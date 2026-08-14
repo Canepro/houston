@@ -31,10 +31,50 @@ def test_sanitize_and_derive():
     assert lc.sanitize("...") == ""      # no usable chars -> empty (caller rejects)
 
 
-def test_pretty_state():
-    assert lc._pretty_state("") == "down"
-    assert lc._pretty_state("running(3), exited(1)") == "running"
-    assert lc._pretty_state("exited(2)") == "stopped"
+def test_repro_state_from_rc_container_status():
+    # "no rocketchat container" splits on whether anything else survives.
+    assert lc.repro_state("", False) == "down"
+    assert lc.repro_state("", True) == "stopped"
+    assert lc.repro_state("Up 2 hours (healthy)", True) == "running"
+    assert lc.repro_state("Up 5 seconds (health: starting)", True) == "running"
+    assert lc.repro_state("Exited (0) 2 minutes ago", True) == "stopped"
+    assert lc.repro_state("Created", True) == "created"
+    assert lc.repro_state("Dead", True) == "dead"
+    # docker reports a paused container as "Up …(Paused)" -- it must not read as running.
+    assert lc.repro_state("Up 3 days (Paused)", True) == "paused"
+    # The regression: a crash-looping RC. The list used to read compose's project
+    # aggregate, where the healthy Mongo's "running(1)" made this "running", while
+    # detail() called it "stopped". Both had to become "restarting".
+    assert lc.repro_state("Restarting (1) 5 seconds ago", True) == "restarting"
+
+
+def test_list_and_detail_agree_on_a_crash_looping_repro(monkeypatch, tmp_path):
+    """The same repro, through both code paths, must report the same state."""
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    meta = lc.runner.Metadata(name="r", project="rcrepro-r", rc_version="8.5.1",
+                           rc_image="img", mongo_tag="8.0", mongo_flavor="official",
+                           preset="default", root_url="http://localhost:3000",
+                           host_port=3000, version_source="test")
+    crash = "Restarting (1) 5 seconds ago"
+    monkeypatch.setattr(lc.runner, "docker_available", lambda **_k: True)
+    monkeypatch.setattr(lc.runner, "exists", lambda _n: True)
+    monkeypatch.setattr(lc.runner, "list_meta", lambda: [meta])
+    monkeypatch.setattr(lc.runner, "read_meta", lambda _n: meta)
+    monkeypatch.setattr(lc.runner, "read_compose", lambda _n: {})
+    monkeypatch.setattr(lc.runner, "rc_restart_count", lambda _n: 7)
+    # What each path actually asks docker: the project aggregate names Mongo as
+    # running, which is precisely what used to mislead the list.
+    monkeypatch.setattr(lc.runner, "project_states",
+                        lambda: {"rcrepro-r": "restarting(1), running(1)"})
+    monkeypatch.setattr(lc.runner, "rc_status_by_project", lambda: {"rcrepro-r": crash})
+    monkeypatch.setattr(lc.runner, "container_details", lambda _n: [
+        {"service": "rocketchat", "state": "restarting", "status": crash, "health": ""},
+        {"service": "mongo", "state": "running", "status": "Up 2 hours", "health": ""}])
+
+    listed = lc.list_repros()[0]
+    detailed = lc.detail("r")
+    assert listed["state"] == detailed["state"] == "restarting"
+    assert detailed["restarts"] == 7      # the crash loop is now visible
 
 
 def test_createreq_defaults():
@@ -46,9 +86,25 @@ def test_createreq_defaults():
 
 
 def test_require_docker_raises_when_down(monkeypatch):
-    monkeypatch.setattr(lc.runner, "docker_available", lambda: False)
-    with pytest.raises(errors.NotReadyError):
+    """An absent engine is a PREFLIGHT failure, not a "still coming up" one.
+
+    It used to raise NotReadyError, which is exit 5 / HTTP 409 and means "poll
+    again" -- advice that can never succeed, because polling does not start
+    Docker. The caller has to fix their environment, so ENGINE_UNAVAILABLE:
+    exit 3, HTTP 502, the dependency underneath is not there.
+
+    Asserted on all three faces of the taxonomy, because each one is consumed by
+    a different front-end and they have drifted apart before.
+    """
+    monkeypatch.setattr(lc.runner, "docker_available", lambda **_k: False)
+    with pytest.raises(errors.DockerError) as caught:
         lc.require_docker()
+    assert caught.value.code == "ENGINE_UNAVAILABLE"
+    assert caught.value.exit_code == 3          # CLI: fix it, do not retry
+    assert caught.value.http_status == 502      # web: upstream dependency is down
+    # And specifically NOT the "poll again" answer it used to give.
+    assert not isinstance(caught.value, errors.NotReadyError)
+    assert errors.NotReadyError.exit_code == 5
 
 
 def test_resolve_name_errors(monkeypatch):
@@ -138,7 +194,7 @@ def test_data_import_plan(monkeypatch, tmp_path):
 
 def test_perf_run_loadtest_validates(monkeypatch):
     from rc_repro.services import perf
-    monkeypatch.setattr(perf.lifecycle.runner, "docker_available", lambda: True)
+    monkeypatch.setattr(perf.lifecycle.runner, "docker_available", lambda **_k: True)
     with pytest.raises(errors.ValidationError):
         perf.run_loadtest(perf.LoadtestReq(name="x", scenario="webhook"))  # not a GUI scenario
     with pytest.raises(errors.ValidationError):
@@ -169,7 +225,7 @@ def test_repro_links():
 
 def test_perf_capacity_benchmark_validate(monkeypatch):
     from rc_repro.services import perf
-    monkeypatch.setattr(perf.lifecycle.runner, "docker_available", lambda: True)
+    monkeypatch.setattr(perf.lifecycle.runner, "docker_available", lambda **_k: True)
     with pytest.raises(errors.ValidationError):
         perf.run_capacity(perf.CapacityReq(name="x", scenario="webhook"))
     with pytest.raises(errors.ValidationError):
@@ -188,13 +244,47 @@ def test_rc_restart_count(monkeypatch):
     assert runner.rc_restart_count("x") == 0   # no container -> 0, no crash
 
 
+def test_docker_queries_behind_the_gui_poll_cannot_hang_or_raise(monkeypatch):
+    """A wedged daemon must degrade, not park a threadpool worker forever.
+
+    docker_available() (timeout=10) can pass and the NEXT call still hang: these
+    three run on the dashboard's 4s poll, so an unbounded one is a worker leak
+    that ends with the server answering nothing. Each already has a documented
+    "couldn't ask docker" value -- they just have to reach it.
+    """
+    import subprocess
+
+    from rc_repro import runner
+
+    for exc in (subprocess.TimeoutExpired(cmd="docker", timeout=30),
+                FileNotFoundError("docker"),
+                OSError("no fork")):
+        def boom(*a, **k):
+            raise exc
+
+        monkeypatch.setattr(runner.subprocess, "run", boom)
+        assert runner._compose_ls() is None                  # None = "couldn't ask"
+        assert runner.project_states() is None               # prune refuses on None
+        assert runner.rc_status_by_project() == {}
+        monkeypatch.setattr(runner, "service_container_ids", lambda n, s: ["abc"])
+        assert runner.rc_restart_count("x") == 0
+
+    # And every one of them passes a timeout, so the hang cannot happen at all.
+    calls = []
+    monkeypatch.setattr(runner.subprocess, "run",
+                        lambda *a, **k: calls.append(k.get("timeout")) or
+                        __import__("types").SimpleNamespace(stdout="", returncode=1))
+    runner._compose_ls(); runner.rc_status_by_project(); runner.rc_restart_count("x")
+    assert calls and all(t is not None for t in calls), f"unbounded docker call: {calls}"
+
+
 def test_kernel_major_minor_parsing():
-    from rc_repro import cli
-    assert cli._kernel_major_minor("6.19.7-200.fc43.aarch64") == (6, 19)
-    assert cli._kernel_major_minor("5.15.0-generic") == (5, 15)
-    assert cli._kernel_major_minor("6.19") == (6, 19)
-    assert cli._kernel_major_minor(None) is None
-    assert cli._kernel_major_minor("not-a-kernel") is None
+    from rc_repro.services import doctor as doctorsvc
+    assert doctorsvc._kernel_major_minor("6.19.7-200.fc43.aarch64") == (6, 19)
+    assert doctorsvc._kernel_major_minor("5.15.0-generic") == (5, 15)
+    assert doctorsvc._kernel_major_minor("6.19") == (6, 19)
+    assert doctorsvc._kernel_major_minor(None) is None
+    assert doctorsvc._kernel_major_minor("not-a-kernel") is None
 
 
 def test_hub_logged_in(monkeypatch, tmp_path):
@@ -231,3 +321,897 @@ def test_event_model_and_emit():
     assert seen[1].level == "warn"
     d = seen[0].as_dict()
     assert d["message"] == "hello" and d["terminal"] is False
+
+
+# --- job manager (web/jobs.py; no fastapi needed) ----------------------------
+
+def _await_finish(job, tries: int = 400) -> None:
+    import time
+    for _ in range(tries):
+        if job.status != "running":
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"job {job.id} never finished")
+
+
+def test_job_events_are_capped_with_absolute_indices():
+    from rc_repro.web import jobs as J
+    job = J.Job(id="job_x", kind="t")
+    for i in range(J.MAX_EVENTS_PER_JOB + 50):
+        job.emit(events.Event(f"e{i}"))
+    # `serve` is long-lived and every streamed docker line is an Event, so the
+    # per-job buffer is bounded -- but the index the SSE stream hands out stays
+    # absolute, so a reader cannot desync by counting.
+    assert len(job.events) == J.MAX_EVENTS_PER_JOB
+    assert job.n_events == J.MAX_EVENTS_PER_JOB + 50
+    evs, done, nxt = job.snapshot(0)
+    assert len(evs) == J.MAX_EVENTS_PER_JOB and nxt == job.n_events
+    assert job.snapshot(nxt) == ([], done, nxt)      # nothing new after catching up
+
+
+def test_job_registry_evicts_finished_jobs_only():
+    from rc_repro.web import jobs as J
+    mgr = J.JobManager()
+    for i in range(J.MAX_JOBS + 20):
+        mgr._jobs[f"job_{i}"] = J.Job(id=f"job_{i}", kind="t", status="done")
+    mgr._jobs["job_live"] = J.Job(id="job_live", kind="t", status="running")
+    mgr._evict_locked()
+    assert len(mgr._jobs) <= J.MAX_JOBS
+    assert mgr.get("job_live") is not None    # a running job is never evicted
+    assert mgr.get("job_0") is None           # the oldest finished ones go first
+
+
+def test_job_status_is_set_before_the_terminal_event(monkeypatch):
+    from rc_repro.web import jobs as J
+    captured = []
+    original = J.Job.emit
+
+    def spy(self, ev):
+        captured.append((ev.terminal, self.status, self.result))
+        original(self, ev)
+
+    monkeypatch.setattr(J.Job, "emit", spy)
+    job = J.JobManager().submit("t", lambda emit: "R")
+    _await_finish(job)
+    terminal = [c for c in captured if c[0]]
+    # A client that polls /api/jobs/<id> on seeing `terminal` used to read
+    # status="running" with result=None, because the event came first.
+    assert terminal and terminal[-1] == (True, "done", "R")
+
+
+def test_job_internal_error_does_not_leak_a_traceback():
+    from rc_repro.web import jobs as J
+    job = J.JobManager().submit("t", lambda emit: 1 / 0)
+    _await_finish(job)
+    assert job.status == "error" and job.error_kind == "InternalError"
+    evs, _done, _n = job.snapshot(0)
+    # The traceback goes to the server's stderr; it must not ride the SSE payload
+    # into a browser, which renders whatever it is handed.
+    assert evs and all("trace" not in (e.get("data") or {}) for e in evs)
+
+
+def test_job_reproerror_keeps_its_kind_on_the_wire():
+    from rc_repro.web import jobs as J
+
+    def boom(emit):
+        raise errors.NotFoundError("no such repro")
+
+    job = J.JobManager().submit("t", boom)
+    _await_finish(job)
+    assert job.status == "error" and job.error_kind == "NotFoundError"
+    evs, _done, _n = job.snapshot(0)
+    assert evs[-1]["data"]["kind"] == "NotFoundError"
+
+
+def test_set_state_explains_a_downed_repro(monkeypatch):
+    monkeypatch.setattr(lc, "resolve_name", lambda n: n)
+    monkeypatch.setattr(lc.runner, "start", lambda n: 1)
+    monkeypatch.setattr(lc.runner, "rc_state", lambda n: "absent")
+    with pytest.raises(errors.DockerError) as exc:
+        lc.set_state("x", "start")
+    # `compose start` cannot revive a repro with no containers -- say what does.
+    assert "no containers to start" in str(exc.value)
+
+
+def test_summary_carries_preset_notes():
+    # These are what the GUI renders from the create job's result and the CLI
+    # prints in a box after `up` -- the Keycloak realm, the /etc/hosts line, etc.
+    m = lc.runner.Metadata(
+        name="x", project="rcrepro-x", rc_version="8.5.1", rc_image="i",
+        mongo_tag="8.0", mongo_flavor="official", preset="oidc",
+        root_url="http://localhost:3000", host_port=3000, version_source="map",
+        extra={"notes": ["Add this to /etc/hosts:", "    127.0.0.1  keycloak"]})
+    assert lc._summary(m)["notes"] == ["Add this to /etc/hosts:",
+                                      "    127.0.0.1  keycloak"]
+
+
+def test_compose_major_version_parsing():
+    from rc_repro.services import doctor as doctorsvc
+    # A first-CHARACTER compare reported every Compose newer than v2 as
+    # unsupported (v5 is current) and would misread v10 as v1.
+    assert doctorsvc._major_version("2.29.1") == 2
+    assert doctorsvc._major_version("v2.29.1") == 2
+    assert doctorsvc._major_version("5.3.1") == 5
+    assert doctorsvc._major_version("10.0.0") == 10
+    assert doctorsvc._major_version("1.29.2") == 1        # genuinely too old
+    assert doctorsvc._major_version(None) is None
+    assert doctorsvc._major_version("") is None
+    assert doctorsvc._major_version("unknown") is None
+
+
+def test_detail_reports_unknown_state_when_docker_is_unreachable(monkeypatch):
+    from rc_repro import runner
+    monkeypatch.setattr(runner, "docker_available", lambda **_k: False)
+    monkeypatch.setattr(lc, "resolve_name", lambda n: n)
+    monkeypatch.setattr(runner, "read_meta", lambda n: lc.runner.Metadata(
+        name=n, project=f"rcrepro-{n}", rc_version="8.5.1", rc_image="i", mongo_tag="8.0",
+        mongo_flavor="official", preset="default", root_url="http://localhost:3000",
+        host_port=3000, version_source="map"))
+    monkeypatch.setattr(runner, "read_compose", lambda n: {"services": {"rocketchat": {}}})
+    d = lc.detail("x")
+    # container_details() returns [] both for "none" and for "could not ask docker",
+    # so detail() used to assert "down" while list_repros() said "?" for the same
+    # repro -- and the panel then offered a Bring up button that could only fail.
+    assert d["state"] == "?" and d["health"] == "" and d["uptime"] == ""
+    assert d["containers"] == []
+
+
+def test_detail_says_whether_this_repro_is_the_default(monkeypatch, tmp_path):
+    """The panel offers "Make default" only when it would change something.
+
+    list_repros() has always carried `default`; detail() did not, so the panel
+    had to either hide the action or show it on the repro that already is one.
+    """
+    from rc_repro import config, runner
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setattr(runner, "docker_available", lambda **_k: False)
+    monkeypatch.setattr(lc, "resolve_name", lambda n: n)
+    monkeypatch.setattr(runner, "read_meta", lambda n: lc.runner.Metadata(
+        name=n, project=f"rcrepro-{n}", rc_version="8.5.1", rc_image="i", mongo_tag="8.0",
+        mongo_flavor="official", preset="default", root_url="http://localhost:3000",
+        host_port=3000, version_source="map"))
+    monkeypatch.setattr(runner, "read_compose", lambda n: {"services": {"rocketchat": {}}})
+
+    assert lc.detail("a")["is_default"] is False       # nothing pinned yet
+    config.update_config(lambda cfg: cfg.__setitem__("default_repro", "a"))
+    assert lc.detail("a")["is_default"] is True
+    assert lc.detail("b")["is_default"] is False
+
+
+# --- --https flag resolution --------------------------------------------------
+
+
+def _req(**kw):
+    base = dict(version="8.6.1")
+    base.update(kw)
+    return lc.CreateReq(**base)
+
+
+def test_a_domain_without_an_email_names_both_ways_to_give_one(tmp_path, monkeypatch):
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    with pytest.raises(errors.ValidationError) as ei:
+        lc._resolve_tls(_req(domain="rc1.example.com"), "x", "")
+    msg = str(ei.value)
+    assert "--email" in msg and "config set acme.email" in msg
+
+
+def test_no_reachability_guessing_stands_between_you_and_a_certificate(tmp_path,
+                                                                       monkeypatch):
+    """How traffic reaches this host is the operator's business.
+
+    The old path refused to create the repro when the name did not resolve, resolved
+    privately, or sat behind a proxy -- guesses this process cannot make correctly
+    (it cannot see a tunnel, a port-forward or a firewall), and the single biggest
+    source of confusion here.
+    """
+    from rc_repro import runner, tls
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setattr(runner, "port_free", lambda p, h="": True)
+    for probe in ("dns_preflight", "reachability_gaps", "resolves_to",
+                  "host_has_public_address"):
+        assert not hasattr(tls, probe), f"{probe} should be gone"
+    # A name that resolves nowhere is still accepted.
+    spec = lc._resolve_tls(_req(domain="nowhere.invalid", acme_email="a@b.c"), "x", "")
+    assert spec.mode == tls.MODE_ACME
+
+
+def test_promote_command_reproduces_the_flags_actually_used():
+    """The staging -> production hint must be copy-pasteable.
+
+    It is the same two flags the workspace was created with, plus --force, so it
+    reproduces the repro rather than describing a different one.
+    """
+    from rc_repro import runner
+    from rc_repro.cli import _promote_command
+
+    def meta(**extra):
+        return runner.Metadata(
+            name="testrepo", project="p", rc_version="8.4.2", rc_image="i",
+            mongo_tag="8.0", mongo_flavor="official", preset="default",
+            root_url="http://localhost:3000", host_port=3000, version_source="map",
+            public_url="https://testrepo.kestron.org", extra={"tls": "acme", **extra})
+
+    cmd = _promote_command(meta(tls_email="me@example.com"), "testrepo.kestron.org")
+    assert "--domain testrepo.kestron.org" in cmd
+    assert "--email me@example.com" in cmd
+    assert "--force" in cmd and "--wait" in cmd
+    # Nothing that no longer exists as a flag.
+    for dead in ("--acme-challenge", "--acme-dns-provider", "--acme-email",
+                 "--acme-staging", "--tls-cert", "--tls-san"):
+        assert dead not in cmd
+
+    # No --bind either: the public bind is derived at create time from --domain,
+    # so spelling it in the hint would be noise the user has to understand.
+    assert "--bind" not in cmd
+
+
+def test_detail_exposes_the_https_fields_the_panel_keys_off(tmp_path, monkeypatch):
+    """The panel's HTTPS row and "Check TLS" action both test detail().public_url.
+
+    list_repros() carried public_url/tls and detail() did not, so the whole feature
+    was invisible in the detail panel even though the links were right.
+    """
+    from rc_repro import runner
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    meta = runner.Metadata(
+        name="g", project="rcrepro-g", rc_version="8.6.1", rc_image="i", mongo_tag="8.0",
+        mongo_flavor="official", preset="default", root_url="http://localhost:3000",
+        host_port=3000, version_source="map",
+        public_url="https://g.rcrepro.localhost:8443",
+        extra={"tls": "local", "tls_ports": [8443]})
+    monkeypatch.setattr(runner, "docker_available", lambda **_k: False)
+    monkeypatch.setattr(lc, "resolve_name", lambda n: n)
+    monkeypatch.setattr(runner, "read_meta", lambda n: meta)
+    monkeypatch.setattr(runner, "read_compose", lambda n: {"services": {"rocketchat": {}}})
+
+    d = lc.detail("g")
+    assert d["public_url"] == "https://g.rcrepro.localhost:8443"
+    assert d["tls"] == "local"
+    # The clickable link prefers https, and the plain port stays available.
+    urls = [x["url"] for x in d["links"]]
+    assert "https://g.rcrepro.localhost:8443" in urls
+    assert "http://localhost:3000" in urls
+
+    # A repro without --https must not grow the row or the action.
+    meta.public_url = ""
+    meta.extra = {}
+    d2 = lc.detail("g")
+    assert d2["public_url"] == "" and d2["tls"] == ""
+
+
+def test_env_overrides_survive_up_force(tmp_path, monkeypatch):
+    """`up --force` rebuilds compose from the spec, so overrides must live in metadata.
+
+    Verified live before this was written: editing only the generated compose file
+    worked until the next `up --force`, which silently dropped the change.
+    """
+    from rc_repro import runner
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    meta = runner.Metadata(
+        name="e", project="rcrepro-e", rc_version="8.6.1", rc_image="i", mongo_tag="8.0",
+        mongo_flavor="official", preset="default", root_url="http://localhost:3000",
+        host_port=3000, version_source="map",
+        extra={"env": {"KEEP_ME": "yes", "GONE": None}})
+    monkeypatch.setattr(runner, "exists", lambda n: True)
+    monkeypatch.setattr(runner, "read_meta", lambda n: meta)
+
+    carried: dict = {}
+    if runner.exists("e"):
+        prev = runner.read_meta("e").extra.get("env")
+        if isinstance(prev, dict):
+            carried.update(prev)
+    carried.update({"NEW": "1"})          # what this run asked for
+    assert carried == {"KEEP_ME": "yes", "GONE": None, "NEW": "1"}, \
+        "existing overrides carry forward; this run's win"
+
+
+def test_set_env_refuses_a_no_op_and_warns_on_load_bearing_keys(tmp_path, monkeypatch):
+    """Load-bearing keys are allowed — reproducing a broken config is the point —
+    but never silently, because the repro stops working and the cause is invisible."""
+    from rc_repro import compose, runner
+    from rc_repro.services import envvars
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setattr(envvars.lifecycle, "require_docker", lambda: None)
+    monkeypatch.setattr(envvars.lifecycle, "resolve_name", lambda n: n)
+
+    with pytest.raises(errors.ValidationError, match="nothing to change"):
+        envvars.set_env("e", {}, [], emit=lambda ev: None)
+
+    meta = runner.Metadata(
+        name="e", project="rcrepro-e", rc_version="8.6.1", rc_image="i", mongo_tag="8.0",
+        mongo_flavor="official", preset="default", root_url="http://localhost:3000",
+        host_port=3000, version_source="map")
+    doc = {"services": {"rocketchat": {"environment": {"PORT": "3000", "KEEP": "1"}},
+                        "rocketchat-2": {"environment": {"PORT": "3000"}}}}
+    monkeypatch.setattr(runner, "read_meta", lambda n: meta)
+    monkeypatch.setattr(runner, "read_compose", lambda n: doc)
+    written = {}
+    monkeypatch.setattr(runner, "write",
+                        lambda n, y, m, files=None: written.update(yaml=y, meta=m))
+    monkeypatch.setattr(runner, "up", lambda n, pull=True: 0)
+
+    events = []
+    r = envvars.set_env("e", {"MONGO_URL": "mongodb://elsewhere", "MY": "v"}, ["KEEP"],
+                        emit=events.append)
+    assert r["restarted"] is True
+    assert any("load-bearing" in str(getattr(e, "message", e)) for e in events), \
+        "MONGO_URL must be called out"
+    # Applied to EVERY rocketchat service, and the unset key is gone from each.
+    out = compose.yaml.safe_load(written["yaml"])
+    for svc in ("rocketchat", "rocketchat-2"):
+        assert out["services"][svc]["environment"]["MY"] == "v", svc
+        assert "KEEP" not in out["services"][svc]["environment"], svc
+    # And it is recorded, so `up --force` keeps it.
+    assert written["meta"].extra["env"] == {"KEEP": None, "MONGO_URL": "mongodb://elsewhere",
+                                            "MY": "v"}
+
+
+def test_set_env_can_write_without_restarting(tmp_path, monkeypatch):
+    from rc_repro import runner
+    from rc_repro.services import envvars
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setattr(envvars.lifecycle, "require_docker", lambda: None)
+    monkeypatch.setattr(envvars.lifecycle, "resolve_name", lambda n: n)
+    monkeypatch.setattr(runner, "read_meta", lambda n: runner.Metadata(
+        name="e", project="p", rc_version="8.6.1", rc_image="i", mongo_tag="8.0",
+        mongo_flavor="official", preset="default", root_url="http://localhost:3000",
+        host_port=3000, version_source="map"))
+    monkeypatch.setattr(runner, "read_compose",
+                        lambda n: {"services": {"rocketchat": {"environment": {}}}})
+    monkeypatch.setattr(runner, "write", lambda *a, **k: None)
+    called = []
+    monkeypatch.setattr(runner, "up", lambda n, pull=True: called.append(n) or 0)
+    r = envvars.set_env("e", {"A": "1"}, [], restart=False, emit=lambda ev: None)
+    assert r["restarted"] is False and called == [], "must not touch containers"
+
+
+# --- the two-flag HTTPS surface (#https-domain-email) ---------------------------
+
+def test_up_offers_exactly_two_https_flags():
+    """The official compose asks for DOMAIN and LETSENCRYPT_EMAIL; so do we.
+
+    This grew to nine visible flags across three certificate modes, which is the
+    complaint that prompted the rewrite. The removed ones must be gone from the
+    signature, not merely hidden -- an unreachable code path behind a deleted flag
+    is worse than either.
+    """
+    import inspect
+    from rc_repro.cli import up as up_cmd
+    params = set(inspect.signature(up_cmd).parameters)
+    assert {"domain", "email", "https"} <= params
+    for dead in ("tls_cert", "tls_key", "tls_san", "acme_staging",
+                 "acme_email", "acme_challenge", "acme_dns_provider"):
+        assert dead not in params, f"--{dead.replace('_', '-')} should be gone"
+
+
+def test_createreq_carries_no_dead_tls_fields():
+    """CreateReq is the web API's schema too, so a stale field is a stale endpoint."""
+    fields = set(lc.CreateReq.__dataclass_fields__)
+    for dead in ("tls_cert", "tls_key", "tls_san", "acme_challenge_given"):
+        assert dead not in fields, f"CreateReq.{dead} should be gone"
+    assert {"domain", "acme_email", "https", "acme_staging"} <= fields
+    # These two survive as DERIVED state, not input: _pick_challenge sets them and
+    # no flag reaches them.
+    assert {"acme_challenge", "acme_dns_provider"} <= fields
+
+
+def test_staging_is_reachable_through_config_only(tmp_path, monkeypatch):
+    """Not a flag on `up` -- but Let's Encrypt allows only 5 failed validations per
+    hostname per hour, so a way to rehearse has to exist somewhere."""
+    from rc_repro import config as cfgmod
+    from rc_repro import runner
+    from rc_repro.cli import _CONFIG_KEYS
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setattr(runner, "port_free", lambda p, h="": True)
+    assert "acme.staging" in _CONFIG_KEYS
+
+    cfgmod.update_config(lambda c: c.__setitem__("acme_staging", True))
+    spec = lc._resolve_tls(_req(domain="rc1.example.com", acme_email="a@b.c"), "x", "")
+    assert spec.acme_staging is True
+
+
+def test_every_tls_attribute_the_cli_and_web_reach_for_exists():
+    """Catches a module attribute that moved out from under a caller.
+
+    Splitting the local CA into tls_local left `trust-ca` calling tls.ensure_ca(),
+    which ruff cannot see (it is an attribute access, not a name) and no test
+    exercised -- so it would have failed only when a user ran the command.
+    """
+    import ast
+    import pathlib
+
+    from rc_repro import tls, tls_local
+    mods = {"tlsmod": tls, "tls": tls, "tls_local": tls_local}
+    missing = []
+    for rel in ("rc_repro/cli.py", "rc_repro/web/app.py", "rc_repro/compose.py",
+                "rc_repro/services/lifecycle.py"):
+        tree = ast.parse(pathlib.Path(rel).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                    and node.value.id in mods and not hasattr(mods[node.value.id], node.attr)):
+                missing.append(f"{rel}:{node.lineno} {node.value.id}.{node.attr}")
+    assert not missing, "attribute(s) that no longer exist: " + ", ".join(missing)
+
+
+# --- the challenge is derived, never asked for (#https-dns01) ---------------------
+
+def _dns_env(tmp_path, body="CF_DNS_API_TOKEN=secret\n"):
+    from rc_repro import tls
+    path = tls.dns_env_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_tls_alpn_is_the_default_matching_the_official_compose(tmp_path, monkeypatch):
+    from rc_repro import runner
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setattr(runner, "port_free", lambda p, h="": True)
+    spec = lc._resolve_tls(_req(domain="rc1.example.com", acme_email="a@b.c"), "x", "")
+    assert spec.acme_challenge == "tlsalpn"
+
+
+def test_dns01_is_selected_when_credentials_exist(tmp_path, monkeypatch):
+    """The presence of the file IS the signal -- nobody creates it by accident.
+
+    It is the only way to issue when Let's Encrypt cannot connect inbound: behind
+    NAT, behind a tunnel, or behind a proxy that terminates TLS in front of you.
+    """
+    from rc_repro import runner
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setattr(runner, "port_free", lambda p, h="": True)
+    _dns_env(tmp_path)
+    req = _req(domain="rc1.example.com", acme_email="a@b.c")
+    spec = lc._resolve_tls(req, "x", "")
+    assert spec.acme_challenge == "dns" and spec.acme_dns_provider == "cloudflare"
+    # dns-01 never accepts an inbound connection, so the workspace must NOT be
+    # widened to 0.0.0.0 -- these repros run admin/admin123.
+    assert req.bind_public is False
+
+
+def test_dns01_provider_inference_is_not_cloudflare_specific(tmp_path, monkeypatch):
+    from rc_repro import tls
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    for body, expected in (("CF_DNS_API_TOKEN=x\n", "cloudflare"),
+                           ("AWS_ACCESS_KEY_ID=x\nAWS_SECRET_ACCESS_KEY=y\n", "route53"),
+                           ("DO_AUTH_TOKEN=x\n", "digitalocean"),
+                           ("HETZNER_API_KEY=x\n", "hetzner"),
+                           ("AZURE_CLIENT_ID=x\n", "azuredns")):
+        _dns_env(tmp_path, body)
+        provider, why = tls.infer_dns_provider()
+        assert provider == expected, f"{body!r} -> {provider!r}"
+        assert "secret" not in why and "=" not in why, "never echo a credential VALUE"
+
+
+def test_unrecognised_credentials_are_refused_not_silently_ignored(tmp_path,
+                                                                   monkeypatch):
+    """Falling back to tlsalpn would ignore a file the user deliberately created."""
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    _dns_env(tmp_path, "SOME_UNKNOWN_THING=x\n")
+    with pytest.raises(errors.ValidationError) as ei:
+        lc._resolve_tls(_req(domain="rc1.example.com", acme_email="a@b.c"), "x", "")
+    assert "config set acme.dns_provider" in str(ei.value)
+
+
+def test_an_explicit_provider_overrides_inference(tmp_path, monkeypatch):
+    from rc_repro import config as cfgmod
+    from rc_repro import runner
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setattr(runner, "port_free", lambda p, h="": True)
+    _dns_env(tmp_path, "SOME_UNKNOWN_THING=x\n")
+    cfgmod.update_config(lambda c: c.__setitem__("acme_dns_provider", "exoscale"))
+    spec = lc._resolve_tls(_req(domain="rc1.example.com", acme_email="a@b.c"), "x", "")
+    assert spec.acme_challenge == "dns" and spec.acme_dns_provider == "exoscale"
+
+
+# --- per-user naming (#team-auth) --------------------------------------------------
+#
+# On a shared server the second person to run `up -v 8.5.1` silently REUSED the
+# first person's workspace, data and all. That is a data-loss bug independent of
+# anything else here.
+
+def test_two_people_running_the_same_version_get_two_workspaces():
+    assert lc.derive_name("8.5.1", "default") == "rc8-5-1"          # unchanged solo
+    assert lc.derive_name("8.5.1", "default", "alice") == "alice-rc8-5-1"
+    assert lc.derive_name("8.5.1", "default", "bob") == "bob-rc8-5-1"
+    assert lc.derive_name("8.5.1", "ldap", "alice") == "alice-rc8-5-1-ldap"
+
+
+def test_an_explicit_name_is_namespaced_too():
+    """Two people typing `--name test` collide exactly as derived names did."""
+    assert lc.owner_prefix("test", "alice") == "alice-test"
+    assert lc.owner_prefix("test", "bob") == "bob-test"
+    # Idempotent, so `up --name alice-test` does not become alice-alice-test.
+    assert lc.owner_prefix("alice-test", "alice") == "alice-test"
+
+
+def test_naming_is_unchanged_without_an_actor():
+    """A single-user machine must keep every existing workspace name."""
+    assert lc.derive_name("8.5.1", "default", "") == "rc8-5-1"
+    assert lc.owner_prefix("test", "") == "test"
+
+
+def test_the_lock_name_and_the_written_name_cannot_drift():
+    """create_repro derives the name twice -- once to lock, once in the body. If
+    they disagreed, the lock would guard a different repro than the one written."""
+    for req in (lc.CreateReq(version="8.5.1", actor="alice"),
+                lc.CreateReq(version="8.5.1", preset="ldap", actor="alice"),
+                lc.CreateReq(version="8.5.1", name="My Repro!", actor="alice"),
+                lc.CreateReq(version="8.5.1")):
+        assert lc._derive_for(req) == lc._derive_for(req)
+        assert lc._derive_for(req)
+
+
+def test_a_derived_name_stays_a_valid_dns_label():
+    """It becomes a hostname under the front door, so dots would break the TLS
+    wildcard silently."""
+    name = lc.derive_name("8.5.1", "default", "alice")
+    assert "." not in name and name == lc.sanitize(name)
+
+
+# --- job concurrency is bounded (F10) -------------------------------------------
+# Job RETENTION was bounded; concurrency was not. Ten teammates each starting a
+# capacity search meant ten k6 containers against one engine -- searches that
+# invalidate each other and starve the workspaces under test. A perf tool that
+# silently produces wrong numbers under contention is worse than one that waits.
+
+def test_a_second_load_test_waits_rather_than_corrupting_the_first():
+    import threading
+    import time as _t
+
+    from rc_repro.web.jobs import JobManager
+
+    jobs = JobManager()
+    started, release = threading.Event(), threading.Event()
+
+    def hog(emit=None):
+        started.set()
+        release.wait(timeout=5)
+        return {"ok": True}
+
+    def quick(emit=None):
+        return {"ok": True}
+
+    first = jobs.submit("loadtest", hog, label="a")
+    assert started.wait(timeout=5), "the first job should start immediately"
+    second = jobs.submit("loadtest", quick, label="b")
+    _t.sleep(0.2)
+    assert second.status == "queued", "a concurrent load test is not a measurement"
+
+    # And a queued job must not look finished: the SSE stream closes on that, and
+    # eviction drops anything not active.
+    _events, done, _n = second.snapshot(0)
+    assert done is False, "a queued job reported as finished closes its own stream"
+
+    release.set()
+    for _ in range(50):
+        if second.status == "done":
+            break
+        _t.sleep(0.1)
+    assert second.status == "done" and first.status == "done"
+
+
+def test_a_failing_job_releases_its_slot():
+    """One leaked slot on the measurement pool (size 1) wedges every future load
+    test for the life of the process."""
+    import time as _t
+
+    from rc_repro.errors import ValidationError
+    from rc_repro.web.jobs import JobManager
+
+    jobs = JobManager()
+
+    def boom(emit=None):
+        raise ValidationError("nope")
+
+    failed = jobs.submit("loadtest", boom, label="a")
+    for _ in range(50):
+        if failed.status == "error":
+            break
+        _t.sleep(0.1)
+    assert failed.status == "error"
+
+    after = jobs.submit("loadtest", lambda emit=None: {"ok": True}, label="b")
+    for _ in range(50):
+        if after.status == "done":
+            break
+        _t.sleep(0.1)
+    assert after.status == "done", "the slot was never released"
+
+
+def test_ordinary_jobs_are_not_queued():
+    """Reads, state changes and seeds stay unbounded, as before."""
+    import time as _t
+
+    from rc_repro.web.jobs import JobManager
+
+    jobs = JobManager()
+    job = jobs.submit("seed", lambda emit=None: {"ok": True}, label="x")
+    for _ in range(50):
+        if job.status == "done":
+            break
+        _t.sleep(0.1)
+    assert job.status == "done"
+
+
+# --- TLS after the edge ---------------------------------------------------------
+# A workspace terminates no TLS, so `_resolve_tls` no longer allocates a port,
+# probes one, or decides anything about a sidecar. What is left is: which name,
+# and which certificate source.
+
+def test_a_domain_still_needs_only_a_domain_and_an_email(tmp_path, monkeypatch):
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from rc_repro import tls
+    from rc_repro.services import edge as edgesvc
+    from rc_repro.services import lifecycle as lcsvc
+
+    monkeypatch.setattr(edgesvc, "running", lambda: True)
+    req = lcsvc.CreateReq(version="8.5.1", domain="chat.example.com",
+                          acme_email="me@example.com")
+    spec = lcsvc._resolve_tls(req, "w", "127.0.0.1")
+    assert spec.mode == tls.MODE_ACME
+    assert spec.host == "chat.example.com"
+    assert spec.root_url == "https://chat.example.com", "443 carries no port"
+
+
+def test_a_domain_without_an_email_says_how_to_set_one(tmp_path, monkeypatch):
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from rc_repro import errors
+    from rc_repro.services import lifecycle as lcsvc
+
+    req = lcsvc.CreateReq(version="8.5.1", domain="chat.example.com")
+    with pytest.raises(errors.ValidationError) as exc:
+        lcsvc._resolve_tls(req, "w", "127.0.0.1")
+    assert "config set acme.email" in str(exc.value)
+
+
+def test_local_https_gets_a_localhost_name_and_no_port_of_its_own(tmp_path, monkeypatch):
+    """It used to allocate 8443, 8444, ... one per workspace, each with its own
+    URL. Every name answers on the edge's 443 now."""
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from rc_repro import tls
+    from rc_repro.services import edge as edgesvc
+    from rc_repro.services import lifecycle as lcsvc
+
+    monkeypatch.setattr(edgesvc, "running", lambda: True)
+    req = lcsvc.CreateReq(version="8.5.1", https=True)
+    spec = lcsvc._resolve_tls(req, "w", "127.0.0.1")
+    assert spec.mode == tls.MODE_LOCAL
+    assert spec.host == "w.rcrepro.localhost"
+    assert spec.root_url == "https://w.rcrepro.localhost"
+
+
+def test_dns01_is_still_chosen_from_credentials_not_a_flag(tmp_path, monkeypatch):
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from rc_repro import tls
+    from rc_repro.services import edge as edgesvc
+    from rc_repro.services import lifecycle as lcsvc
+
+    tls.acme_dir().mkdir(parents=True, exist_ok=True)
+    tls.dns_env_path().write_text("CF_DNS_API_TOKEN=secret\n")
+    monkeypatch.setattr(edgesvc, "running", lambda: True)
+    req = lcsvc.CreateReq(version="8.5.1", domain="chat.example.com",
+                          acme_email="me@example.com")
+    spec = lcsvc._resolve_tls(req, "w", "127.0.0.1")
+    assert spec.acme_challenge == "dns" and spec.acme_dns_provider == "cloudflare"
+
+
+# --- host capacity (an OOM took a 10 GB box down) --------------------------------
+# Seven concurrent Rocket.Chat + MongoDB stacks exhausted a 10 GB host with no
+# swap: the kernel OOM killer fired and the machine had to be recovered. Every
+# individual `up` had succeeded -- nothing anywhere asked whether there was room
+# for one more. docs/design/team-server.md §8 recorded this as "made visible, not
+# solved"; these pin the guard that solves it.
+
+def _mem(monkeypatch, available_mb, total_mb=10000, swap_mb=0):
+    from rc_repro import runner
+    monkeypatch.setattr(runner, "host_memory",
+                        lambda: (total_mb, available_mb, swap_mb))
+
+
+def test_a_workspace_is_refused_when_the_host_cannot_hold_it(monkeypatch):
+    from rc_repro import errors
+    from rc_repro.services import lifecycle as lc
+
+    _mem(monkeypatch, available_mb=1000)      # 100 MB usable after the reserve
+    with pytest.raises(errors.NotReadyError) as exc:
+        lc.check_capacity(lc.CreateReq(version="8.5.1"))
+    assert "not enough memory" in str(exc.value)
+
+
+def test_the_refusal_says_what_to_stop_and_how(monkeypatch):
+    """"Out of memory" with no next step just moves the problem to the operator."""
+    from rc_repro import errors
+    from rc_repro.services import lifecycle as lc
+
+    _mem(monkeypatch, available_mb=1000)
+    with pytest.raises(errors.NotReadyError) as exc:
+        lc.check_capacity(lc.CreateReq(version="8.5.1"))
+    msg = str(exc.value)
+    assert "rc-repro stop" in msg and "--force" in msg
+    assert "NO SWAP" in msg, "no swap means no buffer at all; say so"
+
+
+def test_plenty_of_memory_is_not_refused(monkeypatch):
+    from rc_repro.services import lifecycle as lc
+
+    _mem(monkeypatch, available_mb=9000)
+    lc.check_capacity(lc.CreateReq(version="8.5.1"))       # must not raise
+
+
+def test_a_preset_with_keycloak_needs_more_than_a_bare_workspace(monkeypatch):
+    """saml/oidc run Keycloak, which is the biggest sidecar there is."""
+    from rc_repro import errors
+    from rc_repro.services import lifecycle as lc
+
+    # Enough for a bare workspace, not for one plus Keycloak.
+    _mem(monkeypatch, available_mb=lc.host_reserve_mb(10024) + lc.WORKSPACE_MB + 100)
+    lc.check_capacity(lc.CreateReq(version="8.5.1"))       # bare: fits
+    with pytest.raises(errors.NotReadyError):
+        lc.check_capacity(lc.CreateReq(version="8.5.1"), "saml")
+
+
+def test_monitoring_counts_towards_the_estimate(monkeypatch):
+    from rc_repro import errors
+    from rc_repro.services import lifecycle as lc
+
+    _mem(monkeypatch, available_mb=lc.host_reserve_mb(10024) + lc.WORKSPACE_MB + 100)
+    with pytest.raises(errors.NotReadyError):
+        lc.check_capacity(lc.CreateReq(version="8.5.1", monitor=True))
+
+
+def test_the_last_workspace_warns_before_the_ceiling(monkeypatch):
+    """The ceiling should be visible BEFORE it is hit, not only in the refusal."""
+    from rc_repro.services import lifecycle as lc
+
+    _mem(monkeypatch, available_mb=lc.host_reserve_mb(10024) + lc.WORKSPACE_MB + 200)
+    seen: list = []
+    lc.check_capacity(lc.CreateReq(version="8.5.1"), "", lambda ev: seen.append(ev))
+    assert any("is left" in str(getattr(e, "message", e)) for e in seen)
+
+
+def test_a_host_we_cannot_measure_is_never_refused(monkeypatch):
+    """Not Linux: skip rather than guess. A wrong refusal is worse than none."""
+    from rc_repro import runner
+    from rc_repro.services import lifecycle as lc
+
+    monkeypatch.setattr(runner, "host_memory", lambda: None)
+    lc.check_capacity(lc.CreateReq(version="8.5.1"))       # must not raise
+
+
+def test_host_memory_prefers_available_over_free():
+    """MemFree excludes the page cache, which the kernel reclaims on demand -- it
+    looks alarming on a healthy box and reassuring on a doomed one."""
+    from rc_repro import runner
+
+    mem = runner.host_memory()
+    if mem is None:
+        pytest.skip("not Linux")
+    total, avail, _swap = mem
+    assert total > 0 and 0 < avail <= total
+
+
+def test_the_guard_would_have_stopped_the_incident(monkeypatch):
+    """The REAL numbers from the host that died: 10024 MB total, 3350 MB
+    available, no swap, and a seventh stack about to start.
+
+    A fixed 1 GB reserve waved this exact configuration through when I tested it
+    -- the box OOMed while MemAvailable still read 3.3 GB, because the memory that
+    kills a host is what already-admitted workspaces take LATER. A proportional
+    reserve refuses it.
+    """
+    from rc_repro import errors
+    from rc_repro.services import lifecycle as lc
+
+    _mem(monkeypatch, total_mb=10024, available_mb=3350, swap_mb=0)
+    with pytest.raises(errors.NotReadyError):
+        lc.check_capacity(lc.CreateReq(version="8.5.1"), "multi-instance")
+
+
+def test_the_reserve_scales_with_the_host():
+    from rc_repro.services import lifecycle as lc
+
+    assert lc.host_reserve_mb(10024) == 2004, "a fifth of a 10 GB box"
+    assert lc.host_reserve_mb(2048) == 1024, "never below 1 GB on a small one"
+
+
+def test_an_impossible_mongo_kernel_pairing_is_refused_before_any_docker_work(monkeypatch):
+    """SERVER-121912: mongod 8.0 EXITS on kernel >= 6.19 — not degrades, exits,
+    with a message that reads like a volume or permission fault.
+
+    `doctor` has known the rule for a while and could only warn, because it does
+    not know which release you are about to boot. Nothing on the create path
+    checked it, so `up` would pull ~1.5 GB of images, create the containers and
+    then let mongod die, leaving `diagnose` to explain it afterwards. Now the
+    pairing is resolved first and an impossible one is refused.
+    """
+    from rc_repro.services import doctor
+
+    # The rule itself: version-aware, so it answers differently per pairing.
+    assert doctor.mongo_kernel_conflict("8.0", "6.19.7-200.fc43.aarch64")
+    assert "SERVER-121912" in doctor.mongo_kernel_conflict("8.0", "6.19.7")
+    assert doctor.mongo_kernel_conflict("7.0", "6.19.7") == ""   # 7.0 is unaffected
+    assert doctor.mongo_kernel_conflict("8.0", "6.18.0") == ""   # older kernel is fine
+    assert doctor.mongo_kernel_conflict("8.0", "") == ""         # unknown: do not guess
+    assert doctor.mongo_kernel_conflict("", "6.19.7") == ""      # unknown: do not guess
+
+    # And the create path refuses with it, before it touches docker.
+    pulled: list = []
+    monkeypatch.setattr(lc, "require_docker", lambda: None)
+    monkeypatch.setattr(lc.runner, "docker_kernel_version", lambda: "6.19.7-200.fc43")
+    monkeypatch.setattr(lc.runner, "exists", lambda n: False)
+    monkeypatch.setattr(lc.runner, "write", lambda *a, **k: pulled.append("wrote"))
+    monkeypatch.setattr(lc.versions, "resolve",
+                        lambda v, offline=False: type("R", (), {
+                            "rc_version": v, "mongo_tag": "8.0", "rc_image": "img",
+                            "mongo_flavor": "mongodb", "mongo_shell": "mongosh",
+                            "oplog": False, "source": "test", "note": ""})())
+    with pytest.raises(errors.PreflightError) as caught:
+        lc._create_repro_locked(lc.CreateReq(version="8.6.1"))
+    assert "mongod 8.0 exits" in str(caught.value)
+    assert caught.value.exit_code == 3, "a wrong environment is a preflight failure"
+    assert not pulled, "it refused only AFTER starting work"
+
+
+# --- readiness must not depend on DNS, a certificate, or the edge ----------------
+
+def test_root_url_in_metadata_is_always_the_local_port(monkeypatch, tmp_path):
+    """runner.Metadata's own docstring makes this a contract: root_url "stays the
+    plain http://localhost:<port> that rc-repro's own API calls (login, PAT, seeding,
+    load tests) use", and public_url carries the external name.
+
+    `--root-url` used to displace it, which put a public https name into root_url --
+    and `ready` polls exactly that. Reported from a live box: "Rocket.Chat did not
+    become ready within 300s" while `curl http://localhost:3000/api/info` answered
+    200 the whole time. Reproduced here with `up --root-url https://lab.example.com`:
+    still booting at 127s, 200 locally, and after the fix ready in 15s.
+
+    The override still reaches Rocket.Chat -- it is what RC ADVERTISES, and the
+    compose spec below keeps taking it.
+    """
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    seen = {}
+
+    monkeypatch.setattr(lc.runner, "docker_available", lambda **_k: True)
+    monkeypatch.setattr(lc.runner, "exists", lambda _n: False)
+    monkeypatch.setattr(lc, "check_capacity", lambda *a, **k: None)
+    monkeypatch.setattr(lc, "check_sidecar_ports", lambda *a, **k: None)
+    monkeypatch.setattr(lc, "pick_host_port", lambda *a, **k: 3001)
+    _real_resolve = lc.versions.resolve      # bind before patching, or it recurses
+    monkeypatch.setattr(lc.versions, "resolve",
+                        lambda v, offline=False: _real_resolve(v, offline=True))
+
+    def fake_write(name, compose_yaml, meta, files=None):
+        seen["meta"] = meta
+        seen["yaml"] = compose_yaml
+        return None
+
+    monkeypatch.setattr(lc.runner, "write", fake_write)
+    monkeypatch.setattr(lc, "_up", lambda *a, **k: 0)
+
+    lc.create_repro(lc.CreateReq(version="8.5.1", name="urlcase",
+                                 root_url="https://lab.example.com", wait=False),
+                    emit=lc.null_emit)
+
+    meta = seen.get("meta")
+    assert meta is not None, "create never wrote metadata"
+    assert meta.root_url == "http://localhost:3001", \
+        f"root_url must stay local, got {meta.root_url!r}"
+    # And RC still advertises the override, or --root-url would do nothing at all.
+    assert "ROOT_URL: https://lab.example.com" in seen["yaml"], \
+        "RC should still advertise the override — otherwise --root-url does nothing"
+
+
+def test_a_transitional_health_is_reported_without_dockers_string_prefix():
+    """Docker spells the transitional state "health: starting" inside the Status
+    string, and bare "healthy"/"unhealthy" for the settled ones.
+
+    Taken verbatim the panel rendered "Health: health: starting". The prefix belongs
+    to the string format, not to the value.
+    """
+    assert lc._uptime_health("Up 4 seconds (health: starting)") == ("4 seconds", "starting")
+    assert lc._uptime_health("Up 2 hours (healthy)") == ("2 hours", "healthy")
+    assert lc._uptime_health("Up 5 minutes (unhealthy)") == ("5 minutes", "unhealthy")
+    # No healthcheck at all, and a stopped container, are both "no health".
+    assert lc._uptime_health("Up 3 minutes") == ("3 minutes", "")
+    assert lc._uptime_health("Exited (0) 1 minute ago") == ("", "")

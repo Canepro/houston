@@ -25,3 +25,10 @@ env/
 # Design / internal docs (kept local)
 DESIGN.md
 docs/
+.docs/
+.claude/
+.codex/
+.agents/
+CLAUDE.md
+AGENTS.md
+GEMINI.md

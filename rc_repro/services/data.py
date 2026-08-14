@@ -44,6 +44,13 @@ def _scale_ok(rc: int, out: str, what: str, *, hint: str = "") -> dict:
 def run_scale(name: str, spec_str: str, emit: Emit = null_emit) -> dict:
     """Bulk-insert users/messages per a `--scale` spec (users=N,messages=N@room)."""
     target = lifecycle.resolve_name(name)
+    # Bulk prefill writes straight into Mongo; running it while a backup is dumping
+    # would put half of it in the archive.
+    with runner.repro_lock(target):
+        return _run_scale_locked(target, spec_str, emit)
+
+
+def _run_scale_locked(target: str, spec_str: str, emit: Emit = null_emit) -> dict:
     try:
         spec = scaleseed.parse_scale(spec_str)
     except ValueError as exc:
@@ -72,7 +79,11 @@ def run_scale(name: str, spec_str: str, emit: Emit = null_emit) -> dict:
 def clear_scale(name: str, emit: Emit = null_emit) -> dict:
     """Remove everything a prior --scale added and restore affected rooms."""
     target = lifecycle.resolve_name(name)
-    res = _scale_ok(*scaleseed.clear(target), "clear")
+    # Locked like run_scale, which it undoes. Without it the two could interleave
+    # on one workspace -- a clear deleting the users a concurrent prefill is still
+    # inserting, leaving a count that matches neither.
+    with runner.repro_lock(target, timeout=lifecycle._INTERACTIVE_LOCK_WAIT):
+        res = _scale_ok(*scaleseed.clear(target), "clear")
     out = {"users": res.get("users", 0), "messages": res.get("messages", 0),
            "rooms": res.get("rooms", 0)}
     info(emit, f"removed {out['users']:,} scale users and {out['messages']:,} scale messages",

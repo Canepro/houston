@@ -117,7 +117,8 @@ def run_loadtest(req: LoadtestReq, emit: Emit = null_emit) -> dict:
     try:
         auth = lifecycle.login(m)
         token = rcapi.generate_pat(m.root_url, auth, config.ADMIN_PASSWORD,
-                                   token_name="rc-repro-loadtest", bypass_2fa=True)
+                                   token_name="rc-repro-loadtest", bypass_2fa=True,
+                                   workspace=m.name)
     except Exception as exc:  # noqa: BLE001
         raise NotReadyError(f"could not authenticate (ready?): {exc}") from exc
 
@@ -159,6 +160,9 @@ def run_loadtest(req: LoadtestReq, emit: Emit = null_emit) -> dict:
     except RuntimeError as exc:
         raise DockerError(str(exc)) from exc
     finally:
+        # users.json holds live seeded-user auth tokens — delete it FIRST, so no
+        # later restore step failing can leave credentials on disk.
+        (runner.workspace(m.name) / "loadtest" / "users.json").unlink(missing_ok=True)
         if sampler:
             rcm_report = sampler.stop()
         if mon:
@@ -176,10 +180,14 @@ def run_loadtest(req: LoadtestReq, emit: Emit = null_emit) -> dict:
             except Exception:  # noqa: BLE001
                 warn(emit, "could not restore the Prometheus metrics setting", phase="restore")
         if mongo_prior:
-            mongoprof.stop(m.name, mongo_prior)
+            # Wrapped like its neighbours: an exception here would skip the
+            # resource-cap restore below and leave the containers capped.
+            try:
+                mongoprof.stop(m.name, mongo_prior)
+            except Exception:  # noqa: BLE001
+                warn(emit, "could not restore the Mongo profiler level", phase="restore")
         for problem in constrain_mod.restore(applied_constraints):
             warn(emit, f"could not restore resource limits - {problem}", phase="restore")
-        (runner.workspace(m.name) / "loadtest" / "users.json").unlink(missing_ok=True)
 
     mongo_slow = mongoprof.collect(m.name, since_ms) if (req.diag and mongo_prior) else None
     tl = None
@@ -254,7 +262,8 @@ def run_capacity(req: CapacityReq, emit: Emit = null_emit) -> dict:
     try:
         auth = lifecycle.login(m)
         token = rcapi.generate_pat(m.root_url, auth, config.ADMIN_PASSWORD,
-                                   token_name="rc-repro-loadtest", bypass_2fa=True)
+                                   token_name="rc-repro-loadtest", bypass_2fa=True,
+                                   workspace=m.name)
     except Exception as exc:  # noqa: BLE001
         raise NotReadyError(f"could not authenticate (ready?): {exc}") from exc
     users = _login_seed_users(m.root_url, req.users_n) if req.users_n > 0 else []

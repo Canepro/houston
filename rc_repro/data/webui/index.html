@@ -6,44 +6,84 @@
   <title>rc-repro</title>
   <link rel="stylesheet" href="app.css">
 </head>
-<body>
+<body class="shell">
   <header class="topbar">
-    <div class="brand"><span class="dollar">$</span> rc-repro</div>
-    <span id="docker-badge" class="chip">docker: ?</span>
+    <button class="brand" title="Back to this machine"><span class="dollar">$</span> rc-repro</button>
+    <!-- Status on the left, account on the right. Both badges keep the position
+         they have always had; only the ground under them changed. -->
+    <button id="docker-badge" class="chip" title="Run the environment check">docker: ?</button>
+    <button id="edge-badge" class="chip" title="The shared Traefik serving every https name" hidden></button>
     <div class="topbar-actions">
-      <button id="btn-new" class="btn primary">+ New repro</button>
-      <button id="btn-bench" class="btn">Benchmark</button>
-      <button id="btn-refresh" class="btn">Refresh</button>
-      <button id="btn-prune" class="btn danger">Prune down</button>
+      <button id="btn-home" class="toplink">Home</button>
+      <button id="btn-jobs" class="toplink">Activity</button>
+      <button id="btn-scenarios" class="toplink">Scenarios</button>
+      <button id="btn-bench" class="toplink">Benchmark</button>
+      <button id="btn-refresh" class="toplink">Refresh</button>
+      <button id="theme-toggle" class="chip iconbtn" title="Switch between the light and dark theme"></button>
+      <!-- The account menu. Clicking the name used to open the sessions DIALOG,
+           which meant "sign out" and "change your password" were behind a modal
+           about something else. A menu is what a name in a corner is for. -->
+      <div class="menuwrap">
+        <button id="whoami" class="whoami" hidden aria-haspopup="menu"
+                aria-expanded="false" title="Your account"></button>
+        <div id="me-menu" class="memenu" role="menu" hidden>
+          <div class="me-head"><b id="me-name"></b><span id="me-role"></span></div>
+          <button type="button" id="me-sessions" role="menuitem">Your sessions
+            <small id="me-sessions-n"></small></button>
+          <button type="button" id="me-people" role="menuitem" hidden>People &amp; roles
+            <small>admin</small></button>
+          <button type="button" id="me-passwd" role="menuitem">Change your password</button>
+          <hr>
+          <button type="button" id="me-out" role="menuitem" class="danger">Sign out</button>
+        </div>
+      </div>
     </div>
   </header>
 
-  <main class="layout">
-    <section class="list">
-      <div class="toolbar">
-        <div class="toolbar-title">
-          <h1>Workspaces</h1>
-          <span id="running-pill" class="pill running">0 running</span>
+  <div class="panes">
+    <!-- The rail is for SCANNING: one row per workspace, whole name, no buttons.
+         Six used to need 780px of cards; the same six are 300px of rows, and forty
+         would still fit. Actions moved to the stage, where the thing they act on
+         is actually on screen. -->
+    <nav class="rail" aria-label="Workspaces">
+      <div class="rail-head">
+        <span class="rail-title">Workspaces</span>
+        <span id="running-pill" class="pill running">0 running</span>
+      </div>
+      <div class="rail-controls">
+        <button id="btn-new" class="btn solid block">+ New workspace</button>
+        <input id="filter" class="input" placeholder="Filter by ticket or version…" aria-label="Filter repros by name">
+        <div class="rail-two">
+          <select id="scope-filter" class="input" aria-label="Whose workspaces" hidden>
+            <option value="all">Everyone</option>
+            <option value="mine">Mine</option>
+          </select>
+          <select id="status-filter" class="input" aria-label="Filter by status">
+            <option value="">All statuses</option>
+            <option value="running">Running</option>
+            <option value="stopped">Stopped</option>
+            <option value="down">Down</option>
+            <option value="restarting">Restarting</option>
+            <option value="paused">Paused</option>
+            <option value="created">Created</option>
+            <option value="dead">Dead</option>
+            <option value="?">Unknown (docker down)</option>
+          </select>
+          <select id="sort-by" class="input" aria-label="Sort repros">
+            <option value="name">Sort: name</option>
+            <option value="state">Sort: state</option>
+            <option value="port">Sort: port</option>
+          </select>
         </div>
       </div>
-      <div class="toolbar-controls">
-        <input id="filter" class="input" placeholder="Filter repros...">
-        <select id="status-filter" class="input">
-          <option value="">All statuses</option>
-          <option value="running">Running</option>
-          <option value="stopped">Stopped</option>
-          <option value="down">Down</option>
-        </select>
-        <select id="sort-by" class="input">
-          <option value="name">Sort: name</option>
-          <option value="state">Sort: state</option>
-          <option value="port">Sort: port</option>
-        </select>
+      <section id="repros" class="rows"></section>
+      <div class="rail-foot">
+        <button id="btn-prune" class="btn danger block small">Prune down repros</button>
       </div>
-      <section id="repros" class="cards"></section>
-    </section>
-    <aside id="detail" class="detail"></aside>
-  </main>
+    </nav>
+    <main id="detail" class="stage"></main>
+    <aside id="actpane" class="actpane" aria-label="Actions for this workspace"></aside>
+  </div>
 
   <footer class="statusbar">
     <span id="sb-count">—</span>
@@ -54,20 +94,39 @@
   <!-- Create dialog -->
   <dialog id="create-dialog">
     <form id="create-form" method="dialog">
-      <h2>New repro</h2>
+      <h2>New workspace</h2>
       <label>Rocket.Chat version <input name="version" placeholder="8.5.1" required></label>
+      <p id="version-hint" class="hint"></p>
       <label>Preset <select name="preset" id="preset-select"></select></label>
       <p id="preset-desc" class="hint"></p>
       <div id="preset-params"></div>
       <label>Host port (blank = auto) <input name="port" type="number" min="1024" max="65535" placeholder="auto"></label>
       <div class="checks">
         <label><input type="checkbox" name="monitor"> Monitoring (Prometheus + Grafana)</label>
-        <label><input type="checkbox" name="seed"> Seed sample data</label>
+        <label><input type="checkbox" name="seed"> Seed sample data (users, channels, messages)</label>
+        <label id="create-seed-profile-row" hidden>Seed profile
+          <select name="seed_profile">
+            <option value="small">small — 5 users, 3 channels, 5 msgs/channel</option>
+            <option value="standard">standard — 20 users, 8 channels, 20 msgs/channel</option>
+            <option value="large">large — 100 users, 20 channels, 100 msgs/channel</option>
+          </select>
+        </label>
         <label><input type="checkbox" name="wait" checked> Wait until ready</label>
       </div>
+
       <details class="adv">
         <summary>Advanced options</summary>
         <label>Name (blank = derived) <input name="name" placeholder="e.g. rc8-5-1-ldap"></label>
+        <label>If that name already exists
+          <select name="existing">
+            <option value="reuse">Reuse it — just start the existing containers as they are</option>
+            <option value="force">Rebuild it from the settings above — keep its data</option>
+            <option value="fresh">Rebuild it and DELETE its data — users, channels, messages, uploads</option>
+          </select>
+        </label>
+        <p class="hint">Only applies when the name is already taken. “Reuse” is the default, and it is why
+          creating over an existing name keeps the old version, preset and port — those are read back from
+          the existing workspace, not rebuilt. Seeding and “Wait until ready” still run against it.</p>
         <label>Registration token — EE license (--reg-token) <input name="reg_token" placeholder="cloud reg token"></label>
         <label>MongoDB tag override (--mongo) <input name="mongo" placeholder="e.g. 8.0"></label>
         <label>RC image override (--rc-image) <input name="rc_image" placeholder="registry/…/rocket.chat"></label>
@@ -77,6 +136,33 @@
           <label><input type="checkbox" name="pin"> Pin (persistent + set as default)</label>
           <label><input type="checkbox" name="offline"> Offline (skip live version lookup)</label>
           <label><input type="checkbox" name="no_pull"> Don't pull images first</label>
+        </div>
+
+        <!-- HTTPS lives here rather than in a disclosure of its own. It is one more
+             thing about how the workspace is built, and two sibling twisties made
+             the form look like it had two Advanced sections. A flag, not a preset:
+             --preset is single-valued, so a tls preset would exclude oidc/saml/
+             livechat, which are the ones that need it. -->
+        <div class="fgroup" id="create-https-block">
+          <span class="fgroup-t">HTTPS</span>
+          <label>Certificate
+            <select name="https_mode" id="https-mode">
+              <option value="">Off — plain http://localhost:PORT</option>
+              <option value="acme">Let's Encrypt — a domain that already points here</option>
+              <option value="local">Local certificate — offline, no domain (run `rc-repro trust-ca` once)</option>
+            </select>
+          </label>
+          <p class="hint" id="https-mode-hint"></p>
+          <label class="https-acme" hidden>Domain
+            <input name="domain" placeholder="rc1.example.com"></label>
+          <label class="https-acme" hidden>Contact email for Let's Encrypt
+            <input name="acme_email" type="email" placeholder="you@example.com"></label>
+          <p class="hint https-acme" hidden>The same two values the official
+            Rocket.Chat compose asks for (<code>DOMAIN</code> and
+            <code>LETSENCRYPT_EMAIL</code>). Traefik requests the certificate in the
+            background; check it with <b>Check TLS</b> once the workspace is up.<br>
+            The domain has to resolve to this host with port 443 reachable — Let's
+            Encrypt validates by connecting to it. How you arrange that is up to you.</p>
         </div>
       </details>
       <menu>
@@ -106,7 +192,30 @@
       <menu>
         <button type="button" id="seed-cancel" class="btn">Cancel</button>
         <button type="button" id="seed-clear" class="btn danger">Clear scale data</button>
-        <button type="button" class="btn primary" id="seed-submit">Seed</button>
+        <button class="btn primary" id="seed-submit">Seed</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <!-- Upgrade dialog. Reachable only from a RUNNING workspace: the pre-upgrade
+       backup needs MongoDB up, and Rocket.Chat runs its migrations on boot. -->
+  <dialog id="upgrade-dialog">
+    <form id="upgrade-form" method="dialog">
+      <h2 id="upgrade-title">Upgrade</h2>
+      <p class="hint">Currently running <b id="upgrade-current">?</b>. Rocket.Chat
+        migrates its database on boot, so this is a one-way change — which is why a
+        backup is taken first.</p>
+      <label>Target version
+        <input name="to" id="upgrade-to" placeholder="8.6.1" autocomplete="off">
+      </label>
+      <p class="hint" id="upgrade-plan"></p>
+      <div class="checks">
+        <label><input type="checkbox" id="upgrade-nobackup"> Skip the pre-upgrade
+          backup (nothing to roll back to)</label>
+      </div>
+      <menu>
+        <button type="button" id="upgrade-cancel" class="btn">Cancel</button>
+        <button type="button" class="btn primary" id="upgrade-go" disabled>Upgrade</button>
       </menu>
     </form>
   </dialog>
@@ -124,7 +233,7 @@
       <div id="import-plan" class="plan" hidden></div>
       <menu>
         <button type="button" id="import-cancel" class="btn">Cancel</button>
-        <button type="button" id="import-preview" class="btn">Preview plan</button>
+        <button id="import-preview" class="btn">Preview plan</button>
         <button type="button" class="btn primary" id="import-apply" disabled>Apply</button>
       </menu>
     </form>
@@ -175,7 +284,7 @@
       <label>SLO <input name="slo" value="p95=500ms,error=2%"></label>
       <div class="row2">
         <label>Start VUs <input name="start" type="number" min="1" value="10"></label>
-        <label>Max VUs <input name="max_vus" type="number" min="1" value="320"></label>
+        <label>Max VUs <input name="max_vus" type="number" min="1" value="640"></label>
       </div>
       <div class="row2">
         <label>Step duration <input name="step_duration" value="20s"></label>
@@ -200,15 +309,151 @@
       </label>
       <menu>
         <button type="button" id="bench-cancel" class="btn">Cancel</button>
-        <button type="button" class="btn primary" id="bench-submit">Run benchmark</button>
+        <button class="btn primary" id="bench-submit">Run benchmark</button>
       </menu>
     </form>
+  </dialog>
+
+  <!-- API token. Its own dialog rather than reusing the job log, which a
+       detached background job may still be writing into. -->
+  <dialog id="pat-dialog">
+    <h2 id="pat-title">API token</h2>
+    <p class="hint">Personal Access Token with “Ignore Two Factor Authentication”. Pass both
+      headers on every API call.</p>
+    <pre id="pat-body" class="log"></pre>
+    <menu>
+      <button type="button" id="pat-copy" class="btn">Copy headers</button>
+      <button type="button" id="pat-close" class="btn primary">Close</button>
+    </menu>
+  </dialog>
+
+  <!-- API call console: the GUI's `rc-repro api`. The response renders in place,
+       so app.js cancels the submit to keep the dialog open. method="dialog" is
+       still the right fallback: if that handler never ran, this closes the dialog
+       rather than attempting a navigation the CSP's `form-action 'none'` blocks. -->
+  <dialog id="call-dialog">
+    <form id="call-form" method="dialog">
+      <h2 id="call-title">API call</h2>
+      <p class="hint">An authenticated REST call against this workspace, as its admin —
+        the same request <code>rc-repro api</code> makes.</p>
+      <div class="row2">
+        <label class="narrow">Method
+          <select name="method">
+            <option>GET</option><option>POST</option><option>PUT</option>
+            <option>DELETE</option><option>PATCH</option>
+          </select>
+        </label>
+        <label>Path <input name="path" value="/api/v1/me" placeholder="/api/v1/users.list"></label>
+      </div>
+      <label>JSON body (POST / PUT / PATCH)
+        <textarea name="data" rows="3" spellcheck="false"
+                  placeholder='{"userId": "…", "data": {"name": "New Name"}}'></textarea></label>
+      <div class="checks">
+        <label><input type="checkbox" name="pat"> Auth with a PAT, like a customer script</label>
+        <label><input type="checkbox" name="two_fa"> Add the 2FA password header</label>
+      </div>
+      <pre id="call-out" class="log" hidden></pre>
+      <menu>
+        <button type="button" id="call-copy" class="btn">Copy response</button>
+        <button type="button" id="call-close" class="btn">Close</button>
+        <button type="submit" id="call-send" class="btn primary">Send</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <!-- Doctor: the preflight report, same checks as `rc-repro doctor` -->
+  <dialog id="doctor-dialog">
+    <h2>Environment check</h2>
+    <p class="hint">The same preflight as <code>rc-repro doctor</code>: Docker, Compose, engine
+      kernel, registry auth, disk, connectivity and ports.</p>
+    <div id="doctor-body" class="plan"></div>
+    <menu>
+      <button type="button" id="doctor-recheck" class="btn">Re-check</button>
+      <button type="button" id="doctor-close" class="btn primary">Close</button>
+    </menu>
+  </dialog>
+
+  <!-- The edge: one Traefik serving every https name. Its own dialog rather than
+       the doctor one, whose heading, hint and Re-check button all belong to a
+       different question. -->
+  <dialog id="edge-dialog">
+    <h2>Edge</h2>
+    <p class="hint">One Traefik holds <code>:80</code> and <code>:443</code> for every https
+      name on this box. It is not a workspace, so it never appears in the grid — manage it
+      with <code>rc-repro edge</code>.</p>
+    <div id="edge-body" class="plan"></div>
+    <menu>
+      <button type="button" id="edge-close" class="btn primary">Close</button>
+    </menu>
+  </dialog>
+
+  <!-- Activity: running + recent jobs, reopenable -->
+  <!-- Activity used to live in a dialog. It is a stage view now (see openJobs);
+       only the per-job OUTPUT stays modal, because that one is a live stream you
+       open, watch and dismiss. -->
+
+  <!-- People: who may sign in, and what they may do. Admin only -- a member
+       gets a 403 from every endpoint behind it, so the button is not rendered. -->
+  <dialog id="people-dialog">
+    <h2>People</h2>
+    <p class="hint">Everyone here can sign in to this server. Roles bound the
+      <b>GUI</b> only — anyone with a shell on this box is already in the docker
+      group, so a readonly user with an ssh key is not readonly.</p>
+    <div id="people-body" class="people"></div>
+    <div class="row2" id="people-add">
+      <input id="new-user" class="input" placeholder="name" aria-label="new user name">
+      <select id="new-role" class="input" aria-label="role">
+        <option value="member">member</option>
+        <option value="readonly">readonly</option>
+        <option value="admin">admin</option>
+      </select>
+      <button id="people-add-btn" class="btn primary" type="button">Add person</button>
+    </div>
+    <p class="hint">rc-repro generates the password and shows it once — an admin
+      who types a colleague's password also knows it, which makes every audit line
+      signed with that name deniable.</p>
+    <menu><button type="button" id="people-close" class="btn">Close</button></menu>
+  </dialog>
+
+  <!-- Your account: the sessions you have open, and the way out. Server-side
+       sessions are what make "sign out" and "sign out everywhere" possible at
+       all -- HTTP Basic had neither. -->
+  <!-- Changing your own password. POST /api/me/password has existed since
+       v0.23.0 -- role-gated, throttled like a login, ends every other session and
+       keeps this one -- and NOTHING in the browser called it. It was built and
+       unreachable; this is the two fields it was missing. -->
+  <dialog id="passwd-dialog">
+    <h2>Change your password</h2>
+    <p class="hint">Every other session you are signed in on ends. This one stays,
+      so you are not signed out of the tab you changed it in.</p>
+    <form id="passwd-form" method="dialog">
+      <label>Current password <input name="old" type="password" autocomplete="current-password" required></label>
+      <label>New password <input name="new" type="password" autocomplete="new-password" required></label>
+      <p class="hint">At least 12 characters. rc-repro keeps only a scrypt hash, so
+        nobody — including an admin — can read it back.</p>
+      <p id="passwd-err" class="banner bad" hidden></p>
+      <menu>
+        <button type="button" id="passwd-cancel" class="btn">Cancel</button>
+        <button type="button" id="passwd-go" class="btn primary">Change password</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="session-dialog">
+    <h2 id="session-title">Your sessions</h2>
+    <p class="hint">Each row is a browser you have signed in from. Revoking one
+      ends it immediately on the server, not just in that browser.</p>
+    <div id="session-body" class="plan"></div>
+    <menu>
+      <button type="button" id="session-all" class="btn danger">Sign out everywhere</button>
+      <button type="button" id="session-close" class="btn primary">Close</button>
+    </menu>
   </dialog>
 
   <!-- Job/progress + logs dialog -->
   <dialog id="job-dialog">
     <h2 id="job-title">Working…</h2>
-    <pre id="job-log" class="log"></pre>
+    <pre id="job-log" class="log" aria-live="polite"></pre>
     <menu><button id="job-close" class="btn">Close</button></menu>
   </dialog>
 

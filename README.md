@@ -1,9 +1,9 @@
 # rc-repro
 
-**Reproduce a customer's Rocket.Chat issue on their *exact* version in minutes.**
-One command spins up the right Rocket.Chat version paired with a compatible
-MongoDB, plus optional backing services (LDAP, SAML/OIDC, email, S3, multi-instance)
-and sample data — instead of hand-building a compose stack for every ticket.
+**Reproduce a customer's Rocket.Chat issue on their *exact* version, in minutes.**
+One command boots the right Rocket.Chat paired with a compatible MongoDB, plus
+optional backing services (LDAP, SAML/OIDC, email, S3, multi-instance) and sample
+data — instead of hand-building a compose stack for every ticket.
 
 ```bash
 rc-repro up --version 8.5.1 --name TICKET-1234 --wait   # boot it
@@ -11,18 +11,22 @@ rc-repro up --version 8.5.1 --name TICKET-1234 --wait   # boot it
 rc-repro down --name TICKET-1234 --volumes              # bin it when done
 ```
 
-Prefer a UI? `rc-repro serve` opens a local web dashboard for everything below
-(create, seed, config-import, load-test, monitoring). See [Web GUI](#web-gui-rc-repro-serve).
+Prefer a browser? [`rc-repro serve`](#web-gui) does all of the above.
 
 ## Contents
 
-- [Getting started](#getting-started) — prerequisites, install, your first repro
-- [Everyday use](#everyday-use) — commands & lifecycle
-- [Web GUI](#web-gui-rc-repro-serve) — `rc-repro serve`, a local dashboard
-- [Scenarios](#scenarios) — presets (LDAP, SAML, email, …) & monitoring
-- [Data & performance](#data--performance) — sample data, data-scale prefill, config import, benchmarking, load testing
+- [Getting started](#getting-started) — prerequisites, install, first repro
+- [Everyday use](#everyday-use) — the lifecycle
+- [Web GUI](#web-gui) — `serve`, accounts, and reaching it from somewhere else
+- [Scenarios](#scenarios) — presets and monitoring
+- [HTTPS](#https) — a real name, or a local certificate
+- [Environment variables](#environment-variables) — settings vs. env vars
+- [Data & performance](#data--performance) — seed, import, backup, upgrade, load test
 - [API testing](#api-testing)
-- [Reference](#reference) — command list, version resolution, state, development
+- [Reference](#reference) — commands, version resolution, state, development
+
+Every command has `--help`, and it is written to be read — this file is the map,
+`--help` is the detail.
 
 ---
 
@@ -30,649 +34,586 @@ Prefer a UI? `rc-repro serve` opens a local web dashboard for everything below
 
 ## Prerequisites
 
-- **Docker Desktop** (or Docker Engine) with `docker compose` v2 — **must be running**.
-- **Python 3.11+**.
-- Internet access (to pull images and look up version compatibility).
+- **Docker** with `docker compose` v2 — running.
+- **Python 3.11+**
+- Internet access, to pull images and look up version compatibility.
 
-> **Apple Silicon note:** only the Bitnami MongoDB image (used for MongoDB < 8,
-> i.e. RC < 8) is amd64-only and runs under emulation, so those boots are slower.
-> Everything else (Rocket.Chat, official MongoDB 8+, OpenLDAP, Keycloak) is native.
+`rc-repro doctor` checks all of it and names anything that would fail a boot.
 
-> **Podman / non-Docker engines:** rc-repro talks to any Docker-compatible API, so
-> Podman works via the `docker.sock` helper (`podman-mac-helper`). Two known traps:
-> - **Kernel ≥ 6.19 can't run MongoDB 8.0** ([SERVER-121912](https://jira.mongodb.org/browse/SERVER-121912)),
->   which recent RC versions require — common on fresh Podman machines / Fedora
->   CoreOS. `rc-repro doctor` warns when it detects this; use an engine on kernel
->   < 6.19 until MongoDB ships a fix.
-> - **Docker Hub anonymous pull-rate limits** (`registry.rocket.chat` counts against
->   Hub too) — run `docker login` (Hub username + a Personal Access Token).
->
-> When a boot fails from either cause, `up` now names it directly instead of a bare
-> "`docker compose up` failed".
+<details>
+<summary><b>Apple Silicon, Podman, and Docker Hub rate limits</b></summary>
+
+**Apple Silicon:** only the Bitnami MongoDB image (MongoDB < 8, i.e. RC < 8) is
+amd64-only and runs emulated, so those boots are slower. Everything else is native.
+
+**Podman** works via the `docker.sock` helper (`podman-mac-helper`). Two traps:
+
+- **Kernel ≥ 6.19 cannot run MongoDB 8.0**
+  ([SERVER-121912](https://jira.mongodb.org/browse/SERVER-121912)). `doctor`
+  warns when it sees this; use an engine on kernel < 6.19 until MongoDB ships a fix.
+- **Docker Hub anonymous pull limits** (`registry.rocket.chat` counts against Hub
+  too) — run `docker login`.
+
+`up` names either cause directly rather than reporting a bare compose failure.
+</details>
 
 ## Install
 
-**Recommended — with [pipx](https://pipx.pypa.io)** (isolated, adds `rc-repro` to your PATH):
-
 ```bash
-pipx install git+https://github.com/klovekesh37/rc-repro
-```
-
-**Alternative — a plain virtualenv:**
-
-```bash
-git clone https://github.com/klovekesh37/rc-repro.git && cd rc-repro
-python3 -m venv .venv && source .venv/bin/activate
-python -m pip install --upgrade pip     # editable installs need pip >= 21.3
-pip install -e .
-```
-
-Then confirm your machine is ready — `doctor` checks Docker, Compose, disk,
-connectivity and ports. Fix any ✗ before continuing:
-
-```bash
+pipx install 'rc-repro[gui] @ git+https://github.com/klovekesh37/rc-repro'
 rc-repro doctor
 ```
 
-> **Web GUI (optional):** the `rc-repro serve` dashboard needs a couple of extra
-> deps (the `gui` extra). With pipx use the PEP 508 `name[extra] @ URL` form:
->
-> ```bash
-> pipx install 'rc-repro[gui] @ git+https://github.com/klovekesh37/rc-repro'
-> # already installed? add the extra by reinstalling:
-> pipx install --force 'rc-repro[gui] @ git+https://github.com/klovekesh37/rc-repro'
-> ```
->
-> In a venv: `pip install -e '.[gui]'`. The core CLI stays dependency-light without it.
+The `gui` extra adds the few dependencies [`serve`](#web-gui) needs; drop it for a
+CLI-only install. In a checkout: `pip install -e '.[gui]'`.
 
-<details>
-<summary><b>Updating to the latest version</b></summary>
+To update: `pipx reinstall rc-repro` (`upgrade` only moves when the version was
+bumped). In a checkout: `git pull && pip install -e '.[gui]'`.
 
-```bash
-pipx reinstall rc-repro          # always re-pulls the latest from GitHub
-# or, once a new release version is published:
-pipx upgrade rc-repro
-```
-
-Use **`reinstall`** to be sure — `pipx upgrade` only picks up changes when the
-package version was bumped. (Venv installs: `git pull && pip install -e .`.)
-</details>
+`rc-repro --version` reports what is **installed**, which is the number the running
+code actually is. In a checkout that comes from the distribution metadata, not from
+`pyproject.toml`, so `git pull` alone does not move it — re-run `pip install -e .`
+or the version will keep naming the release you had before. On a remote box that
+one command is how you tell whether a deploy actually landed.
 
 ## Your first repro
 
 ```bash
-# 1. Create a repro on a specific version and wait until it's actually serving
 rc-repro up --version 8.5.1 --name test --wait
-
-# 2. Open the printed URL (http://localhost:<port>) and log in:
-#      username: admin    password: admin123
-
-# 3. When you're done, remove it
+# open the printed URL — admin / admin123
 rc-repro down --name test --volumes
 ```
 
-That's the whole loop: **`up` → use it → `down`**.
+- `--wait` blocks until Rocket.Chat answers and skips the setup wizard. First boot
+  pulls images and can take a few minutes.
+- `--name` is optional (derived from the version) — use a **ticket id** so `list`
+  maps repros to your work.
+- Every repro creates the same admin: **`admin` / `admin123`**.
 
-- `--wait` blocks until Rocket.Chat responds (first boot pulls images and can take a few minutes), and skips the setup wizard so you land straight in.
-- `--name` is optional (a name is derived from the version); use a **ticket id** so `list` maps repros to your work.
-- Every repro auto-creates the same admin: **`admin` / `admin123`**.
-
-> **Local-only by default:** all published ports bind to `127.0.0.1`, so repros
-> (which run these well-known credentials) aren't reachable from your network.
-> MongoDB and NATS are never published at all (stricter than the official compose).
-> ⚠ `--bind 0.0.0.0` exposes RC **and every sidecar** (Keycloak, Mailpit, MinIO —
-> all with known credentials) to your whole network. Treat it as dangerous:
-> trusted networks only, take the repro down when done. rc-repro is a local
-> reproduction tool — never a production or internet-facing deployment.
+> **Local by default.** Published ports bind `127.0.0.1`. `--bind 0.0.0.0` exposes Rocket.Chat **and every sidecar**
+> (Keycloak, Mailpit, MinIO — all with known credentials) to your whole network.
+> This is a reproduction tool, never a deployment.
 
 ---
 
 # Everyday use
 
 ```bash
-rc-repro list                     # all repros: version, port, state, URL
-rc-repro info   --name test       # URL, admin creds, handy snippets
-rc-repro evidence --name test --json  # redacted runtime record for support tooling
-rc-repro logs   --name test -f    # tail logs (attach to a ticket)
-rc-repro ready  --name test       # block until it's serving (if you didn't use --wait)
+rc-repro list                     # version, port, state, URL
+rc-repro info   --name test       # URL, credentials, snippets, preset notes
+rc-repro logs   --name test -f    # tail
+rc-repro ready  --name test       # block until serving
 ```
 
-**Lifecycle** — a repro is a long-lived thing you pause/resume, not something you recreate:
+A repro is long-lived — pause and resume it rather than recreating it:
 
 | Command | Effect |
 |---|---|
-| `up` | create; if it already exists, bring it back up (data intact) |
-| `stop` / `start` | pause / resume — containers kept, resumes in seconds |
-| `down` | remove containers, **keep** data + record (shows as `down`) |
-| `down --volumes` | delete the data and forget the repro (asks to confirm) |
-| `prune` | remove all `down` repros (skips pinned & running; asks to confirm) |
+| `up` | create, or bring an existing one back up (data intact) |
+| `stop` / `start` | pause / resume — containers kept, seconds |
+| `down` | remove containers, **keep** data and the record |
+| `down --volumes` | delete the data and forget it (confirms first) |
+| `prune` | remove every `down` repro (skips pinned and running; confirms first) |
 
-> The two data-deleting commands (`down --volumes`, `prune`) prompt for
-> confirmation — `prune` lists exactly what it will delete first. Pass `--yes`
-> (`-y`) to skip the prompt in scripts/CI.
+Both data-deleting commands prompt, and `prune` lists what it will delete. `--yes`
+skips the prompt in scripts.
 
-**Persistent "daily driver"** — pin one and just start/stop it:
-
-```bash
-rc-repro up --version 8.5.1 --name main --pin    # once
-rc-repro start        # each morning (acts on the pinned default)
-rc-repro stop         # each evening — nothing lost
-```
-
-Once a repro is pinned (or set with `rc-repro use <name>`), commands with no
-`--name` act on it: `rc-repro start`, `rc-repro logs -f`, etc.
+**A daily driver:** `rc-repro up -v 8.5.1 --name main --pin` once, then `rc-repro
+start` / `rc-repro stop`. Commands with no `--name` act on the pinned repro (or
+whatever `rc-repro use <name>` last set).
 
 ---
 
-# Web GUI (`rc-repro serve`)
+# Web GUI
 
-A local, browser-based dashboard over the same engine as the CLI — useful when
-you'd rather click than type. Needs the `gui` extra (see [Install](#install)).
+`rc-repro serve` is the same engine as the CLI with a browser in front — useful
+when you would rather click than type, and the way a team shares one box.
+
+## On your own machine
 
 ```bash
-rc-repro serve            # prints a http://localhost:7070/?t=... URL and opens it
-rc-repro serve --port 8080 --no-open
+rc-repro serve                    # http://localhost:7070/
 ```
 
-It binds **loopback only** by default and prints a one-time session token in the
-URL (repros run weak fixed credentials, so the control plane must not be exposed
-to your network — `--bind 0.0.0.0` requires an explicit opt-in and warns).
+It binds **loopback only** — the GUI can create and delete
+containers and their volumes and mint admin tokens, so the port is docker control.
+Binding anything else needs a deliberate flag, and rc-repro refuses the unsafe
+combinations rather than warning about them.
 
-What you can do from it:
+**The first account.** With no accounts, a loopback `serve` prints a one-time link:
 
-- **Dashboard** — every repro as a card (version, port, state, uptime/health),
-  with filter / status / sort. Click a card for a **detail panel**: Overview
-  (RC/Mongo/port/uptime/health), **Logs / Containers / Env-vars** tabs, clickable
-  **links** to RC and preset sidecars (MinIO, Keycloak, Mailpit, Grafana), a live
-  **CPU/Mem chart**, and a copyable local URL.
-- **Create** a repro (with an Advanced section for `--reg-token`, `--mongo`,
-  `--rc-image`, `--bind`, pin/offline/no-pull), **seed** (profile / bulk `--scale`
-  / clear), **config-import** (upload a support-dump `*-settings.json` → preview
-  the plan → apply), attach/detach **monitoring**, and run the **perf** suite
-  (load test with an embedded k6 Grafana dashboard, capacity, benchmark).
+```
+http://localhost:7070/setup#k=Xf9…
+```
 
-Long operations stream live progress in the browser. Everything the GUI does is
-also a CLI command — same code underneath.
+Open the **whole** URL including the part after `#`. A fragment never reaches the
+server, so the key cannot appear in an access log, a proxy log or a `Referer`
+header. The page asks for a name and a password and creates the first **admin**.
+
+Prefer the terminal? `rc-repro users add <name>` first, and `serve` shows a normal
+sign-in page instead.
+
+## Accounts
+
+```bash
+rc-repro users                    # who exists, their roles and dates — never hashes
+rc-repro users add alice          # GENERATES the password and prints it once
+rc-repro users add alice --ask-password
+rc-repro users role alice admin   # admin | member | readonly
+rc-repro users passwd alice       # new password, ends alice's sessions
+rc-repro users remove alice       # and every session it minted
+```
+
+The **first** account is an admin; every one after it is a `member` until you say otherwise.
+
+A name is **folded into a DNS label**, because it becomes part of a workspace name
+— `lucy.felix` and `Lucy_Felix` both create `lucy-felix`, and `users add` prints
+what it made. Sign-in, `passwd`, `role` and `remove` all accept either spelling, so
+the name somebody was given is the one they can type. A name with nothing usable
+left in it (`...`) or one over 31 characters is refused rather than invented or
+truncated.
+
+The password is generated rather than typed unless --ask-password; and a generated one is ~96 bits where a typed one clears a
+12-character minimum with scrypt.
+Stored in `~/.rc-repro/users`, mode `0600`, hashed with `hashlib.scrypt`.
+
+**Three roles, not a permission system:**
+
+| Role | May |
+|---|---|
+| `admin` | everything, including managing people |
+| `member` | everyday use — create, seed, load-test, tear down |
+| `readonly` | look, but not touch — and **not** read logs or env vars, which carry LDAP bind passwords and OAuth client secrets |
+
+A `member` may set `--rc-image`, `--reg-token` and `--bind`:
+
+```bash
+rc-repro config set gui.create_policy admin      # only admins may set those three
+rc-repro config set gui.destroy_policy anyone    # members may delete anyone's workspace
+rc-repro config set bind_host 0.0.0.0            # one decision instead of per-create
+```
+
+Sessions are server-side and revocable: sign-out ends one, changing or removing an
+account ends every session it minted, and each person can see their own from the
+account menu. 
+
+## Reaching it from somewhere else
+
+Signing in over plain http puts the password on the wire once and the session
+cookie on every request after it. `serve` therefore **refuses** to bind a
+reachable interface over plain http unless you say what is protecting it. Pick the
+row that matches where TLS actually ends:
+
+| Where TLS ends | Command |
+|---|---|
+| Nowhere — just you, on this machine | `rc-repro serve` (add `--no-domain` if this box was set up with `--domain`, or it keeps serving that name) |
+| rc-repro does it, on a name that points here | `rc-repro serve --domain rc.example.com --email you@example.com` |
+| A TLS proxy on **this** box | `rc-repro serve --bind 127.0.0.1 --allow-host rc.example.com` |
+| A proxy **elsewhere** — a lab, Codespaces, ngrok, a load balancer | `rc-repro serve --bind 0.0.0.0 --allow-host rc.example.com --trust-proxy 10.0.0.1` |
+| Nothing, and you accept it | `rc-repro serve --bind 0.0.0.0 --allow-host <name> --insecure` |
+
+`--insecure` is deliberately **not** listed in `serve --help`: it is a security
+decision that does not apply on localhost or behind a lab's TLS, which is where
+almost everyone starts. It still works, and `serve` names it — with the exact
+command to add it to — at the one moment it applies, which is when it refuses to
+put a password on the wire by accident.
+
+Two flags do the work, and they answer different questions:
+
+- **`--allow-host`** is a **DNS-rebinding guard**: whatever you type in the address
+  bar has to be named here, or the request is a 403. Repeatable; `*` accepts any
+  host. This is the one people miss when a proxy forwards its own `Host` and every request 403s.
+  It wants a **bare hostname** — a scheme, a port or a trailing slash is corrected
+  and reported (`--allow-host https://lab.example.com:9944/` becomes
+  `lab.example.com`), because the guard matches the `Host` header with its port
+  already stripped. Omit it on a reachable bind and only `localhost` is accepted;
+  `serve` says so at startup, and the 403 names the host it refused.
+- **`--trust-proxy <address-or-CIDR>`** says *this peer terminates TLS, believe its
+  `X-Forwarded-Proto`/`-For`*. Without it rc-repro cannot tell the browser's hop is
+  https, so it will not mark the session cookie `Secure` and the sign-in page warns
+  about a connection that is actually encrypted. It grants *permission to believe*
+  that header — the cookie becomes `Secure` only once a peer inside the given range
+  actually sends it, which is why the startup line reads "https **when the proxy
+  says so**". `0.0.0.0/0` believes any client, so anyone can then claim https and
+  dodge the sign-in throttle; `serve` warns about it.
+  > **A bare `0.0.0.0` is not "anywhere" — it is the single address `0.0.0.0/32`,
+  > which no peer ever has.** It parses, so nothing used to complain, and the flag
+  > then did exactly nothing while looking correct. Write `0.0.0.0/0` for anywhere,
+  > or better, the proxy's actual address. `serve` now says so at startup.
+
+> Run `rc-repro users add <name>` first. The one-time setup link is offered on a loopback bind only.
+
+
+Everything the GUI does is a CLI command underneath, and every action is recorded
+against the account that took it and appended to `~/.rc-repro/audit.log` — a file. Read it with `rc-repro audit`.
+
+## Your own workspaces
+
+With accounts, derived names are namespaced by owner, so two people can run the
+same version:
+
+```
+$ rc-repro list
+NAME                 OWNER        RC        MONGO   PORT   STATE      URL
+*alice-rc8-5-1       alice        8.5.1     8.0     3000   running    …
+ bob-rc8-5-1         bob          8.5.1     8.0     3001   running    …
+```
+
+## Keeping it running
+
+```bash
+rc-repro serve --domain rc.example.com --email you@example.com --print-service
+```
+
+Prints a **systemd unit** and how to install it, plus a `nohup` fallback — and
+writes nothing, so you can read it first. systemd restarts on crash, starts on
+boot, and gives you `journalctl -u rc-repro -f`. `nohup` survives logout and
+nothing else.
 
 ---
 
 # Scenarios
 
-## Presets
-
-A preset turns a bare RC into a scenario. See them all with `rc-repro presets`;
-launch one with `--preset`:
+A preset turns a bare Rocket.Chat into a scenario. `rc-repro presets` lists them;
+the GUI's **Scenarios** page shows the same thing with each one's setup steps.
 
 ```bash
 rc-repro up --version 8.5.1 --preset ldap
 ```
 
 | Preset | Brings up | Reproduces |
-|--------|-----------|------------|
-| `default` | RC + Mongo, admin auto-created | anything |
-| `airgapped` | RC with Cloud endpoints stubbed out | offline / disconnected-workspace behaviour |
-| `ldap` | OpenLDAP seeded with users + a group | LDAP auth / sync tickets |
-| `saml` | a real Keycloak IdP (SAML realm + users) | SAML SSO login |
-| `oidc` | a real Keycloak IdP (OpenID Connect + users) | OIDC / OAuth SSO login |
-| `email` | Mailpit mailcatcher wired to RC's SMTP | email flows: invites, password reset, verification, 2FA codes |
-| `s3_minio` | MinIO object storage as RC's file upload backend | S3 storage tickets: uploads, previews, presigned URLs |
-| `livechat` | Omnichannel + an available agent + a demo website embedding the widget | Livechat widget load / CORS / routing / agent-availability |
-| `multi-instance` | N RC instances + Traefik load balancer + NATS, one shared Mongo | horizontal scaling / cross-instance real-time |
+|---|---|---|
+| `default` | RC + Mongo | anything |
+| `airgapped` | Cloud endpoints stubbed out | offline / disconnected workspace |
+| `ldap` | OpenLDAP with users and a group | LDAP auth and sync |
+| `saml` | a real Keycloak IdP (SAML realm) | SAML SSO |
+| `oidc` | a real Keycloak IdP (OpenID Connect) | OIDC / OAuth SSO |
+| `email` | Mailpit wired to RC's SMTP | invites, resets, verification, 2FA codes |
+| `s3_minio` | MinIO as the upload backend | uploads, previews, presigned URLs |
+| `livechat` | Omnichannel, an available agent, a demo site embedding the widget | widget load, CORS, routing, agent availability |
+| `multi-instance` | N instances + load balancer + NATS, one Mongo | scaling, cross-instance real-time |
 
-For `ldap`, `saml` and `oidc`, log in as **`user1` / `user1`** (…`userN` / `userN`).
-
-**Common `--set` parameters:**
+For `ldap`, `saml` and `oidc`, log in as **`user1` / `user1`**.
 
 ```bash
-rc-repro up --version 8.5.1 --preset ldap --set users=5        # 5 LDAP users
-rc-repro up --version 8.5.1 --preset ldap --set users=130000   # scale/perf repro
-rc-repro up --version 8.5.1 --preset saml --set users=20       # 20 Keycloak users
-rc-repro up --version 8.5.1 --preset multi-instance --set instances=3   # 3 instances behind a load balancer
-rc-repro up --version 8.5.1 --preset email --seed --wait                # Mailpit + verified sample users
-rc-repro up --version 8.5.1 --preset email --set verification=true      # require signup email verification
-rc-repro up --version 8.5.1 --preset s3_minio                           # files stored in MinIO instead of GridFS
-rc-repro up --version 8.5.1 --preset s3_minio --set presigned=true      # real presigned URLs (needs hosts entry)
-rc-repro up --version 8.5.1 --preset livechat --wait                    # Omnichannel + widget on a demo site
+rc-repro up -v 8.5.1 --preset ldap --set users=130000        # scale repro
+rc-repro up -v 8.5.1 --preset multi-instance --set instances=3
+rc-repro up -v 8.5.1 --preset email --seed --wait            # verified users + Mailpit
+rc-repro up -v 8.5.1 --preset s3_minio --set presigned=true  # real presigned URLs
+rc-repro up -v 8.5.1 --preset livechat --wait
 ```
 
-Use a first-party PR image without retagging it, while keeping every published
-port private on a remote host:
-
-```bash
-rc-repro up \
-  --version 8.5.1 \
-  --rc-image ghcr.io/rocketchat/rocket.chat \
-  --rc-tag pr-12345 \
-  --bind 127.0.0.1 \
-  --name pr-12345 \
-  --wait
-```
-
-`--version` still selects the compatible MongoDB version. `--rc-tag` only
-changes the Rocket.Chat image tag. `--bind` applies to Rocket.Chat and
-every sidecar UI published by the selected preset.
-
-Per-preset details (credentials, URLs, gotchas) are below — expand the one you need:
+**`oidc` needs one host entry** — `127.0.0.1  keycloak` in `/etc/hosts`, because the
+login URL must resolve the same way for your browser and RC's backend. `up` prints
+it, `rc-repro info` reprints it, and the GUI shows it as a blocking setup step.
+Everything else a preset needs is in its notes: consoles, credentials, realms.
 
 <details>
-<summary><b><code>email</code></b> — Mailpit mailcatcher + email-2FA</summary>
+<summary><b>Custom presets and Enterprise licences</b></summary>
 
-Captures every email RC sends (nothing leaves your machine) in Mailpit at
-`http://localhost:8025` — one **catch-all inbox for all users**; check the To:
-column. Covers invites, password resets, verification and notification mail out
-of the box. **Email-2FA is enabled globally**, but RC only applies it to users
-with a *verified* email: seeded users are verified, so `alice` / `alice` gets the
-full OTP flow (code lands in Mailpit); `admin` isn't, so it logs in plain until
-you verify it (Admin → Users → admin → Verified). rc-repro's own
-`token`/`api`/`seed` calls fetch a required code from Mailpit automatically, so
-they keep working either way. `--set verification=true` also makes new signups
-verify their address first.
-</details>
-
-<details>
-<summary><b><code>livechat</code></b> — Omnichannel + widget on a demo site</summary>
-
-Enables Omnichannel, makes `admin` an available agent, creates a **`support`
-department** with the agent(s) assigned, and serves a demo "customer website" at
-`http://localhost:8090` that embeds the Livechat widget **cross-origin** (the real
-setup where widget-load/CORS/CSP tickets happen). The widget frames RC, so the
-preset also drops RC's `X-Frame-Options: sameorigin`
-(`Iframe_Restrict_Access=false`) — otherwise the browser refuses to display it.
-Open the site, start a chat as a visitor, answer it in RC's Omnichannel area (the
-built-in same-origin widget is also at `<repro-url>/livechat`).
-
-`--set agents=N` (all assigned to the department), `--set department=false`,
-`--set registration=true`. **Business hours and canned responses are Enterprise
-features** — pass `--reg-token` to set them up, otherwise they're skipped.
-</details>
-
-<details>
-<summary><b><code>s3_minio</code></b> — MinIO object storage backend</summary>
-
-Stores RC's file uploads in a MinIO bucket (auto-created) instead of GridFS —
-browse it at `http://localhost:9001` (`rcrepro` / `rcrepro-secret`). By default
-downloads are proxied through RC so everything works with zero setup.
-`--set presigned=true` switches to real presigned MinIO URLs — add
-`127.0.0.1  minio` to `/etc/hosts` (printed on `up`); removing that line
-reproduces the classic "uploads work but previews/downloads break" ticket.
-</details>
-
-<details>
-<summary><b><code>multi-instance</code></b> — N instances behind Traefik + NATS</summary>
-
-Runs N Rocket.Chat instances behind Traefik on one URL, sharing one MongoDB and
-coordinating over NATS. Confirm the mesh with
-`rc-repro api --name <name> GET /api/v1/instances.get` (lists every connected
-instance). Traefik load-balances via its file provider — a generated
-`traefik/dynamic.yml` listing the `rocketchat-1..N` backends (no Docker socket
-needed).
-</details>
-
-<details>
-<summary><b><code>saml</code> / <code>oidc</code></b> — Keycloak console & host entry</summary>
-
-**`oidc` needs one host entry.** OIDC's login URL must resolve the same way for
-your browser and RC's backend, so add `127.0.0.1  keycloak` to `/etc/hosts`
-(rc-repro prints this on `up`). Then log in via "Keycloak (OIDC)". The OIDC
-Keycloak console is at `http://localhost:8085` (`admin`/`admin`, realm `rcrepro`).
-
-**Keycloak console** (`saml` preset): `http://localhost:8081` (`admin`/`admin`).
-The console opens on the **`master`** realm, but your SAML users live in the
-**`rcrepro`** realm — switch the realm dropdown (top-left), or open Users directly:
-`http://localhost:8081/admin/master/console/#/rcrepro/users`.
-(`rc-repro info` prints this too.)
-</details>
-
-<details>
-<summary><b>Custom / team presets & Enterprise licenses</b></summary>
-
-**Custom / team presets** — drop a YAML file in `~/.rc-repro/presets/<name>.yaml`
-(overrides a built-in of the same name). **Treat preset files as code**: they can
-run arbitrary containers and mount files — only use presets you trust.
+Drop a YAML file in `~/.rc-repro/presets/<name>.yaml` (it overrides a built-in of
+the same name). **Treat preset files as code** — they can run arbitrary containers
+and mount files.
 
 ```yaml
 name: my-scenario
 description: What this reproduces.
-env:                       # merged into the rocketchat service
+env:
   OVERWRITE_SETTING_Some_Setting: "true"
-services:                  # optional extra compose services
+services:
   my-sidecar: { image: some/image:tag }
 depends_on: [my-sidecar]
 ```
 
-**Enterprise (EE) license** — pass a cloud **registration token**: the workspace
-self-registers on first boot and Rocket.Chat Cloud syncs its license down
-(needs internet; get the token from the cloud console):
+For an EE licence pass a cloud **registration token** — the workspace
+self-registers on first boot and Rocket.Chat Cloud syncs the licence down:
 
 ```bash
-rc-repro up --version 8.5.1 --reg-token <your-token> --wait
+rc-repro up -v 8.5.1 --reg-token <token> --wait
 ```
 
-To avoid retyping it, put `reg_token: <your-token>` in `~/.rc-repro/config.yaml`
-or export `RC_REPRO_REG_TOKEN` — every new repro then registers automatically.
+Put `reg_token:` in `~/.rc-repro/config.yaml` or export `RC_REPRO_REG_TOKEN` to
+stop retyping it.
 </details>
 
-## Monitoring (`--monitor`)
+## Monitoring
 
-Add **Prometheus + Grafana** with Rocket.Chat metrics on top of *any* repro — it's
-an add-on, not a preset, so it layers onto whatever preset you chose (including
-`multi-instance`, where Prometheus scrapes every instance):
-
-```bash
-rc-repro up --version 8.5.1 --monitor                                   # any repro + monitoring
-rc-repro up --version 8.5.1 --preset multi-instance --set instances=3 --monitor
-```
-
-- **Grafana**: `http://localhost:5050` (`admin`/`admin`, anonymous view enabled) —
-  the official **"Rocket.Chat Metrics"** dashboard is auto-provisioned.
-- **Prometheus**: `http://localhost:9090` (Status → Targets shows RC up).
-- **Logs → Loki**: an OpenTelemetry collector tails **this repro's** containers and
-  ships their logs to Loki, queryable in Grafana (Explore → Loki, e.g.
-  `{k8s_namespace_name="rcrepro-<name>"}`). The collector is scoped to the repro's
-  compose project, so it never ingests your other repros.
-
-Attach or detach on an **already-running** repro (RC is not restarted — metrics are
-enabled live via the API):
+Prometheus + Grafana + Loki on top of *any* repro — an add-on, not a preset, so it
+layers onto whatever you chose:
 
 ```bash
-rc-repro monitor --name test            # attach Prometheus + Grafana
-rc-repro monitor --name test --off      # detach them
+rc-repro up -v 8.5.1 --monitor
+rc-repro monitor --name test           # or attach later, without restarting RC
+rc-repro monitor --name test --off
 ```
 
-Config mirrors the official [`RocketChat/rocketchat-compose`](https://github.com/RocketChat/rocketchat-compose)
-monitoring stack (file-SD Prometheus + provisioned Grafana).
+**Grafana** on `http://localhost:5050` (`admin`/`admin`, anonymous view on) with the
+official *Rocket.Chat Metrics*, MongoDB and Node Exporter dashboards provisioned;
+**Prometheus** on `:9090`; container logs shipped to **Loki** and readable in the
+*Rocket.Chat Logs* dashboard. The log collector is scoped to this repro's compose
+project, so it never ingests your others.
+
+---
+
+# HTTPS
+
+**A workspace never terminates TLS.** One Traefik — the **edge** — holds `:80` and
+`:443` and serves every name on the machine. It starts by itself with the first
+workspace that needs one.
+
+```bash
+# A domain name, with a Let's Encrypt certificate
+rc-repro up -v 8.5.1 --domain t1234.example.com --email you@example.com
+
+# No domain, no internet: rc-repro's own CA
+rc-repro trust-ca                       # once
+rc-repro up -v 8.5.1 --https            # https://<name>.rcrepro.localhost
+```
+
+The email is remembered (`rc-repro config set acme.email …`). Rocket.Chat's
+`ROOT_URL` becomes the https URL, which is what makes OAuth/SAML redirects.
+
+**shared fate is real**: while the edge is down, every https name on the box is
+unreachable, which is why `doctor` calls a stopped edge a failure rather than a
+warning.
+
+```bash
+rc-repro edge status     # running? which names? can it reach each one?
+rc-repro edge stop       # frees :80 and :443
+```
+
+`status` prints each route beside whether the edge is actually attached to that
+workspace — a route it cannot reach answers **502** rather than erroring, and
+nothing else would tell you.
+
+<details>
+<summary><b>dns-01 — the way round all of that, and what unlocks a wildcard</b></summary>
+
+Not a flag. Put your provider's credentials in `~/.rc-repro/acme/dns.env` and
+rc-repro uses dns-01 automatically:
+
+```bash
+mkdir -p ~/.rc-repro/acme && chmod 700 ~/.rc-repro/acme
+printf 'CF_DNS_API_TOKEN=%s\n' "$TOKEN" > ~/.rc-repro/acme/dns.env
+chmod 600 ~/.rc-repro/acme/dns.env
+```
+
+---
+
+# Environment variables
+
+```bash
+rc-repro env                                        # the effective env, secrets masked
+rc-repro env --setting Message_AllowEditing=false   # a Rocket.Chat SETTING
+rc-repro env --set MY_FLAG=true                     # a raw env var
+rc-repro env --unset ALLOW_UNSAFE_QUERY_AND_FIELDS_API_PARAMS
+```
+
+Most Rocket.Chat configuration is a **setting** (what you would change in the admin
+UI), not a plain env var — and a setting only takes effect from the environment
+with the `OVERWRITE_SETTING_` prefix. The bare form failing *quietly* is the trap:
+
+| Env var | Effect on `Accounts_ShowFormLogin` |
+|---|---|
+| `Accounts_ShowFormLogin=false` | **none** — accepted by docker, silently ignored |
+| `OVERWRITE_SETTING_Accounts_ShowFormLogin=false` | applied |
+
+So **`--setting Id=value` adds the prefix for you** — prefer it for anything you
+would change in Admin → Settings. `--set` is for real env vars. If you use `--set`
+with a name that *is* a setting on this workspace, rc-repro says so and gives you
+the prefixed form; it asks the workspace, so it is right for whatever version is
+running. The GUI's Env-vars tab does the same and keeps the two kinds apart.
+
+`OVERWRITE_SETTING_*` is **asserted at every boot, not locked** — the API and admin
+UI can still change it while the container runs, and the next restart puts the env
+value back.
+
+Applying a change rewrites the compose file and recreates **only** the Rocket.Chat
+container: MongoDB keeps running, its volume is untouched, no image is pulled, open
+sessions reconnect. `--no-restart` writes it for the next `up`.
+
+Overrides persist in the repro's metadata, so `up --force` keeps them. Precedence is
+base → preset → yours. Load-bearing keys (`MONGO_URL`, `PORT`, `ROOT_URL`,
+`TRANSPORTER`) are allowed — reproducing a broken configuration is the point — but
+each prints what it will break.
 
 ---
 
 # Data & performance
 
-## Sample data (`--seed`)
+## Sample data
 
-A fresh repro is empty. Tickets about message sync, search, notifications, UI
-with data, or permissions need a populated workspace — `--seed` creates realistic
-users, channels, DMs and messages (authored across the users, not just admin).
+A fresh repro is empty. `--seed` creates realistic users, channels, DMs and
+messages, authored across the users rather than all by admin:
 
 ```bash
-rc-repro up --version 8.5.1 --name test --seed                 # small (default)
-rc-repro up --version 8.5.1 --name test --seed --seed-profile standard
-rc-repro seed --name test --profile large                      # seed an existing repro
-rc-repro seed --name test --users 30 --channels 10 --messages 40   # custom counts
+rc-repro up -v 8.5.1 --name test --seed --seed-profile standard
+rc-repro seed --name test --profile large
+rc-repro seed --name test --users 30 --channels 10 --messages 40
 ```
 
-| Profile | Users | Channels | Msgs/channel | DMs | Threads/reactions |
-|---------|-------|----------|--------------|-----|-------------------|
+| Profile | Users | Channels | Msgs/channel | DMs | Threads & reactions |
+|---|---|---|---|---|---|
 | `small` (default) | 5 | 3 | 5 | 2 | no |
 | `standard` | 20 | 8 | 20 | 5 | yes |
 | `large` | 100 | 20 | 100 | 20 | yes |
 
-`seed` reports a **timing breakdown** (time + rate per phase, message-latency
-p50/p95/p99); add `--stats` for the CPU/RAM cost. `rc-repro api` prints each
-call's latency (`HTTP 200 [admin] in 11ms`).
+Seed users are `alice`, `bob`, … with password = username. Email-2FA and the rate
+limiter are disabled while seeding and **restored afterwards**.
 
-Seed users are `alice`, `bob`, … (password = username). While seeding, email-2FA
-and the API rate limiter are temporarily disabled so it can log in as each user
-and post at volume — both are **restored to their prior values afterward** (so
-seeding an `email` repro leaves its 2FA setting on).
-
-### Data-scale prefill (`--scale`)
-
-The REST seed above is realistic but slow — a round-trip per message. For
-*scale* repros (*"50k users"*, *"a room with 800k messages won't load"*) use
-`--scale`, which bulk-inserts straight into MongoDB (tens of thousands/sec):
+**Scale repros** ("50k users", "a room with 800k messages won't load") want
+`--scale`, which bulk-inserts straight into MongoDB at tens of thousands per second:
 
 ```bash
-rc-repro seed --name test --scale users=50000                       # 50k users in seconds
-rc-repro seed --name test --scale messages=800000@general           # fill a room
-rc-repro seed --name test --scale users=50000,messages=800000@team-chat
-rc-repro seed --name test --clear-scale                             # remove everything --scale added
+rc-repro seed --name test --scale users=50000,messages=800000@general
+rc-repro seed --name test --clear-scale        # removes exactly what --scale added
 ```
 
-Every scale document is tagged, so `--clear-scale` removes exactly what was
-inserted (and fixes the room's message counter) without touching your REST-seeded
-or real content. The target room (`messages=N@room`) must already exist — use
-`general` or a REST-seeded channel.
+Bulk documents bypass RC's hooks: bulk users are **credential-less** and messages
+fire no notifications or threading. Use `--scale` for scale behaviour and the REST
+seed for feature behaviour.
 
-**Trade-off:** bulk documents bypass RC's application hooks — bulk users are
-**credential-less** (not loginable; log in as a REST-seeded user or `admin` to
-browse them) and messages fire no notifications/mentions/threading. Use `--scale`
-for scale/perf behaviour, the REST seed for feature behaviour.
-
-## Config import (`config-import`)
-
-Reproduce a *customer's* configuration, not a default one. Point `config-import`
-at the `*-settings.json` from a support dump and it applies the settings the
-customer actually changed:
+## support dump configuration
 
 ```bash
-rc-repro config-import ./support-dump/8.5.0-settings.json --name test
-rc-repro config-import ./8.5.0-settings.json --name test --dry-run     # preview the plan
+rc-repro config-import ./support-dump/8.5.0-settings.json --name test --dry-run
 rc-repro config-import ./8.5.0-settings.json --name test --only Livechat,LDAP
 ```
 
-It imports only settings that differ from their default, and deliberately
-**skips**:
+Applies the settings from the suport dump. Deliberately skips **redacted
+secrets** (listing them so you can set them by hand) and **identity settings** that
+would break or pollute a local repro (`Site_Url`, `Enterprise_License`, `Assets_*`,
+cloud registration).
 
-- **redacted secrets** (`XXXXXXXX` in the dump — SMTP/OAuth/token passwords); it
-  lists them so you can set them by hand,
-- **identity/environment settings** that would break or pollute a local repro —
-  `Site_Url`, `Enterprise_License`, `Assets_*`, deployment fingerprint, cloud
-  registration.
-
-Custom OAuth providers (e.g. Entra ID) are **pre-created** automatically so their
-settings apply. `--dry-run` prints the full apply/skip plan without changing
-anything. Some settings need `rc-repro restart` to fully take effect; a few
-Enterprise/module-gated settings will be reported as rejected on an unlicensed
-repro (they apply once a license is present).
-
-## Version comparison (`benchmark`)
-
-Boot several versions, run the **identical** seed workload against each, and
-compare — a performance-regression check unique to rc-repro because it's
-version-matched:
+## Backup, restore, upgrade
 
 ```bash
-rc-repro benchmark --versions 8.4.1,8.5.1,8.6.0 --seed-profile standard --report
-```
-```
-VERSION  MONGO           BOOT   SEED  msg/s  p95    RC CPU  MongoCPU  RC RAM
-8.4.1    8.0 (official)  10.2s  5.6s  19.6   121ms  62%     31%       1400MB
-8.5.1    8.0 (official)  10.8s  5.8s  19.0   118ms  64%     33%       1450MB
-8.6.0    8.0 (official)  11.1s  9.2s  11.0   340ms  91%     48%       1600MB   <- regression: seed +59%, p95 +188%
+rc-repro backup --label "before upgrade"    # → ~/.rc-repro/backups/*.rcbak
+rc-repro restore <bundle> --new             # rebuild a whole workspace from it
+rc-repro upgrade --to 8.6.1                 # backs up first; --rollback undoes it
 ```
 
-Runs are sequential on the same host; the deltas between versions are the signal.
-`--report` writes a shareable markdown table for a ticket
-(default `~/.rc-repro/reports/`, or `--report-path`).
+A backup is a **bundle**, not a bare dump: the database plus the version, preset and
+parameters that produced it — which is what lets one file rebuild a workspace on a
+colleague's machine. Rocket.Chat is stopped for both operations (`mongodump` is not
+point-in-time consistent across collections; `--live` skips it) and the target
+database is dropped first, so you never end up with a hybrid. Restoring newer data
+into an older workspace is refused; older into newer needs `--allow-upgrade`.
 
-## Load testing (`loadtest`)
+**Not included:** sidecar data — MinIO objects, Keycloak realms, LDAP entries,
+Mailpit mail.
 
-Drive real concurrent HTTP load with [k6] and gate the result against an SLO:
+`upgrade` needs the repro **running**, because the migrations happen when RC boots.
+An upgrade that also needs a new MongoDB *major* is refused rather than attempted —
+majors have to be stepped one at a time with a `featureCompatibilityVersion` bump
+between each, and doing it in one move is how data is lost.
+
+## Load testing and capacity
 
 ```bash
-rc-repro loadtest --name test --scenario journey --vus 50 --duration 60s     # full user sessions
-rc-repro loadtest --name test --scenario mixed --ramp 10:200 --duration 2m --stats --report
-rc-repro loadtest --name test --scenario messages --slo p95=300ms,error=1%,rps=100   # CI gate
-
-# Hit the customer's *actual* slow call under load:
-rc-repro loadtest --name test --scenario custom --endpoint "GET /api/v1/channels.list?count=100" --vus 20
-rc-repro loadtest --name test --scenario custom --endpoint "POST /api/v1/chat.postMessage" --body '{"channel":"#general","text":"hi"}'
-
-# Before/after — did the fix/setting change actually help?
+rc-repro loadtest --name test --scenario journey --vus 50 --duration 60s
+rc-repro loadtest --name test --scenario custom --endpoint "GET /api/v1/channels.list?count=100"
 rc-repro loadtest --name test --scenario journey --save before-fix
 rc-repro loadtest --name test --scenario journey --compare before-fix
-
-# Customer-sized hardware — what does *their* 2-CPU/2GB box handle?
-rc-repro loadtest --name test --scenario journey --constrain "rc=2cpu/2g,mongo=1cpu/1g" --compare before-fix
-```
-```
-+- loadtest journey (50 VUs / 60s, 10 users) ---------+
-|  throughput  229 req/s   (1850 requests)            |
-|  latency     p50 7ms  p90 60ms  p95 66ms  p99 88ms  |
-|  errors      0.00%   checks 100% ok                 |
-|  responses   2xx 1850                               |
-+-----------------------------------------------------+
-Per-step latency:
-  step      count       p50     p95     p99
-  login       370      60ms    86ms   111ms
-  open        370       6ms    17ms    26ms
-  post        370      24ms    61ms    77ms
-vs baseline 'before-fix' (journey, saved 2026-07-18):
-  p95                   66ms -> 190ms       +188%   <- regression
-  step post p95         61ms -> 180ms       +195%   <- regression
+rc-repro capacity --name test --slo "p95=300ms,error=2%"
+rc-repro benchmark --versions 8.4.1,8.5.1,8.6.0 --report
 ```
 
-**Scenarios:** **`journey`** (a full user session per iteration — login → rooms →
-open → post → sync, **each step timed** so you see *which one* is slow), `messages`
-(write path), `login` (auth), `read` (`channels.history`), `mixed` (60/30/10 blend
-with per-endpoint latency), **`webhook`** (an incoming-webhook storm — the
-integration auto-created for the run), **`badbot`** (a badly-written script: tight
-unpaginated polling), and **`custom`** — any endpoint you name with
-`--endpoint "METHOD /path"` (`--body` for POST/PUT/PATCH).
+Real concurrent load through [k6](https://k6.io), run as a throwaway container on
+the repro's own network, so it works with loopback-only binds.
 
-**Load shapes:** constant `--vus`, `--ramp 10:200`, or **`--spike 10:100`** —
-base load for a third, a sharp spike for a third, then a recovery window; the
-result reports **how long p95 took to recover** after load dropped (or that it
-didn't). Long runs with `--stats` also report the **RAM slope per hour** (the
-soak-test leak signal).
+- **Scenarios:** `journey` (a full session per iteration, each step timed so you see
+  *which* one is slow), `messages`, `login`, `read`, `mixed`, `webhook`, `badbot`,
+  and `custom` — any endpoint you name.
+- **Shapes:** constant `--vus`, `--ramp 10:200`, or `--spike 10:100`, which reports
+  how long p95 took to recover after load dropped. Long runs with `--stats` report
+  the RAM slope per hour — the soak-test leak signal.
+- **Their hardware:** `--constrain "rc=2cpu/2g,mongo=1cpu/1g"` caps services for the
+  run (live, no restart, restored after).
+- **`--slo p95=300ms,error=1%`** exits non-zero, so it drops into CI.
+- **Diagnosis, on by default:** RC's event-loop lag, MongoDB's slow queries with
+  their plans (flagging **COLLSCAN**), and a p95 timeline pinning *when* errors
+  started — ending in a plain-language verdict.
 
-**Watch it live:** with the monitoring add-on attached, `--live` streams k6's
-metrics into the same Prometheus — client-side load and RC server metrics on
-one Grafana timeline (`http://localhost:5050` → Explore → `k6_*`).
+`capacity` doubles VUs until the SLO breaks, bisects the boundary, and says why it
+broke. `benchmark` boots several versions, runs the identical workload against each
+and prints the deltas — the regression check that only a version-matched tool can do.
 
-**Real users:** load is spread across seeded users (`alice`, `bob`, … — `--users N`,
-default 10) so it carries real per-user identity, permissions and subscriptions;
-if the repro isn't seeded it falls back to the admin token with a warning
-(`--users 0` forces admin-only; `custom` always uses the admin PAT).
-
-**Before/after:** `--save LABEL` stores a run (`~/.rc-repro/loadtests/`);
-`--compare LABEL` diffs the current run against it — per-metric and per-step
-deltas, regressions flagged. The report also embeds a **workspace snapshot**
-(version, instances, users/rooms/messages in the DB) so results are comparable
-evidence, and `--json` prints a machine-readable result for CI.
-
-**Customer-sized hardware:** `--constrain "rc=2cpu/2g,mongo=1cpu/1g"` caps
-services for the duration of the test (live `docker update`, no restart —
-restored after), so results reflect the *customer's* box, not your laptop.
-`rc` covers every RC instance, `mongo` is MongoDB, or name any compose service;
-each takes a CPU count (`0.5cpu`) and/or memory cap (`512m`, `2g`). ⚠ A memory
-cap below the service's current usage can OOM-kill it — which *is* how an
-undersized box behaves, but expect errors in that run.
-
-**Diagnosis (on by default; `--no-diag` to skip):** every run also collects the
-*server side* of the story and ends with a plain-language **verdict**:
-
-- **RC internals** — RC's own Prometheus metrics sampled during the run
-  (enabled/restored automatically): **event-loop lag**, the Node saturation
-  signal — once the loop lags, every request queues behind it.
-- **Slow MongoDB queries** — Mongo's profiler is armed for the run (`--slowms`,
-  default 100ms) and the slowest queries are read back with their plan, flagging
-  **COLLSCAN** (missing index) — the single most useful line in a perf ticket.
-- **Latency over time** — an ASCII p95 timeline that shows degradation and pins
-  *when* errors started, not just how many.
-
-```
-Verdict:
-  - RC event loop saturated: lag peaked at 2.29s on rocketchat - the Node process
-      is the bottleneck; more CPU or more instances (multi-instance preset) will help.
-  - MongoDB ran 12 collection scan(s) (COLLSCAN) among the profiled slow queries -
-      likely a missing index.
-```
-
-## Capacity finder (`capacity`)
-
-How many concurrent users does this workspace (or *this customer's hardware*)
-actually sustain? `capacity` doubles VUs until your SLO breaks, bisects to the
-boundary, and tells you why it broke:
-
-```bash
-rc-repro capacity --name test --scenario journey --slo "p95=300ms,error=2%"
-rc-repro capacity --name test --constrain "rc=2cpu/2g" --report   # on their box
-```
-```
-   4 VUs             112.8 req/s   p95   111ms   err  0.00%   PASS
-   8 VUs             130.8 req/s   p95   166ms   err  0.00%   PASS
-  16 VUs             137.5 req/s   p95   260ms   err  0.00%   PASS
-  32 VUs             148.9 req/s   p95   547ms   err  0.00%   FAIL (p95 <= 300ms)
-  24 VUs (bisect)    140.3 req/s   p95   432ms   err  0.00%   FAIL
-  20 VUs (bisect)    138.8 req/s   p95   348ms   err  0.00%   FAIL
-
-Capacity: ~16 concurrent VUs (holds at 16, breaks at 20)
-  why it broke: at 20 VUs the RC event loop saturated (lag peaked at 815ms)
-```
-
-Tune the search with `--start` (first VU step, default 10), `--max` (stop
-doubling past this, default 640), and `--step-duration` (how long each step
-runs, default 20s); it also takes `--scenario`, `--users`, `--constrain`,
-`--report` and `--json` like `loadtest`.
-
-The **responses** line breaks failures down by class — `429` (rate-limited), `4xx`
-(client error), `5xx` (server error) — so you can tell *"slow **and** crashing"*
-from *"just being throttled"* at a glance.
-
-> **What "VUs" are:** virtual users are k6's concurrent workers — **not** Rocket.Chat
-> accounts (none are created or deleted). Write scenarios (`journey`, `messages`,
-> `mixed`, a custom `POST`) leave real messages in `#general`; `read`/`login`/custom
-> `GET` add nothing.
-
-k6 runs as a throwaway container **on the repro's own docker network**, so it hits
-the internal service address (works even with loopback-only binds and
-multi-instance repros, which it targets through Traefik). The rate limiter is
-disabled for the run, then restored. With `--slo`, the command **exits non-zero**
-if any rule fails, so it drops straight into CI. `--stats` adds the CPU/RAM cost;
-`--report` writes a shareable markdown report.
-
-[k6]: https://k6.io
+> **VUs are k6 workers, not Rocket.Chat accounts.** Write scenarios leave real
+> messages in `#general`; `read` and `login` add nothing.
 
 ---
 
 # API testing
 
-Auth is set up so you can hit the REST API immediately:
-
 ```bash
-rc-repro token --name test                     # prints -H auth headers
+rc-repro token --name test                     # -H auth headers
 rc-repro api   --name test GET /api/v1/me
-rc-repro api   --name test POST /api/v1/users.create -d '{"name":"Bob","username":"bob","email":"b@x.com","password":"p"}'
-
-# Mirror a customer's Personal Access Token (with "Ignore 2FA"):
-rc-repro api --name test --pat  POST /api/v1/users.update -d '{"userId":"ID","data":{"name":"X"}}'
-# Get past a 2FA-guarded admin endpoint:
-rc-repro api --name test --2fa  POST /api/v1/settings/<id> -d '{"value":true}'
+rc-repro api   --name test --pat POST /api/v1/users.update -d '{"userId":"ID","data":{"name":"X"}}'
+rc-repro api   --name test --2fa POST /api/v1/settings/<id> -d '{"value":true}'
 ```
+
+`--pat` mirrors a customer's Personal Access Token (with "Ignore 2FA"); `--2fa` gets
+past a 2FA-guarded admin endpoint. The GUI has the same thing as a console, with the
+response pretty-printed.
 
 ---
 
 # Reference
 
-## Command list
+## Commands
 
 | Command | Purpose |
 |---|---|
-| `up` | create & start a version-matched repro |
-| `ready` | block until RC is serving (`/api/info`) |
-| `start` / `stop` / `restart` | lifecycle without recreating |
-| `down` | remove containers (`--volumes` also deletes data + record; confirms first, `--yes` to skip) |
-| `use <name>` | set the default repro for name-less commands |
-| `list` | all repros: version, port, state, URL |
-| `info` | URL, admin creds, snippets, preset notes |
-| `evidence` | redacted JSON with version, image identity, runtime state, and compose hash |
-| `token` / `api` / `pat` | REST auth + calls |
-| `seed` | populate a repro with sample users/channels/messages (`--stats` for CPU/RAM cost; `--scale` for bulk Mongo data-scale prefill) |
-| `config-import` | apply a customer's exported settings (support-dump `*-settings.json`) to a repro; `--dry-run`, `--only` |
-| `evidence` | export a redacted, machine-readable repro record (`--json`, `--output`) for support handoff |
-| `stats` | sample a repro's container CPU/RAM (`--for N`, or `--watch` live) |
-| `benchmark` | boot several versions, run identical seed workload, compare (regression check) |
-| `loadtest` | drive concurrent HTTP load with k6 as real seeded users; per-step latency, SLO gate, `--save`/`--compare` baselines, `--spike`, `--live` |
-| `capacity` | double VUs until the SLO breaks, bisect the boundary — "handles ~N concurrent" + why it broke |
-| `monitor` | attach/detach Prometheus + Grafana on a running repro |
-| `serve` | launch the local [web GUI](#web-gui-rc-repro-serve) (needs `pip install 'rc-repro[gui]'`) |
-| `logs` | tail a repro's logs |
-| `presets` | list available presets |
-| `versions <X.Y.Z>` | show the resolved MongoDB pairing (without launching) |
-| `doctor` | preflight checks (Docker, Compose, engine kernel, Hub auth, disk, ports, connectivity) |
-| `prune` | delete all `down` repros (confirms first, `--yes` to skip) |
+| `up` | create and start a version-matched repro |
+| `start` / `stop` / `restart` / `down` | lifecycle; `down --volumes` also deletes data |
+| `list` / `info` / `logs` / `ready` | what exists, where it is, what it is doing |
+| `use` / `config` | the default repro; remembered settings |
+| `env` | show or change env vars, recreating RC to apply |
+| `seed` | sample users/channels/messages; `--scale` for bulk Mongo prefill |
+| `config-import` | apply a customer's exported settings |
+| `backup` / `backups` / `restore` | bundle a repro's database, list bundles, load one back |
+| `upgrade` | move a running repro to another version; `--rollback` |
+| `stats` / `benchmark` / `loadtest` / `capacity` | measure it |
+| `monitor` | attach/detach Prometheus + Grafana |
+| `token` / `api` / `pat` | REST auth and calls |
+| `presets` / `versions` | what scenarios exist; the resolved MongoDB pairing |
+| `serve` / `users` / `audit` | the [web GUI](#web-gui), its accounts, and who did what |
+| `chown` | hand a workspace over to somebody else, with the record to match |
+| `edge` / `trust-ca` / `tls-status` | the shared Traefik, the local CA, what is really served |
+| `doctor` | preflight: Docker, Compose, kernel, Hub auth, disk, memory, ports |
+| `prune` | delete every `down` repro |
 
-Run `rc-repro <command> --help` for flags.
+`rc-repro <command> --help` for flags.
+
+## Exit codes
+
+A **domain** failure exits with a code that says which kind it was, so a script
+can tell "still coming up" from "fix your environment" without parsing the
+message.
+
+| Code | Meaning | Do about it |
+|---|---|---|
+| 0 | success | — |
+| 2 | usage / validation | fix the call — retrying unchanged will not help |
+| 3 | engine unavailable | Docker is not answering (`rc-repro doctor`) |
+| 4 | not found | no such repro |
+| 5 | not ready | **poll again** — it is still coming up |
+| 8 | conflict | the name or port is taken; pick another |
+| 1 | anything else | including argument errors the CLI catches before a command runs |
+
+**1 is still the common answer**, deliberately: only failures raised by the
+service layer as a typed error carry a code today. A mistyped flag, a missing
+file, an out-of-range `--vus` and similar are caught in the command itself and
+still exit 1. Branch on `$? -ne 0` for "did it fail", and on the table above only
+where you have checked the specific command returns what you expect.
+
+`rc_repro.errors.EXIT_CODES` also reserves **6** (authority gate) and **7**
+(create failed). Nothing raises them yet — they arrive with the work that needs
+them, and are listed here so the numbers are not reused for something else.
+
+> **Changed in 0.44.0.** Domain failures used to exit `1` like everything else. A
+> script testing `$? -eq 1` should test `$? -ne 0` instead.
 
 `rc-repro evidence --name <name> --json` is the support-tool handoff. It omits
 admin credentials and free-form preset metadata, reduces the root URL to its
@@ -682,45 +623,43 @@ outside the support workflow.
 
 ## How version → MongoDB resolution works
 
-`rc-repro up --version X` (and `rc-repro versions X`) resolves the MongoDB pairing:
+`rc-repro up --version X` (and `rc-repro versions X`) queries
+`releases.rocket.chat/<version>/info` — Rocket.Chat's own per-release compatibility
+data — and picks the highest supported MongoDB. Offline, or for a release predating
+that data, it falls back to the shipped `versions.yaml` (`--offline` forces this).
 
-1. **Live:** queries `releases.rocket.chat/<version>/info` (Rocket.Chat's own
-   per-release compatibility data) and picks the highest supported MongoDB.
-2. **Fallback:** if offline or the release predates that data, uses the shipped
-   `rc_repro/data/versions.yaml` map (`--offline` forces this path).
-
-The MongoDB image is chosen by the resolved **Mongo** version: **Mongo ≥ 8** →
-`mongodb/mongodb-community-server` + a fix-permission and a one-shot init
-container (matching the official `RocketChat/rocketchat-compose`); **Mongo < 8** →
-`bitnamilegacy/mongodb` (auto-inits the replica set). `MONGO_OPLOG_URL` is emitted
-only for RC < 8 (deprecated in 8.x).
+The image follows the resolved Mongo version: **≥ 8** →
+`mongodb/mongodb-community-server` with a fix-permission and one-shot init container
+(matching the official compose); **< 8** → `bitnamilegacy/mongodb`.
+`MONGO_OPLOG_URL` is emitted only for RC < 8.
 
 ## Where state lives
 
 ```
 ~/.rc-repro/                  # override with RC_REPRO_HOME
-├── config.yaml               # default_repro, optional reg_token / rc_image
-├── presets/                  # your custom/team presets
-├── reports/                  # benchmark & loadtest markdown reports
-├── loadtests/                # saved loadtest baselines (--save / --compare)
+├── config.yaml               # default repro, reg_token, bind_host, gui policies
+├── users                     # GUI accounts — 0600, scrypt
+├── sessions                  # server-side sessions — 0600
+├── audit.log                 # who ran what
+├── presets/                  # your custom presets
+├── backups/  reports/  loadtests/
+├── acme/                     # ACME state; dns.env, issued.json
+├── edge/                     # the shared edge and one file per route
 └── repros/<name>/
-    ├── docker-compose.yml     # generated — don't hand-edit; re-run `up`
-    ├── repro.json             # metadata
-    └── …                      # preset-generated files (LDIF, realm JSON, …)
+    ├── docker-compose.yml    # generated — re-run `up` rather than editing
+    └── repro.json
 ```
 
-Config values can also come from the environment (env wins over `config.yaml`) —
-handy for CI/scripts: `RC_REPRO_HOME`, `RC_REPRO_REG_TOKEN`, `RC_REPRO_RC_IMAGE`,
-`RC_REPRO_BIND_HOST` (default `127.0.0.1`; the `--bind` flag wins over both).
+Config can also come from the environment, which wins over `config.yaml`:
+`RC_REPRO_HOME`, `RC_REPRO_REG_TOKEN`, `RC_REPRO_RC_IMAGE`, `RC_REPRO_BIND_HOST`
+(the `--bind` flag wins over both).
 
 ## Development
 
 ```bash
 git clone https://github.com/klovekesh37/rc-repro.git && cd rc-repro
-python -m pip install --upgrade pip
-pip install -e ".[dev]"
-pytest                         # pure-logic tests — no Docker needed
+pip install -e ".[dev,gui,browser]"
+pytest                         # no Docker needed
 ```
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the project layout and how to add a
-preset.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the layout and how to add a preset.

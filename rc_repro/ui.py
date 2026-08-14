@@ -16,8 +16,14 @@ def ok(msg: str) -> None:
     typer.secho(msg, fg=typer.colors.GREEN)
 
 
-def warn(msg: str) -> None:
-    typer.secho(msg, fg=typer.colors.YELLOW)
+def warn(msg: str, *, err: bool = False) -> None:
+    """Amber: something wants the reader's attention but nothing has failed.
+
+    `err` puts it on stderr, for the case where the warning precedes a non-zero
+    exit -- `rc-repro serve > /dev/null` must still show why nothing started.
+    Default stays stdout so no existing caller moves stream.
+    """
+    typer.secho(msg, fg=typer.colors.YELLOW, err=err)
 
 
 def fail(msg: str) -> None:
@@ -29,9 +35,15 @@ def note(msg: str) -> None:
     typer.secho(msg, fg=typer.colors.CYAN)
 
 
-def die(msg: str) -> NoReturn:
+def die(msg: str, exit_code: int = 1) -> NoReturn:
+    """Red line on stderr, then exit.
+
+    `exit_code` defaults to 1 so every existing caller is unchanged. The domain
+    errors pass their own, so a script can tell "not ready yet" from "known dead"
+    without parsing the sentence -- see errors.EXIT_CODES.
+    """
     fail(f"error: {msg}")
-    raise typer.Exit(1)
+    raise typer.Exit(exit_code)
 
 
 def hint(msg: str) -> None:

@@ -7,12 +7,16 @@ presets can deep-merge extra services / env / RC patches into it.
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import yaml
 
 from rc_repro import config
 from rc_repro.presets import Preset
+
+if TYPE_CHECKING:                      # only for the Spec.tls annotation
+    from rc_repro.tls import TlsSpec
 
 
 @dataclass
@@ -29,6 +33,11 @@ class Spec:
     reg_token: str | None
     preset: Preset
     monitoring: bool = False   # --monitor: add Prometheus + Grafana
+    # --https: terminate TLS in a Traefik sidecar. None = plain http, as before.
+    tls: "TlsSpec | None" = None
+    # `up --env K=V` / `rc-repro env --set`. Applied to every rocketchat service,
+    # last, so it beats the preset. A None value removes the key.
+    env_overrides: dict = field(default_factory=dict)
     container_port: int = config.RC_CONTAINER_PORT
     # Host interface published ports bind to (the official rocketchat-compose
     # BIND_IP pattern). Loopback by default: repros run weak fixed credentials,
@@ -40,7 +49,9 @@ class Spec:
     def from_resolved(cls, resolved, *, project_name: str, root_url: str,
                       host_port: int, reg_token: str | None, preset: Preset,
                       bind_host: str = config.DEFAULT_BIND_HOST,
-                      monitoring: bool = False) -> "Spec":
+                      monitoring: bool = False,
+                      tls: "TlsSpec | None" = None,
+                      env_overrides: dict | None = None) -> "Spec":
         """Build a Spec from a versions.Resolved plus the launch-time choices."""
         return cls(
             project_name=project_name,
@@ -56,6 +67,8 @@ class Spec:
             preset=preset,
             bind_host=bind_host,
             monitoring=monitoring,
+            tls=tls,
+            env_overrides=dict(env_overrides or {}),
         )
 
 
@@ -100,7 +113,27 @@ def _rc_environment(spec: Spec) -> dict:
         env["REG_TOKEN"] = spec.reg_token
     # Preset env (OVERWRITE_SETTING_* etc.) wins over base defaults.
     env.update({k: str(v) for k, v in spec.preset.env.items()})
+    # Explicit user overrides win over everything, including the base keys: this is
+    # a reproduction tool, so pointing MONGO_URL or ROOT_URL somewhere odd is a
+    # legitimate thing to want. `rc-repro env` warns about the ones that break it.
+    # A None value means "remove this key entirely", which is how you unset a base
+    # or preset default rather than merely blanking it.
+    for k, v in (spec.env_overrides or {}).items():
+        if v is None:
+            env.pop(k, None)
+        else:
+            env[k] = str(v)
     return env
+
+
+# mongod asks for 64000 open files and warns on every boot that 1024 is too low
+# ("Soft rlimits for open file descriptors too low"). Docker's default soft limit
+# IS 1024, and normal Rocket.Chat traffic survives it -- but building many
+# collections and indexes at once does not: a `rc-repro restore` hit EMFILE inside
+# WiredTiger, which panics and aborts the whole mongod rather than failing the one
+# operation. The container's hard limit is far higher, so raising the soft limit
+# costs nothing.
+_MONGO_ULIMITS = {"nofile": {"soft": 64000, "hard": 64000}}
 
 
 def _mongo_service_bitnami(spec: Spec) -> dict:
@@ -110,6 +143,7 @@ def _mongo_service_bitnami(spec: Spec) -> dict:
         "mongodb": {
             "image": f"docker.io/bitnamilegacy/mongodb:{spec.mongo_tag}",
             "restart": "always",
+            "ulimits": dict(_MONGO_ULIMITS),
             # Bitnami MongoDB images are published for amd64 only; pin the
             # platform so they run (under emulation) on Apple Silicon too.
             "platform": "linux/amd64",
@@ -152,6 +186,7 @@ def _mongo_service_official(spec: Spec) -> dict:
             "image": image,
             "user": "1001",
             "restart": "always",
+            "ulimits": dict(_MONGO_ULIMITS),
             "depends_on": {"mongodb-fix-permission": {"condition": "service_completed_successfully"}},
             "volumes": ["mongodb_data:/data/db:rw"],
             "entrypoint": ["mongod", "--replSet", "rs0", "--bind_ip_all"],
@@ -249,6 +284,18 @@ def build(spec: Spec) -> dict:
         "restart": "always",
         "environment": _rc_environment(spec),
         "ports": [f"{spec.host_port}:{spec.container_port}"],
+        # The same probe the cloned instances have always had. Without it Docker
+        # reports no health for this service, and `detail()` then falls back to the
+        # container STATE -- which is "running" from the moment the process starts,
+        # minutes before Rocket.Chat serves anything. The panel said
+        # "Health: running" on a workspace whose /api/info was refusing the
+        # connection outright, which is the one question that field exists to
+        # answer.
+        #
+        # Informational only: nothing declares depends_on service_healthy against
+        # the single-instance service, and `_up` does not pass --wait, so this
+        # changes what is REPORTED and not what anything waits for.
+        "healthcheck": copy.deepcopy(_RC_HEALTHCHECK),
         "depends_on": (
             {"mongo-init": {"condition": "service_completed_successfully"}}
             if official
@@ -289,8 +336,45 @@ def build(spec: Spec) -> dict:
     # balancer) instead of rocketchat — the port isn't known until `up`, so it's
     # injected here rather than in the preset.
     entry = spec.preset.entry_service
-    if entry and entry in doc["services"]:
+    if entry:
+        if entry not in doc["services"]:
+            # Silently skipping meant NOTHING published the host port: the repro
+            # booted and was unreachable at its own advertised root_url.
+            raise ValueError(
+                f"preset {spec.preset.name!r} sets entry_service {entry!r}, which is not "
+                f"one of its services ({', '.join(sorted(doc['services']))})")
         doc["services"][entry]["ports"] = [f"{spec.host_port}:80"]
+        # The front-end owns the published port now. Leaving the same host port on
+        # the RC service too binds it twice and `up` fails with "port is already
+        # allocated" — which a single-instance preset setting entry_service (a
+        # custom one; the built-in multi-instance forces instances >= 2) would hit
+        # every time. Drop only the colliding mapping, so multi-instance keeps its
+        # direct per-instance ports on host_port+i.
+        for svc_name, svc in rc_services.items():
+            if svc_name == entry:
+                continue
+            kept = [p for p in svc.get("ports", [])
+                    if str(p).split(":")[0] != str(spec.host_port)]
+            if kept:
+                svc["ports"] = kept
+            else:
+                svc.pop("ports", None)
+
+    # --- HTTPS ---
+    # Nothing here. A workspace never terminates TLS: the edge does, for all of
+    # them, and it reaches this one over the private network compose already made.
+    #
+    # So this document is IDENTICAL whether the workspace serves https or not,
+    # which is the property the whole design rests on -- adding or removing a name
+    # is a route file appearing or disappearing, and no container is ever rebuilt
+    # to gain or lose TLS. The previous version emitted either a Traefik sidecar or
+    # a shared-network join depending on a flag resolved at CREATE time, and every
+    # painful thing about it (port arbitration, `--adopt`, recreating containers to
+    # migrate) came from that decision being frozen into this file.
+    #
+    # RC keeps its published http port. rc-repro's own API calls use it (see
+    # Metadata.public_url), so nothing internal has to trust the local CA, and
+    # `curl http://localhost:<port>` still works for debugging.
 
     # --- optional monitoring add-on (Prometheus + Grafana) ---
     if spec.monitoring:
