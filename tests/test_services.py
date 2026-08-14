@@ -3298,11 +3298,15 @@ steps:
 
     assert man["status"] == "ok"
     assert man["shots"] == ["01-landing.png", "02-after-login.png"]
+    # Mutating steps (goto, click) each leave an automatic step frame behind, so
+    # the call stream now interleaves them with the curated checkpoints.
     assert [c[0] for c in drv.calls] == \
-        ["goto", "screenshot", "click", "screenshot"]
+        ["goto", "screenshot", "screenshot", "click", "screenshot", "screenshot"]
+    assert man["step_shots"] == ["steps/step-00-goto.png", "steps/step-02-click.png"]
     assert drv.calls[0] == ("goto", "http://localhost:3000/")
     assert drv.finished, "the driver must be closed so video is flushed"
     assert (tmp_path / "cap" / "01-landing.png").exists()
+    assert (tmp_path / "cap" / "steps" / "step-02-click.png").exists()
 
 
 def test_capture_fails_loudly_when_a_selector_is_missing(tmp_path, monkeypatch):
@@ -3470,7 +3474,8 @@ steps:
 """)
     drv = _FakeDriver()
     capture.run(capture.load_workload("slow"), drv, tmp_path / "cap", context={})
-    assert drv.calls == [
+    actions = [c for c in drv.calls if c[0] != "screenshot"]  # step frames interleave
+    assert actions == [
         ("click", "button.a", 60000),
         ("fill", "input.b", "x", 45000),
         ("wait_for", "div.c", 30000),
@@ -3659,3 +3664,125 @@ def test_capture_bundle_writes_into_a_directory_holding_unrelated_files(tmp_path
                                      driver_factory=lambda *a, **k: _FakeDriver())
     assert "README.md" in payload["bundle"]["files"]
     assert (dest / "notes.txt").exists(), "unrelated files are left alone"
+
+
+# --- capture reliability (step frames, pacing, validation) --------------------
+
+class _PacedDriver(_FakeDriver):
+    """A fake that also records the pacing/banner calls the real driver gets."""
+
+    def settle(self, ms):
+        self.calls.append(("settle", ms))
+
+    def banner(self, text):
+        self.calls.append(("banner", text))
+
+
+def test_capture_failure_leaves_the_page_at_the_moment_of_failure(tmp_path, monkeypatch):
+    import pytest
+    from rc_repro import errors
+    from rc_repro.services import capture
+    _write_workload("drift", """
+name: drift
+steps:
+  - goto: "/"
+  - click: "button.gone"
+""")
+    drv = _FakeDriver(missing=("button.gone",))
+    with pytest.raises(errors.CaptureFailedError):
+        capture.run(capture.load_workload("drift"), drv, tmp_path / "cap",
+                    context={"root_url": "http://localhost:3000"})
+    import json as _j
+    man = _j.loads((tmp_path / "cap" / "manifest.json").read_text())
+    assert man["failure_shot"] == "steps/failed-step-01.png"
+    assert (tmp_path / "cap" / "steps" / "failed-step-01.png").exists()
+
+
+def test_capture_settle_holds_the_result_and_honours_the_step_override(tmp_path, monkeypatch):
+    from rc_repro.services import capture
+    _write_workload("paced", """
+name: paced
+steps:
+  - click: "button.a"
+  - click: "button.b"
+    settle_ms: 900
+""")
+    drv = _PacedDriver()
+    capture.run(capture.load_workload("paced"), drv, tmp_path / "cap",
+                context={"root_url": "http://localhost:3000"})
+    settles = [c for c in drv.calls if c[0] == "settle"]
+    assert settles == [("settle", capture.SETTLE_MS), ("settle", 900)]
+
+
+def test_capture_fast_disables_settle_but_keeps_step_frames(tmp_path, monkeypatch):
+    from rc_repro.services import capture
+    _write_workload("quick", """
+name: quick
+steps:
+  - click: "button.a"
+""")
+    drv = _PacedDriver()
+    man = capture.run(capture.load_workload("quick"), drv, tmp_path / "cap",
+                      context={"root_url": "http://localhost:3000"}, pacing=False)
+    assert not [c for c in drv.calls if c[0] == "settle"]
+    assert man["step_shots"] == ["steps/step-00-click.png"]
+    assert man["pacing"] == {"slow_mo_ms": 0, "settle_ms": 0}
+
+
+def test_capture_banner_narrates_actions_and_stays_out_of_curated_shots(tmp_path, monkeypatch):
+    from rc_repro.services import capture
+    _write_workload("narrated", """
+name: narrated
+steps:
+  - click: "button.a"
+  - shot: proof
+""")
+    drv = _PacedDriver()
+    capture.run(capture.load_workload("narrated"), drv, tmp_path / "cap",
+                context={"root_url": "http://localhost:3000"})
+    banners = [c[1] for c in drv.calls if c[0] == "banner"]
+    assert banners[0] == "step 0: click button.a"
+    # cleared before the curated shot, and again on the way out
+    assert banners[1] == "" and banners[-1] == ""
+
+
+def test_capture_validation_fails_the_run_when_a_listed_artifact_is_missing(tmp_path, monkeypatch):
+    import pytest
+    from rc_repro import errors
+    from rc_repro.services import capture
+
+    class _Amnesiac(_FakeDriver):
+        def screenshot(self, path):
+            # records the call but writes nothing: the manifest will claim a
+            # frame the disk does not hold
+            self.calls.append(("screenshot", Path(path).name))
+
+    _write_workload("hollow", """
+name: hollow
+steps:
+  - shot: proof
+""")
+    with pytest.raises(errors.CaptureFailedError) as exc:
+        capture.run(capture.load_workload("hollow"), _Amnesiac(), tmp_path / "cap",
+                    context={"root_url": "http://localhost:3000"})
+    assert "Do not attach this bundle as proof" in str(exc.value)
+    import json as _j
+    man = _j.loads((tmp_path / "cap" / "manifest.json").read_text())
+    assert man["status"] == "failed"
+    assert any(v["status"] == "fail" for v in man["validation"])
+
+
+def test_capture_validation_marks_tiny_artifacts_suspect_without_failing(tmp_path, monkeypatch):
+    from rc_repro.services import capture
+    _write_workload("thin", """
+name: thin
+steps:
+  - shot: proof
+""")
+    man = capture.run(capture.load_workload("thin"), _FakeDriver(), tmp_path / "cap",
+                      context={"root_url": "http://localhost:3000"})
+    # the fake writes 9-byte files: present (so no failure) but implausibly small
+    row = next(v for v in man["validation"] if v["artifact"] == "01-proof.png")
+    assert row["status"] == "suspect"
+    lines = "\n".join(capture.render_section(man))
+    assert "SUSPECT" in lines and "review before attaching" in lines

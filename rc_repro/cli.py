@@ -3342,7 +3342,7 @@ def capture(
     """
     payload: dict = {}
     try:
-        payload = capturesvc.capture_bundle(name, workload, bundle, force=force)
+        payload = capturesvc.capture_bundle(name, workload, bundle, force=force, fast=fast)
     except errors.ReproError as exc:
         jsonout.fail(exc) if json_out else _fail(exc)
     if json_out:

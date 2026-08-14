@@ -48,7 +48,7 @@ from rc_repro.errors import (CaptureFailedError, ConflictError, ReproError,
 ACTIONS = ("goto", "click", "fill", "press", "wait_for", "shot")
 
 #: Keys a step may carry alongside its action.
-_MODIFIERS = ("value", "timeout_ms")
+_MODIFIERS = ("value", "timeout_ms", "settle_ms")
 
 #: Selectors whose typed value must never reach the manifest. A workload author who
 #: inlines a credential instead of using a `{{placeholder}}` should not be able to
@@ -56,6 +56,23 @@ _MODIFIERS = ("value", "timeout_ms")
 _PASSWORDISH = re.compile(r"pass|pwd|secret|token|otp", re.I)
 
 _DEFAULT_TIMEOUT_MS = 15000
+
+#: Pacing that makes the video reviewable by a human. slow_mo spaces the actions
+#: out; settle holds the frame after a mutating action long enough for its RESULT
+#: to be on screen before the next step. The 2026-08-13 storage-selection recording
+#: failed review for exactly this: the click happened, but the video never showed
+#: what it changed. `--fast` (CI, agents that only read the manifest) disables both.
+SLOW_MO_MS = 350
+SETTLE_MS = 400
+
+#: Actions that change what is on screen, and so leave a step frame behind.
+_MUTATING = ("goto", "click", "fill", "press")
+
+#: Validation floors. Below these an artifact is almost certainly a blank frame or
+#: a zero-length recording; the bundle is marked suspect rather than presented as
+#: proof. Floors, not exact sizes: a legitimate artifact varies with page content.
+_MIN_SHOT_BYTES = 4096
+_MIN_VIDEO_BYTES = 16384
 
 #: Viewport pinned so two runs of the same workload produce comparable frames, and
 #: so a screenshot filed against a ticket is not sized by whoever ran it.
@@ -68,6 +85,7 @@ class Step:
     target: str
     value: str = ""
     timeout_ms: int = 0
+    settle_ms: int = 0
 
 
 @dataclass(frozen=True)
@@ -111,7 +129,8 @@ def _parse(text: str, source: str) -> Workload:
         if action == "fill" and value is None:
             raise ValidationError(f"workload {source} step {i}: fill needs a value")
         steps.append(Step(action=action, target=target, value=str(value or ""),
-                          timeout_ms=int(item.get("timeout_ms") or 0)))
+                          timeout_ms=int(item.get("timeout_ms") or 0),
+                          settle_ms=int(item.get("settle_ms") or 0)))
 
     return Workload(name=str(raw.get("name") or "").strip() or "unnamed",
                     description=str(raw.get("description") or "").strip(),
@@ -198,7 +217,8 @@ def _apply(step: Step, driver, root: str, context: dict, dest: Path, shots: list
         shots.append(name)
 
 
-def run(workload: Workload, driver, dest: str | Path, context: dict | None = None) -> dict:
+def run(workload: Workload, driver, dest: str | Path, context: dict | None = None,
+        pacing: bool = True) -> dict:
     """Execute a workload, write its artifacts and manifest into `dest`.
 
     Raises `CaptureFailedError` if any step could not run. The manifest is written
@@ -213,8 +233,23 @@ def run(workload: Workload, driver, dest: str | Path, context: dict | None = Non
 
     steps_out: list[dict] = []
     shots: list[str] = []
+    step_shots: list[str] = []
+    failure_shot: str | None = None
     failed: dict | None = None
     secrets = secret_values(context)
+    steps_dir = dest / "steps"
+    banner = getattr(driver, "banner", None)
+    settle = getattr(driver, "settle", None)
+
+    def _say(text: str) -> None:
+        # The banner narrates the video; it must never be the reason a step fails.
+        if banner is None:
+            return
+        try:
+            banner(text)
+        except Exception:  # noqa: BLE001
+            pass
+
     try:
         for i, step in enumerate(workload.steps):
             rec = {"index": i, "action": step.action, "target": step.target, "status": "ok"}
@@ -224,16 +259,46 @@ def run(workload: Workload, driver, dest: str | Path, context: dict | None = Non
                 # redacted whatever the selector is named, so a field this module
                 # does not recognise as credential-bearing cannot leak one.
                 rec["value"] = "REDACTED" if any(s in value for s in secrets) else value
+            # Curated `shot` frames stay clean; every acting step is announced so
+            # the video says what it is doing while it does it.
+            _say("" if step.action == "shot" else
+                 f"step {i}: {step.action} {step.target}")
             try:
                 _apply(step, driver, root, context, dest, shots)
+                if step.action in _MUTATING:
+                    # Hold the result on screen, then keep its frame. The pair is
+                    # what makes an omitted or invisible action detectable at
+                    # review instead of at escalation.
+                    if settle is not None and pacing:
+                        try:
+                            settle(step.settle_ms or SETTLE_MS)
+                        except Exception:  # noqa: BLE001
+                            pass
+                    steps_dir.mkdir(parents=True, exist_ok=True)
+                    frame = f"step-{i:02d}-{step.action}.png"
+                    try:
+                        driver.screenshot(steps_dir / frame)
+                        step_shots.append(f"steps/{frame}")
+                    except Exception:  # noqa: BLE001 - a lost frame is reported by
+                        pass           # validation, not a reason to stop the run
             except Exception as exc:  # noqa: BLE001 - any driver failure ends the run
                 rec["status"] = "failed"
                 rec["error"] = str(exc)
                 failed = rec
+                # The page as it looked at the moment of failure is the single
+                # most useful artifact a drifted workload can leave behind.
+                try:
+                    steps_dir.mkdir(parents=True, exist_ok=True)
+                    frame = f"failed-step-{i:02d}.png"
+                    driver.screenshot(steps_dir / frame)
+                    failure_shot = f"steps/{frame}"
+                except Exception:  # noqa: BLE001
+                    pass
                 break
             finally:
                 steps_out.append(rec)
     finally:
+        _say("")
         # Always close: Playwright only finalises the video on context close, so a
         # crash that skipped this would throw away the recording of the failure.
         artifacts = _finish(driver)
@@ -244,11 +309,19 @@ def run(workload: Workload, driver, dest: str | Path, context: dict | None = Non
         "status": "failed" if failed else "ok",
         "steps": steps_out,
         "shots": shots,
+        "step_shots": step_shots,
+        "failure_shot": failure_shot,
         "video": artifacts.get("video"),
         "trace": artifacts.get("trace"),
         "failed_step": failed,
         "viewport": dict(VIEWPORT),
+        "pacing": {"slow_mo_ms": SLOW_MO_MS if pacing else 0,
+                   "settle_ms": SETTLE_MS if pacing else 0},
     }
+    manifest["validation"] = validate_artifacts(dest, manifest)
+    missing = [v for v in manifest["validation"] if v["status"] == "fail"]
+    if missing and not failed:
+        manifest["status"] = "failed"
     (dest / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True),
                                         encoding="utf-8")
     if failed:
@@ -258,7 +331,50 @@ def run(workload: Workload, driver, dest: str | Path, context: dict | None = Non
             f"If the workload was written for another Rocket.Chat version, its "
             f"selectors may have moved.",
             details={"manifest": str(dest / "manifest.json")})
+    if missing:
+        raise CaptureFailedError(
+            "capture ran but its artifacts do not hold up: "
+            + "; ".join(v["detail"] for v in missing)
+            + ". Do not attach this bundle as proof.",
+            details={"manifest": str(dest / "manifest.json")})
     return manifest
+
+
+def validate_artifacts(dest: Path, manifest: dict) -> list[dict]:
+    """Check that every artifact the manifest claims actually holds up on disk.
+
+    `fail` means the artifact is missing: the bundle lies about what it contains.
+    `suspect` means it exists but is implausibly small - a blank frame or an
+    empty recording that still LOOKS like evidence, which is the failure mode
+    that burned the 2026-08-13 review. Suspect artifacts never raise; they are
+    named in the manifest and the README so a reviewer checks them first.
+    """
+    rows: list[dict] = []
+
+    def check(rel: str, kind: str, floor: int) -> None:
+        p = dest / rel
+        if not p.is_file():
+            rows.append({"check": kind, "artifact": rel, "status": "fail",
+                         "detail": f"{rel} is listed in the manifest but missing"})
+        elif p.stat().st_size < floor:
+            rows.append({"check": kind, "artifact": rel, "status": "suspect",
+                         "detail": f"{rel} is only {p.stat().st_size} bytes - "
+                                   f"likely blank; review before attaching"})
+        else:
+            rows.append({"check": kind, "artifact": rel, "status": "ok",
+                         "detail": rel})
+
+    for shot in manifest.get("shots") or []:
+        check(shot, "shot", _MIN_SHOT_BYTES)
+    for frame in manifest.get("step_shots") or []:
+        check(frame, "step-frame", _MIN_SHOT_BYTES)
+    if manifest.get("failure_shot"):
+        check(manifest["failure_shot"], "failure-frame", _MIN_SHOT_BYTES)
+    if manifest.get("video"):
+        check(manifest["video"], "video", _MIN_VIDEO_BYTES)
+    if manifest.get("trace"):
+        check(manifest["trace"], "trace", 1)
+    return rows
 
 
 #: Files whose presence means a directory already holds a bundle. Only these
@@ -288,7 +404,8 @@ def _refuse_to_replace(dest: Path, force: bool) -> None:
 
 
 def capture_bundle(name: str, workload: str, dest: str | Path = "",
-                   driver_factory=None, force: bool = False) -> dict:
+                   driver_factory=None, force: bool = False,
+                   fast: bool = False) -> dict:
     """Run a workload against a repro and write the complete attachable bundle.
 
     Here rather than in the CLI because both front-ends need the same sequence, and
@@ -309,11 +426,15 @@ def capture_bundle(name: str, workload: str, dest: str | Path = "",
                "admin_user": info["login"]["user"],
                "admin_pass": info["login"]["password"]}
 
-    factory = driver_factory or browser_driver
+    if driver_factory is not None:
+        factory = driver_factory
+    else:
+        def factory(root, d, s):
+            return browser_driver(root, d, s, pacing=not fast)
     driver = factory(info["root_url"], out / "capture", secret_values(context))
     failure: CaptureFailedError | None = None
     try:
-        run(wl, driver, out / "capture", context=context)
+        run(wl, driver, out / "capture", context=context, pacing=not fast)
     except CaptureFailedError as exc:
         failure = exc
 
@@ -358,6 +479,13 @@ def render_section(manifest: dict) -> list[str]:
     media = []
     if manifest.get("video"):
         media.append(f"- Video: `capture/{manifest['video']}`")
+    if manifest.get("step_shots"):
+        media.append(f"- Step-by-step frames: `capture/steps/` "
+                     f"({len(manifest['step_shots'])} frames, one per action - "
+                     f"use these to locate the exact moment something changed)")
+    if manifest.get("failure_shot"):
+        media.append(f"- The page at the moment of failure: "
+                     f"`capture/{manifest['failure_shot']}`")
     if manifest.get("trace"):
         media.append(f"- Trace: `capture/{manifest['trace']}` (open with "
                      f"`npx playwright show-trace capture/{manifest['trace']}`)")
@@ -366,6 +494,19 @@ def render_section(manifest: dict) -> list[str]:
         # workload that did not ask for one.
         media.append("- No video or trace was produced for this run.")
     lines += ["## Recording", ""] + media + [""]
+
+    suspect = [v for v in manifest.get("validation") or [] if v["status"] == "suspect"]
+    missing = [v for v in manifest.get("validation") or [] if v["status"] == "fail"]
+    if missing or suspect:
+        lines += ["## Artifact validation", ""]
+        for v in missing:
+            lines.append(f"- **MISSING:** {v['detail']}")
+        for v in suspect:
+            lines.append(f"- **SUSPECT:** {v['detail']}")
+        lines.append("")
+    elif manifest.get("validation"):
+        lines += [f"*Artifact validation: all "
+                  f"{len(manifest['validation'])} checks passed.*", ""]
     return lines
 
 
@@ -432,7 +573,8 @@ def redact_trace(path: Path, secrets: tuple[str, ...]) -> bool:
     return True
 
 
-def browser_driver(root_url: str, dest: str | Path, secrets: tuple[str, ...] = ()):
+def browser_driver(root_url: str, dest: str | Path, secrets: tuple[str, ...] = (),
+                   pacing: bool = True):
     """A Playwright-backed driver recording video and a trace into `dest`."""
     try:
         sync_playwright = _import_playwright()
@@ -440,7 +582,8 @@ def browser_driver(root_url: str, dest: str | Path, secrets: tuple[str, ...] = (
         raise ReproError(
             "browser capture needs the optional extra: "
             "pip install 'rc-repro[capture]' && playwright install chromium") from exc
-    return _PlaywrightDriver(sync_playwright, root_url, Path(dest), secrets)
+    return _PlaywrightDriver(sync_playwright, root_url, Path(dest), secrets,
+                             pacing=pacing)
 
 
 class _PlaywrightDriver:
@@ -452,12 +595,16 @@ class _PlaywrightDriver:
     """
 
     def __init__(self, sync_playwright, root_url: str, dest: Path,
-                 secrets: tuple[str, ...] = ()):
+                 secrets: tuple[str, ...] = (), pacing: bool = True):
         dest.mkdir(parents=True, exist_ok=True)
         self.dest = dest
         self.secrets = tuple(s for s in secrets if s)
         self._pw = sync_playwright().start()
-        self._browser = self._pw.chromium.launch()
+        # slow_mo spaces the actions so a human can follow the video. Without it a
+        # scripted run clicks faster than the page can visibly respond, which is
+        # how a recording ends up not demonstrating the very action it performed.
+        self._browser = self._pw.chromium.launch(
+            slow_mo=SLOW_MO_MS if pacing else 0)
         self._context = self._browser.new_context(
             viewport=dict(VIEWPORT), record_video_dir=str(dest / "_video"),
             record_video_size=dict(VIEWPORT), reduced_motion="reduce",
@@ -482,6 +629,34 @@ class _PlaywrightDriver:
 
     def screenshot(self, path):
         self._page.screenshot(path=str(path), full_page=True)
+
+    def settle(self, ms):
+        self._page.wait_for_timeout(ms)
+
+    def banner(self, text):
+        """A small high-contrast step label, so the video narrates itself.
+
+        Injected into the page rather than composited afterwards because there is
+        no post-processing step to hide it in. Bottom-right, out of the way of
+        Rocket.Chat's own chrome; empty text removes it (curated `shot` frames
+        stay clean).
+        """
+        self._page.evaluate(
+            """(text) => {
+                let el = document.getElementById('__rc_repro_step__');
+                if (!text) { if (el) el.remove(); return; }
+                if (!el) {
+                    el = document.createElement('div');
+                    el.id = '__rc_repro_step__';
+                    el.style.cssText = 'position:fixed;bottom:12px;right:12px;'
+                        + 'z-index:2147483647;background:#111;color:#fff;'
+                        + 'font:600 14px/1.4 system-ui,sans-serif;'
+                        + 'padding:6px 10px;border-radius:6px;opacity:.92;'
+                        + 'pointer-events:none;max-width:60vw;';
+                    document.body.appendChild(el);
+                }
+                el.textContent = text;
+            }""", text)
 
     def finish(self) -> dict:
         out: dict = {"video": None, "trace": None}
