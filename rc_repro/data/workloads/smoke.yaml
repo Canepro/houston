@@ -1,0 +1,18 @@
+name: smoke
+description: >-
+  Loads the workspace root, signs in as the repro's admin, and shoots the landing
+  page and the logged-in home. The baseline visual proof that a repro is serving
+  and usable; start from a copy of this when scripting a specific reproduction.
+steps:
+  - goto: "/"
+  - wait_for: "input[name=usernameOrEmail]"
+    timeout_ms: 60000
+  - shot: landing
+  - fill: "input[name=usernameOrEmail]"
+    value: "{{admin_user}}"
+  - fill: "input[name=password]"
+    value: "{{admin_pass}}"
+  - click: "button[type=submit]"
+  - wait_for: "[data-qa-id=home-header], .rcx-sidebar"
+    timeout_ms: 60000
+  - shot: signed-in

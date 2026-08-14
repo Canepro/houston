@@ -21,8 +21,8 @@ Python 3.11 and 3.12 (see `.github/workflows/ci.yml`).
 
 | Module | Responsibility |
 |--------|----------------|
-| `rc_repro/cli.py` | Typer commands: option parsing, terminal rendering, CLI-only `loadtest`/`capacity`/`benchmark` |
-| `rc_repro/services/` | the shared "brain" both front-ends run: `lifecycle` (create/ready/teardown/prune), `perf` (GUI loadtest/capacity/benchmark), `data` (scale prefill, config-import), `monitor` (attach/detach), `postready` (preset self-config actions), `diagnose` (opaque `up` failures), `events` (the progress `Event`/`Emit` contract) |
+| `rc_repro/cli.py` | Typer commands: option parsing, terminal rendering, CLI-only `loadtest`/`capacity`/`benchmark`/`capture`/`workloads` |
+| `rc_repro/services/` | the shared "brain" both front-ends run: `lifecycle` (create/ready/teardown/prune), `perf` (GUI loadtest/capacity/benchmark), `data` (scale prefill, config-import), `monitor` (attach/detach), `postready` (preset self-config actions), `diagnose` (opaque `up` failures), `events` (the progress `Event`/`Emit` contract), `evidence` (the attachable record + its Markdown render), `capture` (scripted browser reproduction: workload parsing, the injected driver seam, trace redaction) |
 | `rc_repro/web/` | the `serve` GUI: `app.py` (FastAPI routes, token + Host guard, SSE/WS) and `jobs.py` (background job registry). Imported lazily — the core CLI never depends on it |
 | `rc_repro/errors.py` | `ReproError` hierarchy with `http_status`; the failure contract between services and both front-ends |
 | `rc_repro/configimport.py` | parse a support-dump `*-settings.json` into an apply/skip plan, and apply it |
@@ -88,6 +88,43 @@ Useful `Preset` fields:
 rejected up front) and picks a port that doesn't clash with other presets. All
 published ports are bound to `127.0.0.1` automatically — don't hard-code a bind
 host in the service.
+
+## Adding a capture workload
+
+A capture workload scripts a browser through a reproduction. It is a Workload
+Scenario in `CONTEXT.md` terms: a named pattern of test activity applied to a
+running reproduction. Add a YAML file to `rc_repro/data/workloads/<name>.yaml` (or
+`~/.rc-repro/workloads/<name>.yaml` for a local one, which overrides a built-in of
+the same name):
+
+```yaml
+name: my-repro
+description: What this demonstrates.
+steps:
+  - goto: "/"
+  - wait_for: "input[name=usernameOrEmail]"
+    timeout_ms: 60000
+  - shot: landing              # a named checkpoint screenshot
+  - fill: "input[name=password]"
+    value: "{{admin_pass}}"    # substituted for the browser, recorded unresolved
+  - click: "button[type=submit]"
+```
+
+Actions are `goto` (a path joined to the repro's URL), `click`, `fill` and
+`wait_for` (each a raw Playwright selector), `press` (a key name) and `shot` (a
+screenshot label). The selector actions taking raw Playwright syntax is the escape
+hatch that keeps an unusual reproduction from waiting on this list to grow.
+`timeout_ms` overrides the 15s default on `click`, `fill` and `wait_for`, which is
+what a slow boot needs. Steps run in order and a step that cannot run
+aborts the capture with exit 9 — a workload is pointed at whatever version the
+repro is running, so a silent miss would produce a blank screenshot that still
+reads as evidence.
+
+Never inline a credential; use `{{admin_user}}` / `{{admin_pass}}`. The manifest
+records what was authored rather than what was resolved, and `capture.redact_trace`
+scrubs resolved secrets out of the Playwright trace, which records every action's
+arguments verbatim. Both matter because the bundle is meant to be attached to a
+support case.
 
 Anyone can also drop a preset in `~/.rc-repro/presets/<name>.yaml` locally — a
 user file overrides a built-in or dynamic preset of the same name. Static YAML

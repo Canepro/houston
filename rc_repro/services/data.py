@@ -42,8 +42,16 @@ def _scale_ok(rc: int, out: str, what: str, *, hint: str = "") -> dict:
 
 
 def run_scale(name: str, spec_str: str, emit: Emit = null_emit) -> dict:
-    """Bulk-insert users/messages per a `--scale` spec (users=N,messages=N@room)."""
+    """Bulk-insert users/messages per a `--scale` spec (users=N,messages=N@room).
+
+    Compose-only: scale talks to MongoDB through docker compose exec. Refuse on
+    Kubernetes before any Docker or mongosh command runs.
+    """
     target = lifecycle.resolve_name(name)
+    lifecycle.require_compose_topology(
+        target, "scale",
+        why="bulk Mongo prefill talks to MongoDB through docker compose exec; "
+            "the Kubernetes topology has no equivalent path yet")
     # Bulk prefill writes straight into Mongo; running it while a backup is dumping
     # would put half of it in the archive.
     with runner.repro_lock(target):
@@ -79,6 +87,10 @@ def _run_scale_locked(target: str, spec_str: str, emit: Emit = null_emit) -> dic
 def clear_scale(name: str, emit: Emit = null_emit) -> dict:
     """Remove everything a prior --scale added and restore affected rooms."""
     target = lifecycle.resolve_name(name)
+    lifecycle.require_compose_topology(
+        target, "clear-scale",
+        why="clear-scale removes bulk Mongo rows written through docker compose "
+            "exec; the Kubernetes topology has no equivalent path yet")
     # Locked like run_scale, which it undoes. Without it the two could interleave
     # on one workspace -- a clear deleting the users a concurrent prefill is still
     # inserting, leaving a count that matches neither.

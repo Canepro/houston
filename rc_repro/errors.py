@@ -99,6 +99,20 @@ class CreateFailedError(ReproError):
     exit_code = 7
 
 
+class CaptureFailedError(ReproError):
+    """A scripted browser capture could not complete a step.
+
+    Distinct from NotReadyError (exit 5, "poll again") because retrying is
+    pointless: the usual cause is a scenario whose selectors were written against a
+    different Rocket.Chat version, and this tool exists to run version-matched
+    repros. It earns its own code so that outcome is unmistakable — the failure mode
+    it prevents is a half-run capture whose blank screenshots still look like proof.
+    """
+    http_status = 422
+    code = "CAPTURE_FAILED"
+    exit_code = 9      # fix the scenario; the deployment itself may be fine
+
+
 class AuthorityGateError(ReproError):
     """An action needs a human decision rc-repro is not authorised to make.
 
@@ -157,4 +171,5 @@ EXIT_CODES: dict[int, str] = {
     6: "gate",
     7: "create_failed",
     8: "conflict",
+    9: "capture_failed",
 }

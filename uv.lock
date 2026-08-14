@@ -692,6 +692,9 @@ dependencies = [
 browser = [
     { name = "playwright" },
 ]
+capture = [
+    { name = "playwright" },
+]
 dev = [
     { name = "httpx" },
     { name = "httpx2" },
@@ -712,6 +715,7 @@ requires-dist = [
     { name = "httpx2", marker = "extra == 'dev'", specifier = ">=2.9" },
     { name = "packaging", specifier = ">=23" },
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.44" },
+    { name = "playwright", marker = "extra == 'capture'", specifier = ">=1.40" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7" },
     { name = "python-multipart", marker = "extra == 'gui'", specifier = ">=0.0.9" },
     { name = "pyyaml", specifier = ">=6.0" },
@@ -721,7 +725,7 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'gui'", specifier = ">=0.29" },
     { name = "websockets", marker = "extra == 'gui'", specifier = ">=12" },
 ]
-provides-extras = ["dev", "gui", "browser"]
+provides-extras = ["dev", "gui", "browser", "capture"]
 
 [[package]]
 name = "requests"

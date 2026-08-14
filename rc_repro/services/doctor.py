@@ -81,7 +81,7 @@ def run_checks() -> dict:
     """
     rows: list[dict] = []
 
-    def line(status: str, msg: str, elsewhere: str = "") -> None:
+    def line(status: str, msg: str, elsewhere: str = "", check: str = "") -> None:
         """`elsewhere` names a place the GUI shows this fact PERMANENTLY.
 
         The web report drops those rows (see the /api/doctor endpoint). A terminal
@@ -94,6 +94,8 @@ def run_checks() -> dict:
         row = {"status": status, "message": msg}
         if elsewhere:
             row["elsewhere"] = elsewhere
+        if check:
+            row["check"] = check
         rows.append(row)
 
     # Docker daemon (everything else that needs Docker degrades gracefully).
@@ -146,6 +148,44 @@ def run_checks() -> dict:
             line("warn", f"Disk: only {free_gb:.0f} GB free — images are ~1.5 GB each")
     except OSError:
         line("warn", "couldn't check disk space")
+
+    # Kubernetes toolchain (capture/integration branch). The microservices preset
+    # is opt-in, so a missing toolchain is a warning for the Docker user and only
+    # becomes an error when `up --preset microservices` actually asks for it.
+    from rc_repro.services import k8s as _k8s
+    k8s_tools = {t: shutil.which(t) for t in ("kind", "kubectl", "helm")}
+    missing_k8s = [t for t, path in k8s_tools.items() if not path]
+    if missing_k8s:
+        line("warn", "Kubernetes presets need " + ", ".join(missing_k8s) +
+                     " on PATH (not needed for Docker presets)", check="k8s-tools")
+    else:
+        line("ok", "kind, kubectl and helm present (Kubernetes presets available)",
+             check="k8s-tools")
+        k8s_state_ok = True
+        try:
+            state = _k8s.prepare_client_state()
+            line("ok", "rc-repro Kubernetes and Helm client state is writable at "
+                       f"{state.kubeconfig.parent.parent}", check="k8s-client-state")
+        except OSError as exc:
+            k8s_state_ok = False
+            line("fail", "rc-repro Kubernetes and Helm client state is not writable: "
+                         f"{exc}", check="k8s-client-state")
+        mem_gib, cpus = _k8s.engine_capacity()
+        if mem_gib or cpus:
+            floor_ok = mem_gib >= _k8s.FLOOR_MEMORY_GIB and cpus >= _k8s.FLOOR_CPUS
+            msg = (f"engine has {mem_gib:.1f} GiB and {cpus} CPUs; the microservices "
+                   f"preset needs {_k8s.FLOOR_MEMORY_GIB:g} GiB and {_k8s.FLOOR_CPUS}")
+            # CPU is the binding constraint during start-up, so it is named too: a
+            # memory-only report would look fine on a host that then crawls.
+            line("ok" if floor_ok else "warn", msg, check="k8s-floor")
+        if k8s_state_ok and _k8s.cluster_exists():
+            line("ok", f"rc-repro cluster {_k8s.CLUSTER_NAME} exists (reused, so `up` is faster)")
+        stale = lc.stale_forwards() if k8s_state_ok else []
+        if stale:
+            names = ", ".join(r["name"] for r in stale)
+            line("warn", f"port-forward down for: {names} "
+                         "(re-established on the next ready/info; not an error)",
+                 check="k8s-forwards")
 
     # Memory headroom, in workspaces rather than megabytes -- "3.2 GB available"
     # does not tell you whether you can start another one, and that is the only

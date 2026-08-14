@@ -59,6 +59,54 @@ amd64-only and runs emulated, so those boots are slower. Everything else is nati
 
 ## Install
 
+**Guided Ubuntu 24.04 amd64 setup** — on a clean host, these two auditable
+commands install Docker Engine and Compose, pipx, kind, kubectl, Helm, and the
+core rc-repro CLI from official signed or checksum-verified sources:
+
+```bash
+curl -fsSLO https://github.com/klovekesh37/rc-repro/releases/latest/download/rc-repro-install
+bash rc-repro-install
+```
+
+The installer inventories the host before changing packages, refuses conflicting
+Docker packages instead of removing them, runs `rc-repro doctor`, and creates no
+cluster or repro. If Linux needs a new login for Docker-group or PATH membership,
+the installer says so explicitly. In that new session, complete the interactive
+human setup:
+
+```bash
+rc-repro onboard
+```
+
+The guided bootstrap is deliberately limited to native Ubuntu 24.04 amd64. It
+stops without package changes on macOS, native Windows shells, WSL, other Linux
+releases, and other architectures. On macOS, prepare Docker Desktop and the
+Kubernetes tools separately. On Windows, prefer a Docker Desktop-backed WSL2
+environment and manage its Linux tools separately; the Ubuntu installer refuses
+WSL so it cannot install a second Docker Engine inside the distribution. These
+platforms do not yet have the same newcomer acceptance proof.
+
+**Core CLI only — with [pipx](https://pipx.pypa.io)** (isolated, adds `rc-repro`
+to your PATH). Use this when the required container and Kubernetes tools are
+already managed:
+
+```bash
+pipx install git+https://github.com/klovekesh37/rc-repro
+```
+
+**Alternative — a plain virtualenv:**
+
+```bash
+git clone https://github.com/klovekesh37/rc-repro.git && cd rc-repro
+python3 -m venv .venv && source .venv/bin/activate
+python -m pip install --upgrade pip     # editable installs need pip >= 21.3
+pip install -e .
+```
+
+For a core-only or virtualenv installation, confirm your separately managed
+prerequisites are ready. `doctor` checks Docker, Compose, disk, connectivity and
+ports; fix any ✗ before continuing:
+
 ```bash
 pipx install 'rc-repro[gui] @ git+https://github.com/klovekesh37/rc-repro'
 rc-repro doctor
@@ -280,6 +328,25 @@ the GUI's **Scenarios** page shows the same thing with each one's setup steps.
 ```bash
 rc-repro up --version 8.5.1 --preset ldap
 ```
+
+For a reusable scenario with a different deployment, use the independent
+selectors. `--scenario` may be repeated, but the currently proven matrix admits
+only one scenario at a time; unsupported pairs fail before Docker, Kind, Helm, or
+workspace creation:
+
+```bash
+rc-repro up --version 8.6.1 \
+  --deployment microservices \
+  --scenario ldap --set users=5 \
+  --seed --seed-profile small --wait
+```
+
+`--deployment` accepts `default`, `multi-instance`, or `microservices` (the
+`--topology` spelling is an alias). Existing `--preset` commands remain valid:
+`--preset ldap` means the default Compose deployment plus LDAP, while
+`--preset microservices` means Kubernetes with no scenario. A scenario preset can
+be paired with an explicit deployment (`--preset ldap --deployment microservices`)
+as the compatibility form of the command above.
 
 | Preset | Brings up | Reproduces |
 |---|---|---|
@@ -621,6 +688,171 @@ origin, records created container image IDs when Docker is available, and is
 safe to redirect into an evidence folder. Review the output before sharing it
 outside the support workflow.
 
+`up`, `ready`, `down`, `list`, `info`, `inspect`, `evidence`, `doctor` and `capabilities`
+accept `--json` for scripts and agents (see [Agent & JSON interface](#agent--json-interface)).
+
+## Capturing a reproduction
+
+`evidence` proves what was deployed. It does not prove *do X, then Y goes wrong*,
+which is the shape of nearly every escalation. `capture` drives a scripted
+reproduction through a real browser and writes the whole attachable bundle in one
+command:
+
+```bash
+pip install 'rc-repro[capture]' && playwright install chromium
+
+rc-repro workloads                                      # list workloads
+rc-repro capture --name my-repro --workload smoke       # run one
+```
+
+The bundle contains a screenshot per named checkpoint, a video of the run, a
+Playwright trace (`npx playwright show-trace capture/trace.zip`), the evidence
+record, and a `README.md` linking them together. That README is the file you
+attach; the JSON stays authoritative for scripts.
+
+Write a workload for your own reproduction by copying the built-in `smoke` into
+`~/.rc-repro/workloads/<name>.yaml`. A user file overrides a built-in of the same
+name, which is also how you repair a shipped workload after a UI change:
+
+```yaml
+name: my-repro
+description: What this demonstrates.
+steps:
+  - goto: "/"
+  - wait_for: "input[name=usernameOrEmail]"
+    timeout_ms: 60000
+  - shot: landing
+  - fill: "input[name=usernameOrEmail]"
+    value: "{{admin_user}}"
+  - fill: "input[name=password]"
+    value: "{{admin_pass}}"
+  - click: "button[type=submit]"
+  - shot: signed-in
+```
+
+Two things worth knowing:
+
+**A capture that cannot finish fails (exit 9).** rc-repro runs version-matched
+repros and Rocket.Chat's selectors move between versions, so a workload authored
+against one version may find nothing on another. Rather than shooting a blank page
+that still looks like evidence, the run stops and the manifest names the step that
+could not run.
+
+**A rerun will not quietly replace a bundle.** If the target directory already
+holds one, `capture` stops with exit 8 before starting the browser. A bundle is
+evidence and its README usually carries observed behaviour written by hand, so
+replacing it takes an explicit `--force`.
+
+**Credentials go in as `{{placeholders}}`.** They are substituted for the browser
+but recorded unresolved, so the manifest describes what happened without carrying a
+secret. A literal typed into a password field is redacted, and the Playwright trace
+is scrubbed before it is written, because Playwright records every action's
+arguments verbatim.
+
+## Kubernetes microservices preset
+
+Docker Compose stays rc-repro's default. The `microservices` preset is an opt-in
+Kubernetes topology that runs Rocket.Chat's microservices from the official Helm
+chart on a local `kind` cluster, with the same create, readiness, inspect, evidence
+and teardown lifecycle as every other repro:
+
+```bash
+rc-repro onboard                            # interactive, once per machine
+rc-repro up --preset microservices --version 8.6.1 --name first-repro --wait
+rc-repro info --name first-repro            # URL, pods, port-forward state
+rc-repro inspect --name first-repro         # cluster, nodes, pods, and services
+rc-repro evidence --name first-repro --json
+# Open the URL reported by `info`, then reproduce the behaviour.
+rc-repro down --name first-repro --volumes --yes
+rc-repro prune --yes                        # optional: reclaim the empty shared cluster
+```
+
+`info` is the quick human handoff: it shows the URL, runtime state, pods, and
+port-forward. `inspect` is the read-only deep view: it adds the shared Kind
+cluster, owned context and namespace, node health, and namespace Services. Its
+JSON form uses rc-repro's isolated kubeconfig and intentionally excludes admin
+credentials, registration tokens, and Kubernetes Secret contents, so it can be
+pasted into a case without a hand-written `jq` projection.
+
+The first VPS acceptance run and its remaining seed defects are recorded in
+[`ACCEPTANCE-K8S-SEED-2026-08-05.md`](ACCEPTANCE-K8S-SEED-2026-08-05.md).
+
+Needs `kind`, `kubectl` and `helm` on `PATH`. rc-repro owns one local cluster
+(`rc-repro-local`) with a namespace per repro, so several microservices repros
+coexist. Its kubeconfig and all Helm client state live under
+`RC_REPRO_HOME/clients`; ambient `~/.kube` and Helm XDG directories are never read
+or written. Repository setup, chart lookup and chart installation fail with the
+structured `CREATE_FAILED` error instead of continuing with an unpinned chart.
+MongoDB is always external (a single-node replica set from the official
+image, since the chart's bundled MongoDB is amd64-only and its default tag predates
+what recent Rocket.Chat requires). Reachability is a `kubectl port-forward`, so
+`root_url` behaves exactly as on Docker.
+
+Per-repro `down` deliberately keeps the shared cluster warm for later runs. `prune`
+deletes it only after proving that no rc-repro-owned namespace remains; an
+unreachable cluster or failed ownership query is retained rather than guessed safe.
+
+Measured floor: **6 GiB memory and 4 CPUs** (8 recommended); CPU is the binding
+constraint during start-up. `rc-repro doctor` reports whether the toolchain and the
+floor are met. Rocket.Chat 8.2+ requires MongoDB 8.0, which cannot start on an engine
+kernel 6.19 or newer ([SERVER-121912](https://jira.mongodb.org/browse/SERVER-121912));
+on such a host use a 7.x line, and rc-repro refuses the impossible combination up
+front rather than timing out. Microservices are an enterprise feature: an unlicensed
+repro comes up but may not function as licensed, so rc-repro warns and records the
+licence state in evidence (pass `--reg-token`, `RC_REPRO_REG_TOKEN`, or owner-only
+`config.yaml` `reg_token` to supply a Cloud registration token; the Kubernetes path
+delivers it through a Secret, never through values.yaml).
+
+### Remote access over SSH
+
+Repros bind to **loopback only** by default. That is intentional: admin credentials
+are fixed and weak. A local session opens the URL from `info` directly. From an SSH
+session, open a tunnel on your machine instead of trying to browse the remote host's
+`localhost`:
+
+```bash
+# On the remote host (after create + ready)
+rc-repro up --preset microservices --version 8.6.1 --name first-repro --wait --json
+# The result's data.access field includes tunnel_command and browser_url when SSH_* is set.
+
+# On your laptop (example; use the exact tunnel_command from the result)
+ssh -N -L 3000:127.0.0.1:3000 you@remote-host
+# Then open http://127.0.0.1:3000 in a local browser.
+rc-repro down --name first-repro --volumes --yes
+```
+
+rc-repro never changes the bind address, opens a firewall, or creates public ingress
+for this handoff. Override the suggested host/user with `RC_REPRO_SSH_HOST` and
+`RC_REPRO_SSH_USER` if the defaults are wrong. If the suggested port is already in
+use on your laptop, set `RC_REPRO_SSH_LOCAL_PORT` on the remote command before
+running `up` or `info` again; the returned command and browser URL will use that
+client-side port while preserving the repro's remote port.
+
+## Agent & JSON interface
+
+rc-repro exposes a stable machine-readable surface so scripts and agents drive it
+without scraping human output or importing internals.
+
+- **Discovery.** `rc-repro capabilities` returns, as JSON, the contract version, every
+  command with its schema and flags, the progress phases, the error and exit codes,
+  the presets and the topologies. It answers offline, before you know the environment
+  works. `rc-repro doctor --json` is the preflight call and exits `3` on any failure.
+- **One envelope.** Every `--json` reply is `{schema, contract, ok, data, warnings,
+  error}`, so success, data and errors are always in the same place. Long-running
+  verbs (`up`, `ready`, `down`) stream NDJSON progress events, then one final envelope.
+- **Exit codes**, so a caller can tell states apart without parsing prose: `0` ok,
+  `2` usage, `3` preflight, `4` not found, `5` not ready (may poll), `6` a human
+  authority gate (stop and ask), `7` create failed (known dead, stop), `8` conflict.
+  Each error also carries a stable `code`.
+- **Authority.** One-time interactive `onboard` persists permission to create and
+  later delete the owned local cluster and, only when relevant, to resize the
+  container engine. An un-onboarded agent hitting the Kubernetes path gets exit `6`
+  with the exact command to ask a human to run, rather than inventing a baseline.
+  Automation may use `--accept-defaults`, but must supply every authority it needs
+  explicitly with repeatable `--grant` flags.
+- **The skill.** `rc-repro skill install` drops the versioned agent skill into an
+  agent host, so the skill always matches the rc-repro you are running.
+
 ## How version → MongoDB resolution works
 
 `rc-repro up --version X` (and `rc-repro versions X`) queries
@@ -653,6 +885,18 @@ The image follows the resolved Mongo version: **≥ 8** →
 Config can also come from the environment, which wins over `config.yaml`:
 `RC_REPRO_HOME`, `RC_REPRO_REG_TOKEN`, `RC_REPRO_RC_IMAGE`, `RC_REPRO_BIND_HOST`
 (the `--bind` flag wins over both).
+
+Selector defaults are additive and optional. They are used only when `up` receives
+no `--preset`, `--deployment`, or `--scenario`:
+
+```yaml
+default_deployment: microservices
+default_scenarios:
+  - ldap
+```
+
+Existing configuration files need no migration; omit these keys to retain the
+Docker default.
 
 ## Development
 

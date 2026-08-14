@@ -22,6 +22,9 @@ gui = ["fastapi>=0.110", "uvicorn>=0.29", "python-multipart>=0.0.9", "websockets
 # and tests/test_browser.py importorskips itself when it is absent -- so a
 # machine without it still reports a green suite.
 browser = ["playwright>=1.44"]
+# Browser capture is opt-in: most people want a Rocket.Chat container, not a
+# ~500MB browser download. `rc-repro capture` says so when it is missing.
+capture = ["playwright>=1.40"]
 
 [project.scripts]
 rc-repro = "rc_repro.cli:app"
@@ -30,7 +33,7 @@ rc-repro = "rc_repro.cli:app"
 packages = ["rc_repro", "rc_repro.presets", "rc_repro.perf", "rc_repro.services", "rc_repro.web"]
 
 [tool.setuptools.package-data]
-rc_repro = ["data/*.yaml", "data/presets/*.yaml", "data/monitoring/*.json", "data/loadtest/*.js", "data/webui/*"]
+rc_repro = ["data/*.yaml", "data/presets/*.yaml", "data/workloads/*.yaml", "data/monitoring/*.json", "data/loadtest/*.js", "data/webui/*", "data/skill/*.md"]
 
 [tool.ruff]
 line-length = 110
