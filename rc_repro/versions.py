@@ -12,6 +12,7 @@ there is one rule (the MongoDB tag) to maintain, not four.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib import resources
@@ -21,7 +22,38 @@ import yaml
 from packaging.specifiers import SpecifierSet
 from packaging.version import InvalidVersion, Version
 
+from rc_repro.errors import ValidationError
+
 RELEASES_URL = "https://releases.rocket.chat/{version}/info"
+
+#: The OCI image-tag grammar, and the reason it is enforced rather than assumed.
+#: `k8s.mongo_manifest` builds its StatefulSet by f-string, so a `--mongo` value
+#: carrying a newline was interpolated verbatim and the result was VALID YAML that
+#: `kubectl apply` accepts -- a tag of
+#: "8.0\n        securityContext:\n          privileged: true\n        hostPID: true"
+#: rendered a privileged container with host PID. `mongo` is a plain `CreateReq`
+#: field and is NOT in `PRIVILEGED_CREATE_FIELDS`, so `POST /api/repros` copied it
+#: straight from the body and any member+ GUI account could reach it -- bypassing
+#: the very control that exists to stop a member choosing what code runs.
+#:
+#: Refused at the boundary rather than escaped at the template, because there are
+#: two templates and one entry point: every caller that can supply a tag comes
+#: through `apply_mongo_override`, and a tag that is not an OCI tag cannot name a
+#: real image anyway, so nothing legitimate is lost.
+#: `\Z` and not `$`, which is the whole point of the anchor here: Python's `$` also
+#: matches just before a TRAILING NEWLINE, so `"8.0\n"` satisfied `$` and the guard
+#: let through the one character it exists to refuse. Caught by the test, not by
+#: reading it.
+MONGO_TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}\Z")
+
+
+def require_valid_mongo_tag(tag: str) -> None:
+    """Refuse a `--mongo` value that is not an OCI image tag. See MONGO_TAG_RE."""
+    if not MONGO_TAG_RE.match(tag or ""):
+        raise ValidationError(
+            f"--mongo {tag!r} is not a MongoDB image tag (want something like "
+            "'8.0' or '7.0.14': letters, digits, '.', '_' and '-', starting with "
+            "a letter, digit or '_')")
 
 
 @dataclass
@@ -46,7 +78,13 @@ def _load_map() -> dict:
 
 
 def apply_mongo_override(resolved: "Resolved", mongo_tag: str) -> None:
-    """Apply a manual `--mongo` override, re-deriving flavor + shell from the tag."""
+    """Apply a manual `--mongo` override, re-deriving flavor + shell from the tag.
+
+    Validated here because this is the one place a caller-supplied tag enters:
+    both runtimes read `resolved.mongo_tag` afterwards, and the Kubernetes one
+    templates it into a manifest. See MONGO_TAG_RE.
+    """
+    require_valid_mongo_tag(mongo_tag)
     resolved.mongo_tag = mongo_tag
     resolved.mongo_flavor = _flavor(mongo_tag)
     resolved.mongo_shell = _shell(mongo_tag)

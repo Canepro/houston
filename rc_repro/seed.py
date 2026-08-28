@@ -423,7 +423,7 @@ def plan_from(profile: str, users=None, channels=None, messages=None) -> Plan:
 
 
 def seed(root_url, admin: rcapi.Auth, plan: Plan, log=lambda m: None, workspace: str = "",
-         tokens_out: dict | None = None) -> dict:
+         tokens_out: dict | None = None, admin_password: str = "") -> dict:
     """Seed the repro. `log(msg)` is called with progress lines.
 
     `tokens_out`, when given, is filled with the per-user sessions this created, for
@@ -432,6 +432,11 @@ def seed(root_url, admin: rcapi.Auth, plan: Plan, log=lambda m: None, workspace:
     session token has no business in either.
     """
     base = root_url.rstrip("/")
+    # The workspace's own admin password, falling back to the shared loopback one --
+    # the same fallback `runner.Metadata.admin_pass` applies from the other side.
+    # `set_setting` re-authenticates for a 2FA-guarded change, so a wrong password
+    # here fails the settings step of a seed that had otherwise worked.
+    admin_password = admin_password or config.ADMIN_PASSWORD
     session = requests.Session()
     admin_hdr = {**admin.headers(), "Content-Type": "application/json"}
 
@@ -442,7 +447,7 @@ def seed(root_url, admin: rcapi.Auth, plan: Plan, log=lambda m: None, workspace:
             return None
 
     def _set(setting_id: str, value) -> bool:
-        return rcapi.set_setting(root_url, admin, config.ADMIN_PASSWORD, setting_id, value)
+        return rcapi.set_setting(root_url, admin, admin_password, setting_id, value)
 
     # Make seeding possible/fast: new users' logins aren't blocked by email-2FA,
     # and bulk calls aren't throttled. Both settings are restored to their PRIOR
@@ -457,14 +462,14 @@ def seed(root_url, admin: rcapi.Auth, plan: Plan, log=lambda m: None, workspace:
     # saml / oidc / livechat presets, which deliberately switch it OFF because
     # their users have no mailbox here. Only touch a value we actually observed,
     # and only put back what we actually changed.
-    email_2fa_prev = rcapi.get_setting(root_url, admin, config.ADMIN_PASSWORD, email_2fa)
+    email_2fa_prev = rcapi.get_setting(root_url, admin, admin_password, email_2fa)
     # "UNREADABLE" IS NOT "WAS ON" -- the rule the email-2FA lines above state in as
     # many words, and the limiter line twelve lines down did not follow. `... is False`
     # makes an unreadable setting indistinguishable from one that was on, so a single
     # transient 500 (likely: seeding starts the moment RC answers) made this disable the
     # limiter and then force it ON in the `finally`, on a workspace that may have had it
     # off deliberately. Only touch what was actually observed.
-    limiter_prev = rcapi.get_setting(root_url, admin, config.ADMIN_PASSWORD, rate_limiter)
+    limiter_prev = rcapi.get_setting(root_url, admin, admin_password, rate_limiter)
     email_2fa_changed = False
     _authorship_warning = (
         "seeded users may not be loginable, so messages will be authored by admin")

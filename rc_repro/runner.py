@@ -24,7 +24,7 @@ from rc_repro import config
 # it is the FAILURE contract both front ends understand (errors.py) -- the CLI
 # prints it and exits 1, the API returns 409. A builtin escaped both, so waiting
 # out the timeout ended in a raw traceback or an opaque "internal error".
-from rc_repro.errors import ConflictError
+from rc_repro.errors import ConflictError, MissingRecordError
 
 
 def atomic_write(path: Path, content: str, *, mode: int | None = None) -> None:
@@ -72,12 +72,39 @@ class Metadata:
     # https URL would fail certificate verification in 71 call sites; RC still
     # advertises this one as its ROOT_URL, which is what the browser needs.
     public_url: str = ""
+    # The Rocket.Chat admin password FOR THIS WORKSPACE, when one was generated.
+    # Empty means the shared `config.ADMIN_PASSWORD` -- which is every workspace
+    # made before this field existed, and every loopback one made after. Read it
+    # through `admin_pass` below, never directly, so the fallback is not a thing
+    # each of sixty call sites has to remember.
+    admin_password: str = ""
     extra: dict = field(default_factory=dict)
 
     @property
     def external_url(self) -> str:
         """What a human/browser should open — the https URL if there is one."""
         return self.public_url or self.root_url
+
+    @property
+    def admin_pass(self) -> str:
+        """This workspace's admin password.
+
+        `config.ADMIN_PASSWORD` is the fixed `admin123`, and loopback is WHY that is
+        acceptable -- `config.DEFAULT_BIND_HOST`'s own comment says so. A workspace
+        reachable beyond loopback removes that premise, so `create_repro` generates
+        one for it and stores it here.
+
+        Everything that logs in reads THIS, not the constant: rc-repro's own REST
+        calls (readiness, PATs, seeding, settings, load tests) would otherwise all
+        authenticate with `admin123` against a workspace whose admin password is not
+        `admin123`, and `pat`, `api`, `seed`, `loadtest`, `monitor` and `upgrade`
+        would each fail with a 401 nobody could explain.
+
+        The empty fallback is not a default so much as a version marker: a repro.json
+        written before this field existed means a workspace whose Rocket.Chat really
+        does run `admin123`, and it has to keep working untouched.
+        """
+        return self.admin_password or config.ADMIN_PASSWORD
 
 
 def project_name(name: str) -> str:
@@ -98,9 +125,15 @@ def exists(name: str) -> bool:
     silently created a second one over the top of it.
 
     Either marker counts, which is strictly more permissive than before: no
-    workspace that used to be found can stop being found. repro.json is written
-    after the compose file and both go through `atomic_write`, so a half-written
-    workspace cannot look complete.
+    workspace that used to be found can stop being found.
+
+    It is deliberately more permissive than `read_meta`, and that gap is a real
+    state rather than an oversight: each file goes through `atomic_write` but the
+    PAIR is not atomic, so a kill between them leaves a directory this accepts and
+    `read_meta` rejects. Staying permissive is what lets `down` clean such a
+    directory up; `write()` now writes repro.json FIRST so the surviving half is
+    the one that can be read, and `read_meta` raises `MissingRecordError` -- a 404,
+    not a traceback -- for the other order left behind by an older version.
     """
     ws = workspace(name)
     return (ws / "docker-compose.yml").exists() or (ws / "repro.json").exists()
@@ -161,8 +194,16 @@ def write(name: str, compose_yaml: str, meta: Metadata,
     # Write atomically (temp + rename): an interruption mid-write must not leave a
     # half-written repro.json that read_meta would choke on, nor a compose file
     # out of sync with its metadata.
-    atomic_write(ws / "docker-compose.yml", compose_yaml)
+    #
+    # THE RECORD FIRST, and the order is the whole point. Each write is individually
+    # atomic; the PAIR is not, and a kill between them leaves a directory that
+    # `exists()` accepts. Compose-first left the half that `list_meta` skips and
+    # `read_meta` cannot read -- a workspace invisible to `list`, `prune` and port
+    # allocation while still occupying its name. Record-first leaves the half that
+    # is fully visible and whose compose file `up` regenerates anyway, which is
+    # already this tool's contract for that document.
     atomic_write(ws / "repro.json", json.dumps(asdict(meta), indent=2))
+    atomic_write(ws / "docker-compose.yml", compose_yaml)
     # Preset-generated files (e.g. a seeded LDIF that a service mounts).
     # `{{ROOT_URL}}` is substituted with the repro's URL — presets are built
     # before the host port is known, so a generated file that must reference the
@@ -191,10 +232,40 @@ def read_meta(name: str) -> Metadata:
     rc-repro carrying an added field would otherwise TypeError, and `list_meta`
     swallows that — silently making the repro vanish from `rc-repro list`.
     """
-    blob = json.loads((workspace(name) / "repro.json").read_text(encoding="utf-8"))
+    # A TYPED error, not a raw FileNotFoundError. `exists()` accepts either marker
+    # and this needs repro.json, so a directory left with only a compose file --
+    # a SIGKILL, an OOM or a host reboot between the two writes below -- resolved
+    # fine and then raised out of `detail`/`describe` on the request thread, which
+    # in `serve` is a 500 with a traceback rather than the documented ReproError ->
+    # status mapping. It is now a 404 that says how to finish or remove it.
+    record = workspace(name) / "repro.json"
+    if not record.exists():
+        raise MissingRecordError(
+            f"{name!r} has no repro.json, so it is a half-written workspace rather "
+            f"than one rc-repro can act on — finish it with `rc-repro up --name "
+            f"{name}`, or remove it with `rc-repro down --name {name} --volumes`")
+    blob = json.loads(record.read_text(encoding="utf-8"))
     if not isinstance(blob, dict):
         raise TypeError("repro.json is not a JSON object")
     return Metadata(**{k: v for k, v in blob.items() if k in _META_FIELDS})
+
+
+def write_record(name: str, meta: "Metadata") -> None:
+    """Write just `repro.json`, for a workspace that has no compose document.
+
+    The Kubernetes path has no docker-compose.yml to write, so it called
+    `atomic_write` directly -- and `_restrict()` lives in `write()`, which it
+    therefore never reached. That left the whole workspace directory at the process
+    umask on the one runtime that ALSO writes `kubernetes/values.yaml` carrying
+    ADMIN_PASS, so a generated per-workspace admin password was readable by every
+    local user. `write()`'s own comment says the 0700 DIRECTORY is what does the
+    work; this is the same guarantee for the runtime that had no way to ask for it.
+    """
+    ws = workspace(name)
+    ws.mkdir(parents=True, exist_ok=True)
+    _restrict(ws)
+    atomic_write(ws / "repro.json", json.dumps(asdict(meta), indent=2))
+    _restrict(ws)          # again: covers anything written into it since
 
 
 def update_meta(name: str, mutate) -> "Metadata":

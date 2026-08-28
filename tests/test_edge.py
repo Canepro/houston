@@ -234,6 +234,106 @@ def test_the_guis_own_route_is_not_listed_as_a_workspace():
     assert fd.registered() == ["alice"]
 
 
+# --- the second kind of backend: passthrough -------------------------------------
+
+def test_a_passthrough_route_does_not_decrypt_and_names_no_resolver():
+    """The whole point of the Kubernetes shape: the edge forwards raw TCP.
+
+    A Kubernetes workspace's certificate lives in a cluster Secret and its own
+    Ingress terminates TLS. If the edge terminated instead, the Ingress `tls:` block,
+    the Secret and cert-manager would never run -- and those are precisely where a
+    customer's certificate bugs live, which is the class of bug this tool exists to
+    reproduce.
+
+    So: a TCP router, matched by SNI, `passthrough: true`, and NO certificate of any
+    kind -- naming a resolver would send the edge to Let's Encrypt for a name it does
+    not present a certificate for.
+    """
+    doc = yaml.safe_load(fd.passthrough_route_yml(
+        "kws", "kws.rcrepro.localhost", "172.16.0.2:443"))
+    router = doc["tcp"]["routers"]["kws"]
+    assert router["rule"] == "HostSNI(`kws.rcrepro.localhost`)"
+    assert router["tls"] == {"passthrough": True}, router
+    assert doc["tcp"]["services"]["kws"]["loadBalancer"]["servers"] == \
+        [{"address": "172.16.0.2:443"}]
+    assert "http" not in doc, "a passthrough name has no HTTP router at the edge"
+    assert "tls" not in doc, "and no certificate declaration"
+    body = fd.passthrough_route_yml("kws", "k.example.com", "10.0.0.1:443")
+    assert "certResolver" not in body, \
+        "the edge must not request a certificate for a name it passes through"
+
+
+def test_both_kinds_of_route_share_one_entrypoint():
+    """One :443 does both jobs, which is what makes Compose and Kubernetes coexist.
+
+    Traefik matches TCP routers by SNI first and falls through to HTTP routers for
+    anything unmatched. Measured on this box with one Traefik and two names: the
+    terminating name received the edge's own leaf and the passthrough name received
+    the cluster's Secret, byte-identical to it. If these two ever named different
+    entrypoints that property would be gone and nothing would fail loudly.
+    """
+    term = yaml.safe_load(fd.workspace_route_yml("compose", "c.example.com"))
+    pass_ = yaml.safe_load(fd.passthrough_route_yml("kube", "k.example.com",
+                                                   "172.16.0.2:443"))
+    assert term["http"]["routers"]["compose"]["entryPoints"] == ["websecure"]
+    assert pass_["tcp"]["routers"]["kube"]["entryPoints"] == ["websecure"]
+
+
+def test_registering_a_passthrough_asks_for_no_certificate():
+    """`register` returns "this name needs a certificate of its own", and the caller
+    counts that against Let's Encrypt's weekly limit. A passthrough name presents no
+    certificate at the edge at all, so counting it would spend budget on nothing."""
+    assert fd.register("kws", "kws.example.com",
+                       passthrough="172.16.0.2:443") is False
+    assert fd.registered() == ["kws"]
+    assert not (fd.certs_dir() / "kws.example.com.crt").exists(), \
+        "no local certificate is issued for a name the edge does not terminate"
+
+
+def test_a_passthrough_backend_must_carry_a_port():
+    """Traefik loads a TCP router whose server has no port as a router with no
+    reachable server: the name answers nothing and the reason appears only in the
+    edge's own log. Refused where the value arrives instead."""
+    with pytest.raises(ValidationError) as exc:
+        fd.passthrough_route_yml("kws", "k.example.com", "172.16.0.2")
+    assert "address" in str(exc.value) and "port" in str(exc.value)
+    with pytest.raises(ValidationError):
+        fd.passthrough_route_yml("kws", "k.example.com", "")
+
+
+def test_the_two_kinds_of_route_are_told_apart_on_disk():
+    """Read from the route FILE, because the caller that needs to know is looking at
+    routes rather than at workspaces -- a route outlives its workspace, which is the
+    whole reason `deregister` exists."""
+    fd.register("compose", "c.example.com")
+    fd.register("kube", "k.example.com", passthrough="172.16.0.2:443")
+    assert fd.is_passthrough("kube") is True
+    assert fd.is_passthrough("compose") is False
+    assert fd.is_passthrough("never-registered") is False
+
+
+def test_restarting_the_edge_does_not_report_a_kubernetes_route_as_broken(monkeypatch):
+    """`reattach_all` joins each routed workspace's Docker network, because
+    recreating the edge loses runtime attachments while the route files survive.
+
+    A Kubernetes workspace has no Docker network and no compose project, so attaching
+    one can only fail -- and reporting that failure would name a perfectly healthy
+    workspace as unreachable on every single `edge start`.
+    """
+    fd.register("compose", "c.example.com")
+    fd.register("kube", "k.example.com", passthrough="172.16.0.2:443")
+    tried: list[str] = []
+
+    def _attach(name):
+        tried.append(name)
+        return False                    # as `docker network connect` would, for both
+
+    monkeypatch.setattr(fd, "attach", _attach)
+    failed = fd.reattach_all()
+    assert tried == ["compose"], "it tried to join a network Kubernetes does not have"
+    assert failed == ["compose"], failed
+
+
 def test_write_materialises_the_project(_home):
     fd.write(fd.Edge(domain="support.xyz.com", acme_email="ops@xyz.com"))
     assert fd.installed()
@@ -1008,6 +1108,328 @@ def test_tls_status_survives_a_workspace_with_no_port_of_its_own(tmp_path, monke
     assert not isinstance(r.exception, IndexError)
 
 
+def test_a_certificate_with_no_subject_still_says_what_it_is_for():
+    """cert-manager issues with NO subject at all -- the name is in the SANs only.
+
+    So every Kubernetes workspace's certificate reported `Subject: ?`, which reads as
+    a failure to parse rather than as a perfectly good certificate. `tls_local.py`
+    already says why the SANs are the field that matters: browsers have ignored
+    commonName since Chrome 58, so a certificate with only a CN is rejected outright.
+    """
+    from rc_repro import tls as tlsmod
+    from rc_repro import tls_local
+
+    crt, _ = tls_local.issue_leaf("probe.rcrepro.localhost")
+    assert "probe.rcrepro.localhost" in tlsmod.cert_names(crt)
+    assert "localhost" in tlsmod.cert_names(crt), "the leaf carries both"
+    # Anything unparseable is an empty list, never an exception: this feeds a report.
+    assert tlsmod.cert_names("not a certificate") == []
+
+
+def test_tls_status_reports_the_names_when_there_is_no_subject(tmp_path, monkeypatch):
+    """The row a reader checks to confirm the certificate is for the right name."""
+    from typer.testing import CliRunner
+
+    from rc_repro import cli, runner
+    from rc_repro import tls as tlsmod
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    _acme_workspace("w", "t1.example.com", tmp_path)
+    monkeypatch.setattr(runner, "docker_available", lambda **k: True)
+    monkeypatch.setattr(tlsmod, "verify", lambda *a, **k: {
+        "serving": True, "fallback": False, "issuer": "CN = rc-repro local CA",
+        "subject": "", "dates": "notAfter=Nov 23 2026", "names": ["t1.example.com"],
+        "trusted": True, "trusted_via_ca": True, "error": ""})
+    r = CliRunner().invoke(cli.app, ["tls-status", "--name", "w"])
+    assert "t1.example.com" in (r.output or ""), r.output
+    assert "Subject" not in (r.output or ""), \
+        "the row is what the certificate is VALID FOR, which a subject may not carry"
+
+
+def test_tls_troubleshooting_on_kubernetes_does_not_send_you_to_the_edge(tmp_path,
+                                                                        monkeypatch):
+    """A Kubernetes workspace's certificate is not the edge's, and every line of this
+    advice named Traefik and `rc-repro logs` -- which on that runtime shows
+    Rocket.Chat, not a proxy. The tlsalpn/Cloudflare branch is about a challenge
+    cert-manager does not implement at all.
+
+    Sending someone to `edge logs` for a certificate the edge never saw is the entire
+    reason this branch exists.
+    """
+    from rc_repro import cli, runner
+    from rc_repro.services import topology
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    _acme_workspace("kws", "k1.example.com", tmp_path)
+    _acme_workspace("w", "t1.example.com", tmp_path)      # the Compose control
+    meta = runner.read_meta("kws")
+    topology.stamp(meta.extra, topology.KUBERNETES)
+    meta.extra["namespace"] = "rc-repro-kws"
+    runner.write("kws", "", meta)
+
+    said: list[str] = []
+    monkeypatch.setattr(cli.ui, "hint", lambda m, *a, **k: said.append(m))
+    cli._tls_troubleshoot(runner.read_meta("kws"), "acme", "k1.example.com", 443)
+    joined = "\n".join(said)
+    assert "describe certificate kws-tls" in joined, joined
+    assert "clusterissuer" in joined, joined
+    assert "order,challenge" in joined, "an ACME order is where a public name fails"
+    assert "tlsalpn" not in joined, "cert-manager does not implement it"
+    assert "grep -i traefik" not in joined, "the edge's log has nothing about this name"
+
+    # And the Compose advice is untouched, which is what the Compose suite guards.
+    said.clear()
+    cli._tls_troubleshoot(runner.read_meta("w"), "acme", "t1.example.com", 443)
+    assert "tlsalpn" in "\n".join(said), "still the right advice on Compose"
+
+
+def test_verifying_tls_never_raises_when_the_ca_file_is_absent(tmp_path):
+    """It is a REPORT, and it crashed its caller.
+
+    `create_default_context(cafile=...)` raises FileNotFoundError for a CA that is not
+    there -- an OSError, but raised one line above the handler that catches OSError. So
+    a box that has only ever used `--domain` (and therefore never minted a local
+    certificate, so `ca/ca.crt` does not exist) got a traceback out of the function
+    whose entire job is to say what is being served.
+
+    Found live, after the workspace had been built and its certificate issued: `up`
+    ended in a Python traceback about a missing file.
+    """
+    from rc_repro import tls as tlsmod
+
+    import socket
+    import ssl
+    import threading
+
+    from rc_repro import tls_local
+
+    # A REAL TLS server, because the bug is only reachable once the handshake has
+    # succeeded: `verify` returns early when nothing answers, so pointing it at a dead
+    # port exercises none of this and would pass whether the fix were there or not.
+    crt, key = tls_local.issue_leaf("localhost")
+    cert_f, key_f = tmp_path / "s.crt", tmp_path / "s.key"
+    cert_f.write_text(crt)
+    key_f.write_text(key)
+    srv_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    srv_ctx.load_cert_chain(str(cert_f), str(key_f))
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(8)
+    port = sock.getsockname()[1]
+    stop = threading.Event()
+
+    def serve():
+        sock.settimeout(0.5)
+        while not stop.is_set():
+            try:
+                conn, _ = sock.accept()
+            except (OSError, TimeoutError):
+                continue
+            try:
+                with srv_ctx.wrap_socket(conn, server_side=True):
+                    pass
+            except (OSError, ssl.SSLError):
+                pass
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    try:
+        missing = str(tmp_path / "nope" / "ca.crt")
+        r = tlsmod.verify("127.0.0.1", port, timeout=3.0, cafile=missing)
+        assert r["serving"] is True, r          # the handshake really happened
+        assert r["trusted_via_ca"] is False     # and the absent CA is an answer
+    finally:
+        stop.set()
+        sock.close()
+        t.join(timeout=3)
+
+
+def test_the_kubernetes_proof_checks_the_right_trust_store(monkeypatch, tmp_path):
+    """A Let's Encrypt certificate is checked against the SYSTEM store -- that is the
+    whole claim being made about it -- and rc-repro's own CA is not involved and may
+    not exist. `cli.tls_status` already makes this distinction; the create path did
+    not, and passed a CA file unconditionally."""
+    from rc_repro import tls as tlsmod
+    from rc_repro.services import edge as edgesvc
+    from rc_repro.services import k8s
+    from rc_repro.services import lifecycle as lc
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setattr(edgesvc, "installed", lambda: True)
+    seen: list = []
+    monkeypatch.setattr(tlsmod, "verify", lambda *a, **kw: seen.append(kw.get("cafile"))
+                        or {"serving": True, "fallback": False, "issuer": "CN = x"})
+    ep = k8s.IngressEndpoint("10.0.0.1", 443, "nodeport", "kube-system/traefik", False)
+
+    def ktls(mode):
+        return lc._KubeTls(host="a.example.com", ingress_class="traefik", endpoint=ep,
+                           issuer=k8s.IssuerSpec(mode=mode, acme_email="a@b.c"),
+                           cluster_owns_443=True)
+
+    lc._publish_kubernetes_name("w", ktls("acme"), sleep=lambda s: None)
+    assert seen[-1] is None, "a public certificate is a system-store question"
+    lc._publish_kubernetes_name("w", ktls("local"), sleep=lambda s: None)
+    assert seen[-1] and seen[-1].endswith("ca.crt"), seen
+
+
+def test_the_staging_switch_can_be_turned_back_off(tmp_path, monkeypatch):
+    """`bool("false")` is True, and that made the switch one-way.
+
+    `config set` stored the raw string and every reader did
+    `bool(cfg.get("acme_staging"))`, so turning staging ON worked and turning it OFF
+    did nothing whatsoever. The asymmetry is what hid it for so long: the value people
+    set first is the one that behaves.
+
+    Measured on a live box -- `acme_staging: 'false'` in config.yaml and the very next
+    create still ordering from the Let's Encrypt STAGING directory, producing a
+    certificate no browser trusts, with nothing anywhere explaining why. A workspace
+    that had rehearsed against staging could never be promoted to a real certificate.
+
+    Both sides are asserted: what `config set` writes, and what a reader does with a
+    config an OLDER rc-repro already wrote as a string.
+    """
+    from typer.testing import CliRunner
+
+    from rc_repro import cli, config as cfgmod
+    from rc_repro.services import edge as fd
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    run = CliRunner()
+
+    assert run.invoke(cli.app, ["config", "set", "acme.staging", "true"]).exit_code == 0
+    assert cfgmod.load_config()["acme_staging"] is True, "stored as a real boolean"
+    assert run.invoke(cli.app, ["config", "set", "acme.staging", "false"]).exit_code == 0
+    assert cfgmod.load_config()["acme_staging"] is False, "and it can be turned off"
+
+    # A config written by an OLDER rc-repro holds the string. Every box that ever ran
+    # `config set acme.staging false` has one, so the read has to cope.
+    cfgmod.save_config({"acme_staging": "false"})
+    assert cfgmod.truthy(cfgmod.load_config().get("acme_staging")) is False
+    door = fd.Edge.resolve("d.example.com", "o@e.com")
+    assert door.acme_staging is False, "the edge must not stay on staging for ever"
+
+    # And nonsense is refused rather than stored as something truthy.
+    bad = run.invoke(cli.app, ["config", "set", "acme.staging", "maybe"])
+    assert bad.exit_code != 0
+    assert "true or false" in (bad.output or ""), bad.output
+
+
+def test_two_workspaces_cannot_claim_the_same_hostname():
+    """Ports have been guarded since long before names were, and names needed it more.
+
+    A route file is keyed by WORKSPACE NAME, so two workspaces given the same
+    `--domain` each write their own file claiming the same `Host()`. Traefik then
+    picks one and the other silently never answers -- the failure this module's own
+    docstring warns about one layer down, in the same words: it "looks stable under
+    testing and would silently serve the wrong workspace forever".
+
+    Found by running a scenario matrix on one box: THREE route files all claiming
+    `HostSNI(rc-rpro-test.kestron.org)`, two pointing at NodePorts that no longer
+    existed. Traefik chose a dead one, so the name returned EOF, cert-manager's
+    self check failed, and the certificate never issued -- for a chain that was
+    otherwise entirely correct. It cost an hour to find because every individual
+    component was right.
+    """
+    fd.register("alice", "shared.example.com")
+    assert fd.route_host("alice") == "shared.example.com"
+    assert fd.host_owner("shared.example.com") == "alice"
+    # Case-insensitively, because DNS is.
+    assert fd.host_owner("SHARED.example.com") == "alice"
+    # A workspace may always re-claim its OWN name -- that is every `up` after a
+    # `down`, and refusing it would break bringing a workspace back.
+    assert fd.host_owner("shared.example.com", excluding="alice") == ""
+    # A passthrough route counts too: it is HostSNI rather than Host, and the whole
+    # point is that both kinds share one entrypoint.
+    fd.register("kube", "k.example.com", passthrough="10.0.0.1:443")
+    assert fd.route_host("kube") == "k.example.com"
+    assert fd.host_owner("k.example.com") == "kube"
+    assert fd.host_owner("nobody.example.com") == ""
+
+
+def test_resolving_tls_refuses_a_hostname_another_workspace_holds(tmp_path, monkeypatch):
+    """Refused where BOTH runtimes pass, so neither can grow its own answer."""
+    from rc_repro import errors
+    from rc_repro.services import lifecycle as lc
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    fd.register("first", "taken.example.com")
+
+    req = lc.CreateReq(version="8.5.1", name="second",
+                       domain="taken.example.com", acme_email="o@e.com")
+    with pytest.raises(errors.ConflictError) as exc:
+        lc._resolve_tls(req, "second", "127.0.0.1", exclude="second")
+    assert "already served for workspace 'first'" in str(exc.value)
+    assert "rc-repro down --name first" in str(exc.value), "say how to free it"
+
+    # And the workspace that owns it can still be brought back up.
+    again = lc.CreateReq(version="8.5.1", name="first",
+                         domain="taken.example.com", acme_email="o@e.com")
+    spec = lc._resolve_tls(again, "first", "127.0.0.1", exclude="first")
+    assert spec.host == "taken.example.com"
+
+
+def test_stopping_an_edge_that_was_never_set_up_is_not_a_traceback(tmp_path,
+                                                                   monkeypatch):
+    """`edge stop` on a home with no `edge/` directory answered with a Python
+    traceback:
+
+        error: FileNotFoundError: [Errno 2] No such file or directory:
+        PosixPath('/home/ubuntu/.rc-repro/edge') - this is unhandled
+
+    `cwd` for the compose seam is `edge_dir()`, and a home that has never had an edge
+    has no such directory. `_docker` one function above it carries an explicit NEVER
+    RAISES contract for exactly this class of problem, and `_compose_capture` has the
+    guard too -- this was the one seam without it, and it was the one that broke.
+
+    Hit while cleaning a shared box, which is precisely when a home has no edge.
+    """
+    from typer.testing import CliRunner
+
+    from rc_repro import cli
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    assert not fd.edge_dir().exists(), "the point of the test"
+
+    r = CliRunner().invoke(cli.app, ["edge", "stop"])
+    assert r.exception is None or isinstance(r.exception, SystemExit), r.exception
+    assert "Traceback" not in (r.output or "")
+    assert "nothing to stop" in (r.output or ""), r.output
+    # And it must not claim the ports are free, which it knows nothing about.
+    assert "are free" not in (r.output or ""), r.output
+
+
+def test_the_compose_seam_never_raises(tmp_path, monkeypatch):
+    """The seam itself, not just the command that found it. A seam that raises for one
+    caller raises for the next, and every caller here treats it as returning a
+    result."""
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path / "never-made"))
+    assert not fd.edge_dir().exists()
+    res = fd._compose("ps")
+    assert res.returncode == 127, "127 is 'could not run it'"
+    assert "No such file" in (res.stderr or ""), res.stderr
+    # `down` is the caller that broke, and it now reports rather than raising.
+    assert fd.down() == 127
+    # And the log stream, the one remaining direct call with the same cwd.
+    assert fd.logs(tail=1, follow=False) == 127
+
+
+def test_edge_stop_reports_a_compose_that_could_not_run(tmp_path, monkeypatch):
+    """It discarded the exit code and printed success unconditionally, so a compose
+    that could not run at all reported the ports as free -- the same
+    reported-success-without-reading-the-answer shape this codebase keeps finding."""
+    from typer.testing import CliRunner
+
+    from rc_repro import cli
+    from rc_repro.services import edge as edgesvc
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    edgesvc.write(edgesvc.Edge())                      # so `installed()` is True
+    monkeypatch.setattr(edgesvc, "down", lambda: 1)
+    r = CliRunner().invoke(cli.app, ["edge", "stop"])
+    assert r.exit_code != 0, r.output
+    assert "could not stop the edge" in (r.output or ""), r.output
+
+
 def test_a_broken_gui_route_from_an_older_version_is_repaired(tmp_path, monkeypatch):
     """An older rc-repro wrote a GUI route even with no domain, producing
     `Host(``)` -- rejected at every reload with "empty args for matcher Host".
@@ -1244,3 +1666,517 @@ def test_the_port_claim_probe_costs_nothing_on_a_box_with_no_kubectl(monkeypatch
     monkeypatch.setattr(k8s, "run", _run)
     k8s.port_claiming_cluster(timeout=3.0)
     assert seen and all(t == 3.0 for t in seen), seen
+
+
+# --- forgetting a name --------------------------------------------------------
+# `down --volumes` removes a ROUTE. Route files are keyed by workspace name and
+# certificate material by HOSTNAME, so everything below survived a teardown with
+# nothing in the tool able to see it, let alone remove it.
+
+_ACME = {
+    "le": {
+        "Account": {"Email": "ops@xyz.com", "PrivateKey": "acct-key"},
+        "Certificates": [
+            {"domain": {"main": "gone.example.org", "sans": []},
+             "certificate": "c1", "key": "k1"},
+            {"domain": {"main": "keep.example.org", "sans": ["www.keep.example.org"]},
+             "certificate": "c2", "key": "k2"},
+        ],
+    },
+}
+
+
+def _write_acme(staging: bool = False, doc: dict | None = None) -> None:
+    import json as _json
+
+    from rc_repro import tls
+    tls.acme_dir().mkdir(parents=True, exist_ok=True)
+    (tls.acme_dir() / tls.acme_storage_name(staging)).write_text(
+        _json.dumps(doc if doc is not None else _ACME), encoding="utf-8")
+
+
+def _read_acme(staging: bool = False) -> dict:
+    import json as _json
+
+    from rc_repro import tls
+    return _json.loads((tls.acme_dir() / tls.acme_storage_name(staging)).read_text())
+
+
+def test_a_teardown_leaves_the_certificate_and_its_private_key(tmp_path):
+    """THE DEFECT, stated as the thing that survives.
+
+    `deregister` is what teardown calls and it unlinks `dynamic/<name>.yml`. The
+    certificate, its key and the declaration that loads them are named after the
+    HOST, so all three walk straight past it -- and `orphan_certs` reports nothing,
+    because it flags a declaration whose certificate is MISSING and here everything
+    is present, valid, and unreachable. The visible symptom is a TLS handshake that
+    succeeds, with a genuine certificate for the name, into a 404.
+    """
+    host = "t-1234.rcrepro.localhost"
+    fd.write(fd.Edge(acme_email="ops@xyz.com"))
+    fd.register("t-1234", host, local=True)
+    fd.issue_local_cert(host)
+    _write_acme(doc={"le": {"Certificates": [
+        {"domain": {"main": host, "sans": []}, "certificate": "c", "key": "k"}]}})
+
+    fd.deregister("t-1234")                      # exactly what `down --volumes` calls
+
+    assert (fd.certs_dir() / f"{host}.crt").is_file()
+    assert (fd.certs_dir() / f"{host}.key").is_file()
+    assert (fd.dynamic_dir() / f"_cert-{host}.yml").is_file()
+    assert fd.acme_hosts() == [host]
+    assert fd.orphan_certs() == [], "the wrong direction: it finds MISSING certs"
+
+
+def test_delete_host_removes_everything_a_teardown_left(tmp_path):
+    host = "t-1234.rcrepro.localhost"
+    fd.write(fd.Edge(acme_email="ops@xyz.com"))
+    fd.register("t-1234", host, local=True)
+    fd.issue_local_cert(host)
+    _write_acme(doc={"le": {"Account": {"Email": "ops@xyz.com"}, "Certificates": [
+        {"domain": {"main": host, "sans": []}, "certificate": "c", "key": "k"}]}})
+
+    gone = fd.delete_host(host, confirm=True, restart=False)
+
+    assert gone["host"] == host
+    assert gone["routes"] == ["t-1234"]
+    assert gone["certificate"] is True
+    assert gone["declaration"] is True
+    assert gone["acme"] == ["acme.json"]
+    assert not (fd.certs_dir() / f"{host}.crt").exists()
+    assert not (fd.certs_dir() / f"{host}.key").exists()
+    assert not (fd.dynamic_dir() / f"_cert-{host}.yml").exists()
+    assert not fd.route_path("t-1234").exists()
+    assert fd.acme_hosts() == []
+    # The ACCOUNT is a registration with Let's Encrypt, not a certificate. Dropping
+    # it makes the next issuance register again for nothing.
+    assert _read_acme()["le"]["Account"] == {"Email": "ops@xyz.com"}
+
+
+def test_delete_host_reports_only_what_actually_went(tmp_path):
+    """A name with a route and no certificate must not be reported as a certificate
+    deletion. Reporting the attempt as the outcome is the shape `edge stop` had."""
+    fd.write(fd.Edge(acme_email="ops@xyz.com"))
+    fd.register("k1", "k1.example.org", passthrough="10.0.0.5:31443")
+
+    gone = fd.delete_host("k1.example.org", confirm=True, restart=False)
+
+    assert gone["routes"] == ["k1"]
+    assert gone["passthrough"] == ["k1"], "so the caller can say where the cert IS"
+    assert gone["certificate"] is False
+    assert gone["declaration"] is False
+    assert gone["acme"] == []
+    assert gone["restarted"] is None, "no ACME entry went, so nothing needed a restart"
+
+
+def test_delete_host_finds_every_route_claiming_the_name(tmp_path):
+    """The collision that cost an hour was THREE files on one host. Removing one
+    would leave the name still claimed and still broken."""
+    fd.write(fd.Edge(acme_email="ops@xyz.com"))
+    for n in ("a", "b", "c"):
+        fd.register(n, "dupe.example.org", passthrough="10.0.0.5:31443")
+
+    assert fd.routes_for("dupe.example.org") == ["a", "b", "c"]
+    gone = fd.delete_host("dupe.example.org", confirm=True, restart=False)
+    assert gone["routes"] == ["a", "b", "c"]
+    assert fd.registered() == []
+
+
+def test_delete_host_refuses_while_a_live_workspace_claims_the_name(tmp_path):
+    """Deleting the certificate under a running workspace would leave one that
+    cannot serve its own name. The workspace is NAMED, with the command."""
+    from rc_repro import runner
+    from rc_repro.errors import ConflictError
+
+    fd.write(fd.Edge(acme_email="ops@xyz.com"))
+    fd.register("live", "live.example.org", local=True)
+    runner.workspace("live").mkdir(parents=True, exist_ok=True)
+    (runner.workspace("live") / "repro.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ConflictError) as exc:
+        fd.delete_host("live.example.org", confirm=True, restart=False)
+    assert "live" in str(exc.value)
+    assert "down --name live --volumes" in str(exc.value)
+    assert fd.route_path("live").exists(), "refused means nothing was touched"
+
+
+def test_a_route_whose_workspace_is_gone_is_exactly_the_case_it_serves(tmp_path):
+    """The orphan. `runner.exists` is False, so the refusal above must not fire --
+    this is the state a teardown leaves and the reason the command exists."""
+    fd.write(fd.Edge(acme_email="ops@xyz.com"))
+    fd.register("ghost", "ghost.example.org", local=True)
+    fd.issue_local_cert("ghost.example.org")
+
+    gone = fd.delete_host("ghost.example.org", confirm=True, restart=False)
+    assert gone["routes"] == ["ghost"]
+    assert gone["certificate"] is True
+
+
+def test_delete_host_refuses_the_guis_own_name(tmp_path):
+    """It would take `serve` off HTTPS while the operator is probably using it to
+    run the command."""
+    from rc_repro.errors import ConflictError
+
+    fd.write(fd.Edge(domain="support.xyz.com", acme_email="ops@xyz.com"))
+    with pytest.raises(ConflictError) as exc:
+        fd.delete_host("support.xyz.com", confirm=True, restart=False)
+    assert "GUI's own name" in str(exc.value)
+
+
+def test_delete_host_refuses_without_confirmation(tmp_path):
+    fd.write(fd.Edge(acme_email="ops@xyz.com"))
+    fd.register("x", "x.example.org", local=True)
+    fd.issue_local_cert("x.example.org")
+    with pytest.raises(ValidationError) as exc:
+        fd.delete_host("x.example.org", restart=False)
+    assert "PRIVATE KEY" in str(exc.value)
+    assert (fd.certs_dir() / "x.example.org.crt").is_file(), "nothing touched"
+
+
+def test_delete_host_needs_a_hostname(tmp_path):
+    fd.write(fd.Edge(acme_email="ops@xyz.com"))
+    with pytest.raises(ValidationError) as exc:
+        fd.delete_host("  ", confirm=True, restart=False)
+    assert "edge delete" in str(exc.value)
+
+
+def test_a_trailing_dot_is_the_same_name(tmp_path):
+    """`example.org.` is how a resolver spells it and how a copy-paste arrives."""
+    fd.write(fd.Edge(acme_email="ops@xyz.com"))
+    fd.register("x", "x.example.org", local=True)
+    gone = fd.delete_host("x.example.org.", confirm=True, restart=False)
+    assert gone["routes"] == ["x"]
+
+
+def test_both_acme_stores_are_searched(tmp_path):
+    """Staging and production are SEPARATE files. `config set acme.staging false`
+    after a staging issuance leaves the staging entry behind, and a delete that
+    looked only at the live store would report success over a key still on disk."""
+    fd.write(fd.Edge(acme_email="ops@xyz.com"))
+    _write_acme(staging=False)
+    _write_acme(staging=True)
+    assert fd.acme_hosts() == ["gone.example.org", "keep.example.org",
+                               "www.keep.example.org"]
+
+    gone = fd.delete_host("gone.example.org", confirm=True, restart=False)
+    assert sorted(gone["acme"]) == ["acme-staging.json", "acme.json"]
+    for staging in (False, True):
+        mains = [c["domain"]["main"] for c in _read_acme(staging)["le"]["Certificates"]]
+        assert mains == ["keep.example.org"]
+
+
+def test_a_name_held_only_as_a_san_is_found_and_removed(tmp_path):
+    """A SAN is served exactly like a main name, so a delete that matched only
+    `domain.main` would leave the certificate presenting the deleted name."""
+    fd.write(fd.Edge(acme_email="ops@xyz.com"))
+    _write_acme()
+    gone = fd.delete_host("www.keep.example.org", confirm=True, restart=False)
+    assert gone["acme"] == ["acme.json"]
+    assert fd.acme_hosts() == ["gone.example.org"]
+
+
+def test_the_rewritten_acme_store_is_still_0600(tmp_path):
+    """It is a file full of private keys. `atomic_write` would create it 0644 from
+    the umask, which is how a fix for one exposure becomes another."""
+    import stat
+
+    from rc_repro import tls
+    fd.write(fd.Edge(acme_email="ops@xyz.com"))
+    _write_acme()
+    fd.delete_host("gone.example.org", confirm=True, restart=False)
+    mode = (tls.acme_dir() / tls.ACME_FILE).stat().st_mode
+    assert stat.S_IMODE(mode) == 0o600, oct(stat.S_IMODE(mode))
+
+
+def test_a_garbage_acme_store_is_not_an_exception(tmp_path):
+    """A half-written or hand-edited store means "no certificate for that host in
+    here", which is the only question being asked of it."""
+    from rc_repro import tls
+    fd.write(fd.Edge(acme_email="ops@xyz.com"))
+    tls.acme_dir().mkdir(parents=True, exist_ok=True)
+    (tls.acme_dir() / tls.ACME_FILE).write_text("{not json", encoding="utf-8")
+    assert fd.acme_hosts() == []
+    assert fd.delete_host("x.example.org", confirm=True, restart=False)["acme"] == []
+
+
+def test_deleting_a_name_that_is_not_here_says_so(tmp_path):
+    fd.write(fd.Edge(acme_email="ops@xyz.com"))
+    gone = fd.delete_host("nothing.example.org", confirm=True, restart=False)
+    assert gone["routes"] == [] and gone["acme"] == []
+    assert gone["certificate"] is False and gone["declaration"] is False
+
+
+def test_the_issuance_ledger_is_kept(tmp_path):
+    """`acme/issued.json` is the rate-limit history `tls-status` counts against
+    Let's Encrypt's five-a-week duplicate limit. Deleting a certificate does not
+    give the budget back, so erasing the record would make the count LIE."""
+    from rc_repro import tls
+    fd.write(fd.Edge(acme_email="ops@xyz.com"))
+    tls.record_issuance("gone.example.org")
+    _write_acme()
+    gone = fd.delete_host("gone.example.org", confirm=True, restart=False)
+    assert gone["kept"] == ["acme/issued.json"]
+    assert tls.recent_issuances("example.org") == 1
+
+
+def test_a_local_certificate_deletion_does_not_restart_the_edge(tmp_path,
+                                                               monkeypatch):
+    """A route and a local certificate are read from disk, so removing the file is
+    already in effect. Restarting for those would interrupt every other name on the
+    box and buy nothing."""
+    fd.write(fd.Edge(acme_email="ops@xyz.com"))
+    fd.register("x", "x.example.org", local=True)
+    fd.issue_local_cert("x.example.org")
+    monkeypatch.setattr(fd, "running", lambda: True)
+    monkeypatch.setattr(fd, "down", lambda: pytest.fail("should not restart"))
+    assert fd.delete_host("x.example.org", confirm=True)["restarted"] is None
+
+
+def test_an_acme_deletion_restarts_a_running_edge(tmp_path, monkeypatch):
+    """Traefik holds the ACME store in memory and rewrites the whole file when a
+    certificate changes, so an edit made underneath it can be written back from
+    memory -- the entry reappears hours after a command said it was deleted.
+    Restarting rebuilds that memory from the edited file."""
+    import subprocess
+
+    calls = []
+    fd.write(fd.Edge(acme_email="ops@xyz.com"))
+    _write_acme()
+    # Pinned, because `foreign_edge` asks DOCKER -- and on a developer box with a
+    # real edge running it answers truthfully, which made this test depend on the
+    # machine it ran on. Nothing in this suite needs Docker; keep it that way.
+    monkeypatch.setattr(fd, "foreign_edge", lambda: "")
+    monkeypatch.setattr(fd, "running", lambda: True)
+    monkeypatch.setattr(fd, "down", lambda: calls.append("down") or 0)
+    monkeypatch.setattr(fd, "up", lambda pull=True: calls.append("up")
+                        or subprocess.CompletedProcess([], 0))
+    assert fd.delete_host("gone.example.org", confirm=True)["restarted"] is True
+    assert calls == ["down", "up"]
+
+
+def test_a_stopped_edge_is_not_started_just_to_delete(tmp_path, monkeypatch):
+    """Nothing can write the entry back while it is stopped, and starting it would
+    claim :443 as a side effect of a deletion."""
+    fd.write(fd.Edge(acme_email="ops@xyz.com"))
+    _write_acme()
+    monkeypatch.setattr(fd, "foreign_edge", lambda: "")
+    monkeypatch.setattr(fd, "running", lambda: False)
+    monkeypatch.setattr(fd, "up", lambda pull=True: pytest.fail("must not start"))
+    assert fd.delete_host("gone.example.org", confirm=True)["foreign"] == ""
+    assert fd.delete_host("gone.example.org", confirm=True)["restarted"] is None
+
+
+def test_edge_delete_from_the_cli(tmp_path):
+    from typer.testing import CliRunner
+
+    from rc_repro import cli
+    fd.write(fd.Edge(acme_email="ops@xyz.com"))
+    fd.register("x", "x.example.org", local=True)
+    fd.issue_local_cert("x.example.org")
+
+    r = CliRunner().invoke(cli.app, ["edge", "delete", "x.example.org", "--yes"])
+    assert r.exit_code == 0, r.output
+    assert "certificate and key for x.example.org removed" in r.output
+    assert not fd.route_path("x").exists()
+
+
+def test_edge_delete_without_a_host_says_which_command_lists_them(tmp_path):
+    from typer.testing import CliRunner
+
+    from rc_repro import cli
+    fd.write(fd.Edge(acme_email="ops@xyz.com"))
+    r = CliRunner().invoke(cli.app, ["edge", "delete", "--yes"])
+    assert r.exit_code != 0
+    assert "edge status" in r.output
+
+
+def test_edge_delete_renders_a_refusal_rather_than_raising(tmp_path):
+    """A ConflictError uncaught here is a Python traceback with cli.py's source in
+    it -- the exact failure `edge start` shipped with."""
+    from typer.testing import CliRunner
+
+    from rc_repro import cli
+    fd.write(fd.Edge(domain="support.xyz.com", acme_email="ops@xyz.com"))
+    r = CliRunner().invoke(cli.app, ["edge", "delete", "support.xyz.com", "--yes"])
+    assert r.exit_code != 0
+    assert "Traceback" not in r.output
+    assert "GUI's own name" in r.output
+
+
+def test_edge_status_names_a_certificate_with_no_route(tmp_path):
+    """A name cannot be cleaned up until it can be SEEN, and a Let's Encrypt key
+    for a customer-shaped hostname in acme.json was invisible to every command."""
+    from typer.testing import CliRunner
+
+    from rc_repro import cli
+    fd.write(fd.Edge(acme_email="ops@xyz.com"))
+    _write_acme()
+    r = CliRunner().invoke(cli.app, ["edge", "status"])
+    assert "certificate(s) held with no route" in r.output
+    assert "gone.example.org" in r.output
+    assert "edge delete" in r.output
+
+
+def test_a_foreign_edge_is_reported_and_never_restarted(tmp_path, monkeypatch):
+    """Every home names its compose project `rcrepro_edge`, so a naive restart would
+    stop whichever container carries that label -- another RC_REPRO_HOME's included.
+    `running()` is home-aware and already prevents that; what was missing was the
+    SENTENCE. A foreign edge reads its own ACME store, so the certificate deleted
+    here is this home's copy and the name is still being served with the other one.
+
+    Not hypothetical in either direction: this box's owner lost their edge to exactly
+    this shape, by hand, following an error message that did not know about it.
+    """
+    fd.write(fd.Edge(acme_email="ops@xyz.com"))
+    _write_acme()
+    monkeypatch.setattr(fd, "running", lambda: False)      # not OURS
+    monkeypatch.setattr(fd, "foreign_edge", lambda: "/home/someone/.rc-repro/edge")
+    monkeypatch.setattr(fd, "down", lambda: pytest.fail("would stop another home's edge"))
+    monkeypatch.setattr(fd, "up", lambda pull=True: pytest.fail("nor start ours over it"))
+
+    gone = fd.delete_host("gone.example.org", confirm=True)
+    assert gone["restarted"] is None
+    assert gone["foreign"] == "/home/someone/.rc-repro/edge"
+    # The deletion itself still happened -- the key came off THIS disk, which is
+    # what was asked for.
+    assert gone["acme"] == ["acme.json"]
+
+
+def test_the_cli_says_the_deleted_key_was_not_the_one_being_served(tmp_path,
+                                                                  monkeypatch):
+    """A foreign edge mounts its OWN home's ACME store, so reporting a plain success
+    would claim a name stopped being served when nothing changed for it."""
+    from typer.testing import CliRunner
+
+    from rc_repro import cli
+    fd.write(fd.Edge(acme_email="ops@xyz.com"))
+    _write_acme()
+    monkeypatch.setattr(fd, "foreign_edge", lambda: "/home/someone/.rc-repro/edge")
+    monkeypatch.setattr(fd, "running", lambda: False)
+
+    r = CliRunner().invoke(cli.app, ["edge", "delete", "gone.example.org", "--yes"])
+    assert r.exit_code == 0, r.output
+    assert "another RC_REPRO_HOME" in r.output
+    assert "/home/someone/.rc-repro/edge" in r.output
+    # Collapsed: ui wraps, so the sentence is asserted on the unwrapped text.
+    flat = " ".join(r.output.split())
+    assert "reads its OWN certificate store" in flat, flat
+    assert "not the certificate that name is being served with" in flat, flat
+
+
+def test_tls_status_does_not_report_a_cluster_placeholder_as_this_workspaces_cert(
+        tmp_path, monkeypatch):
+    """It probed 127.0.0.1 ONLY, so on a box where something else holds IPv4 :443 it
+    reported that thing's certificate as the workspace's.
+
+    Found live: k3s ServiceLB DNATs IPv4 :443 into the cluster, whose ingress is also
+    Traefik -- so `tls-status` on a healthy local-CA workspace showed
+    `CN = TRAEFIK DEFAULT CERT` and advised that "ACME never succeeded", about a
+    workspace that uses no ACME at all. `curl` and `tls.verify` on the NAME both
+    agreed the real certificate was being served, from [::1], at the same moment.
+    """
+    from typer.testing import CliRunner
+
+    from rc_repro import cli, runner
+    from rc_repro import tls as tlsmod
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    _acme_workspace("w", "t1.example.com", tmp_path)
+    monkeypatch.setattr(runner, "docker_available", lambda **k: True)
+
+    asked: list[str] = []
+
+    def fake_verify(host, port, **kw):
+        asked.append(host)
+        if host == "127.0.0.1":            # the squatter: a different Traefik
+            return {"serving": True, "fallback": True,
+                    "issuer": "CN = TRAEFIK DEFAULT CERT",
+                    "subject": "CN = TRAEFIK DEFAULT CERT", "dates": "", "names": [],
+                    "trusted": False, "trusted_via_ca": False, "error": ""}
+        return {"serving": True, "fallback": False,
+                "issuer": "CN = rc-repro local CA", "subject": "CN = t1.example.com",
+                "dates": "notAfter=Nov 23 2026", "names": ["t1.example.com"],
+                "trusted": True, "trusted_via_ca": True, "error": ""}
+    monkeypatch.setattr(tlsmod, "verify", fake_verify)
+
+    r = CliRunner().invoke(cli.app, ["tls-status", "--name", "w"])
+    assert "::1" in asked, f"the other loopback family was never tried: {asked}"
+    assert "rc-repro local CA" in (r.output or ""), r.output
+    assert "TRAEFIK DEFAULT CERT" not in (r.output or ""), \
+        "another program's placeholder was reported as this workspace's certificate"
+
+
+def test_tls_status_still_reports_a_placeholder_when_every_family_serves_one(
+        tmp_path, monkeypatch):
+    """The counterpart: if nothing is serving the real certificate then the
+    placeholder IS the finding, and must not be hidden by the family sweep."""
+    from typer.testing import CliRunner
+
+    from rc_repro import cli, runner
+    from rc_repro import tls as tlsmod
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    _acme_workspace("w", "t1.example.com", tmp_path)
+    monkeypatch.setattr(runner, "docker_available", lambda **k: True)
+    monkeypatch.setattr(tlsmod, "verify", lambda *a, **k: {
+        "serving": True, "fallback": True, "issuer": "CN = TRAEFIK DEFAULT CERT",
+        "subject": "CN = TRAEFIK DEFAULT CERT", "dates": "", "names": [],
+        "trusted": False, "trusted_via_ca": False, "error": ""})
+    r = CliRunner().invoke(cli.app, ["tls-status", "--name", "w"])
+    assert "TRAEFIK DEFAULT CERT" in (r.output or ""), r.output
+
+
+def test_config_get_and_list_tell_false_apart_from_unset(tmp_path, monkeypatch):
+    """`cfg.get(k) or '(unset)'` renders a stored `False` as unset, and
+    `acme.staging` is a BOOLEAN whose whole history is people not being able to tell
+    which way it is set.
+
+    `config set acme.staging false` reported success and then both `get` and `list`
+    said the key was unset -- the same confusion, one layer up, as the `bool("false")`
+    defect this key already had.
+    """
+    from typer.testing import CliRunner
+
+    from rc_repro import cli
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    run = CliRunner()
+
+    assert run.invoke(cli.app, ["config", "set", "acme.staging", "false"]).exit_code == 0
+    got = run.invoke(cli.app, ["config", "get", "acme.staging"])
+    assert got.output.strip() == "False", f"a stored False printed as {got.output!r}"
+    listed = run.invoke(cli.app, ["config", "list"]).output
+    assert "(unset)" not in [ln for ln in listed.splitlines()
+                             if "acme.staging" in ln][0], listed
+
+    # And a key that really is unset still says so.
+    assert run.invoke(cli.app, ["config", "unset", "acme.staging"]).exit_code == 0
+    assert run.invoke(cli.app, ["config", "get", "acme.staging"]).output.strip() == ""
+    listed = run.invoke(cli.app, ["config", "list"]).output
+    assert "(unset)" in [ln for ln in listed.splitlines()
+                         if "acme.staging" in ln][0], listed
+
+
+def test_a_passthrough_route_is_not_reported_unreachable(tmp_path, monkeypatch):
+    """`edge status` computed reachability as Docker-network membership, and a
+    PASSTHROUGH route joins no workspace network -- so every Kubernetes workspace
+    was listed `NO (502)`.
+
+    Measured in production conditions on EC2: a workspace answering HTTP 200 from
+    the internet on a real Let's Encrypt certificate, reported unreachable by the
+    command whose job is to say whether it is reachable. `/api/edge` had already
+    learned this; the CLI had not, which is the same two-front-ends drift as the
+    `Host(` / `HostSNI(` parser.
+    """
+    from rc_repro.services import edge as edgesvc
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setattr(edgesvc, "is_passthrough", lambda n: n == "kube")
+    monkeypatch.setattr(edgesvc, "workspace_network",
+                        lambda n: f"rcrepro-{n}_default")
+
+    # A passthrough forwards raw TCP to a NodePort; there is no network to join.
+    assert edgesvc.route_reachable("kube", set()) is True
+    # An HTTP route still needs the edge to have joined its network.
+    assert edgesvc.route_reachable("cmp", set()) is False
+    assert edgesvc.route_reachable("cmp", {"rcrepro-cmp_default"}) is True

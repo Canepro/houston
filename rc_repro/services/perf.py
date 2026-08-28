@@ -152,7 +152,7 @@ def run_loadtest(req: LoadtestReq, emit: Emit = null_emit) -> dict:
 
     try:
         auth = lifecycle.login(m)
-        token = rcapi.generate_pat(m.root_url, auth, config.ADMIN_PASSWORD,
+        token = rcapi.generate_pat(m.root_url, auth, m.admin_pass,
                                    token_name="rc-repro-loadtest", bypass_2fa=True,
                                    workspace=m.name)
     except Exception as exc:  # noqa: BLE001
@@ -182,7 +182,7 @@ def run_loadtest(req: LoadtestReq, emit: Emit = null_emit) -> dict:
             except RuntimeError as exc:
                 raise DockerError(f"could not apply constrain: {exc}") from exc
             info(emit, f"constrained: {constrain_mod.human(per_service)} (restored after)", phase="k6")
-        limiter_was_off = rcapi.get_setting(m.root_url, auth, config.ADMIN_PASSWORD,
+        limiter_was_off = rcapi.get_setting(m.root_url, auth, m.admin_pass,
                                             config.RC_RATE_LIMITER_SETTING) is False
         if not limiter_was_off:
             # JOURNALLED BEFORE IT IS TURNED OFF. The `finally` below turns it back
@@ -190,17 +190,17 @@ def run_loadtest(req: LoadtestReq, emit: Emit = null_emit) -> dict:
             # at all -- so the note on disk is what survives to say the API rate
             # limiter is off on this workspace and nobody meant to leave it that way.
             limiter_note = journal.record(journal.RATE_LIMITER_OFF, m.name)
-            rcapi.set_setting(m.root_url, auth, config.ADMIN_PASSWORD,
+            rcapi.set_setting(m.root_url, auth, m.admin_pass,
                               config.RC_RATE_LIMITER_SETTING, False)
         if req.diag:
-            if rcapi.get_setting(m.root_url, auth, config.ADMIN_PASSWORD,
+            if rcapi.get_setting(m.root_url, auth, m.admin_pass,
                                  monitoring.RC_METRICS_SETTING) is not True:
                 # Journalled like its two neighbours. Both of these are restored in the
                 # `finally` below, which is precisely the block a SIGKILL does not run
                 # -- so without a note a killed --diag run leaves Rocket.Chat's metrics
                 # endpoint open and the profiler armed, with nothing on disk saying so.
                 metrics_note = journal.record(journal.RC_METRICS_ON, m.name)
-                metrics_changed = rcapi.set_setting(m.root_url, auth, config.ADMIN_PASSWORD,
+                metrics_changed = rcapi.set_setting(m.root_url, auth, m.admin_pass,
                                                     monitoring.RC_METRICS_SETTING, True)
             mongo_prior = mongoprof.start(m.name, req.slowms)
             if mongo_prior is not None:
@@ -217,6 +217,7 @@ def run_loadtest(req: LoadtestReq, emit: Emit = null_emit) -> dict:
                    f" ({'%d seeded users' % len(users) if users else 'admin token'})", phase="k6")
         summary = k6.run(m.name, req.scenario, vus=req.vus, duration=req.duration, ramp=None,
                          token=token, uid=auth.user_id, target=target, users=users or None,
+                         password=m.admin_pass,
                          quiet=True, timeline=req.diag, spike=None, live=req.live)
     except RuntimeError as exc:
         raise DockerError(str(exc)) from exc
@@ -230,14 +231,14 @@ def run_loadtest(req: LoadtestReq, emit: Emit = null_emit) -> dict:
             resources = mon.stop()
         if not limiter_was_off:
             try:
-                rcapi.set_setting(m.root_url, auth, config.ADMIN_PASSWORD,
+                rcapi.set_setting(m.root_url, auth, m.admin_pass,
                                   config.RC_RATE_LIMITER_SETTING, True)
                 journal.clear(limiter_note)
             except Exception:  # noqa: BLE001
                 warn(emit, "could not restore the API rate limiter setting", phase="restore")
         if metrics_changed:
             try:
-                rcapi.set_setting(m.root_url, auth, config.ADMIN_PASSWORD,
+                rcapi.set_setting(m.root_url, auth, m.admin_pass,
                                   monitoring.RC_METRICS_SETTING, False)
                 journal.clear(metrics_note)
             except Exception:  # noqa: BLE001
@@ -334,7 +335,7 @@ def run_capacity(req: CapacityReq, emit: Emit = null_emit) -> dict:
             raise ValidationError(f"bad constrain: {exc}") from exc
     try:
         auth = lifecycle.login(m)
-        token = rcapi.generate_pat(m.root_url, auth, config.ADMIN_PASSWORD,
+        token = rcapi.generate_pat(m.root_url, auth, m.admin_pass,
                                    token_name="rc-repro-loadtest", bypass_2fa=True,
                                    workspace=m.name)
     except Exception as exc:  # noqa: BLE001
@@ -354,7 +355,8 @@ def run_capacity(req: CapacityReq, emit: Emit = null_emit) -> dict:
         sampler = rcmetrics.RCMetricsSampler(m.name, rc_services).start()
         try:
             s = k6.run(m.name, req.scenario, vus=n, duration=req.step_duration, ramp=None,
-                       token=token, uid=auth.user_id, target=target, users=users or None, quiet=True)
+                       token=token, uid=auth.user_id, target=target, users=users or None,
+                       password=m.admin_pass, quiet=True)
         finally:
             rcm = sampler.stop()
         res = slo_mod.evaluate(rules, s)
@@ -385,14 +387,14 @@ def run_capacity(req: CapacityReq, emit: Emit = null_emit) -> dict:
                     applied=[dc_asdict(a) for a in applied])
             except RuntimeError as exc:
                 raise DockerError(f"could not apply constrain: {exc}") from exc
-        limiter_was_off = rcapi.get_setting(m.root_url, auth, config.ADMIN_PASSWORD,
+        limiter_was_off = rcapi.get_setting(m.root_url, auth, m.admin_pass,
                                             config.RC_RATE_LIMITER_SETTING) is False
         if not limiter_was_off:
             limiter_note = journal.record(journal.RATE_LIMITER_OFF, m.name)
-            rcapi.set_setting(m.root_url, auth, config.ADMIN_PASSWORD, config.RC_RATE_LIMITER_SETTING, False)
-        if rcapi.get_setting(m.root_url, auth, config.ADMIN_PASSWORD, monitoring.RC_METRICS_SETTING) is not True:
+            rcapi.set_setting(m.root_url, auth, m.admin_pass, config.RC_RATE_LIMITER_SETTING, False)
+        if rcapi.get_setting(m.root_url, auth, m.admin_pass, monitoring.RC_METRICS_SETTING) is not True:
             metrics_note = journal.record(journal.RC_METRICS_ON, m.name)
-            metrics_changed = rcapi.set_setting(m.root_url, auth, config.ADMIN_PASSWORD,
+            metrics_changed = rcapi.set_setting(m.root_url, auth, m.admin_pass,
                                                 monitoring.RC_METRICS_SETTING, True)
         info(emit, f"capacity search: {req.scenario}, SLO {req.slo}, steps of {req.step_duration}", phase="k6")
         n = req.start
@@ -418,13 +420,13 @@ def run_capacity(req: CapacityReq, emit: Emit = null_emit) -> dict:
     finally:
         if not limiter_was_off:
             try:
-                rcapi.set_setting(m.root_url, auth, config.ADMIN_PASSWORD, config.RC_RATE_LIMITER_SETTING, True)
+                rcapi.set_setting(m.root_url, auth, m.admin_pass, config.RC_RATE_LIMITER_SETTING, True)
                 journal.clear(limiter_note)
             except Exception:  # noqa: BLE001
                 warn(emit, "could not restore the API rate limiter setting", phase="restore")
         if metrics_changed:
             try:
-                rcapi.set_setting(m.root_url, auth, config.ADMIN_PASSWORD, monitoring.RC_METRICS_SETTING, False)
+                rcapi.set_setting(m.root_url, auth, m.admin_pass, monitoring.RC_METRICS_SETTING, False)
                 journal.clear(metrics_note)
             except Exception:  # noqa: BLE001
                 warn(emit, "could not restore the Prometheus metrics setting", phase="restore")
@@ -530,12 +532,13 @@ def bench_one(version: str, profile: str, offline: bool, no_pull: bool, emit: Em
         rcapi.wait_ready(meta.root_url, timeout=300.0,
                          is_alive=lambda: runner.rc_state(name) in ("running", "restarting", "created"))
         boot_s = time.monotonic() - t0
-        auth = lifecycle.finalize(meta, null_emit) or rcapi.login(meta.root_url)
+        auth = lifecycle.finalize(meta, null_emit) or rcapi.login(meta.root_url, password=meta.admin_pass)
         plan = seeder.plan_from(profile)
         info(emit, f"[{version}] seeding ({profile})", phase="seed")
         mon = perf.ResourceMonitor(name).start()
         ts = time.monotonic()
         s = seeder.seed(meta.root_url, auth, plan, log=lambda _m: None,
+                        admin_password=meta.admin_pass,
                         workspace=meta.name)
         seed_total = time.monotonic() - ts
         res = mon.stop()

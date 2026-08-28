@@ -122,7 +122,8 @@ def build_plan(settings_json: Path, *, only: set[str] | None = None) -> Plan:
 
 
 def apply(root_url: str, admin: rcapi.Auth, plan: Plan, *,
-          dry_run: bool = False, log=lambda m: None, workspace: str = "") -> dict:
+          dry_run: bool = False, log=lambda m: None, workspace: str = "",
+          admin_password: str = "") -> dict:
     """Apply the plan. Disables the API rate limiter during the bulk PATCH and
     restores it in a finally. Returns {applied, failed, skipped, failures}."""
     if dry_run:
@@ -130,7 +131,7 @@ def apply(root_url: str, admin: rcapi.Auth, plan: Plan, *,
                 "skipped": len(plan.redacted) + len(plan.denied),
                 "failures": []}
 
-    pw = config.ADMIN_PASSWORD
+    pw = admin_password or config.ADMIN_PASSWORD
     limiter = "API_Enable_Rate_Limiter"
     # Disable the rate limiter for the bulk PATCH. But the dump itself may set
     # this setting — if so its value wins; otherwise restore the prior value.

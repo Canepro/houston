@@ -367,7 +367,7 @@ def _repair(entry: Entry, emit: Emit) -> bool:
         auth = lifecycle.login(meta)
         if auth is None:
             return False
-        return bool(rcapi.set_setting(meta.root_url, auth, config.ADMIN_PASSWORD,
+        return bool(rcapi.set_setting(meta.root_url, auth, meta.admin_pass,
                                      config.RC_RATE_LIMITER_SETTING, True))
     if entry.kind == EMAIL_2FA_OFF:
         from rc_repro import rcapi
@@ -375,7 +375,7 @@ def _repair(entry: Entry, emit: Emit) -> bool:
         auth = lifecycle.login(meta)
         if auth is None:
             return False
-        return bool(rcapi.set_setting(meta.root_url, auth, config.ADMIN_PASSWORD,
+        return bool(rcapi.set_setting(meta.root_url, auth, meta.admin_pass,
                                       EMAIL_2FA_SETTING, True))
     if entry.kind == RC_METRICS_ON:
         from rc_repro import rcapi
@@ -384,7 +384,7 @@ def _repair(entry: Entry, emit: Emit) -> bool:
         auth = lifecycle.login(meta)
         if auth is None:
             return False
-        return bool(rcapi.set_setting(meta.root_url, auth, config.ADMIN_PASSWORD,
+        return bool(rcapi.set_setting(meta.root_url, auth, meta.admin_pass,
                                       monitoring.RC_METRICS_SETTING, False))
     if entry.kind == MONGO_PROFILER_ON:
         from rc_repro.perf import mongoprof

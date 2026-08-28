@@ -639,7 +639,8 @@ def test_pat_endpoint_maps_a_failure_to_not_ready(monkeypatch):
     monkeypatch.setattr(lc, "require_docker", lambda: None)
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
     monkeypatch.setattr(runner_mod, "read_meta",
-                        lambda n: type("M", (), {"name": n, "root_url": "http://x", "extra": {}})())
+                        lambda n: type("M", (), {"name": n, "root_url": "http://x",
+                                                 "extra": {}, "admin_pass": "admin123"})())
     monkeypatch.setattr(lc, "login", lambda m: type("A", (), {"user_id": "u1"})())
     monkeypatch.setattr(rcapi, "generate_pat", lambda *a, **k: "tok_abc")
     r = client().post("/api/repros/x/pat", headers=H, json={})
@@ -658,7 +659,7 @@ def _stub_call_target(monkeypatch):
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
     monkeypatch.setattr(runner_mod, "read_meta",
                         lambda n: type("M", (), {"name": n, "root_url": "http://x:3000",
-                                                 "extra": {}})())
+                                                 "extra": {}, "admin_pass": "admin123"})())
     monkeypatch.setattr(lc, "login", lambda m: type("A", (), {"user_id": "u1", "token": "t1"})())
 
 
@@ -994,6 +995,80 @@ def test_compatibility_is_answerable_before_committing(monkeypatch):
     r = client().post("/api/backups/compatibility", headers=H,
                       json={"bundle": inside})
     assert r.status_code == 200 and r.json()["compatibility"] is None
+
+
+def test_the_rollback_route_confines_its_bundle_like_the_other_two(monkeypatch):
+    """`_confined_backup_in` exists for exactly this and wrapped `/api/restore` and
+    `/api/backups/compatibility` -- this third route was missed, so `bundle` went
+    straight to `Path().expanduser()`. A member+ got the same filesystem oracle the
+    helper's own docstring describes, readable back from `GET /api/jobs/{id}` at
+    readonly+.
+    """
+    import rc_repro.web.app as appmod
+
+    monkeypatch.setattr(lc, "resolve_name", lambda n: n)
+    r = client().post("/api/repros/x/upgrade/rollback", headers=H,
+                      json={"bundle": "/etc/passwd"})
+    assert r.status_code == 400, r.text
+    assert "must be inside" in r.json()["error"], r.text
+
+    # An EMPTY bundle still means "use the one recorded on the workspace", which is
+    # the ordinary way to call this and must not start being refused.
+    submitted: dict = {}
+
+    def fake_submit(self, kind, fn, *a, **k):
+        submitted.update(k)
+        return type("J", (), {"id": "job_1"})()
+    monkeypatch.setattr(appmod.JobManager, "submit", fake_submit)
+    r = client().post("/api/repros/x/upgrade/rollback", headers=H, json={})
+    assert r.status_code == 200, r.text
+    assert submitted.get("bundle") == ""
+
+
+def test_one_members_job_output_is_not_readable_by_another(monkeypatch):
+    """Job results and error text were not scoped to the submitter and sit at
+    readonly+, so any signed-in account could read another user's output -- which for
+    `logs`, `env`, `pat` and `api` is credentials."""
+    import time as _time
+
+    from rc_repro.services import users as usersvc
+
+    _fresh_auth_state()
+    usersvc.add("alice", PASSWORD, role="admin")
+    usersvc.add("bob", "bobs-good-password", role="member")
+    usersvc.add("carol", "carols-good-password", role="member")
+
+    # ONE app: the job registry is per-application (`app.state.jobs`), so separate
+    # create_app() calls would not see each other's jobs and the test would pass
+    # for the wrong reason.
+    app = create_app()
+    job = app.state.jobs.submit("logs",
+                                lambda **_k: {"secret": "LDAP_BIND_PASSWORD"},
+                                label="x", actor="bob")
+    for _ in range(300):
+        if job.status != "running":
+            break
+        _time.sleep(0.01)
+    assert job.status == "done", job.status
+
+    def as_(user, password):
+        c = TestClient(app, base_url="http://localhost")
+        assert c.post("/signin", data={"user": user, "password": password},
+                      follow_redirects=False, headers=H).status_code == 303
+        return c
+
+    # The submitter sees it; an admin sees it; another member does not.
+    assert as_("bob", "bobs-good-password").get(
+        f"/api/jobs/{job.id}", headers=H).status_code == 200
+    assert as_("alice", PASSWORD).get(
+        f"/api/jobs/{job.id}", headers=H).status_code == 200
+    other = as_("carol", "carols-good-password")
+    assert other.get(f"/api/jobs/{job.id}", headers=H).status_code == 404
+    # The live half of the same document is scoped too, or the above is decorative.
+    assert other.get(f"/api/jobs/{job.id}/stream", headers=H).status_code == 404
+    # And it is not merely hidden from the detail route: the listing drops it too.
+    assert [j for j in other.get("/api/jobs", headers=H).json()["jobs"]
+            if j["id"] == job.id] == []
 
 
 def test_compatibility_and_restore_need_a_bundle():
@@ -1708,6 +1783,48 @@ def test_edge_endpoint_reports_each_route_and_whether_it_is_reachable(
     assert by_name["bob-rc8-5-1"]["reachable"] is False, "attached to neither"
 
 
+def test_a_passthrough_route_is_not_reported_unreachable(basic_client, monkeypatch):
+    """SEEN IN A BROWSER, against a name answering 200 from the public internet.
+
+    `reachable` was `workspace_network(n) in attached` -- the right question for a
+    route that names a CONTAINER, which the edge resolves over a shared Docker
+    network. A passthrough route names an ADDRESS and there is no network to join, so
+    the test could never be true and every Kubernetes workspace was reported broken.
+
+    Three places read that one field, and all three were wrong: the header said
+    "edge: 1 unreachable", the rail filed the workspace under "Wants you", and the
+    detail panel said "The edge cannot reach this workspace ... the edge is not on
+    this workspace's network" -- about a name that worked.
+    """
+    from rc_repro.services import edge as edgesvc
+
+    edgesvc.write(edgesvc.Edge(domain="gui.example.com", acme_email="o@e.com"))
+    monkeypatch.setattr(edgesvc, "_docker", lambda *a, **k: type(
+        "P", (), {"returncode": 0, "stdout": ""})())
+    edgesvc.register("composews", "t1.example.com")
+    edgesvc.register("k8sws", "k1.example.com", passthrough="10.0.0.9:31855")
+    monkeypatch.setattr(edgesvc, "running", lambda: True)
+    # The edge is on the COMPOSE workspace's network and on nothing else -- which is
+    # every Kubernetes workspace's normal, permanent state.
+    monkeypatch.setattr(edgesvc, "attached_networks",
+                        lambda: {edgesvc.workspace_network("composews")})
+
+    body = basic_client.get("/api/edge",
+                            headers=_auth("alice", "correct-horse-battery")).json()
+    by_name = {r["name"]: r for r in body["routes"]}
+    assert by_name["composews"]["reachable"] is True
+    assert by_name["composews"]["passthrough"] is False
+    assert by_name["k8sws"]["passthrough"] is True
+    assert by_name["k8sws"]["reachable"] is True, \
+        "a passthrough has no network to be attached to; absence is not a fault"
+
+    # And a container-backed route the edge really cannot reach is still reported.
+    edgesvc.register("orphan", "t2.example.com")
+    body = basic_client.get("/api/edge",
+                            headers=_auth("alice", "correct-horse-battery")).json()
+    assert {r["name"]: r["reachable"] for r in body["routes"]}["orphan"] is False
+
+
 def test_edge_endpoint_says_so_when_there_is_none(basic_client):
     body = basic_client.get("/api/edge",
                             headers=_auth("alice", "correct-horse-battery")).json()
@@ -1751,6 +1868,135 @@ def test_every_api_route_declares_a_minimum_role():
                          f"refused at runtime: {missing}")
 
 
+def test_allow_host_star_does_not_also_trust_every_origin():
+    """`--allow-host '*'` is documented as widening the HOST allow-list -- what a
+    proxy in front of `serve` needs. `_cross_site` resolved Origin through the same
+    closure, so `*` silently disabled the cross-site guard too: the guard whose
+    docstring records a forged `Origin: https://evil.example` streaming a workspace's
+    container log, LDAP bind passwords included.
+    """
+    from rc_repro.services import users as usersvc
+
+    _fresh_auth_state()
+    usersvc.add("alice", PASSWORD, role="admin")
+    app = create_app(allow_hosts=["*"])
+    c = TestClient(app, base_url="http://anything.example")
+    assert c.post("/signin", data={"user": "alice", "password": PASSWORD},
+                  follow_redirects=False,
+                  headers={"Origin": "http://anything.example"}).status_code == 303
+
+    # The Host half still works: that is what `*` is for.
+    assert app.state.host_ok("whatever.example") is True
+    # The Origin half does not follow it. A forged Origin names a host this request
+    # was not addressed to, and that is what makes it cross-site.
+    assert app.state.cross_site({"origin": "https://evil.example",
+                                 "host": "anything.example"}) is True, \
+        "a foreign Origin must still count as cross-site under --allow-host '*'"
+    # ...and the SPA's own same-origin call keeps working, which is the case `*`
+    # exists for and the reason this is not simply an allow-list membership test.
+    assert app.state.cross_site({"origin": "https://anything.example",
+                                 "host": "anything.example"}) is False
+
+
+def test_a_named_allow_host_is_still_a_trusted_origin():
+    """Splitting the two questions must not break the proxy case it exists for: a
+    named host really is ours even when the proxy rewrote Host to something else."""
+    app = create_app(allow_hosts=["rc.example.com"])
+    assert app.state.origin_ok("rc.example.com", "localhost") is True
+    assert app.state.cross_site({"origin": "https://rc.example.com",
+                                 "host": "localhost"}) is False
+    assert app.state.cross_site({"origin": "https://evil.example",
+                                 "host": "localhost"}) is True
+
+
+def test_the_throttle_key_is_the_rightmost_untrusted_hop():
+    """An appending proxy adds the peer it saw to the END of X-Forwarded-For, so the
+    LEFT of the list is attacker-written. Taking `[0]` gave every request its own
+    rate-limit key, and the sign-in throttle -- the only thing bounding password
+    guessing, because scrypt is spent at the endpoint -- never tripped."""
+    from rc_repro.web import app as webapp
+
+    trusted = webapp.parse_trusted(["10.0.0.0/8"])
+    # client -> proxy(10.0.0.5) -> us. The client's own claim is on the left.
+    assert webapp._rightmost_untrusted("1.2.3.4, 10.0.0.5", trusted) == "1.2.3.4"
+    # A rotated forgery on the left cannot displace the real hop.
+    assert webapp._rightmost_untrusted("9.9.9.9, 1.2.3.4, 10.0.0.5",
+                                       trusted) == "1.2.3.4"
+    # Two trusted hops: still the first address neither of them vouched for.
+    assert webapp._rightmost_untrusted("1.2.3.4, 10.0.0.5, 10.0.0.6",
+                                       trusted) == "1.2.3.4"
+    # Everything trusted, or nothing there: keep the socket peer.
+    assert webapp._rightmost_untrusted("10.0.0.5", trusted) == ""
+    assert webapp._rightmost_untrusted("", trusted) == ""
+
+
+def test_the_signin_throttle_is_not_reset_wholesale_by_a_flood():
+    """It `.clear()`ed the whole map past 4096 keys, so a flood from throwaway
+    addresses erased the counter it was tripping -- including the failures bounding
+    a real attempt against a real account."""
+    from rc_repro.web import app as webapp
+
+    webapp._signin_fails.clear()
+    # The flood comes first, so the victim is NEWER than most of it. Under `.clear()`
+    # the victim was wiped regardless of age -- that is the defect. Under
+    # oldest-first eviction the recently-active entry is the one that survives, which
+    # is the entry that matters: an attempt still in progress is by definition recent.
+    for n in range(webapp._SIGNIN_MAX_KEYS):
+        webapp._signin_failed(f"flood-{n}")
+    webapp._signin_failed("victim")
+    webapp._signin_failed("victim")
+    before = len(webapp._signin_fails["victim"])
+    for n in range(webapp._SIGNIN_MAX_KEYS, webapp._SIGNIN_MAX_KEYS + 500):
+        webapp._signin_failed(f"flood-{n}")
+
+    assert "victim" in webapp._signin_fails, \
+        "the flood erased the counter it was competing with"
+    assert len(webapp._signin_fails["victim"]) == before, \
+        "the victim's accumulated failures were reset"
+    assert len(webapp._signin_fails) <= webapp._SIGNIN_MAX_KEYS + 1, "still bounded"
+    webapp._signin_fails.clear()
+
+
+def test_every_websocket_handler_actually_enforces_its_table_entry():
+    """The walk above proves a WS route has a TABLE ENTRY. It cannot prove the
+    handler reads it.
+
+    HTTP routes are covered by `guard`, one middleware for all of them, so an entry
+    is enough. A WebSocket handshake is exempt from that middleware and each handler
+    re-implements the checks -- which is how a forged `Origin` once streamed a
+    workspace's container log, LDAP bind passwords and all. So for WS the table is
+    only half the invariant: a second WS route added with an entry and no in-handler
+    check would pass the walk and be wide open.
+    """
+    import inspect
+
+    from starlette.routing import WebSocketRoute
+
+    from rc_repro.web import app as webapp
+
+    app = create_app()
+    unenforced, checked = [], 0
+    for route in app.routes:
+        if not isinstance(route, WebSocketRoute):
+            continue
+        path = getattr(route, "path", "")
+        if not path.startswith("/api/"):
+            continue
+        checked += 1
+        assert webapp.route_requirement("WS", path) is not None, path
+        src = inspect.getsource(route.endpoint)
+        # The handler must consult the table itself, and it must run the shared
+        # cross-site check rather than its own idea of one.
+        if "route_requirement(" not in src:
+            unenforced.append(f"{path}: never calls route_requirement()")
+        elif "_cross_site(" not in src:
+            unenforced.append(f"{path}: never calls _cross_site()")
+    assert checked, "no WebSocket routes found — this walk would pass vacuously"
+    assert not unenforced, (
+        "these WebSocket handlers have a ROUTE_ROLES entry but do not enforce it, "
+        f"so the table is decorative for them: {unenforced}")
+
+
 def test_a_readonly_user_may_look_but_not_touch(basic_client, monkeypatch):
     from rc_repro.services import users as usersvc
     monkeypatch.setattr(lc, "list_repros", lambda: [])
@@ -1773,6 +2019,67 @@ def test_a_readonly_user_cannot_read_logs_or_env(basic_client, monkeypatch):
     _as(basic_client, "ronly", "read-only-password")
     assert basic_client.get("/api/repros/x/logs", headers=_auth()).status_code == 403
     assert basic_client.get("/api/repros/x/env", headers=_auth()).status_code == 403
+
+
+def test_a_member_cannot_delete_a_name_from_the_shared_edge(basic_client):
+    """A member creates and destroys their OWN workspaces; the box's shared front
+    door is not theirs to edit -- and this one deletes a private key."""
+    from rc_repro.services import users as usersvc
+    usersvc.add("bob", "bobs-good-password", role="member")
+    _as(basic_client, "bob", "bobs-good-password")
+    r = basic_client.delete("/api/edge/hosts/x.example.org?confirm=true",
+                            headers=_auth())
+    assert r.status_code == 403, r.text
+
+
+def test_deleting_an_edge_name_without_confirm_is_a_400_not_a_deletion(basic_client,
+                                                                      tmp_path):
+    """`confirm` is a parameter, not an assumption. A request that forgets it must
+    get told what it would have destroyed, not have it destroyed."""
+    from rc_repro.services import edge as edgesvc
+    edgesvc.write(edgesvc.Edge(acme_email="ops@xyz.com"))
+    edgesvc.register("x", "x.example.org", local=True)
+    edgesvc.issue_local_cert("x.example.org")
+
+    r = basic_client.delete("/api/edge/hosts/x.example.org", headers=_auth())
+    assert r.status_code == 400, r.text
+    assert "PRIVATE KEY" in r.json()["error"]
+    assert (edgesvc.certs_dir() / "x.example.org.crt").is_file()
+
+    r = basic_client.delete("/api/edge/hosts/x.example.org?confirm=true",
+                            headers=_auth())
+    assert r.status_code == 200, r.text
+    assert r.json()["certificate"] is True
+    assert not (edgesvc.certs_dir() / "x.example.org.crt").exists()
+
+
+def test_a_refusal_from_the_edge_delete_becomes_its_status(basic_client):
+    """The `ReproError` -> http_status contract, on the newest route."""
+    from rc_repro.services import edge as edgesvc
+    edgesvc.write(edgesvc.Edge(domain="support.xyz.com", acme_email="ops@xyz.com"))
+    r = basic_client.delete("/api/edge/hosts/support.xyz.com?confirm=true",
+                            headers=_auth())
+    assert r.status_code == 409, r.text          # ConflictError
+    assert "GUI's own name" in r.json()["error"]
+
+
+def test_the_edge_payload_names_certificates_with_no_route(basic_client):
+    """The GUI cannot offer to delete what the payload does not mention, and an
+    operator handed `serve` and no shell has no other way to see it."""
+    import json as _json
+
+    from rc_repro import tls
+    from rc_repro.services import edge as edgesvc
+    edgesvc.write(edgesvc.Edge(acme_email="ops@xyz.com"))
+    edgesvc.register("live", "live.example.org", local=True)
+    tls.acme_dir().mkdir(parents=True, exist_ok=True)
+    (tls.acme_dir() / tls.ACME_FILE).write_text(_json.dumps({"le": {"Certificates": [
+        {"domain": {"main": "live.example.org", "sans": []}},
+        {"domain": {"main": "orphan.example.org", "sans": []}},
+    ]}}), encoding="utf-8")
+
+    body = basic_client.get("/api/edge", headers=_auth()).json()
+    assert body["stale_certs"] == ["orphan.example.org"], body["stale_certs"]
 
 
 def test_a_member_cannot_manage_people(basic_client, monkeypatch):
@@ -2621,7 +2928,11 @@ def test_settings_publishes_what_each_runtime_costs_and_refuses(monkeypatch, tmp
     docker = next(r for r in body["runtimes"] if r["name"] == "docker")
 
     assert docker["unsupported"] == [], "Compose refuses none of them"
-    assert {u["field"] for u in kube["unsupported"]} == {"https", "domain", "fresh"}
+    # `https` LEFT this set when the Kubernetes ingress path landed, and the GUI
+    # follows automatically: `app.js` hides exactly the fields this list names, so the
+    # HTTPS control appeared in the create dialog with no JS change. That is the
+    # property this endpoint exists for -- a copy in JS would still be refusing it.
+    assert {u["field"] for u in kube["unsupported"]} == {"fresh"}
     assert all(u["why"] for u in kube["unsupported"]), "a refusal without a reason"
 
     # The same constants check_capacity spends, per deployment.

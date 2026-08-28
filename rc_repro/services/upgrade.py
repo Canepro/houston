@@ -28,6 +28,7 @@ from packaging.version import InvalidVersion, Version
 from rc_repro import compose, rcapi, runner, versions
 from rc_repro.errors import (ConflictError, DockerError, NotReadyError,
                              ReproError, ValidationError)
+from rc_repro.services import audit as auditsvc
 from rc_repro.services import backup as backupsvc
 from rc_repro.services import lifecycle, topology
 from rc_repro.services.events import Emit, info, null_emit, warn
@@ -281,6 +282,15 @@ def _run_locked(target: str, to_version: str, *, offline: bool, force: bool,
     meta.extra[UPGRADE_FROM_KEY] = p["from_version"]
     if bundle:
         meta.extra[LAST_BACKUP_KEY] = bundle
+    else:
+        # CLEARED, not left alone. `--no-backup` used to leave the PREVIOUS upgrade's
+        # bundle recorded while the line above updated `upgraded_from` regardless, so
+        # the two disagreed and nothing noticed. A later `--rollback` then read that
+        # stale path and restored it with force=True -- which bypasses the downgrade
+        # refusal -- so "undo the last upgrade" dropped the current database and
+        # loaded data from two versions back. 7.0 -> 8.0 --no-backup -> rollback
+        # landed on 6.x data.
+        meta.extra.pop(LAST_BACKUP_KEY, None)
     if not kube:
         # Compose has to be written BEFORE `up`, because `up` reads it. That window
         # is inherent there, and its rollback restores the previous document.
@@ -466,6 +476,19 @@ def _rollback(target: str, previous_compose: str, previous: dict, bundle: str,
 def rollback(name: str, *, bundle: str = "", emit: Emit = null_emit) -> dict:
     """Undo the last upgrade of this repro from its automatic pre-upgrade backup."""
     target = lifecycle.resolve_name(name)
+    # A rollback DROPS THE CURRENT DATABASE and loads an older one, which destroys a
+    # colleague's reproduction state exactly as thoroughly as `down --volumes`. It
+    # was reachable at member+ over HTTP with nothing consulted -- the ownership gate
+    # belongs on every operation that destroys somebody else's work, not only on the
+    # two verbs whose names sound like it.
+    #
+    # BEFORE require_engine, because "you may not do this" does not depend on
+    # whether Docker is up, and answering a refused caller with a Docker error tells
+    # them to go and fix an engine they were never going to be allowed to use.
+    allowed, why = lifecycle.may_destroy(target, auditsvc.actor())
+    if not allowed:
+        auditsvc.record("upgrade-rollback", target, outcome="denied")
+        raise ConflictError(why)
     lifecycle.require_engine(target)          # same reason as require_running
     meta = runner.read_meta(target)
     extra = meta.extra if isinstance(meta.extra, dict) else {}

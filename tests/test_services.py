@@ -1877,7 +1877,7 @@ def test_stop_says_so_when_the_operator_keeps_mongodb_running(monkeypatch):
 
     def cluster(*, operator: bool, pods: list[str]):
         """Stub kubectl for the handful of calls stop_workspace makes."""
-        def run(argv, timeout=None, own=False):
+        def run(argv, timeout=None, own=False, env=None):
             import subprocess as sp
             joined = " ".join(argv)
             if "mongodbcommunity" in joined:
@@ -1960,7 +1960,7 @@ def test_ready_speaks_for_every_probed_pod_not_just_the_first(monkeypatch):
         code for the wrong reason -- output it could not parse -- and would prove
         nothing about the over-claiming this test is here to pin.
         """
-        def run(argv, timeout=None, own=False):
+        def run(argv, timeout=None, own=False, env=None):
             import subprocess as sp
             seen.append(argv)
             rc, payload = result
@@ -2220,8 +2220,21 @@ def _fake_run(mapping):
     """Stub k8s.run: match on a substring of the joined argv."""
     import subprocess as sp
 
-    def run(argv, timeout=None, own=False):
+    def run(argv, timeout=None, own=False, env=None):
+        # `env=` BECAUSE THE REAL ONE TAKES IT. This signature drifted: two probes in
+        # the kubernetes block pass `env=helm_env(...)`, and a fake without the
+        # parameter raises TypeError out of `k8s.preflight`, which doctor's outer
+        # `except` swallows -- so the WHOLE kubernetes section silently vanished from
+        # the report these tests then asserted over. The chart-repo probe has been
+        # unexercised here for that reason; it is wrapped in its own bare `except`, so
+        # nothing ever failed to say so.
         joined = " ".join(argv)
+        # HELM REACHES THE CLUSTER unless a test says otherwise. `helm_reachable`
+        # reports whatever a non-zero exit said, and "no stub" from the fallback below
+        # would put a `fail` row in every doctor test that never mentioned helm. A
+        # mapping that wants an UNREACHABLE helm says so with its own `helm list` key.
+        if joined.startswith("helm list") and not any("helm list" in n for n in mapping):
+            return sp.CompletedProcess(argv, 0, "", "")
         # A NAMESPACE-LABELS QUERY WITH NO STUB MEANS THE NAMESPACE IS NOT THERE,
         # which is what a create test is describing. Answered before the mapping
         # because the natural `"get namespace"` entry matches this query too, and
@@ -2284,7 +2297,7 @@ def test_namespaces_are_selected_by_label_never_by_name(monkeypatch):
 
     seen = []
 
-    def spy(argv, timeout=None, own=False):
+    def spy(argv, timeout=None, own=False, env=None):
         import subprocess as sp
         seen.append(argv)
         # `-o json`: `workspace_namespaces` goes through `ask_list` now, because it
@@ -2324,7 +2337,7 @@ def test_preflight_stops_before_asking_a_cluster_that_is_not_there(monkeypatch):
 
     asked = []
 
-    def spy(argv, timeout=None, own=False):
+    def spy(argv, timeout=None, own=False, env=None):
         import subprocess as sp
         asked.append(" ".join(argv))
         if "get clusters" in " ".join(argv):
@@ -2717,33 +2730,6 @@ def test_storage_is_not_reported_for_a_cluster_nobody_could_reach():
     assert k8s.storage_blocker(unreachable) == ""
 
 
-def test_a_missing_ingress_controller_only_blocks_a_request_that_needs_one():
-    """Conditional on purpose. A workspace reached by port-forward needs no
-    ingress controller, so an absent one is not a fault -- it is only a fault
-    against `--domain`. Warning about it in `doctor` would tell every port-forward
-    user about something that cannot affect them."""
-    from rc_repro.services import k8s
-
-    bare = k8s.Preflight(context="kind-kind", cluster_reachable=True,
-                         provider=k8s.PROVIDER_EXTERNAL)
-    assert k8s.ingress_blocker(bare, wants_domain=False) == "", \
-        "port-forward needs no ingress"
-    msg = k8s.ingress_blocker(bare, wants_domain=True)
-    assert "no ingress controller" in msg
-    assert "does not install one into a cluster it does not own" in msg
-    assert "helm install traefik" in msg, "name what to run"
-
-    # In OUR cluster the same gap is rc-repro's job, so the message differs.
-    ours = k8s.Preflight(context=k8s.CONTEXT, cluster_reachable=True,
-                         provider=k8s.PROVIDER_KIND)
-    assert "rc-repro installs one" in k8s.ingress_blocker(ours, wants_domain=True)
-
-    # Present: silent either way.
-    have = k8s.Preflight(context="c", cluster_reachable=True,
-                         ingress_classes=["traefik"])
-    assert k8s.ingress_blocker(have, wants_domain=True) == ""
-
-
 def test_doctor_never_warns_about_ingress(monkeypatch, tmp_path):
     """This used to assert `doctor` did not MENTION ingress at all, on the reasoning that
     it cannot know whether you are about to ask for `--domain` and most workspaces never
@@ -2753,7 +2739,7 @@ def test_doctor_never_warns_about_ingress(monkeypatch, tmp_path):
     distinguishes their cluster from a kind one.
 
     So it is reported as a FACT and never as a warning. Severity still belongs to whatever
-    needs it, which is `ingress_blocker` refusing a `--domain` that cannot be served.
+    needs it, which is `ensure_ingress` adopting or installing one at create time.
     """
     from rc_repro.services import doctor, k8s
 
@@ -2771,9 +2757,15 @@ def test_doctor_never_warns_about_ingress(monkeypatch, tmp_path):
     }))
     rows = doctor.run_checks()["checks"]
     ingress = [r for r in rows if "ingress" in r["message"].lower()]
-    assert len(ingress) == 1, [r["message"] for r in ingress]
-    assert ingress[0]["status"] == "ok", "an absent ingress controller is not a fault"
-    assert ingress[0]["check"] == "kubernetes-ingress"
+    # SEVERITY, not a row count. Two rows mention it now: the fact itself, and the
+    # `kubernetes-https` summary saying which shape the box is in. Asserting a count
+    # made this test about the report's length rather than about nagging, which is the
+    # property it exists to protect.
+    assert ingress, "the fact is worth reporting — k3s having one is what tells that "\
+                    "cluster apart from a kind one"
+    assert {r["status"] for r in ingress} == {"ok"}, \
+        "an absent ingress controller is not a fault"
+    assert "kubernetes-ingress" in {r["check"] for r in ingress}
     assert "port-forward" in ingress[0]["message"], \
         "and it says why its absence does not matter"
     # Nothing anywhere in the report escalates over it.
@@ -2814,7 +2806,7 @@ def test_isolation_is_derived_from_the_target_not_chosen_at_the_call_site(monkey
 
     seen = []
 
-    def spy(argv, timeout=None, own=False):
+    def spy(argv, timeout=None, own=False, env=None):
         import subprocess as sp
         seen.append((own, " ".join(argv)))
         return sp.CompletedProcess(argv, 0, "ok", "")
@@ -2985,7 +2977,7 @@ def test_creating_a_cluster_never_writes_the_users_kubeconfig(monkeypatch, tmp_p
     monkeypatch.setattr(k8s, "which", lambda t: f"/usr/bin/{t}")
     calls = []
 
-    def spy(argv, timeout=None, own=False):
+    def spy(argv, timeout=None, own=False, env=None):
         import subprocess as sp
         calls.append((own, argv))
         j = " ".join(argv)
@@ -3020,7 +3012,7 @@ def test_a_second_up_reuses_the_cluster_instead_of_racing_to_create_it(monkeypat
     monkeypatch.setattr(k8s, "which", lambda t: f"/usr/bin/{t}")
     created = []
 
-    def spy(argv, timeout=None, own=False):
+    def spy(argv, timeout=None, own=False, env=None):
         import subprocess as sp
         j = " ".join(argv)
         if "get clusters" in j:
@@ -3046,7 +3038,7 @@ def test_a_create_that_lost_a_race_is_success_not_failure(monkeypatch, tmp_path)
     monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "which", lambda t: f"/usr/bin/{t}")
 
-    def spy(argv, timeout=None, own=False):
+    def spy(argv, timeout=None, own=False, env=None):
         import subprocess as sp
         j = " ".join(argv)
         if "get clusters" in j:
@@ -3064,7 +3056,7 @@ def test_a_create_that_lost_a_race_is_success_not_failure(monkeypatch, tmp_path)
     assert k8s.ensure_cluster() == k8s.CONTEXT
 
     # A create that fails for any OTHER reason is terminal, and says why.
-    def broken(argv, timeout=None, own=False):
+    def broken(argv, timeout=None, own=False, env=None):
         import subprocess as sp
         j = " ".join(argv)
         if "get clusters" in j:
@@ -3105,7 +3097,7 @@ def test_deleting_the_cluster_can_only_ever_target_our_own(monkeypatch, tmp_path
     monkeypatch.setattr(k8s, "which", lambda t: f"/usr/bin/{t}")
     seen = []
 
-    def spy(argv, timeout=None, own=False):
+    def spy(argv, timeout=None, own=False, env=None):
         import subprocess as sp
         seen.append(argv)
         j = " ".join(argv)
@@ -3142,7 +3134,7 @@ def test_the_cluster_is_not_taken_out_from_under_a_colleagues_workspace(monkeypa
     monkeypatch.setattr(k8s, "which", lambda t: f"/usr/bin/{t}")
     deleted = []
 
-    def spy(argv, timeout=None, own=False):
+    def spy(argv, timeout=None, own=False, env=None):
         import subprocess as sp
         j = " ".join(argv)
         if "get clusters" in j:
@@ -3197,7 +3189,7 @@ def test_the_replica_set_is_initiated_and_verified_not_assumed(monkeypatch, tmp_
     monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
     scripts = []
 
-    def spy(argv, timeout=None, own=False):
+    def spy(argv, timeout=None, own=False, env=None):
         import subprocess as sp
         j = " ".join(argv)
         if "jsonpath" in j:
@@ -3216,7 +3208,7 @@ def test_the_replica_set_is_initiated_and_verified_not_assumed(monkeypatch, tmp_
     assert "rs.status().ok" in scripts, "it must verify, not trust the exit code"
 
     # A set that is already initiated is success, not failure.
-    def already(argv, timeout=None, own=False):
+    def already(argv, timeout=None, own=False, env=None):
         import subprocess as sp
         j = " ".join(argv)
         if "jsonpath" in j:
@@ -3242,7 +3234,7 @@ def test_an_uninitiated_replica_set_is_reported_as_dead_not_left_to_time_out(
 
     monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
 
-    def never_ok(argv, timeout=None, own=False):
+    def never_ok(argv, timeout=None, own=False, env=None):
         import subprocess as sp
         if "jsonpath" in " ".join(argv):
             return sp.CompletedProcess(argv, 0, "true", "")   # container is up...
@@ -3259,7 +3251,7 @@ def test_an_uninitiated_replica_set_is_reported_as_dead_not_left_to_time_out(
 
     # And MongoDB never becoming ready is equally terminal, naming the command
     # that shows why.
-    def never_ready(argv, timeout=None, own=False):
+    def never_ready(argv, timeout=None, own=False, env=None):
         import subprocess as sp
         return sp.CompletedProcess(argv, 0, "false", "")
 
@@ -3292,7 +3284,7 @@ def test_initiation_waits_for_a_running_pod_not_a_ready_one(monkeypatch, tmp_pat
     monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
     asked = []
 
-    def spy(argv, timeout=None, own=False):
+    def spy(argv, timeout=None, own=False, env=None):
         import subprocess as sp
         joined = " ".join(argv)
         asked.append(joined)
@@ -3343,7 +3335,7 @@ def test_a_failed_create_leaves_no_namespace_nobody_can_see(monkeypatch, tmp_pat
     monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
     deleted = []
 
-    def spy(argv, timeout=None, own=False):
+    def spy(argv, timeout=None, own=False, env=None):
         import subprocess as sp
         joined = " ".join(argv)
         if "get clusters" in joined:
@@ -3572,10 +3564,10 @@ def test_the_port_forward_targets_the_deployment_not_the_service(monkeypatch, tm
         "jsonpath": (0, "Running")}))
     monkeypatch.setattr(k8s.subprocess, "Popen",
                         lambda argv, **kw: spawned.append(argv) or _FakeProc(4242))
-    # `pid_owns_port`, not `forward_reachable`: the code asks whether OUR
+    # `pid_owns_port_exclusively`, not `forward_reachable`: the code asks whether OUR
     # child holds the socket, because "the port answers" is satisfied by a
     # squatter and lost that race 3 times out of 3.
-    monkeypatch.setattr(k8s, "pid_owns_port", lambda *a, **kw: True)
+    monkeypatch.setattr(k8s, "pid_owns_port_exclusively", lambda *a, **kw: True)
     pid = k8s.port_forward("k", namespace="rc-repro-k", context=k8s.CONTEXT,
                            host_port=3010, sleep=lambda _s: None)
     assert pid == 4242
@@ -3607,10 +3599,10 @@ def test_a_dead_port_forward_is_replaced_rather_than_trusted(monkeypatch, tmp_pa
         "jsonpath": (0, "Running")}))
     monkeypatch.setattr(k8s.subprocess, "Popen",
                         lambda argv, **kw: spawned.append(argv) or _FakeProc(77))
-    # `pid_owns_port`, not `forward_reachable`: the code asks whether OUR
+    # `pid_owns_port_exclusively`, not `forward_reachable`: the code asks whether OUR
     # child holds the socket, because "the port answers" is satisfied by a
     # squatter and lost that race 3 times out of 3.
-    monkeypatch.setattr(k8s, "pid_owns_port", lambda *a, **kw: True)
+    monkeypatch.setattr(k8s, "pid_owns_port_exclusively", lambda *a, **kw: True)
     assert k8s.ensure_port_forward("k", namespace="ns", context=k8s.CONTEXT,
                                    host_port=3010, pid=999999999) == 77
     assert spawned, "it trusted a dead pid"
@@ -3693,7 +3685,7 @@ def test_a_cluster_that_outlived_its_kubeconfig_is_reconnected(monkeypatch, tmp_
     monkeypatch.setattr(k8s, "which", lambda t: f"/usr/bin/{t}")
     seen = []
 
-    def spy(argv, timeout=None, own=False):
+    def spy(argv, timeout=None, own=False, env=None):
         import subprocess as sp
         joined = " ".join(argv)
         seen.append(joined)
@@ -3713,7 +3705,7 @@ def test_a_cluster_that_outlived_its_kubeconfig_is_reconnected(monkeypatch, tmp_
 
     # A failed export is terminal and says so, rather than leaving every later
     # kubectl call to fail against localhost:8080.
-    def broken(argv, timeout=None, own=False):
+    def broken(argv, timeout=None, own=False, env=None):
         import subprocess as sp
         joined = " ".join(argv)
         if "get clusters" in joined:
@@ -3832,10 +3824,10 @@ def test_bind_reaches_the_port_forward_instead_of_being_dropped(monkeypatch, tmp
     spawned: list = []
     monkeypatch.setattr(k8s.subprocess, "Popen",
                         lambda argv, **kw: spawned.append(argv) or _FakeProc(9))
-    # `pid_owns_port`, not `forward_reachable`: the code asks whether OUR
+    # `pid_owns_port_exclusively`, not `forward_reachable`: the code asks whether OUR
     # child holds the socket, because "the port answers" is satisfied by a
     # squatter and lost that race 3 times out of 3.
-    monkeypatch.setattr(k8s, "pid_owns_port", lambda *a, **kw: True)
+    monkeypatch.setattr(k8s, "pid_owns_port_exclusively", lambda *a, **kw: True)
 
     k8s.port_forward("n", namespace="ns", context=k8s.CONTEXT, host_port=3000,
                      bind_host="0.0.0.0", sleep=lambda _s: None)
@@ -3864,7 +3856,7 @@ def test_teardown_waits_for_the_namespace_rather_than_claiming_it_is_gone(
     said: list = []
     phases = ["Terminating", "Terminating", ""]
 
-    def spy(argv, timeout=None, own=False):
+    def spy(argv, timeout=None, own=False, env=None):
         import subprocess as sp
         joined = " ".join(argv)
         # ONE query answers both questions now, which is what a cluster actually
@@ -5031,7 +5023,7 @@ def test_a_port_forward_that_never_bound_is_not_recorded_as_a_pid(monkeypatch, t
     # ownership question now, because asking "does the port answer?" is answered
     # `True` by the squatter -- measured, 3 times out of 3, in a tenth of a
     # millisecond, so the warning below never fired in the one scenario it is for.
-    monkeypatch.setattr(k8s, "pid_owns_port", lambda *a, **kw: False)
+    monkeypatch.setattr(k8s, "pid_owns_port_exclusively", lambda *a, **kw: False)
     said: list = []
     pid = k8s.port_forward("k", namespace="ns", context=k8s.CONTEXT, host_port=3010,
                            emit=lambda e: said.append(e.message),
@@ -5042,7 +5034,7 @@ def test_a_port_forward_that_never_bound_is_not_recorded_as_a_pid(monkeypatch, t
     # And the ordinary case still works: child alive and holding its own socket.
     monkeypatch.setattr(k8s.subprocess, "Popen",
                         lambda argv, **kw: _FakeProc(4242))
-    monkeypatch.setattr(k8s, "pid_owns_port", lambda *a, **kw: True)
+    monkeypatch.setattr(k8s, "pid_owns_port_exclusively", lambda *a, **kw: True)
     assert k8s.port_forward("k", namespace="ns", context=k8s.CONTEXT, host_port=3010,
                             sleep=lambda _s: None) == 4242
 
@@ -5270,13 +5262,26 @@ def test_kubernetes_refuses_what_it_would_silently_drop(monkeypatch, tmp_path):
         # had outlived itself while the flag stayed refused; it now travels in an
         # Opaque Secret referenced by `valueFrom`, and is asserted below.
         (req(fresh=True), "--fresh"),
-        (req(https="local"), "--https"),
-        (req(domain="x.example"), "--domain"),
     ]
     for creq, expected in cases:
         with pytest.raises(errors.ValidationError) as caught:
             lc._refuse_unsupported_on_kubernetes(creq)
         assert expected in str(caught.value), f"{expected}: {caught.value}"
+
+    # `--https` HAS LEFT THIS TABLE, and that is the point of the change rather than a
+    # gap in it. A runtime-wide "not supported" cannot say which of four different
+    # things is missing, so it was replaced by refusals about THIS CLUSTER, in
+    # `_kubernetes_tls_plan`: no ingress class, no cert-manager, no reachable :443
+    # Service, or a cluster that is not on this machine. The table's job is to catch
+    # what would be ACCEPTED AND DROPPED, and --https is now honoured.
+    lc._refuse_unsupported_on_kubernetes(req(https="local"))
+
+    # `--domain` HAS ALSO LEFT, and for the same reason: what was missing was an ACME
+    # ClusterIssuer, and that is now one IssuerSpec away from the `ca` one. The table
+    # is down to the one option that is genuinely dropped rather than refused.
+    lc._refuse_unsupported_on_kubernetes(req(domain="x.example",
+                                             acme_email="ops@example.com"))
+    assert [f["field"] for f in lc.unsupported_fields("kubernetes")] == ["fresh"]
 
     # What IS supported must still pass straight through, or this becomes a wall.
     lc._refuse_unsupported_on_kubernetes(req(preset="default", name="x", pin=True,
@@ -5355,6 +5360,1389 @@ def test_a_scenarios_settings_reach_the_rocket_chat_container(monkeypatch):
                               preset_env={"ADMIN_NAME": "Scenario"})
     names = [e["value"] for e in override["extraEnv"] if e["name"] == "ADMIN_NAME"]
     assert names[-1] == "Scenario", names
+
+
+def test_the_chart_value_host_is_a_hostname_and_a_url_is_refused():
+    """The chart CONCATENATES, so a URL here rendered a nonsense ROOT_URL.
+
+    `rocketchat/rocketchat` 7.0.2, templates/chat-deployment.yaml:
+
+        - name: ROOT_URL
+          value: https://{{ .Values.host }}
+
+    and `values_for` took a parameter called `root_url` and assigned it straight to
+    `values["host"]`. Rendered with what `_create_kubernetes` computes:
+
+        $ helm template rocketchat . --set host=http://localhost:32812
+                - name: ROOT_URL
+                  value: https://http://localhost:32812
+
+    `.Values.host` is also the Ingress rule host, so the same value corrupts both
+    the URL Rocket.Chat advertises and the name an ingress would route -- which is
+    exactly what the HTTPS work has to set. Refused rather than normalised: a caller
+    passing a URL here has a bug, and stripping the scheme would hide it.
+    """
+    from rc_repro.services import k8s
+
+    with pytest.raises(errors.ValidationError) as exc:
+        k8s.values_for(rc_version="8.5.1", rc_image="i", microservices=False,
+                       host="http://localhost:32812")
+    assert "bare hostname" in str(exc.value)
+    # A port is the same trap one character smaller.
+    with pytest.raises(errors.ValidationError):
+        k8s.values_for(rc_version="8.5.1", rc_image="i", microservices=False,
+                       host="ticket.rcrepro.localhost:443")
+    # The legitimate shape, which is what the official values.yaml documents.
+    values = k8s.values_for(rc_version="8.5.1", rc_image="i", microservices=False,
+                            host="ticket.rcrepro.localhost")
+    assert values["host"] == "ticket.rcrepro.localhost"
+
+
+def test_a_kubernetes_workspace_advertises_the_url_it_is_reached_on():
+    """This runtime set no ROOT_URL at all, on any workspace it ever made.
+
+    The chart emits one only from `.Values.host`, and nothing passed it -- so
+    Rocket.Chat ran on its own built-in default while every human reached it on an
+    allocated port. ROOT_URL is what absolute links, OAuth callbacks and CORS derive
+    from, so it was wrong for all three. Compose has always set it.
+
+    And never twice: with `host` given, the chart writes ROOT_URL itself, and a
+    second entry from `extraEnv` is a server-side-apply failure rather than an
+    override -- the same `duplicate entries for key` that DEPLOY_PLATFORM produced.
+    """
+    from rc_repro.services import k8s
+
+    plain = k8s.values_for(rc_version="8.5.1", rc_image="i", microservices=False,
+                           root_url="http://localhost:32812")
+    env = {e["name"]: e.get("value") for e in plain["extraEnv"]}
+    assert env.get("ROOT_URL") == "http://localhost:32812", env
+    assert "host" not in plain, "a port-forward workspace has no ingress host"
+
+    # With a name, the chart derives the URL -- so extraEnv must NOT carry one.
+    named = k8s.values_for(rc_version="8.5.1", rc_image="i", microservices=False,
+                           host="ticket.rcrepro.localhost")
+    assert [e for e in named["extraEnv"] if e["name"] == "ROOT_URL"] == [], \
+        "the chart already emits ROOT_URL from `host`; a second entry is a conflict"
+
+    # Asking for both is the caller not knowing which mechanism it wants.
+    with pytest.raises(errors.ValidationError):
+        k8s.values_for(rc_version="8.5.1", rc_image="i", microservices=False,
+                       root_url="http://localhost:1", host="a.example.com")
+
+
+def test_the_kubernetes_create_passes_the_url_it_just_computed(monkeypatch, tmp_path):
+    """`create_workspace` has taken `root_url` since it was written; nothing gave it one.
+
+    So the parameter existed, `values_for` had a branch for it, and the branch was
+    dead on every real create -- which is how a whole runtime shipped with no
+    ROOT_URL. The fix is one keyword, and this is the test that keeps it there.
+    """
+    from rc_repro.services import k8s, topology
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setattr(k8s, "assert_namespace_available", lambda *a, **kw: None)
+    monkeypatch.setattr(lc, "check_capacity", lambda *a, **kw: None)
+    monkeypatch.setattr(lc, "pick_host_port", lambda *a, **kw: 3456)
+    monkeypatch.setattr(lc.versions, "resolve", lambda v, offline=False: type(
+        "R", (), {"rc_version": v, "mongo_tag": "8.0", "rc_image": "img",
+                  "mongo_flavor": "official", "oplog": False, "source": "t"})())
+    seen: dict = {}
+    monkeypatch.setattr(k8s, "create_workspace", lambda **kw: seen.update(kw) or {
+        "context": k8s.CONTEXT, "namespace": "rc-repro-k", "chart_version": "7.0.0",
+        "release": k8s.RELEASE, "port_forward_pid": 0, "bind_host": "",
+        "microservices": False})
+
+    lc._create_kubernetes(lc.CreateReq(version="8.5.1", name="k",
+                                       runtime=topology.KUBERNETES))
+    assert seen.get("root_url") == "http://localhost:3456", \
+        "the create computed a URL and did not pass it, so the chart set none"
+
+
+def test_tearing_down_a_kubernetes_workspace_drops_its_edge_route(monkeypatch, tmp_path):
+    """The Kubernetes branch returned before the line that removes the route.
+
+    Correct while a Kubernetes workspace could not have one. The moment `--https`
+    lands it is a leak with a nasty shape: the route outlives the namespace, so the
+    hostname 502s instead of 404ing -- pointing at a backend rather than at nothing
+    -- and the name can never be reused by anyone else. The Compose branch twenty
+    lines below has always dropped it, for exactly this reason.
+    """
+    from rc_repro.services import edge as edgesvc
+    from rc_repro.services import k8s, topology
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    m = lc.runner.Metadata(name="kws", project="rc-repro-kws", rc_version="8.5.1",
+                           rc_image="i", mongo_tag="8.0", mongo_flavor="",
+                           preset="default", root_url="http://localhost:3001",
+                           host_port=3001, version_source="t",
+                           public_url="https://kws.rcrepro.localhost")
+    topology.stamp(m.extra, topology.KUBERNETES)
+    m.extra["edge"] = True
+    lc.runner.write("kws", "", m)
+    # The route as `edge.register` would have left it.
+    edgesvc.dynamic_dir().mkdir(parents=True, exist_ok=True)
+    route = edgesvc.route_path("kws")
+    route.write_text("# generated\n")
+
+    monkeypatch.setattr(k8s, "workload_exists", lambda *a, **kw: True)
+    monkeypatch.setattr(k8s, "delete_namespace", lambda *a, **kw: True)
+    monkeypatch.setattr(k8s, "remove_operator", lambda *a, **kw: False)
+    monkeypatch.setattr(k8s, "remove_monitoring", lambda *a, **kw: False)
+
+    lc.teardown("kws", volumes=True, confirm=True)
+    assert not route.exists(), \
+        "the namespace went and the edge route stayed, so that name would 502 for ever"
+
+
+def _svc(ns, name, kind, *, port=443, node_port=None, address=""):
+    """One Service, shaped as `kubectl get svc -A -o json` really returns it."""
+    entry = {"port": port, "name": "https"}
+    if node_port is not None:
+        entry["nodePort"] = node_port
+    doc = {"metadata": {"namespace": ns, "name": name},
+           "spec": {"type": kind, "ports": [entry]}}
+    if address:
+        doc["status"] = {"loadBalancer": {"ingress": [{"ip": address}]}}
+    return doc
+
+
+def _svc_reader(monkeypatch, items, *, rc=0, stderr=""):
+    """Stub the ONE seam every cluster read goes through, and record the argv."""
+    import subprocess as sp
+
+    from rc_repro.services import k8s
+
+    seen: list[list[str]] = []
+
+    def spy(argv, timeout=None, own=False, env=None):
+        seen.append(argv)
+        if "nodes" in argv:
+            body = {"items": [{"status": {"addresses": [
+                {"type": "Hostname", "address": "docker-01"},
+                {"type": "InternalIP", "address": "172.16.0.2"}]}}]}
+            return sp.CompletedProcess(argv, 0, json.dumps(body), "")
+        return sp.CompletedProcess(argv, rc, json.dumps({"items": items}) if not rc
+                                  else "", stderr)
+
+    monkeypatch.setattr(k8s, "run", spy)
+    return seen
+
+
+def test_the_ingress_endpoint_is_the_service_reachable_from_outside(monkeypatch):
+    """Publishing :443 is not enough to be an ingress, and the first real cluster said so.
+
+    Asked on this box's k3s, THREE Services publish 443 -- `default/kubernetes` (the
+    API server), `kube-system/metrics-server` and `kube-system/traefik` -- and only
+    the last is the ingress. Both others are ClusterIP, which is not merely unrouted
+    from outside but unroutable: a virtual IP realised by kube-proxy's netfilter
+    rules on the node. So a ClusterIP cannot be a front door whatever port it
+    publishes, and reachability is what separates them.
+
+    Found by the ambiguity guard firing on a healthy cluster, which is the guard
+    doing its job -- the alternative was picking the API server and passing a
+    workspace's TLS through to it.
+    """
+    from rc_repro.services import k8s
+
+    _svc_reader(monkeypatch, [
+        _svc("default", "kubernetes", "ClusterIP"),
+        _svc("kube-system", "metrics-server", "ClusterIP"),
+        _svc("kube-system", "traefik", "LoadBalancer", node_port=31123,
+             address="172.16.0.2"),
+    ])
+    monkeypatch.setattr(k8s, "is_local_address", lambda ip: ip == "172.16.0.2")
+    ep = k8s.ingress_endpoint("default")
+    assert (ep.address, ep.port) == ("172.16.0.2", 443), ep
+    assert ep.source == "loadbalancer" and ep.service == "kube-system/traefik", ep
+    assert ep.local is True, "k3s's ServiceLB address IS one of this host's own"
+    assert str(ep) == "172.16.0.2:443", "the shape a passthrough route needs"
+
+
+def test_a_nodeport_is_a_real_endpoint_and_not_a_degraded_one(monkeypatch):
+    """`k8s-https.md` §2 calls NodePort "a fallback for a cluster with no
+    LoadBalancer address at all -- not the k3s path", and then its own acceptance
+    test ran through one, because it had to.
+
+    Every LoadBalancer Service carries a nodePort anyway, so this is an answer rather
+    than a consolation -- and it is THE answer on a cluster whose ingress has been
+    moved off the host ports, which is exactly what `doctor` tells a k3s user to do
+    when the cluster is taking :443 from the edge.
+    """
+    from rc_repro.services import k8s
+
+    _svc_reader(monkeypatch, [
+        _svc("kube-system", "traefik", "NodePort", node_port=31123),
+    ])
+    monkeypatch.setattr(k8s, "is_local_address", lambda ip: True)
+    ep = k8s.ingress_endpoint("default")
+    assert (ep.address, ep.port) == ("172.16.0.2", 31123), ep
+    assert ep.source == "nodeport", ep
+
+
+def test_a_cluster_that_could_not_be_asked_is_not_a_cluster_without_an_ingress(monkeypatch):
+    """The module's oldest rule, at a new call site.
+
+    Returning None for a refused read would make "your cluster has no ingress
+    controller" the message for an expired credential, a wrong context or an
+    unreachable API server -- and send the reader to install something they already
+    have. `Answer.require` is what refuses to guess.
+    """
+    from rc_repro.services import k8s
+
+    _svc_reader(monkeypatch, [], rc=1,
+                stderr="Error in configuration: context was not found")
+    with pytest.raises(errors.DockerError) as exc:
+        k8s.ingress_endpoint("nope")
+    assert "refusing to guess" in str(exc.value)
+
+
+def test_two_candidate_ingresses_are_reported_rather_than_guessed(monkeypatch):
+    """Kubernetes does not link an IngressClass to the Service that serves it -- the
+    class names a controller string and nothing else. So with two reachable Services
+    on :443 there is no answer, and picking the first would work on every cluster
+    anybody tests and silently pass one workspace's TLS to the wrong ingress on the
+    cluster where it mattered."""
+    from rc_repro.services import k8s
+
+    _svc_reader(monkeypatch, [
+        _svc("kube-system", "traefik", "LoadBalancer", address="172.16.0.2"),
+        _svc("ingress-nginx", "controller", "LoadBalancer", address="172.16.0.3"),
+    ])
+    with pytest.raises(errors.ConflictError) as exc:
+        k8s.ingress_endpoint("default")
+    assert "traefik" in str(exc.value) and "controller" in str(exc.value)
+    assert "port-forward" in str(exc.value), "say what to do instead"
+
+
+def test_a_cluster_with_no_reachable_ingress_answers_none(monkeypatch):
+    """Absence, asserted by the cluster, is a fact and safe to act on -- as distinct
+    from the refused read above. kind ships no ingress controller at all."""
+    from rc_repro.services import k8s
+
+    _svc_reader(monkeypatch, [_svc("default", "kubernetes", "ClusterIP")])
+    assert k8s.ingress_endpoint("default") is None
+
+
+def test_services_are_asked_for_across_every_namespace(monkeypatch):
+    """`-A`, and it must come AFTER the subcommand.
+
+    Without it kubectl reads the CURRENT namespace, so the ingress -- which lives in
+    `kube-system` -- is invisible and the cluster reads as having none: an empty,
+    exit-0, entirely believable wrong answer. And `--all-namespaces` belongs to `get`
+    rather than being global, so placed before it kubectl answers "flags cannot be
+    placed before plugin name: --context". Both were live bugs, in that order.
+    """
+    from rc_repro.services import k8s
+
+    seen = _svc_reader(monkeypatch, [
+        _svc("kube-system", "traefik", "LoadBalancer", address="10.0.0.9")])
+    k8s.ingress_endpoint("default")
+    argv = seen[0]
+    assert "-A" in argv, argv
+    assert argv.index("-A") > argv.index("get"), \
+        "kubectl refuses --all-namespaces placed before the subcommand"
+
+
+# --- --https on Kubernetes: the refusals, which are the feature -------------------
+
+def _kube_tls_env(monkeypatch, *, ingress=("traefik",), cert_manager=True,
+                  distribution="k3s", endpoint="present", claims=(),
+                  ingress_class=None):
+    """Stub the cluster reads `_kubernetes_tls_plan` makes. Nothing runs kubectl.
+
+    That sentence was aspirational. `ensure_ingress` was NOT stubbed here -- each
+    test was expected to do it -- and three did not, so they called the real one,
+    which reads IngressClasses through kubectl. On a box with a reachable cluster
+    that returns a class and the tests pass; on a box without one it raises
+
+        DockerError: could not read the IngressClasses in cluster 'default' ...
+        refusing to guess
+
+    and they fail. So they passed here and failed on a clean machine, which is the
+    worst way for a test to be wrong: the suite was green wherever it was written.
+
+    `ingress_class` is what `ensure_ingress` returns -- by default the first class
+    the cluster is said to have, which is what adopting one does. Pass it explicitly
+    to describe an INSTALL, where the class that appears is not the one the earlier
+    probe saw.
+    """
+    from rc_repro.services import k8s
+
+    pre = k8s.Preflight(context="default", cluster_reachable=True,
+                        ingress_classes=list(ingress), distribution=distribution,
+                        provider=k8s.PROVIDER_EXTERNAL)
+    monkeypatch.setattr(k8s, "preflight", lambda ctx="": pre)
+    _cls = ingress_class if ingress_class is not None else (
+        list(ingress)[0] if ingress else "traefik")
+    monkeypatch.setattr(k8s, "ensure_ingress", lambda **kw: _cls)
+    # And helm's own reachability, for the same reason: it shells out, so a box with
+    # a cluster answers "" and a box without one answers with an error that refuses
+    # the create.
+    monkeypatch.setattr(k8s, "helm_reachable", lambda ctx: "")
+    monkeypatch.setattr(k8s, "cert_manager_installed", lambda ctx: cert_manager)
+    # Adopt-or-install is exercised in its own tests; here it must not reach a cluster.
+    monkeypatch.setattr(k8s, "ensure_cert_manager", lambda **kw: None)
+    ep = (k8s.IngressEndpoint(address="172.16.0.2", port=443, source="loadbalancer",
+                              service="kube-system/traefik", local=True)
+          if endpoint == "present" else None)
+    monkeypatch.setattr(k8s, "ingress_endpoint", lambda ctx, **kw: ep)
+    monkeypatch.setattr(k8s, "host_port_claim", lambda ctx, **kw: (
+        k8s.PortClaim(context=ctx, service="kube-system/traefik",
+                      address="172.16.0.2", ports=list(claims)) if claims else None))
+    return k8s.ClusterPlan(context="default", distribution=distribution, create=False)
+
+
+def _local_spec(host="ws.rcrepro.localhost"):
+    from rc_repro import tls as tlsmod
+    return tlsmod.TlsSpec(mode=tlsmod.MODE_LOCAL, host=host, port=443)
+
+
+def test_https_on_kubernetes_installs_an_ingress_when_the_cluster_has_none(monkeypatch):
+    """Adopt what is there, install what is not -- and the order is the point.
+
+    The ingress controller is the component a support case is usually about, so a
+    cluster already running nginx keeps running nginx. Installing is only for a cluster
+    that has NONE: k3s with `--disable traefik`, a bare kubeadm, or rc-repro's own
+    fresh kind cluster, where `--https` used to be a dead end.
+
+    This replaced a blanket refusal, and with it the `plan.create` refusal: a cluster
+    that does not exist yet is now created and filled in rather than turned away.
+    """
+    from rc_repro import tls as tlsmod
+    from rc_repro.services import k8s
+
+    # Already has one: the plan uses that class.
+    plan = _kube_tls_env(monkeypatch, ingress=("traefik",))
+    ktls = lc._kubernetes_tls_plan(lc.CreateReq(version="8.5.1", https="local"),
+                                   _local_spec(), plan)
+    assert ktls.ingress_class == "traefik"
+
+    # Had none: the plan must use what was INSTALLED, not what the earlier probe saw.
+    # Reading `pre.ingress_classes` after an install finds nothing -- the class is a
+    # separate object that appears a moment behind the release.
+    plan = _kube_tls_env(monkeypatch, ingress=(), ingress_class="nginx")
+    ktls = lc._kubernetes_tls_plan(lc.CreateReq(version="8.5.1", https="local"),
+                                   _local_spec(), plan)
+    assert ktls.ingress_class == "nginx"
+
+    # A cluster that does not exist yet is created, not refused. `ensure_kubeconfig` is
+    # what makes it, and the plan then probes the cluster it just brought up.
+    made: list = []
+    monkeypatch.setattr(k8s, "ensure_kubeconfig",
+                        lambda plan, emit=None: made.append(plan.context) or "default")
+    unmade = k8s.ClusterPlan(context="default", distribution="kind", create=True)
+    ktls = lc._kubernetes_tls_plan(lc.CreateReq(version="8.5.1", https="local"),
+                                   _local_spec(), unmade)
+    assert made == ["default"], "the cluster has to exist before it can be asked"
+    assert ktls.ingress_class == "nginx"
+
+    # cert-manager is no longer a refusal either: the guide lists it as a prerequisite
+    # AND gives the command, so rc-repro runs the documented step. Requiring it by hand
+    # while installing the ingress automatically was an inconsistency with no reason.
+    acme = tlsmod.TlsSpec(mode=tlsmod.MODE_ACME, host="a.example.com", port=443,
+                          acme_email="ops@example.com")
+    nocm = _kube_tls_env(monkeypatch, cert_manager=False)
+    made: list[str] = []
+    monkeypatch.setattr(k8s, "ensure_cert_manager",
+                        lambda **kw: made.append(kw["context"]))
+    lc._kubernetes_tls_plan(lc.CreateReq(version="8.5.1", domain="a.example.com"),
+                            acme, nocm)
+    assert made == ["default"], "cert-manager is installed, not demanded"
+
+
+def test_cert_manager_is_adopted_or_installed_like_the_ingress(monkeypatch):
+    """The guide lists cert-manager as a prerequisite AND gives the command, so
+    rc-repro runs the documented step rather than demanding it.
+
+    Requiring it by hand while installing the ingress controller automatically was an
+    inconsistency with no reason behind it -- both are things the guide tells an
+    operator to install, and both are now adopt-or-install.
+
+    Installed BY KUBECTL as the guide does it, and that is load-bearing rather than
+    stylistic: the static manifest has no `startupapicheck` and no Job at all, so two
+    of the seven findings recorded against this work cannot arise -- nothing can fail a
+    post-install hook, and the `crds.enabled`-versus-`installCRDs` trap has nowhere to
+    happen.
+    """
+    import subprocess as sp
+
+    from rc_repro.services import k8s
+
+    # Already there: adopted, nothing run.
+    ran: list[list[str]] = []
+    monkeypatch.setattr(k8s, "cert_manager_installed", lambda ctx: True)
+    monkeypatch.setattr(k8s, "run", lambda argv, **kw: ran.append(argv))
+    k8s.ensure_cert_manager(context="c", distribution="k3s")
+    assert ran == [], "nothing may be applied over a cert-manager already installed"
+
+    # Absent on a local cluster: applied, then waited for.
+    seen = {"n": 0}
+
+    def present(ctx):
+        seen["n"] += 1
+        return seen["n"] > 1
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(k8s, "cert_manager_installed", present)
+    monkeypatch.setattr(k8s, "run", lambda argv, **kw: calls.append(argv)
+                        or sp.CompletedProcess(argv, 0, "", ""))
+    k8s.ensure_cert_manager(context="c", distribution="kind", sleep=lambda s: None)
+    apply = next(c for c in calls if "apply" in c)
+    assert apply[:2] == ["kubectl", "--context"], apply
+    assert any(a.endswith("cert-manager.yaml") for a in apply), apply
+    assert not any("helm" in a for a in apply), "the guide uses kubectl, not helm"
+    # The WEBHOOK, not just the apply: an issuer created before it is serving is
+    # accepted and then never reconciled.
+    waited = [c for c in calls if "rollout" in c]
+    assert len(waited) == len(k8s.CERT_MANAGER_DEPLOYMENTS), waited
+
+
+def test_cert_manager_is_not_installed_into_somebody_elses_cluster(monkeypatch):
+    """Six CRDs and an admission webhook change what a cluster IS, for every workload
+    in it -- not something to do to a managed cluster on the way to booting a repro.
+    There it names the command, and adopts as soon as it is there."""
+    from rc_repro.services import k8s
+
+    monkeypatch.setattr(k8s, "cert_manager_installed", lambda ctx: False)
+    monkeypatch.setattr(k8s, "run", lambda *a, **kw: pytest.fail("must not install"))
+    with pytest.raises(errors.PreflightError) as exc:
+        k8s.ensure_cert_manager(context="prod", distribution="eks")
+    msg = str(exc.value)
+    assert "not on this machine" in msg
+    assert "kubectl apply -f" in msg and "cert-manager.yaml" in msg, msg
+    assert "adopts it as soon as it is there" in msg, "say what would change the answer"
+    # Unknown locality must not read as local.
+    monkeypatch.setattr(k8s, "distribution_of", lambda ctx: "")
+    with pytest.raises(errors.PreflightError):
+        k8s.ensure_cert_manager(context="prod", distribution="")
+
+
+def test_cert_manager_applied_but_never_answering_is_a_failure(monkeypatch):
+    """`kubectl apply` returns as soon as the objects are accepted. What matters is
+    whether the cluster can issue a Certificate, which is the CRD being there."""
+    import subprocess as sp
+
+    from rc_repro.services import k8s
+
+    monkeypatch.setattr(k8s, "cert_manager_installed", lambda ctx: False)
+    monkeypatch.setattr(k8s, "run",
+                        lambda argv, **kw: sp.CompletedProcess(argv, 0, "", ""))
+    monkeypatch.setattr(k8s, "CERT_MANAGER_TRIES", 2)
+    with pytest.raises(errors.CreateFailedError) as exc:
+        k8s.ensure_cert_manager(context="c", distribution="kind", sleep=lambda s: None)
+    assert "CRDs never appeared" in str(exc.value)
+
+
+def test_https_on_kubernetes_will_not_send_the_ca_key_to_a_remote_cluster(monkeypatch):
+    """A `ca` ClusterIssuer means rc-repro's CA PRIVATE KEY in a cluster Secret.
+
+    `tls_local.py` says what that key is: it "can mint a certificate for any name the
+    browser will trust". On this machine's own cluster that is the same trust boundary
+    as the box, which already holds the key at 0600. On a managed cluster it is not,
+    and there is a better answer that needs no CA at all.
+
+    An `AuthorityGateError`, not a validation failure: the input is fine and the
+    environment is fine, and what is missing is a decision rc-repro is not entitled
+    to make.
+    """
+    plan = _kube_tls_env(monkeypatch, distribution="eks")
+    with pytest.raises(errors.AuthorityGateError) as exc:
+        lc._kubernetes_tls_plan(lc.CreateReq(version="8.5.1", https="local"),
+                                _local_spec(), plan)
+    assert "CA private key" in str(exc.value)
+    assert "--domain" in str(exc.value), "name the alternative that needs no CA"
+    # Unknown must not read as local: the question is whether a key may leave the box.
+    plan = _kube_tls_env(monkeypatch, distribution="")
+    with pytest.raises(errors.AuthorityGateError):
+        lc._kubernetes_tls_plan(lc.CreateReq(version="8.5.1", https="local"),
+                                _local_spec(), plan)
+
+
+def test_https_on_kubernetes_refuses_when_nothing_can_route_to_the_name(monkeypatch):
+    """An ingress CLASS with no reachable Service is a controller nothing outside the
+    cluster can reach. The workspace would install, the Ingress would exist, the
+    certificate would issue, and the name would answer nothing."""
+    plan = _kube_tls_env(monkeypatch, endpoint=None)
+    with pytest.raises(errors.PreflightError) as exc:
+        lc._kubernetes_tls_plan(lc.CreateReq(version="8.5.1", https="local"),
+                                _local_spec(), plan)
+    assert "no Service publishing :443" in str(exc.value)
+
+
+def test_the_https_plan_reports_whether_the_cluster_already_owns_443(monkeypatch):
+    """Two topologies, both normal, and they need different things.
+
+    k3s's ServiceLB claims host :80/:443 by hostPort DNAT, so the name reaches the
+    cluster's ingress with no edge involved. Anywhere else the edge must own :443 and
+    pass the name through. Measured rather than assumed, because getting it wrong
+    either requires an edge that is not needed or omits one that is.
+    """
+    # THE CLAIM HAS TO BE TRUE FOR THIS NAME. Holding host :443 is not the same as
+    # being where the workspace's hostname points, and this asserted only the first:
+    # k3s ServiceLB claims 172.16.0.2 while `<name>.rcrepro.localhost` resolves to
+    # loopback, klipper's DNAT is IPv4-only, and the EDGE answers there -- so the
+    # https URL rc-repro printed returned 404. Both directions are pinned now.
+    plan = _kube_tls_env(monkeypatch, claims=(80, 443))
+    monkeypatch.setattr(lc, "_name_reaches", lambda host, claim: True)
+    ktls = lc._kubernetes_tls_plan(lc.CreateReq(version="8.5.1", https="local"),
+                                   _local_spec(), plan)
+    assert ktls.cluster_owns_443 is True
+    assert ktls.ingress_class == "traefik"
+    assert str(ktls.endpoint) == "172.16.0.2:443"
+
+    # Same claim, but the name does not resolve to the ingress: through the edge.
+    plan = _kube_tls_env(monkeypatch, claims=(80, 443))
+    monkeypatch.setattr(lc, "_name_reaches", lambda host, claim: False)
+    assert lc._kubernetes_tls_plan(lc.CreateReq(version="8.5.1", https="local"),
+                                   _local_spec(), plan).cluster_owns_443 is False, \
+        "a name that resolves elsewhere is not served by the cluster, claim or no claim"
+
+    plan = _kube_tls_env(monkeypatch, claims=())
+    assert lc._kubernetes_tls_plan(lc.CreateReq(version="8.5.1", https="local"),
+                                    _local_spec(), plan).cluster_owns_443 is False
+
+
+def test_a_loopback_name_is_not_reached_by_a_cluster_on_a_host_address():
+    """`_name_reaches` on its own, because the decision above turns on it.
+
+    The real resolver, no stubs: `*.rcrepro.localhost` is loopback by construction
+    and a ServiceLB address is not, which is the pairing that produced a 404 from a
+    URL the create had just printed as ready.
+    """
+    import types
+
+    claim = types.SimpleNamespace(address="172.16.0.2", ports=[80, 443])
+    assert lc._name_reaches("ws.rcrepro.localhost", claim) is False
+    assert lc._name_reaches("localhost", claim) is False
+    # Unresolvable is NOT a mismatch: a `--domain` whose DNS has not propagated is
+    # the normal state of a name being set up, and must not be moved off the cluster
+    # for a reason that stops being true in minutes.
+    assert lc._name_reaches("no-such-host.invalid", claim) is True
+    # A claim with no address cannot be reached by anything.
+    assert lc._name_reaches("localhost", types.SimpleNamespace(address="")) is False
+
+
+def test_a_domain_on_kubernetes_plans_an_acme_issuer(monkeypatch):
+    """`--https` and `--domain` are the same code path with a different ClusterIssuer,
+    which is what the official values.yaml already implies -- the ingress block is
+    byte-identical and only the annotation's value differs.
+
+    Staging gets its own issuer NAME rather than a flag on one issuer:
+    `privateKeySecretRef` holds the ACME ACCOUNT KEY, and pointing a production order
+    at a staging account fails in a way that names neither. `tls.py` separates its
+    storage file for the same reason.
+    """
+    from rc_repro import tls as tlsmod
+    from rc_repro.services import k8s
+
+    plan = _kube_tls_env(monkeypatch)
+    spec = tlsmod.TlsSpec(mode=tlsmod.MODE_ACME, host="a.example.com", port=443,
+                          acme_email="ops@example.com")
+    ktls = lc._kubernetes_tls_plan(lc.CreateReq(version="8.5.1",
+                                                domain="a.example.com"), spec, plan)
+    assert ktls.issuer.mode == "acme"
+    assert ktls.issuer.name == k8s.ACME_ISSUER
+    assert ktls.issuer.directory == k8s.ACME_PRODUCTION
+    assert ktls.issuer.acme_email == "ops@example.com"
+
+    staging = tlsmod.TlsSpec(mode=tlsmod.MODE_ACME, host="a.example.com", port=443,
+                             acme_email="ops@example.com", acme_staging=True)
+    st = lc._kubernetes_tls_plan(lc.CreateReq(version="8.5.1",
+                                              domain="a.example.com"), staging, plan)
+    assert st.issuer.name == k8s.ACME_ISSUER_STAGING, "a separate ACME account"
+    assert st.issuer.directory == k8s.ACME_STAGING
+
+
+def test_a_domain_needs_no_local_cluster_because_no_ca_key_leaves_the_box(monkeypatch):
+    """The asymmetry that makes `--domain` the answer `--https`'s refusal points at.
+
+    A `ca` issuer holds rc-repro's CA private key, which can mint a certificate for
+    any name this box trusts -- so it does not go into somebody else's cluster. An
+    ACME issuer holds a Let's Encrypt ACCOUNT key, which is the cluster's own and
+    mints nothing here. So a managed cluster refuses `--https` and accepts `--domain`.
+    """
+    from rc_repro import tls as tlsmod
+
+    plan = _kube_tls_env(monkeypatch, distribution="eks")
+    with pytest.raises(errors.AuthorityGateError):
+        lc._kubernetes_tls_plan(lc.CreateReq(version="8.5.1", https="local"),
+                                _local_spec(), plan)
+    acme = tlsmod.TlsSpec(mode=tlsmod.MODE_ACME, host="a.example.com", port=443,
+                          acme_email="ops@example.com")
+    ktls = lc._kubernetes_tls_plan(lc.CreateReq(version="8.5.1",
+                                                domain="a.example.com"), acme, plan)
+    assert ktls.issuer.mode == "acme", "the same cluster is fine for a public name"
+
+
+def test_the_acme_issuer_is_the_official_guides_own_shape():
+    """From docs.rocket.chat/docs/deploy-with-kubernetes, with two deliberate
+    departures, both stated where the manifest is built:
+
+    * `ingressClassName` rather than the guide's `class`, which is the deprecated
+      spelling of the same field. Measured: an issuer written the guide's way reached
+      `Ready=True reason=ACMEAccountRegistered` on cert-manager 1.21, so this is about
+      not inheriting a deprecation.
+    * http01 and NOT tls-alpn -- cert-manager does not implement tls-alpn at all,
+      which is why the challenge differs from the Compose path's default.
+    """
+    import yaml as _yaml
+
+    from rc_repro.services import k8s
+
+    doc = _yaml.safe_load(k8s.acme_issuer_manifest(
+        k8s.IssuerSpec(mode="acme", acme_email="ops@example.com"),
+        ingress_class="traefik"))
+    acme = doc["spec"]["acme"]
+    assert acme["server"] == k8s.ACME_PRODUCTION
+    assert acme["email"] == "ops@example.com"
+    assert acme["privateKeySecretRef"]["name"].endswith("-account-key")
+    assert acme["solvers"] == [{"http01": {"ingress": {"ingressClassName": "traefik"}}}]
+    assert "tlsALPN01" not in str(acme), "cert-manager does not implement it"
+
+
+def test_force_does_not_switch_the_memory_preflight_off(monkeypatch, tmp_path):
+    """`check_capacity` has a `--force` branch that WARNS and proceeds, added because
+    "this is the guard that exists after an OOM took out a 10 GB host: overriding it
+    has to stay visible".
+
+    The caller excluded force from the call entirely, so for a new workspace the
+    function was never reached and the loud override was a silent one.
+    """
+    from rc_repro.services import lifecycle as lcsvc
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    calls: list = []
+    monkeypatch.setattr(lcsvc, "check_capacity",
+                        lambda *a, **k: calls.append(True))
+    monkeypatch.setattr(lcsvc.runner, "up", lambda *a, **k: 0)
+    monkeypatch.setattr(lcsvc.runner, "down", lambda *a, **k: 0)
+
+    for force in (False, True):
+        calls.clear()
+        try:
+            lcsvc.create_repro(lcsvc.CreateReq(version="8.5.1", name=f"cap{int(force)}",
+                                               force=force))
+        except Exception:               # noqa: BLE001 - the boot is not the subject
+            pass
+        assert calls, f"check_capacity was never called with force={force}"
+
+
+def test_a_half_written_workspace_is_a_404_not_a_traceback(tmp_path, monkeypatch):
+    """`runner.write` writes two files, each atomically; the PAIR is not atomic. A
+    kill between them left a directory `exists()` accepts and `read_meta` could not
+    read, and the bare FileNotFoundError escaped the ReproError contract -- in
+    `serve` a 500 with a traceback, because detail() runs on the request thread.
+    """
+    from rc_repro import runner as runnersvc
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    ws = runnersvc.workspace("halfwritten")
+    ws.mkdir(parents=True)
+    (ws / "docker-compose.yml").write_text("services: {}\n")
+
+    assert runnersvc.exists("halfwritten"), "precondition: it looks like a workspace"
+    with pytest.raises(errors.MissingRecordError) as exc:
+        runnersvc.read_meta("halfwritten")
+    assert exc.value.http_status == 404
+    assert "down --name halfwritten" in str(exc.value), "must say how to remove it"
+    # Still a FileNotFoundError, so the callers that already skip on that keep working.
+    assert isinstance(exc.value, FileNotFoundError)
+    assert [m.name for m in runnersvc.list_meta()] == []
+
+
+def test_the_record_is_written_before_the_compose_file(tmp_path, monkeypatch):
+    """Which half survives a kill is decided by this order. The record is what makes
+    a directory a workspace; the compose document is regenerated by `up` anyway."""
+    from rc_repro import runner as runnersvc
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    order: list[str] = []
+    real = runnersvc.atomic_write
+    monkeypatch.setattr(runnersvc, "atomic_write",
+                        lambda p, c, **k: order.append(p.name) or real(p, c, **k))
+    meta = runnersvc.Metadata(name="ordered", project="p", rc_version="8.5.1",
+                              rc_image="i", mongo_tag="7.0", mongo_flavor="official",
+                              preset="default", root_url="http://localhost:3000",
+                              host_port=3000, version_source="x")
+    runnersvc.write("ordered", "services: {}\n", meta)
+    assert order[:2] == ["repro.json", "docker-compose.yml"], order
+
+
+def test_a_kubernetes_workspace_directory_is_restricted_like_every_other(tmp_path,
+                                                                         monkeypatch):
+    """`_restrict` lives in `runner.write`, and the Kubernetes path wrote repro.json
+    with a bare `atomic_write` -- so the 0700 directory that `write`'s own comment
+    calls "what does the work" was absent on the one runtime that also writes
+    `kubernetes/values.yaml` with ADMIN_PASS in it.
+    """
+    from rc_repro import runner as runnersvc
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    meta = runnersvc.Metadata(name="kube", project="p", rc_version="8.5.1",
+                              rc_image="i", mongo_tag="7.0", mongo_flavor="official",
+                              preset="default", root_url="http://localhost:3000",
+                              host_port=3000, version_source="x")
+    runnersvc.write_record("kube", meta)
+    mode = runnersvc.workspace("kube").stat().st_mode & 0o777
+    assert mode == 0o700, f"workspace root is {mode:o}, traversable by other users"
+    assert runnersvc.read_meta("kube").name == "kube"
+
+
+def test_a_contact_address_cannot_add_keys_to_a_cluster_scoped_issuer():
+    """The ClusterIssuer was built by f-string, so an `acme_email` carrying newlines
+    was interpolated verbatim and the result was VALID YAML cert-manager accepts.
+
+    A ClusterIssuer is CLUSTER-SCOPED and shared by every workspace on the box, so
+    `skipTLSVerify: true` injected through one workspace's contact address would
+    apply to all of them. Pre-fix this rendered six keys under `spec.acme`; the two
+    extra ones are the finding.
+    """
+    import yaml as _yaml
+
+    from rc_repro.services import k8s
+
+    hostile = ("ops@example.com\n    skipTLSVerify: true\n"
+               "    disableAccountKeyGeneration: true\n    # ")
+    doc = _yaml.safe_load(k8s.acme_issuer_manifest(
+        k8s.IssuerSpec(mode="acme", acme_email=hostile), ingress_class="traefik"))
+    acme = doc["spec"]["acme"]
+    assert set(acme) == {"server", "email", "privateKeySecretRef", "solvers"}, (
+        "the contact address added keys to a cluster-scoped issuer")
+    # It survives as ONE scalar rather than being dropped: the address is wrong and
+    # Let's Encrypt will say so, which is the right place for that to fail.
+    assert acme["email"] == hostile
+    assert doc["kind"] == "ClusterIssuer" and doc["apiVersion"] == "cert-manager.io/v1"
+
+
+def test_a_mongo_tag_cannot_add_structure_to_the_statefulset():
+    """`mongo_manifest` builds YAML by f-string, and `--mongo` is a plain CreateReq
+    field that `POST /api/repros` copies straight from the body -- and is NOT in
+    PRIVILEGED_CREATE_FIELDS, so any member+ GUI account could reach it.
+
+    Pre-fix this rendered `privileged: true` and `hostPID: true` into a valid
+    two-document manifest that `kubectl apply` accepts, bypassing the very control
+    that exists to stop a member choosing what code runs.
+    """
+    from rc_repro.services import k8s
+
+    hostile = ("8.0\n        securityContext:\n          privileged: true\n"
+               "        hostPID: true\n        # ")
+    with pytest.raises(errors.ValidationError, match="not a MongoDB image tag"):
+        k8s.mongo_manifest("t", hostile)
+    # The legitimate tags this runtime actually uses are untouched.
+    for good in ("8.0", "7.0.14", "6.0.5-ubi8", "latest"):
+        assert k8s.mongo_manifest("t", good), good
+
+
+def test_an_acme_issuer_that_never_registers_says_why(monkeypatch):
+    """Registering an ACME account is a real call to Let's Encrypt FROM INSIDE the
+    cluster, so this fails on no pod egress or a rejected contact address -- and it
+    should fail once, here, rather than silently per Certificate afterwards."""
+    from rc_repro.services import k8s
+
+    monkeypatch.setattr(k8s, "apply", lambda *a, **kw: None)
+    monkeypatch.setattr(k8s, "ask_object",
+                        lambda *a, **kw: k8s.Answer(k8s.PRESENT, {"metadata": {}}))
+    monkeypatch.setattr(k8s, "ISSUER_WAIT_TRIES", 2)
+    with pytest.raises(errors.PreflightError) as exc:
+        k8s.ensure_acme_issuer(k8s.IssuerSpec(mode="acme", acme_email="a@b.c"),
+                               context="c", ingress_class="traefik",
+                               sleep=lambda s: None)
+    msg = str(exc.value)
+    assert "egress" in msg and "contact address" in msg, msg
+
+
+def test_the_issuer_call_dispatches_on_the_spec_not_on_the_caller(monkeypatch):
+    """One call site, two mechanisms. A branch at the caller is how `--https` and
+    `--domain` would drift into two code paths again."""
+    from rc_repro.services import k8s
+
+    seen: list[str] = []
+    monkeypatch.setattr(k8s, "ensure_ca_issuer",
+                        lambda **kw: seen.append("ca"))
+    monkeypatch.setattr(k8s, "ensure_acme_issuer",
+                        lambda spec, **kw: seen.append("acme"))
+    k8s.ensure_issuer(k8s.IssuerSpec(mode="local"), context="c",
+                      ingress_class="traefik")
+    k8s.ensure_issuer(k8s.IssuerSpec(mode="acme", acme_email="a@b.c"), context="c",
+                      ingress_class="traefik")
+    assert seen == ["ca", "acme"]
+
+
+def test_the_ingress_values_are_the_official_guides_shape():
+    """From docs.rocket.chat/docs/deploy-with-kubernetes, and the point is that a
+    customer's values.yaml and rc-repro's differ only in the issuer NAME:
+
+        host: <domain.xyz>
+        ingress:
+          enabled: true
+          ingressClassName: traefik
+          annotations:
+            cert-manager.io/cluster-issuer: production-cert-issuer
+          tls:
+            - secretName: rckube
+              hosts: [<domain.xyz>]
+    """
+    from rc_repro.services import k8s
+
+    v = k8s.ingress_values("ws.rcrepro.localhost", ingress_class="traefik",
+                           secret_name="ws-tls")
+    assert v["host"] == "ws.rcrepro.localhost"
+    assert v["ingress"]["enabled"] is True
+    assert v["ingress"]["ingressClassName"] == "traefik"
+    assert v["ingress"]["annotations"] == {
+        "cert-manager.io/cluster-issuer": k8s.CA_ISSUER}
+    assert v["ingress"]["tls"] == [{"secretName": "ws-tls",
+                                    "hosts": ["ws.rcrepro.localhost"]}]
+
+
+def test_the_ca_issuer_is_a_tls_secret_and_a_clusterissuer_that_signs_from_it():
+    """A `ca` issuer rather than an `acme` one is what makes `--https` and `--domain`
+    the same values.yaml with one field different."""
+    import yaml as _yaml
+
+    from rc_repro.services import k8s
+
+    docs = [d for d in _yaml.safe_load_all(
+        k8s.ca_issuer_manifest("-----BEGIN CERTIFICATE-----\nc\n-----END CERTIFICATE-----",
+                               "-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----"))
+        if d]
+    secret = next(d for d in docs if d["kind"] == "Secret")
+    issuer = next(d for d in docs if d["kind"] == "ClusterIssuer")
+    assert secret["type"] == "kubernetes.io/tls", "cert-manager reads tls.crt/tls.key"
+    assert set(secret["stringData"]) == {"tls.crt", "tls.key"}
+    assert secret["metadata"]["namespace"] == k8s.CERT_MANAGER_NAMESPACE, \
+        "a ClusterIssuer reads its Secret from the cluster-resource namespace"
+    assert issuer["spec"]["ca"]["secretName"] == secret["metadata"]["name"]
+    # Labelled as ours, so it can be told from a cluster's own issuers.
+    assert issuer["metadata"]["labels"][k8s.OWNER_LABEL_KEY] == k8s.OWNER_LABEL_VALUE
+
+
+def test_an_issuer_that_never_reconciles_is_a_refusal_not_a_silence(monkeypatch):
+    """`k8s-https.md` §4's third finding: a ClusterIssuer created before cert-manager
+    is ready is ACCEPTED and then never reconciled -- no `.status` at all -- so no
+    Certificate ever issues and nothing says why.
+
+    Waiting for `Ready=True` means a workspace has either a working issuer or a
+    refusal, never the silent third thing.
+    """
+    from rc_repro.services import k8s
+
+    monkeypatch.setattr(k8s, "apply", lambda *a, **kw: None)
+    monkeypatch.setattr(k8s, "ask_object",
+                        lambda *a, **kw: k8s.Answer(k8s.PRESENT, {"metadata": {}}))
+    monkeypatch.setattr(k8s, "ISSUER_WAIT_TRIES", 2)
+    with pytest.raises(errors.PreflightError) as exc:
+        k8s.ensure_ca_issuer(context="c", sleep=lambda s: None)
+    assert "did not become ready" in str(exc.value)
+    assert "says nothing" in str(exc.value), "name the failure mode, not just the wait"
+
+    # And it returns quietly once the condition is there.
+    monkeypatch.setattr(k8s, "ask_object", lambda *a, **kw: k8s.Answer(
+        k8s.PRESENT, {"status": {"conditions": [
+            {"type": "Ready", "status": "True", "message": "Signing CA verified"}]}}))
+    k8s.ensure_ca_issuer(context="c", sleep=lambda s: None)
+
+
+def test_publishing_a_kubernetes_name_checks_it_instead_of_claiming_it(monkeypatch):
+    """Measured on a box in exactly this state: the edge was bound, running, healthy,
+    and answering every https name with its OWN default certificate, because the
+    cluster had taken :443 underneath it. Nothing said so.
+
+    `tls.verify` already reports that as `fallback`, so the proof is one existing call
+    -- and a name that does not work has to say so at create time rather than be
+    discovered in a browser.
+    """
+    from rc_repro import tls as tlsmod
+    from rc_repro.services import edge as edgesvc
+    from rc_repro.services import k8s
+
+    monkeypatch.setattr(edgesvc, "installed", lambda: True)
+    monkeypatch.setattr(edgesvc, "running", lambda: True)
+    monkeypatch.setattr(edgesvc, "register", lambda *a, **kw: False)
+    ktls = lc._KubeTls(host="ws.rcrepro.localhost", ingress_class="traefik",
+                       endpoint=k8s.IngressEndpoint("172.16.0.2", 443, "loadbalancer",
+                                                    "kube-system/traefik", True),
+                       cluster_owns_443=True)
+    said: list[str] = []
+    emit = lambda ev: said.append(f"{ev.level}:{ev.message}")  # noqa: E731
+
+    monkeypatch.setattr(tlsmod, "verify", lambda *a, **kw: {
+        "serving": True, "fallback": True, "issuer": "CN = TRAEFIK DEFAULT CERT"})
+    lc._publish_kubernetes_name("ws", ktls, emit=emit, sleep=lambda s: None)
+    joined = "\n".join(said)
+    assert "warn:" in joined and "default certificate" in joined, joined
+    assert "terminating TLS for this name" in joined, joined
+
+    said.clear()
+    monkeypatch.setattr(tlsmod, "verify", lambda *a, **kw: {
+        "serving": True, "fallback": False, "issuer": "CN = rc-repro local CA"})
+    lc._publish_kubernetes_name("ws", ktls, emit=emit, sleep=lambda s: None)
+    assert any("is serving the cluster's certificate" in s for s in said), said
+
+
+def test_the_name_is_given_time_to_go_live_before_it_is_called_broken(monkeypatch):
+    """Found by running it, on a chain that was completely correct.
+
+    `up --https --runtime kubernetes` reported "answered with a proxy's own default
+    certificate, so something in front is terminating TLS for this name instead of
+    passing it through" -- and the same name served the cluster's certificate seconds
+    later. A route file APPEARING and Traefik's file provider having RELOADED it are
+    a second apart, and the proof ran in between.
+
+    A check that fires on every healthy create is worse than no check: it is how a
+    reader learns to ignore the one line here that would have told them something.
+    `cli._report_gui_tls` already polls about ACME for exactly this reason.
+    """
+    from rc_repro import tls as tlsmod
+    from rc_repro.services import edge as edgesvc
+    from rc_repro.services import k8s
+
+    monkeypatch.setattr(edgesvc, "installed", lambda: True)
+    monkeypatch.setattr(edgesvc, "running", lambda: True)
+    monkeypatch.setattr(edgesvc, "register", lambda *a, **kw: False)
+    ktls = lc._KubeTls(host="ws.rcrepro.localhost", ingress_class="traefik",
+                       endpoint=k8s.IngressEndpoint("172.16.0.2", 443, "loadbalancer",
+                                                    "kube-system/traefik", True),
+                       cluster_owns_443=False)
+    said: list[str] = []
+    # The real sequence: the default certificate twice while the proxy reloads, then
+    # the cluster's.
+    answers = [
+        {"serving": True, "fallback": True, "issuer": "CN = TRAEFIK DEFAULT CERT"},
+        {"serving": True, "fallback": True, "issuer": "CN = TRAEFIK DEFAULT CERT"},
+        {"serving": True, "fallback": False, "issuer": "CN = rc-repro local CA"},
+    ]
+    monkeypatch.setattr(tlsmod, "verify",
+                        lambda *a, **kw: answers.pop(0) if answers else answers)
+    lc._publish_kubernetes_name("ws", ktls,
+                                emit=lambda ev: said.append(f"{ev.level}:{ev.message}"),
+                                sleep=lambda s: None)
+    joined = "\n".join(said)
+    assert "warn:" not in joined, f"a reloading proxy is not a broken chain: {joined}"
+    assert "is serving the cluster's certificate" in joined, joined
+    assert not answers, "it must actually retry, not give up after one look"
+
+
+def test_a_public_name_create_says_nothing_about_credentials(monkeypatch):
+    """The warning that used to fire here is GONE, deliberately, and this is what
+    replaced it.
+
+    It said the name was reachable, that the password was generated rather than
+    admin123, where to read it, and to `down --volumes` when finished -- next to a
+    summary panel that prints the URL and `admin / <the password>` two lines later.
+    Every clause was either already on screen or a generic reminder, and a warning
+    people scroll past is worse than no warning: it trains them to scroll past the
+    next one.
+
+    What made the original necessary was that a public name ran the SAME `admin123`
+    as every loopback workspace and nothing said so. That is no longer true --
+    `reachable_beyond_loopback` generates a password for exactly these workspaces --
+    so the condition the sentence existed to report does not occur any more.
+    """
+    from rc_repro import tls as tlsmod
+
+    plan = _kube_tls_env(monkeypatch)
+    said: list[str] = []
+    emit = lambda ev: said.append(f"{ev.level}:{ev.message}")  # noqa: E731
+    acme = tlsmod.TlsSpec(mode=tlsmod.MODE_ACME, host="a.example.com", port=443,
+                          acme_email="ops@example.com")
+    lc._kubernetes_tls_plan(lc.CreateReq(version="8.5.1", name="pub",
+                                         domain="a.example.com"), acme, plan,
+                            emit=emit)
+    joined = "\n".join(said)
+    for gone in ("reachable by anyone who can resolve it", "admin password is GENERATED",
+                 "admin123", "username as their password", "--volumes when you are"):
+        assert gone not in joined, f"{gone!r} is still being said:\n{joined}"
+    # The TLS progress it does still report is untouched -- removing a credentials
+    # warning must not take the http-01 explanation with it.
+    assert "http-01 challenge" in joined, joined
+
+
+def test_a_public_name_still_gets_a_password_of_its_own(monkeypatch):
+    """The property the warning used to announce. Removing the sentence must not be
+    read, later, as removing the behaviour -- so it is asserted where the sentence
+    used to be tested."""
+    from rc_repro import tls as tlsmod
+
+    acme = tlsmod.TlsSpec(mode=tlsmod.MODE_ACME, host="a.example.com", port=443,
+                          acme_email="ops@example.com")
+    assert lc.reachable_beyond_loopback(tlsspec=acme, bind_host="127.0.0.1")
+
+
+def test_the_route_exists_before_the_chart_can_start_an_acme_order(monkeypatch):
+    """Ordering, and it is the whole difference between a certificate and a timeout.
+
+    cert-manager starts an ACME order the moment it sees the Ingress -- which the CHART
+    creates during `helm install` -- and the http-01 challenge arrives on this host's
+    :80. The first version of this published the name AFTER the install and after
+    `wait_for_certificate`, so Let's Encrypt got a connection refused, the order
+    failed, and the wait spent its whole budget on a challenge that could never have
+    been answered.
+
+    Asserted on the ORDER of the two calls, because that is the thing that was wrong.
+    """
+    import inspect
+
+    src = inspect.getsource(lc._create_kubernetes)
+    route = src.index("_route_kubernetes_name(")
+    install = src.index("k8s.create_workspace(")
+    prove = src.index("_publish_kubernetes_name(")
+    assert route < install, "the challenge must have somewhere to land before the chart"
+    assert install < prove, "and the proof means nothing until the Ingress exists"
+
+
+def test_routing_a_name_starts_the_edge_only_when_the_cluster_does_not_own_443(monkeypatch):
+    """Two topologies, and one of them needs no edge at all.
+
+    With k3s's ServiceLB holding host :80/:443 the name reaches the cluster's ingress
+    directly -- starting an edge would take the port away from the thing already
+    serving it. Anywhere else the edge must own :443 and pass the name through.
+    """
+    from rc_repro.services import edge as edgesvc
+    from rc_repro.services import k8s
+
+    ep = k8s.IngressEndpoint("172.16.0.2", 443, "loadbalancer", "kube-system/traefik",
+                             True)
+    starts: list[str] = []
+    monkeypatch.setattr(edgesvc, "running", lambda: False)
+    monkeypatch.setattr(edgesvc, "installed", lambda: False)
+    monkeypatch.setattr(edgesvc, "ensure_running",
+                        lambda **kw: starts.append("started") or edgesvc.StartResult(True))
+    monkeypatch.setattr(edgesvc, "register", lambda *a, **kw: False)
+
+    lc._route_kubernetes_name("ws", lc._KubeTls(
+        host="a.example.com", ingress_class="traefik", endpoint=ep,
+        cluster_owns_443=True))
+    assert starts == [], "the cluster already answers on :443; do not take the port"
+
+    lc._route_kubernetes_name("ws", lc._KubeTls(
+        host="a.example.com", ingress_class="traefik", endpoint=ep,
+        cluster_owns_443=False))
+    assert starts == ["started"], "nothing else holds :443, so the edge must"
+
+
+def test_a_cold_mongod_is_retried_rather_than_failing_the_create(monkeypatch):
+    """Reproduced twice out of two on freshly installed k3s clusters.
+
+        error: could not initiate the MongoDB replica set:
+               mongonetworkerror: connect econnrefused 127.0.0.1:27017
+
+    `init_replica_set` waits for `containerStatuses[0].started` and its own comment
+    says exactly why it cannot wait for READINESS -- readiness needs the replica set,
+    and this is the initiation. That reasoning is right, and it leaves a window: the
+    container is up and mongod has not bound :27017 yet.
+
+    The retry existed and did not cover it. Its predicate was an allow-list of ONE
+    error string ("container not found"), written for a different race -- a pod that
+    reports `started` while terminating -- so a connection refusal returned on the
+    first attempt and failed the whole create. On a warm cluster mongod binds before
+    the exec arrives and nobody sees it; on an empty containerd store with a cold PVC
+    it loses the race every time. Which means it fired on somebody's FIRST create.
+    """
+    import subprocess as sp
+
+    from rc_repro.services import k8s
+
+    calls: list[int] = []
+
+    def flaky(context, namespace, script):
+        calls.append(1)
+        if len(calls) < 3:
+            return sp.CompletedProcess([], 1, "", "MongoNetworkError: connect "
+                                       "ECONNREFUSED 127.0.0.1:27017")
+        return sp.CompletedProcess([], 0, "1", "")
+
+    monkeypatch.setattr(k8s, "_mongo_exec_once", flaky)
+    res = k8s._mongo_exec("c", "ns", "rs.status().ok", sleep=lambda s: None)
+    assert res.returncode == 0, "a cold mongod is a wait, not a dead create"
+    assert len(calls) == 3, calls
+
+    # A REAL error must still come straight back -- retrying an authentication
+    # failure five times just makes the report slower and no more accurate.
+    calls.clear()
+    monkeypatch.setattr(k8s, "_mongo_exec_once", lambda *a: sp.CompletedProcess(
+        [], 1, "", "MongoServerError: Authentication failed"))
+    res = k8s._mongo_exec("c", "ns", "rs.status().ok", sleep=lambda s: None)
+    assert res.returncode == 1
+    assert k8s._mongo_exec_once("c", "ns", "x").returncode == 1  # sanity
+
+    # And the other transient it was originally written for still retries.
+    calls.clear()
+    seen: list[int] = []
+
+    def terminating(context, namespace, script):
+        seen.append(1)
+        if len(seen) < 2:
+            return sp.CompletedProcess([], 1, "", 'container not found ("mongod")')
+        return sp.CompletedProcess([], 0, "1", "")
+
+    monkeypatch.setattr(k8s, "_mongo_exec_once", terminating)
+    assert k8s._mongo_exec("c", "ns", "x", sleep=lambda s: None).returncode == 0
+    assert len(seen) == 2
+
+
+def test_the_edge_joins_a_kind_clusters_docker_network(monkeypatch):
+    """A kind cluster's ingress is unreachable from where the edge lives.
+
+    kind's node is a CONTAINER on kind's own Docker network, so its ingress NodePort
+    answers from the host and not from a container on the default bridge. Measured:
+    `172.18.0.2:30925` reachable from the host and from a container on the `kind`
+    network, **unreachable** from one on `bridge` -- which is exactly where the edge
+    is. `k8s-https.md` §4's fifth finding, and the one part of it that is genuinely
+    kind-specific.
+
+    `edge.attach` could not do this: it derives a network from a WORKSPACE name, and a
+    cluster is not a workspace.
+    """
+    from rc_repro.services import edge as edgesvc
+    from rc_repro.services import k8s
+
+    # The derivation is pure -- no Docker in k8s.py, which owns no such seam.
+    assert k8s.kind_node_container("kind-rc-repro-local") == \
+        "rc-repro-local-control-plane"
+    assert k8s.kind_node_container("default") == "", "k3s has no node container"
+    assert k8s.kind_node_container("kind-") == ""
+
+    joined: list[str] = []
+    monkeypatch.setattr(edgesvc, "installed", lambda: True)
+    monkeypatch.setattr(edgesvc, "running", lambda: True)
+    monkeypatch.setattr(edgesvc, "register", lambda *a, **kw: False)
+    monkeypatch.setattr(edgesvc, "container_network",
+                        lambda c: "kind" if c == "rc-repro-local-control-plane" else "")
+    monkeypatch.setattr(edgesvc, "attach_network",
+                        lambda n: joined.append(n) or True)
+
+    ep = k8s.IngressEndpoint("172.18.0.2", 30925, "nodeport",
+                             "ingress-nginx/ingress-nginx-controller", False)
+    lc._route_kubernetes_name("ws", lc._KubeTls(
+        host="a.example.com", ingress_class="nginx", endpoint=ep,
+        context="kind-rc-repro-local", cluster_owns_443=False))
+    assert joined == ["kind"], "the edge must join the network the node is on"
+
+    # And a k3s cluster has nothing to join: its endpoint is on the host itself.
+    joined.clear()
+    lc._route_kubernetes_name("ws", lc._KubeTls(
+        host="a.example.com", ingress_class="traefik",
+        endpoint=k8s.IngressEndpoint("172.16.0.2", 443, "loadbalancer",
+                                     "kube-system/traefik", True),
+        context="default", cluster_owns_443=False))
+    assert joined == [], "joining a network k3s does not have would only fail"
+
+
+def test_ensure_ingress_adopts_before_it_installs(monkeypatch):
+    """A cluster already running nginx must keep running nginx.
+
+    The ingress controller is the component a support case is usually ABOUT, so
+    installing Traefik over the top of somebody's nginx would reproduce the wrong
+    thing in exactly the dimension that matters.
+    """
+    from rc_repro.services import k8s
+
+    ran: list[list[str]] = []
+    monkeypatch.setattr(k8s, "run", lambda argv, **kw: ran.append(argv))
+    monkeypatch.setattr(k8s, "ingress_classes", lambda ctx: ["nginx"])
+    assert k8s.ensure_ingress(context="c", distribution="k3s") == "nginx"
+    assert ran == [], "nothing may be installed over a controller that is already there"
+
+
+def test_ensure_ingress_installs_the_guides_own_chart(monkeypatch):
+    """`helm install traefik traefik/traefik -n traefik --create-namespace` is the
+    official Rocket.Chat guide's own example, so a cluster rc-repro filled in looks
+    like a cluster somebody followed the guide on.
+
+    And the chart's default Service type is LEFT ALONE. `helm show values` renders
+    `type: LoadBalancer`; on a cluster with a provider it gets an address and the
+    cluster owns :443, and on one without it stays `<pending>` while Kubernetes
+    allocates NodePorts anyway. That is why no NodePort is configured anywhere --
+    `ingress_endpoint` reads whichever exists.
+    """
+    import subprocess as sp
+
+    from rc_repro.services import k8s
+
+    calls: list[list[str]] = []
+    seen = {"n": 0}
+
+    def classes(ctx):
+        seen["n"] += 1
+        return [] if seen["n"] == 1 else ["traefik"]
+
+    monkeypatch.setattr(k8s, "ingress_classes", classes)
+    monkeypatch.setattr(k8s, "clear_pending_release", lambda *a, **kw: None)
+    monkeypatch.setattr(k8s, "run", lambda argv, **kw: calls.append(argv)
+                        or sp.CompletedProcess(argv, 0, "", ""))
+    assert k8s.ensure_ingress(context="c", distribution="k3s",
+                              sleep=lambda s: None) == "traefik"
+    helm = next(c for c in calls if "upgrade" in c)
+    assert helm[:4] == ["helm", "upgrade", "--install", "traefik"], helm
+    assert "traefik/traefik" in helm
+    assert "--create-namespace" in helm
+    assert not any(a.startswith("service.type") for a in helm), \
+        "the chart's own Service type is what the guide gives; do not override it"
+    # AND NO `--wait`, NOR THE ROLLBACK FLAG THAT IMPLIES IT. Helm's readiness check
+    # for a LoadBalancer Service waits for an address to be populated, and this chart's
+    # Service is a LoadBalancer -- so on a cluster with no provider `--wait` cannot
+    # succeed on exactly the cluster being installed into. Measured on k3s with
+    # `--disable servicelb`: "release traefik failed, and has been uninstalled due to
+    # atomic being set: context deadline exceeded", five minutes after three healthy
+    # pods. The controller is waited for with `rollout status` instead.
+    assert "--wait" not in helm, helm
+    assert "--atomic" not in helm and "--rollback-on-failure" not in helm, helm
+    assert any(c[:2] == ["kubectl", "--context"] and "rollout" in c for c in calls), \
+        "the controller still has to be waited for, just not through helm"
+
+
+def test_ensure_ingress_waits_for_the_class_not_just_the_release(monkeypatch):
+    """helm returning means the Deployment is ready. The IngressClass is a SEPARATE
+    object the chart creates, so a create that went straight on to reading the classes
+    would find none and refuse for want of the thing it had just installed."""
+    import subprocess as sp
+
+    from rc_repro.services import k8s
+
+    looks = {"n": 0}
+
+    def classes(ctx):
+        looks["n"] += 1
+        return ["traefik"] if looks["n"] > 3 else []
+
+    monkeypatch.setattr(k8s, "ingress_classes", classes)
+    monkeypatch.setattr(k8s, "clear_pending_release", lambda *a, **kw: None)
+    monkeypatch.setattr(k8s, "run",
+                        lambda argv, **kw: sp.CompletedProcess(argv, 0, "", ""))
+    assert k8s.ensure_ingress(context="c", distribution="kind",
+                              sleep=lambda s: None) == "traefik"
+    assert looks["n"] > 2, "it has to keep looking, not read once"
+
+
+def test_ensure_ingress_will_not_provision_a_cloud_load_balancer_implicitly(monkeypatch):
+    """The chart's Service is a LoadBalancer, and on a managed cluster that provisions
+    a REAL load balancer -- billable, created implicitly, in somebody's account.
+    `.docs/design/kubernetes-cluster-model.md` already decided that one: never create a
+    billable cloud resource implicitly. So a remote cluster is told what to run."""
+    from rc_repro.services import k8s
+
+    import subprocess as sp
+
+    monkeypatch.setattr(k8s, "ingress_classes", lambda ctx: [])
+    # Only a HELM call is forbidden. Reads are fine -- deciding locality is itself a
+    # read, and a stub that refuses every subprocess would fail on the question rather
+    # than on the answer.
+    def no_helm(argv, **kw):
+        assert argv[0] != "helm", f"must not install: {argv}"
+        return sp.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(k8s, "run", no_helm)
+    with pytest.raises(errors.PreflightError) as exc:
+        k8s.ensure_ingress(context="prod", distribution="eks")
+    assert "not on this machine" in str(exc.value)
+    assert "helm install traefik" in str(exc.value), "say what to run instead"
+    # Unknown locality must not read as local: the question is whether to spend money.
+    monkeypatch.setattr(k8s, "distribution_of", lambda ctx: "")
+    with pytest.raises(errors.PreflightError):
+        k8s.ensure_ingress(context="prod", distribution="")
+
+
+def test_ensure_ingress_refuses_a_read_it_could_not_make(monkeypatch):
+    """The module's oldest rule at one more call site. Reading a refused list as "this
+    cluster has no controller" would install one into a cluster that already had it,
+    over a credential problem."""
+    from rc_repro.services import k8s
+
+    monkeypatch.setattr(k8s, "ingress_classes", lambda ctx: None)
+    monkeypatch.setattr(k8s, "run", lambda *a, **kw: pytest.fail("must not install"))
+    with pytest.raises(errors.DockerError) as exc:
+        k8s.ensure_ingress(context="c", distribution="k3s")
+    assert "refusing to guess" in str(exc.value)
+
+
+def test_doctor_says_which_https_shape_the_box_is_in(monkeypatch, tmp_path):
+    """One row that answers "can this box serve a name, and how".
+
+    Every fact in it is reported somewhere above -- the ingress class, the load
+    balancer, the edge, the port claim -- and reading four rows and composing them is
+    exactly what nobody does at the moment they need the answer. Which of the two
+    shapes the box is in is the fact every HTTPS question turns on: the cluster owning
+    :443 and answering directly, or the edge owning it and passing the name through.
+    """
+    from rc_repro.services import doctor, k8s
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    pre = k8s.Preflight(context="default", cluster_reachable=True,
+                        cluster_exists=True, ingress_classes=["traefik"],
+                        distribution="k3s", provider=k8s.PROVIDER_EXTERNAL,
+                        default_storage_class="local-path",
+                        tools={n: k8s.Tool(name=n, version=(1, 36), path="/x")
+                               for n in k8s.CORE_TOOLS})
+    monkeypatch.setattr(k8s, "preflight", lambda ctx="": pre)
+    monkeypatch.setattr(k8s, "cert_manager_installed", lambda ctx: True)
+    monkeypatch.setattr(k8s, "port_claiming_cluster", lambda **kw: None)
+
+    def shape(ep):
+        monkeypatch.setattr(k8s, "ingress_endpoint", lambda ctx, **kw: ep)
+        rows = [r for r in doctor.run_checks()["checks"]
+                if r.get("check") == "kubernetes-https"]
+        assert rows, "the row must always be emitted for a reachable cluster"
+        return rows[0]["message"]
+
+    # The cluster owns :443 -- answered directly, no edge in the path.
+    said = shape(k8s.IngressEndpoint("172.16.0.2", 443, "loadbalancer",
+                                     "kube-system/traefik", True))
+    assert "CLUSTER's own ingress" in said, said
+    assert "directly" in said, said
+
+    # The edge owns it -- the name is passed through to a NodePort.
+    said = shape(k8s.IngressEndpoint("172.16.0.2", 32492, "nodeport",
+                                     "kube-system/traefik", True))
+    assert "edge" in said and "passed through by SNI" in said, said
+    assert "32492" in said, "name the endpoint, so it can be dialled by hand"
+
+    # Nothing reachable: say what it would take, not that something is broken.
+    said = shape(None)
+    assert "not servable yet" in said, said
+
+    # AND IT MUST NOT PROMISE A CERT-MANAGER SECRET WHEN THERE IS NO CERT-MANAGER.
+    # This row sat directly under one saying cert-manager was not installed, and
+    # described what WOULD happen as though it already did.
+    monkeypatch.setattr(k8s, "cert_manager_installed", lambda ctx: False)
+    said = shape(k8s.IngressEndpoint("172.16.0.2", 443, "loadbalancer",
+                                     "kube-system/traefik", True))
+    assert "once cert-manager is installed" in said, said
+    assert "from a cert-manager Secret" not in said, said
+
+
+def test_nothing_is_installed_before_every_read_only_refusal_has_passed(monkeypatch):
+    """A refusal must leave nothing behind, and this one left an ingress controller.
+
+    Measured on a fresh kind box: the create built the cluster, installed
+    traefik/traefik into it, and THEN refused for want of cert-manager. Every check
+    that can be answered by reading has to come first, so the one step that changes
+    the cluster is the last thing before it is committed to.
+    """
+    import inspect
+
+    src = inspect.getsource(lc._kubernetes_tls_plan)
+    local = src.index("is_local_cluster(")
+    cm = src.index("ensure_cert_manager(")
+    ing = src.index("ensure_ingress(")
+    ep = src.index("ingress_endpoint(")
+    assert local < cm, "refuse a remote cluster before creating anything in it"
+    assert cm < ing, "cert-manager first — the ingress annotation names its issuer"
+    assert ing < ep, "the endpoint is the Service the ingress install created"
+
+    # And a refusal really does happen without touching the cluster: `--https` on a
+    # cluster that is not on this machine would send the CA key there.
+    from rc_repro.services import k8s
+
+    plan = _kube_tls_env(monkeypatch, distribution="eks", ingress=())
+    monkeypatch.setattr(k8s, "ensure_cert_manager",
+                        lambda **kw: pytest.fail("must not install"))
+    monkeypatch.setattr(k8s, "ensure_ingress",
+                        lambda **kw: pytest.fail("must not install"))
+    with pytest.raises(errors.AuthorityGateError):
+        lc._kubernetes_tls_plan(lc.CreateReq(version="8.5.1", https="local"),
+                                _local_spec(), plan)
 
 
 def test_a_scenario_forward_waits_for_a_ready_endpoint(monkeypatch):
@@ -5505,10 +6893,10 @@ def test_a_scenario_forward_targets_the_deployment_not_the_service(monkeypatch):
     # published if OUR kubectl got the socket, not merely if the port answers.
     monkeypatch.setattr(k8s.subprocess, "Popen",
                         lambda argv, **kw: (spawned.append(argv), _FakeProc(4242))[1])
-    # `pid_owns_port`, not `forward_reachable`: the code asks whether OUR
+    # `pid_owns_port_exclusively`, not `forward_reachable`: the code asks whether OUR
     # child holds the socket, because "the port answers" is satisfied by a
     # squatter and lost that race 3 times out of 3.
-    monkeypatch.setattr(k8s, "pid_owns_port", lambda *a, **kw: True)
+    monkeypatch.setattr(k8s, "pid_owns_port_exclusively", lambda *a, **kw: True)
 
     out = k8s.scenario_ui_forwards("w", namespace="rc-repro-w", context=k8s.CONTEXT,
                                    sleep=lambda _s: None)
@@ -6630,7 +8018,7 @@ def test_a_forward_that_hid_its_arguments_is_not_called_dead(monkeypatch):
             raise OSError("no")
 
     monkeypatch.setattr(k8s, "Path", _Proc)
-    # `pid_owns_port`, not `forward_reachable`: the code asks whether OUR
+    # `pid_owns_port_exclusively`, not `forward_reachable`: the code asks whether OUR
     # child holds the socket, because "the port answers" is satisfied by a
     # squatter and lost that race 3 times out of 3.
     monkeypatch.setattr(k8s, "pid_owns_port", lambda *a, **kw: port_up)
@@ -7069,7 +8457,7 @@ def test_doctor_reports_what_a_cluster_provides_the_same_way_on_every_distributi
 
     All three are `ok` rows on purpose. A capability is a FACT; severity belongs to
     whatever needs it, and an absent ingress controller cannot affect a workspace reached
-    by port-forward -- `ingress_blocker` is what refuses when something asks for a
+    by port-forward -- `ensure_ingress` is what adopts or installs one when something asks for a
     hostname. A doctor that warns about a feature you are not using teaches people to
     ignore its warnings.
     """
@@ -7130,7 +8518,7 @@ def test_the_mongodb_operator_goes_with_the_last_workspace_but_not_before(monkey
     calls = []
 
     def fake(mongodbs, installed=True, rc=0):
-        def run(argv, timeout=None, own=False):
+        def run(argv, timeout=None, own=False, env=None):
             calls.append(" ".join(argv))
             j = " ".join(argv)
             if "helm list" in j:
@@ -7177,7 +8565,7 @@ def test_removing_the_operator_never_fails_a_teardown(monkeypatch):
 
     from rc_repro.services import k8s
 
-    def run(argv, timeout=None, own=False):
+    def run(argv, timeout=None, own=False, env=None):
         j = " ".join(argv)
         if "helm list" in j:
             return sp.CompletedProcess(argv, 0, _helm_list(k8s.OPERATOR_RELEASE), "")
@@ -7265,7 +8653,7 @@ def test_the_workspace_being_destroyed_does_not_vote_to_keep_the_stack(monkeypat
 
     from rc_repro.services import k8s
 
-    def run(argv, timeout=None, own=False):
+    def run(argv, timeout=None, own=False, env=None):
         j = " ".join(argv)
         if "helm list" in j:
             return sp.CompletedProcess(argv, 0, _helm_list(k8s.MONITORING_RELEASE), "")
@@ -7313,7 +8701,7 @@ def test_detaching_monitoring_that_was_never_attached_says_nothing_alarming(monk
 
     calls = []
 
-    def run(argv, timeout=None, own=False):
+    def run(argv, timeout=None, own=False, env=None):
         calls.append(" ".join(argv))
         # `helm list -o json` answers with an empty array: nothing installed here.
         return sp.CompletedProcess(argv, 0, "[]", "")
@@ -8351,8 +9739,24 @@ def test_not_knowing_who_you_are_is_not_proof_the_namespace_is_yours(monkeypatch
                          "status": {"phase": "Active"}})
     monkeypatch.setattr(k8s, "run", lambda *a, **k: _completed(0, out=ns_doc))
 
+    # THE REASON DEPENDS ON WHETHER TEAM MODE IS ON, and saying the wrong one made
+    # the namespace un-adoptable. `_cli_actor()` returns "" whenever this box has no
+    # accounts -- even with RC_REPRO_USER set -- so on such a box the old message
+    # said "RC_REPRO_USER is not set" while it WAS, and the remedy it named produced
+    # the identical refusal. The refusal itself was always right.
     with pytest.raises(ConflictError) as caught:
         k8s.assert_namespace_available("w", context="c")          # no owner at all
+    assert "no rc-repro accounts" in str(caught.value), caught.value
+    assert "rc-repro users add bob" in str(caught.value), \
+        "the remedy has to be one that actually works on a box with no accounts"
+    assert "RC_REPRO_USER=bob" in str(caught.value), "say how to identify yourself"
+
+    # With accounts, an empty owner really does mean the variable is unset, and the
+    # original message is the right one.
+    from rc_repro.services import users as usersvc
+    usersvc.add("someone", "correct-horse-battery")
+    with pytest.raises(ConflictError) as caught:
+        k8s.assert_namespace_available("w", context="c")
     assert "RC_REPRO_USER is not set" in str(caught.value), caught.value
     assert "RC_REPRO_USER=bob" in str(caught.value), "say how to identify yourself"
 
@@ -8609,6 +10013,11 @@ def test_the_namespace_preflight_is_skipped_when_the_cluster_is_about_to_be_made
     from rc_repro.services import k8s
     monkeypatch.setattr(k8s, "assert_namespace_available",
                         lambda name, **kw: asked.append(name))
+    # The helm gate sits directly above the call under test, in the same
+    # `not plan.create` block, and it SHELLS OUT -- so on a box with no reachable
+    # cluster it refuses the create and this test's subject never runs. Pinned, for
+    # the reason `_kube_tls_env` pins it: nothing in this suite may need a cluster.
+    monkeypatch.setattr(k8s, "helm_reachable", lambda ctx: "")
     monkeypatch.setattr(k8s, "plan_cluster",
                         lambda *a, **kw: k8s.ClusterPlan(context="default",
                                                          distribution="k3s",
@@ -9259,10 +10668,25 @@ def test_an_explicitly_wide_bind_is_warned_about(monkeypatch, tmp_path):
     assert "elif bind_host not in _LOOPBACK_BINDS:" in src, (
         "an explicitly requested wide bind still has no warning branch")
     after = src.split("elif bind_host not in _LOOPBACK_BINDS:", 1)[1][:2600]
-    for expected in ("admin/admin123", "trusted network", "--bind"):
-        assert expected in after, f"the wide-bind warning does not mention {expected!r}"
-    assert "username as their password" in after, (
-        "seeded users are the worse credential and are not mentioned")
+    # The WARNING ITSELF, not the block around it. The comments there record the
+    # defect this branch was written for and quote the old credential by name, so a
+    # naive substring search over the block reports the history as if it were the
+    # message -- which is how this assertion first failed against a correct fix.
+    said = after.split('warn(emit,', 1)[1].split('phase="create")', 1)[0]
+    for expected in ("trusted network", "--bind", "every interface"):
+        assert expected in said, f"the wide-bind warning does not mention {expected!r}"
+    # The CREDENTIALS half is deliberately no longer here. The Rocket.Chat admin is
+    # generated for a bind this wide and printed on the panel two lines below, so
+    # saying it again was a sentence people scroll past -- and a warning nobody reads
+    # costs the NEXT warning its reader. What survives is what the panel does not
+    # say: the preset's own UI, Grafana, and seeded users, each named only when the
+    # create actually has one.
+    assert "admin123" not in said, (
+        "the panel prints the real password; repeating a wrong one is worse than "
+        f"silent:\n{said}")
+    assert "seeded users, whose password is their username" in after, (
+        "the credential that is STILL weak must survive the trim")
+    assert "req.seed" in after, "and be said only when there are seeded users"
 
 
 def test_a_restore_retargets_site_url_at_the_workspace_it_landed_in(monkeypatch,
@@ -10208,3 +11632,747 @@ def test_dockers_echo_stays_out_but_warnings_never_do(monkeypatch, tmp_path):
 
     # And the tag really is applied at the one place that produces the echo.
     assert 'echo="docker"' in inspect.getsource(lc._up)
+
+
+# --- the per-workspace admin password -----------------------------------------
+# `config.ADMIN_PASSWORD` is `admin123` and `config.DEFAULT_BIND_HOST`'s own comment
+# states why that is acceptable: nothing outside this machine can reach a loopback
+# workspace. `--domain` removes that premise -- the edge answers for a name anybody
+# on the internet can resolve -- and the credential did not change with it.
+
+def _pin_edge(monkeypatch):
+    """The edge, stubbed at its Docker seam.
+
+    `foreign_edge` and `ensure_running` both shell out, and on a developer box with a
+    real edge running the preflight answers truthfully and refuses the create -- so
+    these tests would pass or fail by machine. Nothing in this suite needs Docker.
+    """
+    monkeypatch.setattr(lc.edgesvc, "foreign_edge", lambda: "")
+    monkeypatch.setattr(lc.edgesvc, "ensure_running",
+                        lambda **k: type("S", (), {"ok": True, "why": "", "started": True,
+                                                   "note": ""})())
+    monkeypatch.setattr(lc.edgesvc, "register", lambda *a, **k: False)
+    monkeypatch.setattr(lc.edgesvc, "issue_local_cert", lambda *a, **k: None)
+    monkeypatch.setattr(lc.edgesvc, "host_owner", lambda *a, **k: "")
+
+
+def _capture_create(monkeypatch):
+    """The create path with Docker stubbed at the seam, capturing record + compose."""
+    from rc_repro import config, tls as tlsmod  # noqa: F401
+    seen: dict = {}
+    monkeypatch.setattr(lc.runner, "docker_available", lambda **_k: True)
+    monkeypatch.setattr(lc.runner, "exists", lambda _n: False)
+    monkeypatch.setattr(lc, "check_capacity", lambda *a, **k: None)
+    monkeypatch.setattr(lc, "check_sidecar_ports", lambda *a, **k: None)
+    monkeypatch.setattr(lc, "pick_host_port", lambda *a, **k: 3001)
+    _real = lc.versions.resolve
+    monkeypatch.setattr(lc.versions, "resolve",
+                        lambda v, offline=False: _real(v, offline=True))
+    monkeypatch.setattr(lc.runner, "write",
+                        lambda name, yaml_, meta, files=None:
+                        seen.update(meta=meta, yaml=yaml_))
+    monkeypatch.setattr(lc, "_up", lambda *a, **k: 0)
+    return seen
+
+
+def test_a_loopback_workspace_keeps_the_shared_password(monkeypatch):
+    """Nothing off this box can reach it, which is the entire reason `admin123` is
+    acceptable. Rotating it here would cost every runbook and buy nothing."""
+    from rc_repro import config, tls as tlsmod  # noqa: F401
+    seen = _capture_create(monkeypatch)
+    lc.create_repro(lc.CreateReq(version="8.5.1", name="loop", wait=False),
+                    emit=lc.null_emit)
+    assert seen["meta"].admin_password == "", "empty means the shared default"
+    assert seen["meta"].admin_pass == config.ADMIN_PASSWORD
+    assert "admin123" in seen["yaml"]
+
+
+def test_a_public_name_gets_a_password_of_its_own(monkeypatch):
+    """THE DEFECT. A name anybody on the internet can resolve was created running
+    the same `admin123` every loopback workspace runs."""
+    from rc_repro import config, tls as tlsmod  # noqa: F401
+    seen = _capture_create(monkeypatch)
+    monkeypatch.setattr(lc, "_resolve_tls", lambda req, name, bind, **k:
+                        tlsmod.TlsSpec(mode=tlsmod.MODE_ACME, host="a.example.com",
+                                       port=443, acme_email="ops@example.com"))
+    _pin_edge(monkeypatch)
+    lc.create_repro(lc.CreateReq(version="8.5.1", name="pub", wait=False,
+                                 domain="a.example.com", acme_email="ops@example.com"),
+                    emit=lc.null_emit)
+    pw = seen["meta"].admin_password
+    assert pw and pw != config.ADMIN_PASSWORD, f"still the shared one: {pw!r}"
+    assert len(pw) >= 20, f"120 bits through token_urlsafe is 20 chars, got {pw!r}"
+    assert seen["meta"].admin_pass == pw
+
+
+def test_the_compose_document_provisions_the_password_that_was_recorded(monkeypatch):
+    """The one invariant that makes the rest true. The compose document is what
+    actually creates the admin, so a password written to repro.json and not to
+    ADMIN_PASS would be a stored credential for a login that does not exist -- and
+    every command reads the record, so ALL of them would 401 against a workspace
+    whose real password is `admin123`."""
+    from rc_repro import config, tls as tlsmod  # noqa: F401
+    seen = _capture_create(monkeypatch)
+    monkeypatch.setattr(lc, "_resolve_tls", lambda req, name, bind, **k:
+                        tlsmod.TlsSpec(mode=tlsmod.MODE_ACME, host="b.example.com",
+                                       port=443, acme_email="ops@example.com"))
+    _pin_edge(monkeypatch)
+    lc.create_repro(lc.CreateReq(version="8.5.1", name="pair", wait=False,
+                                 domain="b.example.com", acme_email="ops@example.com"),
+                    emit=lc.null_emit)
+    pw = seen["meta"].admin_password
+    assert pw
+    assert f"ADMIN_PASS: {pw}" in seen["yaml"] or pw in seen["yaml"], \
+        "the record and the compose document disagree about the admin password"
+    assert "admin123" not in seen["yaml"], "the old one must not also be in there"
+
+
+def test_binding_wide_generates_one_too(monkeypatch):
+    """`--bind 0.0.0.0` removes the same premise by the other mechanism, and the
+    bind path is the one that already warned -- so it must not be the one left
+    handing `admin123` to the LAN."""
+    from rc_repro import config, tls as tlsmod  # noqa: F401
+    seen = _capture_create(monkeypatch)
+    lc.create_repro(lc.CreateReq(version="8.5.1", name="wide", wait=False,
+                                 bind="0.0.0.0"), emit=lc.null_emit)
+    assert seen["meta"].admin_password != ""
+
+
+def test_two_public_workspaces_do_not_share_a_password(monkeypatch):
+    """Per WORKSPACE. One password for every public workspace on the box would make
+    a single leak the whole box, which is the property being bought here."""
+    from rc_repro import config, tls as tlsmod  # noqa: F401
+    made = []
+    for i, host in enumerate(("c1.example.com", "c2.example.com")):
+        seen = _capture_create(monkeypatch)
+        monkeypatch.setattr(lc, "_resolve_tls", lambda req, name, bind, _h=host, **k:
+                            tlsmod.TlsSpec(mode=tlsmod.MODE_ACME, host=_h, port=443,
+                                           acme_email="ops@example.com"))
+        _pin_edge(monkeypatch)
+        lc.create_repro(lc.CreateReq(version="8.5.1", name=f"multi{i}", wait=False,
+                                     domain=host, acme_email="ops@example.com"),
+                        emit=lc.null_emit)
+        made.append(seen["meta"].admin_password)
+    assert made[0] and made[1] and made[0] != made[1]
+
+
+def test_reachable_beyond_loopback_is_the_whole_decision():
+    """Both mechanisms, and the one that looks public and is not.
+
+    A local-CA `--https` name resolves to 127.0.0.1. Treating it as exposed would
+    rotate the password for the ordinary local case -- the common one -- for nothing.
+    """
+    from rc_repro import config, tls as tlsmod  # noqa: F401
+    acme = tlsmod.TlsSpec(mode=tlsmod.MODE_ACME, host="a.example.com", port=443,
+                          acme_email="ops@example.com")
+    local = tlsmod.TlsSpec(mode=tlsmod.MODE_LOCAL, host="x.rcrepro.localhost", port=443)
+    assert lc.reachable_beyond_loopback(tlsspec=acme, bind_host="127.0.0.1")
+    assert lc.reachable_beyond_loopback(tlsspec=None, bind_host="0.0.0.0")
+    assert lc.reachable_beyond_loopback(tlsspec=None, bind_host="192.168.1.5")
+    assert not lc.reachable_beyond_loopback(tlsspec=local, bind_host="127.0.0.1")
+    assert not lc.reachable_beyond_loopback(tlsspec=None, bind_host="127.0.0.1")
+    assert not lc.reachable_beyond_loopback(tlsspec=None, bind_host="::1")
+    assert not lc.reachable_beyond_loopback(tlsspec=None, bind_host="")
+
+
+def test_a_record_written_before_the_field_existed_still_works(tmp_path, monkeypatch):
+    """BACK-COMPAT, and it is not cosmetic: a workspace made by an older rc-repro
+    really does run `admin123`, so the fallback is a statement of fact about that
+    workspace, not a default."""
+    from rc_repro import config, tls as tlsmod  # noqa: F401
+    import json
+
+    from rc_repro import runner
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    ws = runner.workspace("old")
+    ws.mkdir(parents=True)
+    (ws / "repro.json").write_text(json.dumps({
+        "name": "old", "project": "rcrepro-old", "rc_version": "6.5.3",
+        "rc_image": "registry.rocket.chat/rocketchat/rocket.chat", "mongo_tag": "5.0",
+        "mongo_flavor": "bitnami-legacy", "preset": "default",
+        "root_url": "http://localhost:3001", "host_port": 3001,
+        "version_source": "shipped"}), encoding="utf-8")
+    meta = runner.read_meta("old")
+    assert meta.admin_password == ""
+    assert meta.admin_pass == "admin123"
+
+
+def test_the_detail_payload_carries_the_workspace_password(tmp_path, monkeypatch):
+    """What both front-ends read. The GUI's detail panel renders `login` with a copy
+    button and the create dialog's result box shows the same dict, so a generated
+    password reaches a browser-only operator through this one key -- which is also
+    the payload-shape trap `_fake_detail` exists for."""
+    from rc_repro import config, tls as tlsmod  # noqa: F401
+    from rc_repro import runner
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    meta = runner.Metadata(
+        name="d", project="rcrepro-d", rc_version="8.5.1", rc_image="i",
+        mongo_tag="8.0", mongo_flavor="official", preset="default",
+        root_url="http://localhost:3001", host_port=3001, version_source="live",
+        admin_password="s3cret-generated-value")
+    assert lc._summary(meta)["login"] == {"user": "admin",
+                                          "password": "s3cret-generated-value"}
+    # And an older record still reports the password its Rocket.Chat really runs.
+    meta.admin_password = ""
+    assert lc._summary(meta)["login"]["password"] == "admin123"
+
+
+def test_a_stale_edge_route_is_not_told_to_run_down(tmp_path, monkeypatch):
+    """`down --name <it>` CANNOT remove a route whose workspace is gone -- the
+    workspace is the missing half, so `down` answers "no such workspace" and the
+    route stays exactly where it was.
+
+    Found by running `rc-repro doctor` against a home in that state and following
+    its own advice. The route survives, the hostname goes on 502ing, and the name
+    cannot be reused. `edge delete` takes the HOSTNAME, which is the part that still
+    exists, and takes the certificate and private key with it.
+    """
+    from rc_repro.services import doctor as doctorsvc
+    from rc_repro.services import edge as edgesvc
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    edgesvc.write(edgesvc.Edge(domain="support.example.com",
+                               acme_email="ops@example.com"))
+    edgesvc.register("ghost", "ghost.example.com", local=True)
+    monkeypatch.setattr(edgesvc, "running", lambda: True)
+    monkeypatch.setattr(edgesvc, "config_drift", lambda: ([], []))
+    monkeypatch.setattr(edgesvc, "attached_networks", lambda: set())
+    monkeypatch.setattr(edgesvc, "port_holder", lambda p=443: "")
+
+    rows = doctorsvc.run_checks()["checks"]
+    said = " ".join(r["message"] for r in rows if "no workspace" in r["message"])
+    assert said, "the stale route must still be reported"
+    assert "edge delete ghost.example.com" in said, said
+    assert "down --name" not in said, f"advice that cannot work: {said}"
+
+
+# --- helm and kubectl are two clients ------------------------------------------
+
+def test_helm_reachable_reports_what_helm_said(monkeypatch):
+    """It returns the LINE, not a boolean. "helm cannot reach the cluster" sends a
+    reader to the cluster; `x509: certificate signed by unknown authority` sends them
+    to the kubeconfig, which is where the problem actually was."""
+    from rc_repro.services import k8s
+
+    monkeypatch.setattr(k8s, "which", lambda t: f"/usr/bin/{t}")
+    monkeypatch.setattr(k8s, "run", _fake_run({"helm list": (
+        1, "")}))
+    assert k8s.helm_reachable("default")           # non-empty == a problem
+
+    monkeypatch.setattr(k8s, "run", _fake_run({"helm list": (0, "")}))
+    assert k8s.helm_reachable("default") == "", "a working helm says nothing"
+
+
+def test_a_missing_helm_is_not_reported_as_an_unreachable_cluster(monkeypatch):
+    """There is already a tools check for that, and two rows about one binary is how
+    a reader learns to distrust both."""
+    from rc_repro.services import k8s
+
+    monkeypatch.setattr(k8s, "which", lambda t: "" if t == "helm" else f"/usr/bin/{t}")
+    monkeypatch.setattr(k8s, "run",
+                        lambda *a, **k: pytest.fail("must not run a missing helm"))
+    assert k8s.helm_reachable("default") == ""
+
+
+def test_a_create_refuses_when_helm_cannot_reach_the_cluster_kubectl_can(monkeypatch,
+                                                                        tmp_path):
+    """THE DEFECT, and it cost four minutes each time.
+
+    rc-repro drives kubectl AND helm; they resolve their configuration differently --
+    `helm_env` gives helm rc-repro's HELM_* homes while leaving KUBECONFIG to whoever
+    owns the cluster -- and only kubectl was ever asked. Measured on a box whose
+    `~/.kube/config` carried the server CA and client certificate of a PREVIOUS
+    install of the same cluster: kubectl was entirely happy (`get ns`, `auth whoami`
+    as system:admin, the whole MongoDB phase) and helm refused every call. So the
+    create built a namespace, a StatefulSet, a PersistentVolume and an initiated
+    replica set, then died at the chart and rolled all of it back:
+
+        create failed — removing namespace rc-repro-k8slive
+        error: helm install failed: Error: kubernetes cluster unreachable: Get
+        "https://127.0.0.1:6443/version": tls: failed to verify certificate: x509:
+        certificate signed by unknown authority
+
+    An error naming neither the cause nor the cure, for a condition readable in one
+    second. A refusal here leaves nothing -- the gate this codebase applies to every
+    other read-only precondition on this path.
+    """
+    from rc_repro.services import k8s
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setattr(lc.runner, "docker_available", lambda **_k: True)
+    monkeypatch.setattr(lc.runner, "exists", lambda _n: False)
+    monkeypatch.setattr(lc, "check_capacity", lambda *a, **k: None)
+    monkeypatch.setattr(lc, "pick_host_port", lambda *a, **k: 3001)
+    _real = lc.versions.resolve
+    monkeypatch.setattr(lc.versions, "resolve",
+                        lambda v, offline=False: _real(v, offline=True))
+    monkeypatch.setattr(k8s, "ensure_kubeconfig", lambda plan, emit=None: "default")
+    monkeypatch.setattr(k8s, "helm_reachable",
+                        lambda ctx: 'Error: kubernetes cluster unreachable: '
+                                    'x509: certificate signed by unknown authority')
+    # Anything that would BUILD is a failure of the gate, not of the stub.
+    monkeypatch.setattr(k8s, "assert_namespace_available",
+                        lambda *a, **k: pytest.fail("gate ran too late"))
+    monkeypatch.setattr(k8s, "create_workspace",
+                        lambda **k: pytest.fail("a namespace was built anyway"))
+    # `plan_cluster` lives on k8s, and lifecycle calls it as `k8s.plan_cluster()` --
+    # patching the name on `lc` would have patched nothing and the test would have
+    # passed against the real cluster on whatever box it ran.
+    monkeypatch.setattr(k8s, "plan_cluster", lambda: k8s.ClusterPlan(
+        context="default", distribution="k3s", create=False))
+
+    with pytest.raises(errors.ValidationError) as exc:
+        lc.create_repro(lc.CreateReq(version="8.5.1", name="hg",
+                                     runtime="kubernetes", wait=False),
+                        emit=lc.null_emit)
+    said = str(exc.value)
+    assert "helm cannot reach cluster" in said, said
+    assert "although kubectl can" in said, said
+    # The CURE, named. This is the whole difference from the error it replaces.
+    assert "previous install of the same cluster" in said, said
+    assert "/etc/rancher/k3s/k3s.yaml > ~/.kube/config" in said, said
+    assert "kind export kubeconfig" in said, said
+    assert "doctor" in said, said
+
+
+def test_doctor_fails_when_helm_cannot_reach_a_cluster_kubectl_can(monkeypatch,
+                                                                  tmp_path):
+    """FAIL, not warn: every Kubernetes create on this box is broken until it is
+    fixed, and the tick doctor used to print beside it is what sent a reader looking
+    at the chart instead of the kubeconfig."""
+    from rc_repro.services import doctor, k8s
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setattr(k8s, "which", lambda t: f"/usr/bin/{t}")
+    monkeypatch.setattr(k8s, "run", _fake_run({
+        "get clusters": (0, f"{k8s.CLUSTER_NAME}\n"),
+        "/readyz": (0, "ok"),
+        "get storageclass": (0, '{"items": [{"metadata": {"name": "standard",'
+                                ' "annotations": {"storageclass.kubernetes.io/'
+                                'is-default-class": "true"}}}]}'),
+        "get ingressclass": (0, ""),
+        "get namespace": (0, ""),
+        "version": (0, "v9.9.9"),
+        # THE ONE THAT DISAGREES.
+        "helm list": (1, "Error: kubernetes cluster unreachable: x509: certificate "
+                         "signed by unknown authority"),
+    }))
+    rows = doctor.run_checks()["checks"]
+    hit = [r for r in rows if "helm cannot reach" in r["message"]]
+    assert hit, [r["message"][:60] for r in rows]
+    assert hit[0]["status"] == "fail", hit
+    assert "kubectl can" in hit[0]["message"]
+    assert "roll back" in hit[0]["message"]
+
+
+# --- the Kubernetes audit's findings (K-01 .. K-24) -----------------------------
+
+def _cluster_env(monkeypatch, *, reachable, held):
+    """rc-repro's own kind cluster, present, with `held` workspace namespaces."""
+    from rc_repro.services import k8s
+    calls: list = []
+    monkeypatch.setattr(k8s, "run",
+                        lambda argv, **kw: calls.append(argv) or _completed(0))
+    monkeypatch.setattr(k8s, "which", lambda b: "/usr/bin/kind")
+    monkeypatch.setattr(k8s, "clusters", lambda: ([k8s.CLUSTER_NAME], ""))
+    monkeypatch.setattr(k8s, "cluster_context", lambda: "kind-rc-repro-local")
+    monkeypatch.setattr(k8s, "reachable", lambda ctx, **kw: reachable)
+    monkeypatch.setattr(k8s, "workspace_namespaces", lambda ctx=None: held)
+    return calls
+
+
+def test_an_unreachable_cluster_is_never_treated_as_an_empty_one(monkeypatch):
+    """K-01. `delete_cluster`'s whole ownership guard lived inside
+    `if not force and reachable(context)`, so an unreachable cluster skipped it --
+    including the "could not read" refusal written for exactly that case.
+
+    `kind delete` talks to Docker, so unreachability was no obstacle: a paused
+    control plane holding live workspaces was deleted by one `prune --yes`, with the
+    prompt calling the cluster empty. A cluster nobody can reach is the case rc-repro
+    knows LEAST about, not most.
+    """
+    from rc_repro.services import k8s
+
+    # Holds a workspace and cannot be reached: the worst case, and the one that used
+    # to delete it.
+    calls = _cluster_env(monkeypatch, reachable=False, held=["rc-repro-victim"])
+    assert k8s.cluster_reclaimable() is False
+    with pytest.raises(errors.ConflictError, match="not answering"):
+        k8s.delete_cluster()
+    assert not [a for a in calls if "delete" in a and "cluster" in a], \
+        "the cluster was deleted without its contents ever being read"
+
+    # Empty but unreachable: still refused — "empty" is not something we know.
+    _cluster_env(monkeypatch, reachable=False, held=[])
+    assert k8s.cluster_reclaimable() is False
+    with pytest.raises(errors.ConflictError):
+        k8s.delete_cluster()
+
+    # Reachable and genuinely empty: the legitimate reclaim still works.
+    calls = _cluster_env(monkeypatch, reachable=True, held=[])
+    assert k8s.cluster_reclaimable() is True
+    assert k8s.delete_cluster() is True
+    assert [a for a in calls if "delete" in a and "cluster" in a]
+
+    # Reachable and occupied: refused, naming what it holds.
+    _cluster_env(monkeypatch, reachable=True, held=["rc-repro-victim"])
+    with pytest.raises(errors.ConflictError, match="still holds"):
+        k8s.delete_cluster()
+
+    # --force is still the way through a wedged one.
+    calls = _cluster_env(monkeypatch, reachable=False, held=["rc-repro-victim"])
+    assert k8s.delete_cluster(force=True) is True
+
+
+def test_an_orphaned_namespace_owned_by_someone_else_is_left_alone(monkeypatch,
+                                                                   tmp_path):
+    """K-02. `prune --orphans` deleted a stray namespace and its PVC without ever
+    reading `rc-repro.io/owner` -- and a stray is by definition what a colleague's
+    workspace looks like from here, since their repro.json is on their machine.
+    """
+    from rc_repro.services import k8s
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setattr(lc, "prunable", lambda: [])
+    monkeypatch.setattr(lc.auditsvc, "record", lambda *a, **kw: None)
+    monkeypatch.setattr(lc.auditsvc, "actor", lambda: "me")
+    monkeypatch.setattr(lc, "_orphan_context", lambda: "c")
+    monkeypatch.setattr(lc, "orphan_namespaces",
+                        lambda *a, **kw: ["rc-repro-hers", "rc-repro-mine",
+                                          "rc-repro-unreadable"])
+    monkeypatch.setattr(lc, "_reclaim_cluster", lambda emit: False)
+    owners = {"rc-repro-hers": "alice", "rc-repro-mine": "me",
+              "rc-repro-unreadable": None}
+    monkeypatch.setattr(k8s, "namespace_owner",
+                        lambda ns, **kw: owners[ns])
+    monkeypatch.setattr(k8s, "wait_namespace_gone", lambda *a, **kw: True)
+    deleted: list[str] = []
+    monkeypatch.setattr(k8s, "run",
+                        lambda argv, **kw: (deleted.append(argv[-2])
+                                            if "delete" in argv else None)
+                        or _completed(0))
+
+    out = lc.prune(confirm=True, orphans=True)
+    assert deleted == ["rc-repro-mine"], deleted
+    assert out["orphans"] == ["rc-repro-mine"]
+
+    # --force is the documented way to take them anyway.
+    deleted.clear()
+    out = lc.prune(confirm=True, orphans=True, force=True)
+    assert sorted(deleted) == ["rc-repro-hers", "rc-repro-mine",
+                               "rc-repro-unreadable"], deleted
+
+
+def test_an_unreadable_workspace_is_not_offered_for_deletion_as_down(monkeypatch,
+                                                                     tmp_path):
+    """K-03. `workload_exists` returned `rc == 0 and stdout`, so a refused read was
+    indistinguishable from "the workload is not there" -- and `prunable()` listed a
+    LIVE workspace under "these down repros will be deleted, containers, data volumes
+    and records". Measured against a workspace serving 200 at the time.
+    """
+    from dataclasses import asdict
+
+    from rc_repro.services import k8s, topology
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    m = lc.runner.Metadata(name="k", project="p", rc_version="8.5.1", rc_image="i",
+                           mongo_tag="8.0", mongo_flavor="official", preset="default",
+                           root_url="u", host_port=3000, version_source="t")
+    topology.stamp(m.extra, topology.KUBERNETES)
+    ws = lc.runner.workspace("k")
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "repro.json").write_text(json.dumps(asdict(m)), encoding="utf-8")
+
+    # A refused read: non-zero exit, no stdout -- exactly what an RBAC denial or a
+    # wrong context produces.
+    monkeypatch.setattr(k8s, "run", lambda *a, **kw: _completed(1, err="forbidden"))
+    with pytest.raises(errors.DockerError, match="could not ask"):
+        k8s.workload_exists("k", context="c")
+    assert lc.prunable() == [], \
+        "a workspace nobody could read was offered for deletion as `down`"
+
+
+def test_one_unreadable_workspace_does_not_abort_the_whole_prune(monkeypatch,
+                                                                 tmp_path):
+    """K-04. `prune` caught ConflictError but not the DockerError `delete_namespace`
+    raises, so the first unreadable workspace ended the run and every later one was
+    silently left -- the reported "prune doesn't work"."""
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setattr(lc.auditsvc, "record", lambda *a, **kw: None)
+    monkeypatch.setattr(lc, "orphan_namespaces", lambda *a, **kw: [])
+    monkeypatch.setattr(lc, "_reclaim_cluster", lambda emit: False)
+    monkeypatch.setattr(lc, "prunable", lambda: ["bad", "good"])
+    monkeypatch.setattr(lc.topology, "of_repro", lambda n: lc.topology.DOCKER)
+    monkeypatch.setattr(lc.edgesvc, "detach", lambda n: None)
+    monkeypatch.setattr(lc.edgesvc, "deregister", lambda n: None)
+    removed: list[str] = []
+    monkeypatch.setattr(lc.runner, "remove", lambda n: removed.append(n))
+    monkeypatch.setattr(lc, "_clear_default_if", lambda n: None)
+
+    def down(name, **kw):
+        if name == "bad":
+            raise errors.DockerError("could not ask the cluster")
+        return 0
+    monkeypatch.setattr(lc.runner, "down", down)
+
+    out = lc.prune(confirm=True, only=["bad", "good"])
+    assert out["removed"] == ["good"], \
+        "the unreadable workspace ended the sweep instead of being skipped"
+
+
+def test_a_wedged_workspace_is_not_reported_as_starting_for_ever(monkeypatch):
+    """K-09. Everything not ready read as `starting`, which promises that something
+    is coming. For a pod in ImagePullBackOff or a `pending-install` release nothing
+    is, and both facts were already available -- `terminal_pod_failure` named the pod,
+    the reason and the message while `list` printed "starting" beside it.
+    """
+    import types
+
+    from rc_repro.services import k8s
+
+    meta = types.SimpleNamespace(extra={"context": "c"})
+    monkeypatch.setattr(k8s, "workspace_namespaces", lambda ctx=None: ["rc-repro-k"])
+    monkeypatch.setattr(k8s, "workload_exists", lambda n, **kw: True)
+    monkeypatch.setattr(k8s, "desired_replicas", lambda n, **kw: 1)
+    monkeypatch.setattr(k8s, "workspace_ready", lambda n, **kw: False)
+    monkeypatch.setattr(k8s, "release_state", lambda *a, **kw: ("deployed", 1))
+
+    monkeypatch.setattr(k8s, "terminal_pod_failure", lambda n, **kw: None)
+    assert lc.kubernetes_state("k", meta) == "starting"
+
+    monkeypatch.setattr(k8s, "terminal_pod_failure",
+                        lambda n, **kw: ("mongodb-0", "ImagePullBackOff", "no such host"))
+    assert lc.kubernetes_state("k", meta) == "failed"
+
+    monkeypatch.setattr(k8s, "terminal_pod_failure", lambda n, **kw: None)
+    monkeypatch.setattr(k8s, "release_state", lambda *a, **kw: ("pending-install", 1))
+    assert lc.kubernetes_state("k", meta) == "failed"
+
+    # A REFUSED probe must not manufacture a failure: still `starting`.
+    def boom(*a, **kw):
+        raise errors.DockerError("could not ask")
+    monkeypatch.setattr(k8s, "terminal_pod_failure", boom)
+    monkeypatch.setattr(k8s, "release_state", boom)
+    assert lc.kubernetes_state("k", meta) == "starting"
+
+
+def test_the_mongodb_manifest_satisfies_pod_security_restricted():
+    """K-10. `mongo_manifest` set no securityContext at all, so under PSA
+    `restricted` the StatefulSet was ACCEPTED and no pod was ever created -- and
+    every diagnostic went blind: `terminal_pod_failure` found no pod, `pod_rows` was
+    empty, `storage_blocker` said nothing, and the PVC sat Pending pointing at
+    storage, which was not the problem.
+
+    Verified live against a namespace labelled `enforce=restricted`: pre-fix the API
+    server rejected the pod with all four violations named; post-fix it Runs, mongod
+    is uid 999, and the replica set reaches PRIMARY.
+    """
+    import yaml as _yaml
+
+    from rc_repro.services import k8s
+
+    sts = [d for d in _yaml.safe_load_all(k8s.mongo_manifest("t", "8.0"))
+           if d and d["kind"] == "StatefulSet"][0]
+    pod = sts["spec"]["template"]["spec"]
+    assert pod["securityContext"]["runAsNonRoot"] is True
+    assert pod["securityContext"]["seccompProfile"]["type"] == "RuntimeDefault"
+    container = pod["containers"][0]
+    assert container["securityContext"]["allowPrivilegeEscalation"] is False
+    assert container["securityContext"]["capabilities"]["drop"] == ["ALL"]
+    # Requests so a namespace quota cannot reject the pod outright; no CPU limit,
+    # because throttling mongod during a restore turns a backup test into a timeout.
+    assert container["resources"]["requests"]["memory"]
+    assert "cpu" not in container["resources"].get("limits", {})
+
+
+def test_a_monolith_does_not_run_a_nats_cluster_it_never_uses():
+    """K-15. The chart defaults `nats.enabled` on independently of
+    `microservices.enabled`, so `--deployment monolith` ran a 3-pod NATS cluster
+    nothing connected to -- three more pods to schedule, wait for and tear down.
+    Confirmed by rendering chart 7.0.2: 6 NATS objects without this, 0 with it.
+    """
+    from rc_repro.services import k8s
+
+    mono = k8s.values_for(rc_version="8.5.1", rc_image="i", microservices=False,
+                          host="rc.example.com")
+    micro = k8s.values_for(rc_version="8.5.1", rc_image="i", microservices=True,
+                           host="rc.example.com")
+    assert mono["nats"]["enabled"] is False
+    assert micro["nats"]["enabled"] is True
+    # The cluster NAME stays either way: it is what the chart's own values call it.
+    assert mono["nats"]["cluster"]["name"] == micro["nats"]["cluster"]["name"]
+
+
+def test_a_forward_that_only_got_one_address_family_is_not_certified():
+    """K-16. `kubectl port-forward` binds "localhost", which is BOTH 127.0.0.1 and
+    [::1]. If an IPv4-only process already holds the port kubectl does NOT fail --
+    it binds [::1] alone and runs happily -- and `pid_owns_port` said yes, so
+    `forward_bound` certified a URL on which every IPv4 client reached the squatter.
+
+    Reproduced live with a real kubectl forward and an IPv4 squatter: the old check
+    True, the new one False, `127.0.0.1` serving a different program. Here the
+    squatter is a CHILD process, because a socket this process binds is by definition
+    its own and would make the split untestable.
+    """
+    import os
+    import socket
+    import subprocess
+    import sys
+    import time as _time
+
+    from rc_repro.services import k8s
+
+    mine = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    try:
+        mine.bind(("::1", 0))
+    except OSError:
+        mine.close()
+        pytest.skip("no IPv6 loopback here to build the split with")
+    mine.listen(1)
+    port = mine.getsockname()[1]
+    try:
+        # Only this process holds it: exclusive, which is the healthy forward.
+        assert k8s.pid_owns_port(os.getpid(), port) is True
+        assert k8s.pid_owns_port_exclusively(os.getpid(), port) is True
+        # A pid that holds nothing on it answers no to both.
+        assert k8s.pid_owns_port_exclusively(1, port) is False
+
+        squatter = subprocess.Popen(
+            [sys.executable, "-c",
+             "import socket,time;s=socket.socket();"
+             "s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);"
+             f"s.bind(('127.0.0.1',{port}));s.listen(1);time.sleep(30)"])
+        try:
+            for _ in range(50):
+                if len(k8s._listening_inodes(port)) > 1:
+                    break
+                _time.sleep(0.1)
+            assert len(k8s._listening_inodes(port)) > 1, "the split never formed"
+            # THE SPLIT. Presence still says yes -- our IPv6 socket is really there --
+            # and that is exactly the answer that certified a broken URL.
+            assert k8s.pid_owns_port(os.getpid(), port) is True
+            assert k8s.pid_owns_port_exclusively(os.getpid(), port) is False
+        finally:
+            squatter.terminate()
+            squatter.wait(timeout=10)
+    finally:
+        mine.close()
+
+
+def test_a_port_change_retires_the_previous_forward(monkeypatch):
+    """K-06. `forward_alive` identifies a forward by namespace AND port, which is
+    right for "is what I recorded still up" and wrong for "is there an old one to
+    retire": `up --port 3261` asked about the NEW port, got False, recorded pid 0 and
+    left the old kubectl holding 3260 with nothing able to find it again. It survived
+    `down --volumes` for the same reason.
+    """
+    from rc_repro.services import k8s
+
+    signalled: list[int] = []
+    monkeypatch.setattr(k8s.os, "kill", lambda pid, sig: signalled.append(pid))
+    monkeypatch.setattr(k8s, "forward_alive",
+                        lambda pid, **kw: kw.get("host_port") == 3260)
+
+    # Asked about the port it is actually on: retired.
+    assert k8s.stop_forward(4242, namespace="ns", host_port=3260) is True
+    assert signalled == [4242]
+    # Asked about the new port: not our forward, and nothing is signalled.
+    signalled.clear()
+    assert k8s.stop_forward(4242, namespace="ns", host_port=3261) is False
+    assert signalled == []
+    # No recorded pid at all is not an error.
+    assert k8s.stop_forward(0, namespace="ns", host_port=3260) is False
+
+
+def test_the_monitoring_stack_reclaims_its_volume(monkeypatch):
+    """K-11. A StatefulSet's PVCs outlive it by design -- that is what keeps a
+    workspace's MongoDB data across a plain `down` -- and nothing deleted the
+    monitoring one. There was no code path anywhere that could: a clean
+    `monitor --off` left `prometheus-...-db-...-0` Bound, 10 Gi, permanently.
+    """
+    from rc_repro.services import k8s
+
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **kw):
+        seen.append(argv)
+        if "get" in argv and "pvc" in argv:
+            return _completed(0, out="persistentvolumeclaim/prometheus-db-0\n")
+        return _completed(0)
+    monkeypatch.setattr(k8s, "run", fake_run)
+    monkeypatch.setattr(k8s, "release_installed", lambda *a, **kw: True)
+    monkeypatch.setattr(k8s, "workspace_namespaces", lambda ctx=None: [])
+    monkeypatch.setattr(k8s, "grafana_leftovers", lambda ctx: [])
+    monkeypatch.setattr(k8s, "clear_grafana_finalizers", lambda ctx: None)
+
+    assert k8s.remove_monitoring(context="c") is True
+    deletes = [a for a in seen if "delete" in a and "pvc" in a]
+    assert deletes, "the monitoring volume was left allocated"
+
+
+def test_the_operator_is_not_installed_with_telemetry_on(monkeypatch):
+    """K-13. The chart sends the cluster UID, the Kubernetes version and deployment
+    UIDs to MongoDB on a weekly timer, enabled by default. Nobody using a support
+    reproduction tool opted into third-party analytics about the cluster they are
+    debugging, and on a customer's adopted cluster rc-repro would be what started it.
+    """
+    from rc_repro.services import k8s
+
+    seen: list[list[str]] = []
+    monkeypatch.setattr(k8s, "run",
+                        lambda argv, **kw: seen.append(argv) or _completed(0))
+    monkeypatch.setattr(k8s, "operator_installed", lambda **kw: False)
+    monkeypatch.setattr(k8s, "wait_operator_ready", lambda **kw: None, raising=False)
+    try:
+        k8s.ensure_operator(context="c")
+    except Exception:                      # noqa: BLE001 - the install is not the subject
+        pass
+    upgrade = [a for a in seen if "upgrade" in a and "--install" in a]
+    assert upgrade, "the operator install never ran"
+    flat = " ".join(upgrade[0])
+    assert "operator.telemetry.send.enabled=false" in flat, flat
+
+
+def test_a_version_the_index_has_never_heard_of_is_named_before_the_build(
+        monkeypatch, tmp_path):
+    """`resolve()` stamps `source="map (no such release)"` when releases.rocket.chat
+    answered 404, and the create path ignored it -- so `up --version 99.99.99` built
+    the whole compose document, created containers and failed ~90s later at docker's
+    own "not found", leaving a workspace to clean up.
+
+    Measured on EC2 against the real index. A warning rather than a refusal: the
+    shipped map can legitimately pair a version the live index has not indexed yet.
+    """
+    from rc_repro import versions
+    from rc_repro.services import lifecycle as lcsvc
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    said: list[str] = []
+    monkeypatch.setattr(lcsvc.runner, "up", lambda *a, **k: 0)
+    monkeypatch.setattr(lcsvc.runner, "down", lambda *a, **k: 0)
+
+    fields = {f.name: (f.default if f.default is not __import__("dataclasses").MISSING
+                       else "") for f in __import__("dataclasses").fields(versions.Resolved)}
+    fields.update(rc_version="99.99.99", rc_image="i", mongo_tag="8.0",
+                  mongo_flavor="official", source="map (no such release)")
+    monkeypatch.setattr(versions, "resolve", lambda *a, **kw: versions.Resolved(**fields))
+
+    try:
+        lcsvc.create_repro(lcsvc.CreateReq(version="99.99.99", name="bogus"),
+                           emit=lambda e: said.append(e.message))
+    except Exception:                      # noqa: BLE001 - the boot is not the subject
+        pass
+    assert any("has no 99.99.99" in m for m in said), said
+    assert any("shipped map" in m for m in said), \
+        "it must say where the pairing came from, not just that the version is unknown"
+
+    # A version the index DOES know is not warned about.
+    fields["source"] = "releases.rocket.chat"
+    monkeypatch.setattr(versions, "resolve", lambda *a, **kw: versions.Resolved(**fields))
+    said.clear()
+    try:
+        lcsvc.create_repro(lcsvc.CreateReq(version="8.5.1", name="fine"),
+                           emit=lambda e: said.append(e.message))
+    except Exception:                      # noqa: BLE001
+        pass
+    assert not [m for m in said if "has no" in m], said

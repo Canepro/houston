@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 
-from rc_repro import compose, config, rcapi, runner
+from rc_repro import compose, rcapi, runner
 from rc_repro.errors import DockerError, ValidationError
 from rc_repro.services import lifecycle
 from rc_repro.services.events import Emit, info, null_emit, warn
@@ -80,7 +80,7 @@ def warn_bare_settings(meta, keys: list[str], emit: Emit = null_emit) -> None:
         return
     try:
         auth = lifecycle.login(meta)
-        known = rcapi.setting_ids(meta.root_url, auth, config.ADMIN_PASSWORD)
+        known = rcapi.setting_ids(meta.root_url, auth, meta.admin_pass)
     except Exception:  # noqa: BLE001 - not serving yet, or not logged in; skip quietly
         return
     if not known:

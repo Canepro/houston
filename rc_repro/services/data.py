@@ -163,6 +163,7 @@ def _import_apply_locked(name: str, settings_path: str, only: set[str] | None = 
     except Exception as exc:  # noqa: BLE001
         raise NotReadyError(f"can't import - repro not ready: {exc}") from exc
     res = configimport.apply(m.root_url, auth, plan, workspace=m.name,
+                             admin_password=m.admin_pass,
                              log=lambda s: info(emit, s.strip(), phase="config"))
     info(emit, f"imported {res['applied']} setting(s), skipped {res['skipped']}"
                + (f"; {res['failed']} rejected" if res["failed"] else ""), phase="done")

@@ -203,7 +203,8 @@ def _not_answering(m: runner.Metadata, exc: Exception, what: str) -> NoReturn:
 def _login(meta: runner.Metadata) -> rcapi.Auth:
     """Admin login for a repro. Passes the repro's Mailpit URL (email preset)
     so rcapi can satisfy an email-2FA challenge automatically."""
-    return rcapi.login(meta.root_url, mailpit_url=meta.extra.get(config.EXTRA_MAILPIT_URL))
+    return rcapi.login(meta.root_url, password=meta.admin_pass,
+                       mailpit_url=meta.extra.get(config.EXTRA_MAILPIT_URL))
 
 
 def _parse_set_params(set_: list[str] | None) -> dict[str, str]:
@@ -303,7 +304,7 @@ def _summary_panel(meta: runner.Metadata, extra_rows: list[tuple[str, str]] | No
         # external_url, not root_url: with --https the browser wants the https URL,
         # while root_url stays the plain http one rc-repro's own API calls use.
         ("URL", meta.external_url),
-        ("Login", f"{config.ADMIN_USERNAME} / {config.ADMIN_PASSWORD}"),
+        ("Login", f"{config.ADMIN_USERNAME} / {meta.admin_pass}"),
     ]
     owner = meta.extra.get("created_by", "") if isinstance(meta.extra, dict) else ""
     if owner:
@@ -493,6 +494,7 @@ def _run_seed(meta: runner.Metadata, profile: str,
     tokens: dict = {}
     try:
         s = seeder.seed(meta.root_url, auth, plan, tokens_out=tokens,
+                        admin_password=meta.admin_pass,
                         workspace=meta.name,
                         log=(lambda m: None) if quiet else (lambda m: typer.echo(f"  {m}")))
     finally:
@@ -869,6 +871,9 @@ def prune(
     orphans: bool = typer.Option(False, "--orphans",
                                  help="also delete Kubernetes namespaces rc-repro owns "
                                       "that no local record explains"),
+    force: bool = typer.Option(False, "--force",
+                               help="with --orphans, sweep namespaces that belong to "
+                                    "somebody else or whose owner cannot be read"),
 ) -> None:
     """Delete every `down` repro — INCLUDING its data volume and record. Skips pinned and running ones."""
     try:
@@ -889,7 +894,7 @@ def prune(
                        "empty and can be given back (about 0.5 GB).")
             typer.confirm("Delete the cluster?", abort=True)
         try:
-            res = lcsvc.prune(confirm=True, orphans=orphans, emit=_cli_emit)
+            res = lcsvc.prune(confirm=True, orphans=orphans, force=force, emit=_cli_emit)
         except errors.ReproError as exc:
             _fail(exc)
         if res.get("cluster"):
@@ -910,13 +915,22 @@ def prune(
             typer.echo("")
             typer.echo("These Kubernetes namespaces are labelled rc-repro's but no "
                        "local record explains them — their PersistentVolumeClaims go too:")
+            # THE OWNER, NAMED. The label is on the namespace and this printed a
+            # bare list with a general warning, which is the one case where "may
+            # belong to a colleague" is answerable rather than a caveat.
             for ns in stray:
-                typer.echo(f"  - {ns}")
+                who = _orphan_owner(ns)
+                if who is None:
+                    typer.echo(f"  - {ns}   (owner could not be read — needs --force)")
+                elif who and who != me:
+                    typer.echo(f"  - {ns}   (belongs to {who} — needs --force)")
+                else:
+                    typer.echo(f"  - {ns}")
             typer.echo("  (on a shared cluster one of these may belong to a colleague)")
         typer.confirm("Continue?", abort=True)
     try:
-        res = lcsvc.prune(confirm=True, orphans=orphans, only=targets,
-                          emit=_cli_emit)
+        res = lcsvc.prune(confirm=True, orphans=orphans, force=force,
+                          only=targets, emit=_cli_emit)
     except errors.ReproError as exc:
         _fail(exc)
     # BOTH lists, because a sweep that removed only namespaces used to report
@@ -933,6 +947,22 @@ def prune(
         typer.echo("Nothing to prune.")
     if res.get("cluster"):
         ui.ok("✓ the cluster is gone too — the next Kubernetes workspace creates a new one.")
+
+
+def _orphan_owner(ns: str) -> str | None:
+    """Who a stray namespace says it belongs to, for the prune prompt.
+
+    `""` names nobody, `None` could not be read — the same three answers the service
+    makes its decision on, so the prompt cannot promise a sweep the service will then
+    refuse. Never raises: this is prompt text, and a cleanup verb must not fail
+    because a probe did.
+    """
+    try:
+        from rc_repro.services import k8s
+        from rc_repro.services.lifecycle import _orphan_context
+        return k8s.namespace_owner(ns, context=_orphan_context())
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _cluster_reclaimable() -> bool:
@@ -1070,6 +1100,10 @@ def info(
 
 # Settings worth remembering, shown name -> config.yaml key. An allowlist, so a
 # typo cannot write junk into the config file.
+#: The settings that are booleans rather than strings. `config set` coerces these,
+#: because storing what was typed made `false` truthy -- see `config.truthy`.
+_BOOL_CONFIG_KEYS = frozenset({"acme.staging"})
+
 _CONFIG_KEYS: dict[str, str] = {
     "acme.email": "acme_email",
     # Not a flag on `up`, on purpose: HTTPS is meant to be --domain plus --email and
@@ -1125,7 +1159,7 @@ _CONFIG_KEYS: dict[str, str] = {
 def users_cmd(
     action: str = typer.Argument("list", help="list | add | passwd | remove | role"),
     name: str = typer.Argument("", help="the user name, for add/passwd/remove/role"),
-    role: str = typer.Argument("", help="admin | member | readonly, for `role`"),
+    role: str = typer.Argument("", help="admin | member | readonly, for `add` and `role`"),
     ask_password: bool = typer.Option(
         False, "--ask-password",
         help="type a password instead of letting rc-repro generate one"),
@@ -1139,6 +1173,7 @@ def users_cmd(
     \b
     `add` and `passwd` GENERATE the password and show it once:
         rc-repro users add bob
+        rc-repro users add bob readonly          # with a role; member by default
         rc-repro users add bob --ask-password    # type one instead
 
     The GUI has always minted them, and for two reasons that apply just as much at
@@ -1232,9 +1267,28 @@ def users_cmd(
             # rc-repro generated" means one thing on this box rather than two.
             pw = usersvc.mint_password()
             minted = True
+        # The `role` positional was accepted by Typer and then read by nobody in
+        # this branch, so `users add contractor readonly` reported success and
+        # created a MEMBER -- an account that can create and destroy workspaces,
+        # read container logs (which carry LDAP bind passwords and OAuth client
+        # secrets) and mint PATs. An invalid role was accepted just as silently.
+        # The GUI path has always validated and passed it (web/app.py:1147); this
+        # is the parity fix, not a policy change.
+        if role and action == "passwd":
+            _err("`users passwd` takes no role — change one with "
+                 f"`rc-repro users role {name} {role}`")
+        if role:
+            try:
+                usersvc.require_valid_role(role)
+            except errors.ReproError as exc:
+                _fail(exc)
         try:
             if action == "add":
-                added = usersvc.add(name, pw)
+                # Empty `role` keeps add()'s own default, which is what makes the
+                # FIRST account an admin. Passing "" rather than a guess is what
+                # leaves that rule where it is defined.
+                added = usersvc.add(name, pw,
+                                    role=usersvc.normalise_role(role) if role else "")
             else:
                 # set_password() ends every session the OLD password minted, so
                 # changing a compromised one does not leave the intruder signed in
@@ -1350,9 +1404,11 @@ def _report_gui_tls(domain: str, tries: int = 10, pause: float = 2.0) -> None:
 
 @app.command(name="edge")
 def edge_cmd(
-    action: str = typer.Argument("status", help="status | start | stop | restart | logs"),
+    action: str = typer.Argument("status", help="status | start | stop | restart | logs | delete"),
+    host: str = typer.Argument("", help="the hostname, for `delete`"),
     follow: bool = typer.Option(False, "--follow", "-f", help="follow the log (logs)"),
     tail: int = typer.Option(200, "--tail", help="how many lines of log to show"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="skip the confirmation prompt (delete)"),
 ) -> None:
     """The shared Traefik that serves every HTTPS name on this box.
 
@@ -1363,6 +1419,11 @@ def edge_cmd(
     It starts by itself when the first workspace needs a name. `stop` frees :80
     and :443 for something else; routes are files, so starting it again restores
     every name with no re-registration.
+
+    `delete <host>` forgets a name completely — its route, its certificate, its
+    private key and its Let's Encrypt entry. `down --volumes` removes the route
+    and stops there, so the certificate material for a name you are finished with
+    outlives the workspace it was issued for; this is how it goes.
     """
     from rc_repro.services import edge as edgesvc
 
@@ -1413,6 +1474,20 @@ def edge_cmd(
                     f"{edgesvc.certs_dir()} is root-owned (Docker creates a missing "
                     f"bind-mount target that way), `sudo chown -R $(id -u):$(id -g) "
                     f"{edgesvc.certs_dir()}` and re-run `up` for those workspaces.")
+        # Certificates with nothing pointing at them. The counterpart to the orphan
+        # check above and the other half of the same blind spot: that one finds a
+        # declaration with no certificate, this finds a certificate with no route.
+        # Reported because a name cannot be cleaned up until it can be SEEN -- a
+        # Let's Encrypt key for a customer-shaped hostname sitting in acme.json for
+        # ever was invisible to every command this tool had.
+        claimed = {_edge_route_host(edgesvc, n).casefold() for n in st["routes"]}
+        claimed.add((domain or "").casefold())
+        stale = [h for h in edgesvc.acme_hosts() if h.casefold() not in claimed]
+        if stale:
+            ui.warn(f"  ⚠ {len(stale)} certificate(s) held with no route — "
+                    f"{', '.join(stale[:3])}{'…' if len(stale) > 3 else ''}. Each is a "
+                    f"Let's Encrypt certificate AND private key on this disk for a name "
+                    f"nothing serves. `rc-repro edge delete <host>` removes one.")
         if not st["routes"]:
             ui.hint("  no names registered yet.")
             return
@@ -1422,8 +1497,76 @@ def edge_cmd(
         typer.echo(f"\n{'NAME':<28} {'SERVES':<38} REACHABLE")
         for name in st["routes"]:
             host = _edge_route_host(edgesvc, name)
-            ok = edgesvc.workspace_network(name) in attached
+            # Through the service, so this and `/api/edge` cannot disagree again: a
+            # PASSTHROUGH route joins no workspace network, so membership answered
+            # NO (502) for every Kubernetes workspace, including ones serving 200
+            # from the internet on a real certificate.
+            ok = edgesvc.route_reachable(name, attached)
             typer.echo(f"{name:<28} {host:<38} {'yes' if ok else 'NO (502)'}")
+        return
+
+    if action == "delete":
+        if not edgesvc.installed():
+            ui.note("no edge in this home, so it holds no names — nothing to delete.")
+            return
+        if not host:
+            _err("name the host: `rc-repro edge delete <host>`. `rc-repro edge status` "
+                 "lists what this edge routes and what it holds a certificate for.")
+        if not yes:
+            # The prompt names what goes, because "delete rc-rpro-test.kestron.org"
+            # reads like removing a route and it is removing a private key.
+            typer.confirm(
+                f"delete {host} — its route, its certificate, its PRIVATE KEY and its "
+                f"Let's Encrypt entry? This cannot be undone",
+                abort=True)
+        try:
+            gone = edgesvc.delete_host(host, confirm=True)
+        except errors.ReproError as exc:
+            _fail(exc)
+        # Reported per kind, and only what actually went. Saying "certificate removed"
+        # about a Kubernetes name whose certificate lives in the cluster would be the
+        # same reported-the-attempt-as-the-outcome failure `edge stop` had.
+        for name in gone["routes"]:
+            ui.ok(f"✓ route {name} removed"
+                  + (" (passthrough — its certificate is in the cluster, and went "
+                     "with the namespace)" if name in gone["passthrough"] else ""))
+        if gone["certificate"]:
+            ui.ok(f"✓ certificate and key for {gone['host']} removed")
+        if gone["declaration"]:
+            ui.ok(f"✓ certificate declaration for {gone['host']} removed")
+        if gone["acme"]:
+            ui.ok(f"✓ Let's Encrypt certificate removed from {', '.join(gone['acme'])}")
+            if gone["foreign"]:
+                # The one case where a clean "removed" would mislead: this home's
+                # edge is not running, another home's is, and that one reads its own
+                # ACME store. The key came off this disk; the name is still served.
+                ui.warn(f"the edge holding :443 belongs to another RC_REPRO_HOME "
+                        f"({gone['foreign']}), and it reads its OWN certificate "
+                        f"store — so what was just deleted is this home's copy, not "
+                        f"the certificate that name is being served with. Run this "
+                        f"there, with that RC_REPRO_HOME.")
+            elif gone["restarted"] is True:
+                ui.note("the edge was restarted so Traefik reloads the store — it holds "
+                        "it in memory and rewrites the whole file, so an edit made "
+                        "underneath it comes back. Every other name is served again; "
+                        "routes are files.")
+            elif gone["restarted"] is False:
+                ui.warn("the edge did not come back cleanly — `rc-repro edge status`. "
+                        "Until it restarts, Traefik may write the deleted entry back "
+                        "from memory.")
+            elif not edgesvc.running():
+                ui.hint("the edge is stopped, so nothing can write the entry back.")
+        if not any((gone["routes"], gone["certificate"], gone["declaration"],
+                    gone["acme"])):
+            ui.note(f"nothing here for {gone['host']} — no route, no certificate, no "
+                    f"ACME entry. Already clean, or the name belongs to another "
+                    f"RC_REPRO_HOME.")
+            return
+        if gone["kept"]:
+            ui.hint(f"kept {', '.join(gone['kept'])} — the issuance ledger is what "
+                    f"`tls-status` counts against Let's Encrypt's five-a-week "
+                    f"duplicate limit. Deleting the certificate does NOT give the "
+                    f"budget back; re-issuing the same name still counts.")
         return
 
     if action in ("start", "stop", "restart"):
@@ -1447,8 +1590,26 @@ def edge_cmd(
                     gui_host=fd.gui_host, gui_port=fd.gui_port,
                     http_port=fd.http_port, https_port=fd.https_port))
         if action in ("stop", "restart"):
-            edgesvc.down()
-            ui.ok("✓ edge stopped; :80 and :443 are free.")
+            # NOTHING TO STOP IS NOT A FAILURE, AND NOT A SUCCESS EITHER. `edge logs`
+            # a few lines up already guards on `installed()`; this did not, so on a
+            # home that has never had an edge it went straight to `docker compose` in
+            # a directory that does not exist. Only `stop` can reach this with no edge:
+            # `restart` writes a config above.
+            if not edgesvc.installed():
+                ui.note("no edge is set up in this home — nothing to stop. If a name "
+                        "is still being served, the edge belongs to another "
+                        "RC_REPRO_HOME; `rc-repro edge status` says so.")
+                return
+            # AND THE EXIT CODE IS READ. This discarded it and printed success
+            # unconditionally, which is the shape this codebase keeps finding: a
+            # compose that could not run at all reported the ports as free.
+            if edgesvc.down() != 0:
+                _err("could not stop the edge — `docker compose -p rcrepro_edge ps` "
+                     "says what is still there.")
+            # NOT "the ports are free". The edge no longer holds them, which is all
+            # this command did; a cluster taking them by DNAT would make the stronger
+            # claim false, and that is the exact failure `_port_claim_note` exists for.
+            ui.ok("✓ edge stopped; it no longer holds :80 or :443.")
         if action in ("start", "restart"):
             # RENDERED, not raised. `up()` refuses with a ConflictError when an edge from
             # a different RC_REPRO_HOME already holds the port -- a real, expected,
@@ -1473,18 +1634,26 @@ def edge_cmd(
                 ui.ok("✓ edge running — every registered name is served again.")
         return
 
-    _err(f"unknown action {action!r} (want: status | start | stop | restart)")
+    _err(f"unknown action {action!r} (want: status | start | stop | restart | logs | "
+         f"delete <host>)")
 
 
 def _edge_route_host(edgesvc, name: str) -> str:
-    """The hostname a route file serves, for display only."""
-    try:
-        for line in edgesvc.route_path(name).read_text().splitlines():
-            if "rule:" in line and "Host(" in line:
-                return line.split("Host(`", 1)[1].split("`", 1)[0]
-    except (OSError, IndexError):
-        pass
-    return "?"
+    """The hostname a route file serves, for display only. `?` when it declares none.
+
+    `edge.route_host` already matched both rule shapes and this kept its own copy
+    testing `"Host(" in line` -- which is NOT a substring of `"HostSNI("`, so every
+    Kubernetes passthrough route displayed as having no host while serving 200 from
+    the internet. The GUI had the identical copy, so the two agreed, which is what
+    made it read as a fact about the route rather than about the parser.
+    """
+    return edgesvc.route_host(name) or "?"
+
+
+#: Distinguishes "this key is not set" from "this key is set to something falsy".
+#: `None` cannot do it -- a config file may legitimately hold it -- and `or` cannot
+#: either, which is the bug this exists to prevent recurring.
+_UNSET = object()
 
 
 @app.command(name="config")
@@ -1510,13 +1679,24 @@ def config_cmd(
     if action == "list":
         cfg = config.load_config()
         for shown, stored in _CONFIG_KEYS.items():
-            typer.echo(f"  {shown:20} {cfg.get(stored) or '(unset)'}")
+            # `.get(k, _UNSET)`, not `.get(k) or ...`: a stored `False` is falsy, so
+            # `or` rendered it as "(unset)" -- and `acme.staging` is a BOOLEAN whose
+            # whole history is people not being able to tell which way it is set.
+            # `config set acme.staging false` then reported success and both `list`
+            # and `get` said the key was unset, which is the same confusion one layer
+            # up from the `bool("false")` defect this key already had.
+            value = cfg.get(stored, _UNSET)
+            typer.echo(f"  {shown:20} "
+                       f"{'(unset)' if value is _UNSET else value}")
         return
     if key not in _CONFIG_KEYS:
         _err(f"unknown key {key!r} (want: {', '.join(_CONFIG_KEYS)})")
     stored = _CONFIG_KEYS[key]
     if action == "get":
-        typer.echo(config.load_config().get(stored) or "")
+        # Same distinction as `list`: an empty line means the key is not set, so a
+        # `False` that printed as one was indistinguishable from absent.
+        value = config.load_config().get(stored, _UNSET)
+        typer.echo("" if value is _UNSET else value)
         return
     if action == "unset":
         config.update_config(lambda c: c.pop(stored, None))
@@ -1531,8 +1711,18 @@ def config_cmd(
             strict = "admin" if key == "gui.create_policy" else "owner"
             if value not in ("anyone", strict):
                 _err(f"{key} takes 'anyone' or '{strict}' (got {value!r})")
-        config.update_config(lambda c: c.__setitem__(stored, value))
-        ui.ok(f"✓ {key} = {value}")
+        stored_value: object = value
+        if key in _BOOL_CONFIG_KEYS:
+            # COERCED, because the raw string was stored and `bool("false")` is True --
+            # so this command could turn a setting on and never off. Refused rather
+            # than guessed for anything unrecognised: silently storing a truthy string
+            # is the defect being fixed.
+            low = value.strip().lower()
+            if low not in config._TRUE + config._FALSE or low == "":
+                _err(f"{key} takes true or false (got {value!r})")
+            stored_value = config.truthy(value)
+        config.update_config(lambda c: c.__setitem__(stored, stored_value))
+        ui.ok(f"✓ {key} = {stored_value}")
         return
     _err(f"unknown action {action!r} (want: list | get | set | unset)")
 
@@ -1634,14 +1824,34 @@ def tls_status(name: str = typer.Option("", "--name", "-n")) -> None:
     # Probe THIS host, not the hostname, so a proxy in front cannot answer for us.
     # Checking only the public name reported Cloudflare's edge certificate as
     # "serving HTTPS, trusted" while our own Traefik had no certificate at all.
-    r = tlsmod.verify("127.0.0.1", port, cafile=cafile, sni=host)
+    #
+    # BOTH LOOPBACK FAMILIES, because one of them may not be ours. On a box running
+    # k3s, klipper's ServiceLB DNATs IPv4 :443 into the cluster -- and its ingress is
+    # also Traefik, so probing 127.0.0.1 reached the CLUSTER's placeholder
+    # certificate and reported a perfectly healthy workspace as broken. Measured
+    # here: 127.0.0.1:443 answered `CN = TRAEFIK DEFAULT CERT` while [::1]:443 --
+    # the rc-repro edge -- served the real one, and `tls.verify` on the NAME agreed
+    # with [::1]. The advice printed with it was wrong twice over, because it named
+    # ACME for a workspace whose certificate comes from the local CA.
+    #
+    # The first answer that is not a fallback wins; if every family answers with a
+    # placeholder then that IS the finding, and the last result carries it.
+    for _probe in ("127.0.0.1", "::1"):
+        r = tlsmod.verify(_probe, port, cafile=cafile, sni=host)
+        if r["serving"] and not r.get("fallback"):
+            break
 
     if not r["serving"]:
         ui.warn(f"  ✗ nothing is serving TLS on this host's port {port} - {r['error']}")
         _tls_troubleshoot(m, mode, host, port)
         raise typer.Exit(1)
+    # SUBJECT OR THE NAMES, because an empty subject is not a failure to read one.
+    # cert-manager issues with no subject at all -- the name is in the SANs only -- so
+    # every Kubernetes workspace showed `Subject: ?` for a certificate that was
+    # entirely correct, which reads as something having gone wrong.
     rows = [("Endpoint", f"{host}:{port}"), ("Issuer", r["issuer"] or "?"),
-            ("Subject", r["subject"] or "?"), ("Expires", r["dates"].replace("notAfter=", ""))]
+            ("Valid for", r["subject"] or ", ".join(r.get("names") or []) or "?"),
+            ("Expires", r["dates"].replace("notAfter=", ""))]
     ui.panel(f"TLS: {m.name}", rows)
 
     if r["fallback"]:
@@ -1708,7 +1918,37 @@ def _promote_command(m: runner.Metadata, host: str) -> str:
 
 def _tls_troubleshoot(m: runner.Metadata, mode: str, host: str, port: int) -> None:
     """The next things to actually check, ordered by how often they are the cause."""
+    from rc_repro.services import topology
+
     ui.hint(f"  Rocket.Chat itself is fine at {m.root_url} - this is the TLS layer.")
+    # A KUBERNETES WORKSPACE'S CERTIFICATE IS NOT THE EDGE'S, so none of the advice
+    # below applies to it. Every line here named Traefik and `rc-repro logs` -- which
+    # on this runtime shows Rocket.Chat, not a proxy -- and the tlsalpn/Cloudflare
+    # branch is about a challenge cert-manager does not even implement. Sending
+    # someone to `edge logs` for a certificate the edge never saw is the whole reason
+    # this branch exists.
+    if topology.of_meta(m) == topology.KUBERNETES:
+        extra = m.extra if isinstance(m.extra, dict) else {}
+        ns = str(extra.get("namespace") or m.project or "")
+        from rc_repro.services import k8s
+        ui.hint("  TLS terminates in the cluster, from a Secret cert-manager filled — "
+                "the edge only forwards the raw connection, so its log has nothing "
+                "about this name.")
+        ui.hint("  Most likely, in order:")
+        ui.hint("    1. the Certificate is not Ready yet, or says why it is not")
+        ui.hint("    2. the ClusterIssuer is not Ready (created before cert-manager, "
+                "or no egress for an ACME order)")
+        ui.hint("    3. nothing routes to the ingress — `rc-repro doctor` names a "
+                "cluster holding this host's ports")
+        ui.hint("  What cert-manager says:")
+        ui.hint(f"    kubectl -n {ns} describe certificate {k8s.tls_secret_for(m.name)}")
+        ui.hint(f"    kubectl describe clusterissuer "
+                f"{k8s.ACME_ISSUER if mode == 'acme' else k8s.CA_ISSUER}")
+        if mode == "acme":
+            ui.hint(f"    kubectl -n {ns} get order,challenge")
+            ui.hint("  Debug on staging (`rc-repro config set acme.staging true`): "
+                    f"production allows only 5 failed validations per hour for {host}.")
+        return
     if mode == "acme":
         ui.hint("  Most likely, in order:")
         ui.hint(f"    1. inbound TCP/{port} not reachable from the internet "
@@ -1802,7 +2042,7 @@ def api(
     try:
         auth = _login(m)
         if pat:
-            token = rcapi.generate_pat(m.root_url, auth, config.ADMIN_PASSWORD, bypass_2fa=True, workspace=m.name)
+            token = rcapi.generate_pat(m.root_url, auth, m.admin_pass, bypass_2fa=True, workspace=m.name)
             auth = rcapi.Auth(token=token, user_id=auth.user_id)  # use the PAT as the auth token
     except Exception as exc:  # noqa: BLE001
         _not_answering(m, exc, "this API call")
@@ -1812,7 +2052,7 @@ def api(
     except json.JSONDecodeError as exc:
         _err(f"--data is not valid JSON: {exc}")
 
-    extra = rcapi.password_2fa_headers(config.ADMIN_PASSWORD) if two_fa else None
+    extra = rcapi.password_2fa_headers(m.admin_pass) if two_fa else None
     _t = time.monotonic()
     try:
         status, text = rcapi.call(m.root_url, method, path, auth=auth, data=body, extra_headers=extra)
@@ -1842,7 +2082,7 @@ def pat(
     m = runner.read_meta(target)
     try:
         auth = _login(m)
-        token = rcapi.generate_pat(m.root_url, auth, config.ADMIN_PASSWORD, token_name=label, bypass_2fa=bypass_2fa, workspace=m.name)
+        token = rcapi.generate_pat(m.root_url, auth, m.admin_pass, token_name=label, bypass_2fa=bypass_2fa, workspace=m.name)
     except Exception as exc:  # noqa: BLE001
         _not_answering(m, exc, "minting a token")
     typer.echo(f"# Personal Access Token for {m.name} ({m.root_url}) — bypass_2fa={bypass_2fa}")
@@ -2642,7 +2882,7 @@ def loadtest(
     # Auth as a bypass-2FA PAT — exactly how a customer's script would hit the API.
     try:
         auth = _login(m)
-        token = rcapi.generate_pat(m.root_url, auth, config.ADMIN_PASSWORD,
+        token = rcapi.generate_pat(m.root_url, auth, m.admin_pass,
                                    token_name="rc-repro-loadtest", bypass_2fa=True,
                                    workspace=m.name)
     except Exception as exc:  # noqa: BLE001
@@ -2661,7 +2901,7 @@ def loadtest(
     # The webhook scenario posts through a real incoming-webhook integration —
     # create (or reuse) it now and hand its tokenized path to k6.
     if scenario == "webhook":
-        hook_path = rcapi.create_incoming_webhook(m.root_url, auth, config.ADMIN_PASSWORD)
+        hook_path = rcapi.create_incoming_webhook(m.root_url, auth, m.admin_pass)
         if not hook_path:
             _err("could not create the incoming webhook integration (check admin permissions)")
         extra_env = {**(extra_env or {}), "RC_HOOK_PATH": hook_path}
@@ -2714,11 +2954,11 @@ def loadtest(
         # Disable the API rate limiter so the offered load isn't throttled into a
         # false result. Restored below — back ON unless it was already known-off
         # (an unreadable setting -> None -> restores to ON, never left disabled).
-        limiter_was_off = rcapi.get_setting(m.root_url, auth, config.ADMIN_PASSWORD,
+        limiter_was_off = rcapi.get_setting(m.root_url, auth, m.admin_pass,
                                             config.RC_RATE_LIMITER_SETTING) is False
         if not limiter_was_off:
             limiter_note = journal.record(journal.RATE_LIMITER_OFF, m.name)
-            if not rcapi.set_setting(m.root_url, auth, config.ADMIN_PASSWORD,
+            if not rcapi.set_setting(m.root_url, auth, m.admin_pass,
                                      config.RC_RATE_LIMITER_SETTING, False):
                 journal.clear(limiter_note)
                 limiter_note = ""
@@ -2736,10 +2976,10 @@ def loadtest(
         # Server-side diagnosis (Phase C): RC's own /metrics (event-loop lag) and
         # Mongo's query profiler, armed for the run. Both best-effort.
         if diag:
-            if rcapi.get_setting(m.root_url, auth, config.ADMIN_PASSWORD,
+            if rcapi.get_setting(m.root_url, auth, m.admin_pass,
                                  monitoring.RC_METRICS_SETTING) is not True:
                 metrics_note = journal.record(journal.RC_METRICS_ON, m.name)
-                metrics_changed = rcapi.set_setting(m.root_url, auth, config.ADMIN_PASSWORD,
+                metrics_changed = rcapi.set_setting(m.root_url, auth, m.admin_pass,
                                                     monitoring.RC_METRICS_SETTING, True)
             mongo_prior = mongoprof.start(m.name, slowms)
             if mongo_prior is None:
@@ -2754,7 +2994,8 @@ def loadtest(
             sampler = rcmetrics.RCMetricsSampler(m.name, rc_services).start()
         summary = k6.run(m.name, scenario, vus=vus, duration=duration, ramp=ramp or None,
                          token=token, uid=auth.user_id, target=target, extra_env=extra_env,
-                         users=users or None, quiet=json_out, timeline=want_timeline,
+                         users=users or None, password=m.admin_pass,
+                         quiet=json_out, timeline=want_timeline,
                          spike=spike or None, live=live)
     except RuntimeError as exc:
         _err(str(exc))   # raises typer.Exit; finally still runs (mon stopped, limiter restored)
@@ -2768,14 +3009,14 @@ def loadtest(
             resources = mon.stop()
         if not limiter_was_off:
             try:
-                rcapi.set_setting(m.root_url, auth, config.ADMIN_PASSWORD,
+                rcapi.set_setting(m.root_url, auth, m.admin_pass,
                                   config.RC_RATE_LIMITER_SETTING, True)
                 journal.clear(limiter_note)
             except Exception:  # noqa: BLE001 - best-effort restore
                 _warn("  ⚠ could not restore the API rate limiter setting")
         if metrics_changed:
             try:
-                rcapi.set_setting(m.root_url, auth, config.ADMIN_PASSWORD,
+                rcapi.set_setting(m.root_url, auth, m.admin_pass,
                                   monitoring.RC_METRICS_SETTING, False)
                 journal.clear(metrics_note)
             except Exception:  # noqa: BLE001
@@ -2969,7 +3210,7 @@ def capacity(
 
     try:
         auth = _login(m)
-        token = rcapi.generate_pat(m.root_url, auth, config.ADMIN_PASSWORD,
+        token = rcapi.generate_pat(m.root_url, auth, m.admin_pass,
                                    token_name="rc-repro-loadtest", bypass_2fa=True,
                                    workspace=m.name)
     except Exception as exc:  # noqa: BLE001
@@ -2991,7 +3232,7 @@ def capacity(
         try:
             s = k6.run(m.name, scenario, vus=n, duration=step_duration, ramp=None,
                        token=token, uid=auth.user_id, target=target,
-                       users=users or None, quiet=True)
+                       users=users or None, password=m.admin_pass, quiet=True)
         finally:
             rcm = sampler.stop()
         res = slo_mod.evaluate(rules, s)
@@ -3023,16 +3264,16 @@ def capacity(
             constrain_note = journal.record(
                 journal.CONSTRAINTS_APPLIED, m.name,
                 applied=[dataclasses.asdict(a) for a in applied_constraints])
-        limiter_was_off = rcapi.get_setting(m.root_url, auth, config.ADMIN_PASSWORD,
+        limiter_was_off = rcapi.get_setting(m.root_url, auth, m.admin_pass,
                                             config.RC_RATE_LIMITER_SETTING) is False
         if not limiter_was_off:
             limiter_note = journal.record(journal.RATE_LIMITER_OFF, m.name)
-            rcapi.set_setting(m.root_url, auth, config.ADMIN_PASSWORD,
+            rcapi.set_setting(m.root_url, auth, m.admin_pass,
                               config.RC_RATE_LIMITER_SETTING, False)
-        if rcapi.get_setting(m.root_url, auth, config.ADMIN_PASSWORD,
+        if rcapi.get_setting(m.root_url, auth, m.admin_pass,
                              monitoring.RC_METRICS_SETTING) is not True:
             metrics_note = journal.record(journal.RC_METRICS_ON, m.name)
-            metrics_changed = rcapi.set_setting(m.root_url, auth, config.ADMIN_PASSWORD,
+            metrics_changed = rcapi.set_setting(m.root_url, auth, m.admin_pass,
                                                 monitoring.RC_METRICS_SETTING, True)
         identity = f"{len(users)} seeded users" if users else "admin token"
         if not json_out:
@@ -3063,7 +3304,7 @@ def capacity(
     finally:
         if not limiter_was_off:
             try:
-                rcapi.set_setting(m.root_url, auth, config.ADMIN_PASSWORD,
+                rcapi.set_setting(m.root_url, auth, m.admin_pass,
                                   config.RC_RATE_LIMITER_SETTING, True)
             except Exception:  # noqa: BLE001
                 ui.warn("  ⚠ could not restore the API rate limiter setting")
@@ -3071,7 +3312,7 @@ def capacity(
                 journal.clear(limiter_note)
         if metrics_changed:
             try:
-                rcapi.set_setting(m.root_url, auth, config.ADMIN_PASSWORD,
+                rcapi.set_setting(m.root_url, auth, m.admin_pass,
                                   monitoring.RC_METRICS_SETTING, False)
                 journal.clear(metrics_note)
             except Exception:  # noqa: BLE001

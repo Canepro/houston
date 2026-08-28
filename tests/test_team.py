@@ -186,6 +186,152 @@ def test_deleting_your_own_workspace_is_not_nagged_about(monkeypatch):
     assert "owned by" not in r.output
 
 
+def test_a_member_cannot_take_a_workspace_in_order_to_destroy_it():
+    """The ownership gate reads the OWNER, and the write to it was ungated.
+
+    `POST /api/repros/{name}/owner` is member+ and `set_owner` validated only that
+    the TARGET account existed -- never that the caller owned the workspace. So a
+    member refused a destroy could reassign it to themselves and destroy it on the
+    next call: two requests, both audited, neither prevented. The refusal message
+    even named the command that did it.
+    """
+    from rc_repro import errors
+
+    users.add("alice", GOOD, role="member")
+    users.add("bob", GOOD, role="member")
+    _write_meta("alice-rc8-5-1", "alice")
+
+    refused, why = lc.may_destroy("alice-rc8-5-1", "bob")
+    assert not refused, "precondition: bob may not destroy alice's workspace"
+
+    with pytest.raises(errors.ConflictError) as exc:
+        lc.set_owner("alice-rc8-5-1", "bob", by="bob")
+    assert "belongs to alice" in str(exc.value)
+    assert lc.owner_of("alice-rc8-5-1") == "alice", "and the record is unchanged"
+    # The destroy gate is still shut, which is the point: the two calls are one hole.
+    assert not lc.may_destroy("alice-rc8-5-1", "bob")[0]
+
+
+def test_the_owner_and_an_admin_can_still_hand_a_workspace_over():
+    """The gate must not cost the workflow it exists for -- handing a ticket on is
+    the reason `chown` is a verb at all (team-server.md §3.3)."""
+    users.add("root", GOOD, role="admin")
+    users.add("alice", GOOD, role="member")
+    users.add("bob", GOOD, role="member")
+    _write_meta("alice-rc8-5-1", "alice")
+
+    assert lc.set_owner("alice-rc8-5-1", "bob", by="alice")["to"] == "bob"
+    assert lc.set_owner("alice-rc8-5-1", "alice", by="root")["to"] == "alice"
+    # An unowned (pre-team) workspace stays claimable by anyone, as before.
+    _write_meta("rc8-5-1")
+    assert lc.set_owner("rc8-5-1", "bob", by="bob")["to"] == "bob"
+
+
+def test_the_destroy_refusal_no_longer_names_its_own_bypass():
+    """It told the refused caller to run `chown --to <themselves>`, which worked.
+    Now that the chown is gated, the advice has to name who can actually run it."""
+    users.add("alice", GOOD, role="member")
+    users.add("bob", GOOD, role="member")
+    _write_meta("alice-rc8-5-1", "alice")
+
+    why = lc.may_destroy("alice-rc8-5-1", "bob")[1]
+    assert "alice or an admin can run" in why, why
+
+
+def test_users_add_creates_the_role_it_was_given():
+    """`rc-repro users [action] [name] [role]` accepted the role and the `add`
+    branch never read it, so every account was a MEMBER whatever was typed.
+
+    An operator running `users add contractor readonly` believed they had made a
+    read-only account; they had made one that can create and destroy workspaces,
+    read container logs (which carry LDAP bind passwords and OAuth client secrets)
+    and mint PATs. The GUI path has always validated and passed it, so this was a
+    CLI/GUI parity defect rather than a policy one.
+    """
+    users.add("first", GOOD)                       # the first account is admin
+    for name, want in (("ro", "readonly"), ("mem", "member"), ("adm", "admin")):
+        r = cli_runner.invoke(cli.app, ["users", "add", name, want])
+        assert r.exit_code == 0, r.output
+        assert users.role_of(name) == want, f"{name} asked for {want}"
+    # No role given still means the service's own default, not a guess made here.
+    assert cli_runner.invoke(cli.app, ["users", "add", "plain"]).exit_code == 0
+    assert users.role_of("plain") == "member"
+
+
+def test_the_ownership_gate_covers_every_operation_that_destroys_data():
+    """It guarded `down --volumes` and `prune` -- the two verbs whose NAMES sound
+    destructive -- and not the three others that destroy a colleague's reproduction
+    just as thoroughly: `up --fresh` deletes the data volume, `restore` writes a
+    bundle over a running workspace, and `upgrade --rollback` drops the database and
+    loads an older one. All three were member+ over HTTP.
+    """
+    from rc_repro import errors
+    from rc_repro.services import backup as backupsvc
+    from rc_repro.services import upgrade as upgradesvc
+
+    from rc_repro.services import audit as auditsvc
+
+    users.add("alice", GOOD, role="member")
+    users.add("bob", GOOD, role="member")
+    # The reachable shape: bob made it, then handed it to alice with `chown`.
+    # `owner_prefix` namespaces an explicit --name to the caller, so `bob-rc` is the
+    # workspace `up --name rc` resolves to when bob runs it.
+    _write_meta("bob-rc", "alice")
+    auditsvc.set_actor("bob")
+
+    with pytest.raises(errors.ConflictError, match="belongs to alice"):
+        upgradesvc.rollback("bob-rc")
+    with pytest.raises(errors.ConflictError, match="belongs to alice"):
+        backupsvc.restore("/nonexistent.tar.gz", name="bob-rc")
+
+
+def test_up_fresh_does_not_delete_a_colleagues_volume(monkeypatch):
+    """`--fresh` runs the identical `docker compose down -v` that `down --volumes`
+    is gated on, from a command that reads as "start it again"."""
+    from rc_repro import errors
+    from rc_repro.services import audit as auditsvc
+
+    users.add("alice", GOOD, role="member")
+    users.add("bob", GOOD, role="member")
+    _write_meta("bob-rc", "alice")
+    auditsvc.set_actor("bob")
+
+    torn: list = []
+    monkeypatch.setattr(lc.runner, "down", lambda *a, **k: torn.append(a) or 0)
+    monkeypatch.setattr(lc.runner, "up", lambda *a, **k: 0)
+
+    req = lc.CreateReq(version="8.5.1", name="rc", fresh=True, actor="bob")
+    with pytest.raises(errors.ConflictError, match="belongs to alice"):
+        lc.create_repro(req)
+    assert not torn, "the volume teardown ran despite the refusal"
+
+
+def test_a_name_that_gets_coerced_says_so():
+    """`sanitize` slugifies rather than refusing, which is right -- but silently, and
+    slugifying is not injective. `../escape` and `escape` both become `escape`, so
+    two tickets could land on ONE workspace and share its data with nothing said."""
+    seen: list[str] = []
+    req = lc.CreateReq(version="8.5.1", name="TICKET/1234")
+    lc._warn_name_coerced(req, lambda e: seen.append(e.message))
+    assert seen and "becomes 'ticket-1234'" in seen[0], seen
+    assert "same workspace" in seen[0]
+
+    quiet: list[str] = []
+    lc._warn_name_coerced(lc.CreateReq(version="8.5.1", name="ticket-1234"),
+                          lambda e: quiet.append(e.message))
+    assert not quiet, "a name that survives unchanged must not be warned about"
+
+
+def test_users_add_refuses_a_role_that_does_not_exist():
+    """It was accepted silently and the account came out a member, so a typo in a
+    role was indistinguishable from success."""
+    users.add("first", GOOD)
+    r = cli_runner.invoke(cli.app, ["users", "add", "typo", "reedonly"])
+    assert r.exit_code != 0, r.output
+    assert "unknown role" in r.output
+    assert not users.role_of("typo"), "and the account must not have been created"
+
+
 # --- serving the login ----------------------------------------------------------
 # Basic Auth over plain http is refused on a reachable interface unless asked for.
 # The refusal shipped before the front door that was meant to satisfy it, so
@@ -285,8 +431,18 @@ def test_serve_says_when_the_domain_has_no_certificate(tmp_path, monkeypatch, ca
     command to read."""
     from rc_repro import cli, tls as tlsmod
     from rc_repro.services import edge as fdsvc
+    from rc_repro.services import k8s
 
     monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    # NO CLUSTER, ASSERTED RATHER THAN INHERITED. `_report_gui_tls` calls
+    # `_port_claim_note()`, which runs a real `kubectl get svc` -- so on a box whose
+    # k3s holds :80 and :443 (which is the box this feature is FOR) both of these
+    # tests took the port-claim branch and never reached the certificate verdict they
+    # exist to check. Measured on such a box: two failures on pristine main, for a
+    # reason that is about the machine and not the code. The sibling test in
+    # test_edge.py stubs the same seam to assert the claim; these stub it to assert
+    # its absence.
+    monkeypatch.setattr(k8s, "port_claiming_cluster", lambda *a, **k: None)
     # Serving, but it is Traefik's fallback -- which is what a failed ACME looks like
     # from outside, and is indistinguishable from success unless you look at `fallback`.
     monkeypatch.setattr(tlsmod, "verify", lambda *a, **k: {
@@ -308,8 +464,18 @@ def test_serve_confirms_a_real_certificate_when_there_is_one(tmp_path, monkeypat
     """The other half: a healthy start must say so, or a warning nobody ever sees
     succeed is a warning people learn to ignore."""
     from rc_repro import cli, tls as tlsmod
+    from rc_repro.services import k8s
 
     monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    # NO CLUSTER, ASSERTED RATHER THAN INHERITED. `_report_gui_tls` calls
+    # `_port_claim_note()`, which runs a real `kubectl get svc` -- so on a box whose
+    # k3s holds :80 and :443 (which is the box this feature is FOR) both of these
+    # tests took the port-claim branch and never reached the certificate verdict they
+    # exist to check. Measured on such a box: two failures on pristine main, for a
+    # reason that is about the machine and not the code. The sibling test in
+    # test_edge.py stubs the same seam to assert the claim; these stub it to assert
+    # its absence.
+    monkeypatch.setattr(k8s, "port_claiming_cluster", lambda *a, **k: None)
     monkeypatch.setattr(tlsmod, "verify", lambda *a, **k: {
         "serving": True, "fallback": False, "issuer": "CN = R11, O = Let's Encrypt"})
     cli._report_gui_tls("gui.example.test", tries=1, pause=0)

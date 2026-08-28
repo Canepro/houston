@@ -44,7 +44,7 @@ def _attach_locked(target: str, emit: Emit = null_emit) -> dict:
     lifecycle.check_monitor_ports(exclude=m.name)   # raises ConflictError on a taken port
     try:
         auth = lifecycle.login(m)
-        if not rcapi.set_setting(m.root_url, auth, config.ADMIN_PASSWORD,
+        if not rcapi.set_setting(m.root_url, auth, m.admin_pass,
                                  monitoring.RC_METRICS_SETTING, True):
             warn(emit, "could not enable RC metrics via the API (is it ready?)", phase="config")
     except Exception as exc:  # noqa: BLE001
@@ -94,7 +94,7 @@ def _attach_kubernetes(target: str, emit: Emit = null_emit) -> dict:
     lifecycle.check_monitor_ports(exclude=m.name)
     try:
         auth = lifecycle.login(m)
-        if not rcapi.set_setting(m.root_url, auth, config.ADMIN_PASSWORD,
+        if not rcapi.set_setting(m.root_url, auth, m.admin_pass,
                                  monitoring.RC_METRICS_SETTING, True):
             warn(emit, "could not enable RC metrics via the API (is it ready?)",
                  phase="config")
@@ -139,7 +139,7 @@ def _detach_kubernetes(target: str, emit: Emit = null_emit) -> dict:
     info(emit, f"turning Rocket.Chat's metrics off in {m.name!r}", phase="monitor")
     try:
         auth = lifecycle.login(m)
-        rc_ok = rcapi.set_setting(m.root_url, auth, config.ADMIN_PASSWORD,
+        rc_ok = rcapi.set_setting(m.root_url, auth, m.admin_pass,
                                   monitoring.RC_METRICS_SETTING, False)
     except Exception:  # noqa: BLE001 - best-effort; the repro may be stopped
         pass
@@ -185,7 +185,7 @@ def _detach_locked(target: str, emit: Emit = null_emit) -> dict:
     info(emit, f"turning Rocket.Chat's metrics off in {m.name!r}", phase="monitor")
     try:
         auth = lifecycle.login(m)
-        rc_ok = rcapi.set_setting(m.root_url, auth, config.ADMIN_PASSWORD,
+        rc_ok = rcapi.set_setting(m.root_url, auth, m.admin_pass,
                                   monitoring.RC_METRICS_SETTING, False)
     except Exception:  # noqa: BLE001 - best-effort; the repro may be stopped
         pass

@@ -1360,7 +1360,7 @@ def test_the_database_tools_authenticate_when_the_operator_manages_mongodb(
     import base64 as _b64
     secret = _b64.b64encode(b"s3cr3t-generated").decode()
 
-    def fake_run(argv, timeout=None, own=False):
+    def fake_run(argv, timeout=None, own=False, env=None):
         import subprocess as sp
         if "secret" in argv:
             return sp.CompletedProcess(argv, 0, secret, "")
@@ -1619,3 +1619,53 @@ def test_a_truncated_bundle_fails_inside_the_error_contract(tmp_path):
     with pytest.raises(errors.ValidationError) as other:
         bk.read_manifest(junk)
     assert "not a readable backup bundle" in str(other.value), other.value
+
+
+def test_no_backup_clears_the_previous_upgrades_recorded_bundle(monkeypatch, tmp_path):
+    """`--no-backup` left the PREVIOUS upgrade's bundle recorded while
+    `upgraded_from` was updated regardless, so the two disagreed and nothing noticed.
+
+    A later `--rollback` read that stale path and restored it with force=True, which
+    bypasses the downgrade refusal -- so "undo the last upgrade" dropped the current
+    database and loaded data from TWO versions back.
+    """
+    import json as _json
+    from dataclasses import asdict
+
+    from rc_repro.services import upgrade as up
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    stale = tmp_path / "from-7-0.rcbak"
+    stale.write_bytes(b"x")
+
+    m = bk.runner.Metadata(name="u", project="p", rc_version="8.0.0",
+                           rc_image="i", mongo_tag="8.0", mongo_flavor="official",
+                           preset="default", root_url="http://localhost:3000",
+                           host_port=3000, version_source="t")
+    m.extra[up.LAST_BACKUP_KEY] = str(stale)        # recorded by the 7.0 -> 8.0 run
+    m.extra[up.UPGRADE_FROM_KEY] = "7.0.0"
+    ws = bk.runner.workspace("u")
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "repro.json").write_text(_json.dumps(asdict(m)), encoding="utf-8")
+    (ws / "docker-compose.yml").write_text(
+        "services:\n  rocketchat:\n    image: i\n", encoding="utf-8")
+
+    monkeypatch.setattr(up.lifecycle, "require_engine", lambda *a, **kw: None)
+    monkeypatch.setattr(up.lifecycle, "resolve_name", lambda n: n)
+    monkeypatch.setattr(bk.runner, "up", lambda *a, **kw: 0)
+    monkeypatch.setattr(up, "_wait_ready", lambda *a, **kw: None, raising=False)
+
+    monkeypatch.setattr(up, "plan", lambda *a, **kw: {
+        "allowed": True, "mongo_blocked": False, "to_version": "9.0.0",
+        "from_version": "8.0.0", "rc_image": "i", "oplog": False,
+        "blocked_reason": "", "warnings": [], "notes": []})
+    try:
+        up._run_locked("u", "9.0.0", offline=True, force=False, no_backup=True,
+                       rollback_on_failure=False, emit=lambda e: None)
+    except Exception:                      # noqa: BLE001 - the boot is not the subject
+        pass
+
+    after = bk.runner.read_meta("u").extra
+    assert up.LAST_BACKUP_KEY not in after or not after[up.LAST_BACKUP_KEY], (
+        "the previous upgrade's bundle is still recorded, so `--rollback` would "
+        f"restore two versions back: {after.get(up.LAST_BACKUP_KEY)!r}")

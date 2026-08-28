@@ -2399,7 +2399,12 @@ def test_bare_setting_warning_asks_the_workspace_and_stays_quiet_when_it_cannot(
     """
     from rc_repro import rcapi
     from rc_repro.services import envvars
-    meta = type("M", (), {"name": "e", "root_url": "http://x", "extra": {}})()
+    # `admin_pass` because a workspace's admin password is per workspace now, and
+    # everything that logs in reads it off the record. A stub without it raises
+    # AttributeError inside a `try` and the warning silently never fires -- which is
+    # exactly how this stub failed when the field was added.
+    meta = type("M", (), {"name": "e", "root_url": "http://x", "extra": {},
+                          "admin_pass": "admin123"})()
 
     monkeypatch.setattr(envvars.lifecycle, "login", lambda m: object())
     monkeypatch.setattr(rcapi, "setting_ids",
@@ -3589,6 +3594,40 @@ def test_the_compatible_mongo_note_says_which_end_it_took():
     assert versions._lowest([]) is None
 
 
+def test_a_mongo_override_must_be_an_image_tag():
+    """`--mongo` is templated into a Kubernetes StatefulSet by f-string, so a value
+    carrying a newline added its own YAML keys and `kubectl apply` accepted them.
+
+    Refused at the boundary rather than escaped at the template: this is the one
+    place a caller-supplied tag enters, both runtimes read `resolved.mongo_tag`
+    afterwards, and a value that is not an OCI tag cannot name a real image anyway.
+    """
+    import dataclasses
+
+    import pytest
+
+    from rc_repro import versions
+    from rc_repro.errors import ValidationError
+
+    fields = {f.name: (f.default if f.default is not dataclasses.MISSING else "")
+              for f in dataclasses.fields(versions.Resolved)}
+    fields.update(rc_version="7.4.1", rc_image="i", mongo_tag="7.0",
+                  mongo_flavor="official")
+    resolved = versions.Resolved(**fields)
+
+    for bad in ("8.0\n        privileged: true", "8.0 --privileged", "-8.0", "",
+                "a" * 129, "8.0\n"):
+        with pytest.raises(ValidationError, match="not a MongoDB image tag"):
+            versions.apply_mongo_override(resolved, bad)
+    assert resolved.mongo_tag == "7.0", "a refused override must not be applied"
+
+    # The tags this tool actually pairs, including the flavor split at Mongo 8.
+    versions.apply_mongo_override(resolved, "8.0")
+    assert (resolved.mongo_tag, resolved.mongo_flavor) == ("8.0", "official")
+    versions.apply_mongo_override(resolved, "6.0.5-ubi8")
+    assert (resolved.mongo_tag, resolved.mongo_flavor) == ("6.0.5-ubi8", "bitnami-legacy")
+
+
 def test_a_preset_name_cannot_be_a_path(tmp_path, monkeypatch):
     """`--preset /tmp/x` read /tmp/x.yaml, and the presets directory was never consulted.
 
@@ -3823,3 +3862,121 @@ def test_the_optional_extras_are_present_when_ci_says_they_must_be():
     assert not missing, (
         "RC_REPRO_REQUIRE_EXTRAS=1 but the suite would have skipped whole layers:\n  "
         + "\n  ".join(missing))
+
+
+#: Where `config.ADMIN_PASSWORD` is the CORRECT answer. Each is either the constant
+#: itself or the one fallback applied where a caller supplied no password:
+#:
+#:   runner.py       `Metadata.admin_pass`, the fallback everything else reads
+#:   compose.py      the same, applied where the admin is actually provisioned
+#:   services/k8s.py the same, for the chart's extraEnv
+#:   seed.py         the same, for a caller that passes no password
+#:   configimport.py the same
+#:   rcapi.py        the `login()` default, for a loopback caller
+#:   perf/k6.py      the `run()` default, same reason
+_SHARED_PASSWORD_OK = {
+    "runner.py", "compose.py", "seed.py", "configimport.py", "rcapi.py",
+    "services/k8s.py", "perf/k6.py",
+}
+
+
+def _shared_password_readers() -> list[str]:
+    """Every `config.ADMIN_PASSWORD` ATTRIBUTE ACCESS in the package, parsed.
+
+    Parsed rather than grepped for the reason `test_every_engine_heavy_job_kind_lands
+    _in_a_pool` gives: a grep counts the constant's own docstring, and a walk that
+    fires on prose is one somebody switches off.
+    """
+    import ast
+    import pathlib
+
+    from rc_repro import config as cfgmod
+
+    root = pathlib.Path(cfgmod.__file__).parent
+    found = []
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root).as_posix()
+        if rel == "config.py":                       # the definition itself
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Attribute) and node.attr == "ADMIN_PASSWORD"
+                    and isinstance(node.value, ast.Name) and node.value.id == "config"):
+                found.append(f"{rel}:{node.lineno}")
+    return found
+
+
+def test_nothing_authenticates_with_the_shared_password_by_accident():
+    """A registry that is correct and is not enforced by a walk is this codebase's
+    most-repeated defect, and the admin password just became one.
+
+    Sixty-odd call sites read `config.ADMIN_PASSWORD` directly. They are now
+    `meta.admin_pass`, which falls back to the same constant for a loopback
+    workspace -- so the sweep is invisible in behaviour and a MISSED site is
+    invisible too: it authenticates with `admin123` against a workspace whose
+    password is not `admin123`, and returns a 401 that names nothing. `pat`, `api`,
+    `seed`, `loadtest`, `monitor`, `upgrade` and readiness all run through those
+    sites.
+    """
+    stray = [hit for hit in _shared_password_readers()
+             if hit.rsplit(":", 1)[0] not in _SHARED_PASSWORD_OK]
+    assert not stray, (
+        "these read the shared loopback password directly; they want the "
+        "workspace's own -- `meta.admin_pass`:\n  " + "\n  ".join(stray))
+
+
+def test_the_allow_list_above_is_not_stale():
+    """A file that stops using the constant must leave the list, or the list stops
+    describing anything -- the same reason `PHASES` is walked rather than trusted."""
+    using = {hit.rsplit(":", 1)[0] for hit in _shared_password_readers()}
+    assert not (_SHARED_PASSWORD_OK - using), \
+        f"allow-listed and no longer using it: {sorted(_SHARED_PASSWORD_OK - using)}"
+
+
+def test_every_k8s_run_stub_accepts_what_the_real_one_takes():
+    """A test double whose SIGNATURE drifts from the real function fails as a
+    TypeError from inside the code under test -- and this codebase has two places
+    that swallow exactly that.
+
+    `k8s.run` grew an `env=` parameter for the helm probes. Twenty-odd stubs declared
+    `(argv, timeout=None, own=False)`, so the moment `preflight` passed `env=` they
+    raised TypeError out of `k8s.preflight`, `doctor`'s outer `except` swallowed it,
+    and the WHOLE Kubernetes section silently vanished from a report those tests then
+    asserted over. One of them -- `test_doctor_never_warns_about_ingress` -- failed
+    with `assert []` and pointed nowhere near the cause. The chart-repo probe had
+    been passing `env=` for longer and was never exercised here at all, because it
+    carries its own bare `except`.
+
+    So the doubles are checked against the real parameter list rather than trusted,
+    the same way `ROUTE_ROLES`, `PHASES`, `doctor.CHECKS` and the job pools are.
+    """
+    import ast
+    import inspect
+    import pathlib
+
+    from rc_repro.services import k8s
+
+    # Everything the real `run` accepts by keyword, minus the positional argv.
+    real = {n for n, p in inspect.signature(k8s.run).parameters.items()
+            if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)} - {"argv"}
+
+    bad = []
+    for path in sorted(pathlib.Path(__file__).parent.glob("test_*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            args = node.args
+            names = [a.arg for a in args.posonlyargs + args.args + args.kwonlyargs]
+            # A stub for `run` is any nested def whose FIRST parameter is `argv`.
+            if not names or names[0] != "argv":
+                continue
+            if args.kwarg is not None:          # **kw absorbs anything
+                continue
+            missing = real - set(names)
+            if missing:
+                bad.append(f"{path.name}:{node.lineno} {node.name}() is missing "
+                           f"{sorted(missing)}")
+    assert not bad, (
+        "these doubles cannot be called the way k8s.run is, so they raise TypeError "
+        "from inside the code under test:\n  " + "\n  ".join(bad))

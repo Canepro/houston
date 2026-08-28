@@ -331,17 +331,77 @@ function openEdge() {
       body.append(el("p", { class: "kv" }, "No names registered yet."));
     }
     for (const r of EDGE.routes || []) {
+      // The KIND of route is worth saying: one is terminated here and one is not, and
+      // a reader looking at this list is usually asking which.
       body.append(el("div", { class: "dcheck " + (r.reachable ? "ok" : "warn") },
         el("span", { class: "dmark" }, r.reachable ? "✓" : "!"),
         el("span", {}, `${r.host || r.name} → ${r.name}`
+          + (r.passthrough ? "  (passed through to the cluster, not decrypted)" : "")
           + (r.reachable ? "" : "  (unreachable — answers 502)"))));
     }
-    if ((EDGE.routes || []).some((r) => !r.reachable)) {
+    // Only a container-backed route is fixed by re-attaching; a passthrough has no
+    // network to join, so advising it would send someone to restart a healthy edge.
+    if ((EDGE.routes || []).some((r) => !r.reachable && !r.passthrough)) {
       body.append(el("p", { class: "banner warn" },
         "Run `rc-repro edge restart` to re-attach them."));
     }
+    // Certificates nothing points at. `down --volumes` removes a workspace's ROUTE
+    // and walks past the certificate, which is keyed by hostname -- so a Let's
+    // Encrypt certificate AND private key for a name you are finished with stays on
+    // this disk. Amber, not red: the row is telling you something wants attention;
+    // the button that destroys is the red one.
+    const stale = EDGE.stale_certs || [];
+    if (stale.length) {
+      const many = stale.length > 1;
+      body.append(el("p", { class: "banner warn" },
+        `${stale.length} certificate${many ? "s" : ""} held with no route — `
+        + (many ? "each is a certificate and private key"
+                : "a certificate and private key")
+        + " on this box for a name nothing serves."));
+      for (const host of stale) {
+        const row = el("div", { class: "dcheck warn" },
+          el("span", { class: "dmark" }, "!"),
+          el("span", {}, host));
+        // Admin only, and ABSENT rather than disabled for everyone else -- the rule
+        // this GUI uses everywhere: a control you cannot use should not be there to
+        // wonder about.
+        if (canAdmin()) {
+          row.append(el("button", { class: "btn danger small", onclick: () => forgetHost(host) },
+            "Delete"));
+        }
+        body.append(row);
+      }
+    }
   }
   if (!$("#edge-dialog").open) $("#edge-dialog").showModal();
+}
+
+async function forgetHost(host) {
+  // The prompt names the private key on purpose. "Delete rc-rpro-test.example.org"
+  // reads like removing a route, and it is removing a key that cannot be recovered.
+  if (!confirm(`Delete ${host}?\n\nThis removes its route, its certificate and its `
+             + `PRIVATE KEY, and its Let's Encrypt entry.\n\nThis cannot be undone.`)) {
+    return;
+  }
+  try {
+    const gone = await api(`/api/edge/hosts/${encodeURIComponent(host)}?confirm=true`,
+                           { method: "DELETE" });
+    // What actually went, not what was asked for -- the same reason the CLI reports
+    // per kind. A restart happens only for an ACME deletion, and it is worth saying
+    // because every other name on the box blinked.
+    const bits = [];
+    if (gone.routes && gone.routes.length) bits.push(`route ${gone.routes.join(", ")}`);
+    if (gone.certificate) bits.push("certificate and key");
+    if (gone.acme && gone.acme.length) bits.push(`Let's Encrypt entry (${gone.acme.join(", ")})`);
+    toast(bits.length ? `${host}: removed ${bits.join(", ")}`
+                      : `${host}: nothing here to remove`, "ok");
+  } catch (e) {
+    toast(`Could not delete ${host}: ${e.message}`);
+  }
+  // Re-read before re-rendering: the dialog is drawn from EDGE, and after a delete
+  // that object is stale by exactly the row the user just acted on.
+  await refreshEdgeBadge();
+  openEdge();
 }
 
 function render() {
@@ -3413,9 +3473,31 @@ const ADV_GONE_LABEL = {
 function syncAdvancedForRuntime(spec) {
   const gone = new Set(((spec && spec.unsupported) || []).map((u) => u.field));
 
-  // HTTPS is a block of its own, so it goes entirely.
+  // HTTPS is a block of its own, so it goes entirely -- but only when HTTPS itself
+  // is refused. This used to read `gone.has("https") || gone.has("domain")`, which
+  // was right while a runtime refused both and became wrong the moment one of them
+  // worked: Kubernetes now serves `--https` through the chart's own Ingress and still
+  // cannot do `--domain`, and the || hid the whole control for want of the half that
+  // is missing.
   const https = $("#create-https-block");
-  if (https) https.hidden = gone.has("https") || gone.has("domain");
+  if (https) https.hidden = gone.has("https");
+
+  // The MODE is the thing that is unavailable, so the mode goes and the block stays.
+  // Removed rather than disabled, because that is this dialog's rule -- a disabled
+  // option invites a click and explains nothing, and `#adv-gone` below already says
+  // what was taken away and why.
+  const mode = $("#https-mode");
+  if (mode) {
+    const has = [...mode.options].some((o) => o.value === "acme");
+    if (gone.has("domain") && has) {
+      if (mode.value === "acme") mode.value = "";
+      [...mode.options].find((o) => o.value === "acme").remove();
+      syncHttpsFields();
+    } else if (!gone.has("domain") && !has) {
+      mode.append(el("option", { value: "acme" },
+        "Let's Encrypt — a domain that already points here"));
+    }
+  }
 
   // `fresh` is ONE OPTION of the existing-name select, not the whole control:
   // `reuse` and `force` work on both runtimes, and hiding the row would take a

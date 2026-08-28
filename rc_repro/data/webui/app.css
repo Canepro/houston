@@ -397,7 +397,11 @@ input:focus, select:focus, textarea:focus {
 .wstate.stopped, .wstate.paused, .wstate.created { color: var(--amber); }
 .wstate.down, .wstate.unknown { color: var(--dim); }
 .wstate.down::before, .wstate.unknown::before { background: transparent; box-shadow: inset 0 0 0 1px currentColor; }
-.wstate.restarting, .wstate.dead { color: var(--red); }
+/* `failed` joins the red group rather than getting a colour of its own: a wedged
+   Helm release or a pod in ImagePullBackOff is the same signal as `dead` -- this is
+   not coming back on its own and it wants you. Without a rule here the word would
+   render at the base colour, which reads as "fine". */
+.wstate.restarting, .wstate.dead, .wstate.failed { color: var(--red); }
 .wstate.working { color: var(--blue); }
 .wage { font-family: var(--mono); font-size: .64rem; color: var(--dim); }
 

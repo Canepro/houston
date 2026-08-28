@@ -42,6 +42,7 @@ from packaging.version import InvalidVersion, Version
 from rc_repro import config, rcapi, runner
 from rc_repro.errors import (ConflictError, DockerError, NotFoundError,
                              NotReadyError, ReproError, ValidationError)
+from rc_repro.services import audit as auditsvc
 from rc_repro.services import journal, lifecycle, topology
 from rc_repro.services.events import Emit, info, null_emit, warn
 
@@ -670,6 +671,19 @@ def compatibility(manifest: dict, meta) -> dict:
 
 # --- restore -----------------------------------------------------------------------
 
+def _require_may_destroy(target: str) -> None:
+    """Refuse a restore over somebody else's workspace, and record the refusal.
+
+    One helper because `restore` learns its target two ways -- from `name`, before
+    anything is read, and from the bundle's manifest afterwards -- and both have to
+    apply the same rule.
+    """
+    allowed, why = lifecycle.may_destroy(target, auditsvc.actor())
+    if not allowed:
+        auditsvc.record("restore", target, outcome="denied")
+        raise ConflictError(why)
+
+
 def restore(bundle: str | Path, *, name: str = "", new: bool = False,
             allow_upgrade: bool = False, force: bool = False,
             emit: Emit = null_emit) -> dict:
@@ -684,6 +698,14 @@ def restore(bundle: str | Path, *, name: str = "", new: bool = False,
     # so it is checked below once the name is known -- and restoring into a fresh
     # workspace still creates a Compose one, because a bundle carries no runtime.
     existing = lifecycle.resolve_name(name) if name and not new else ""
+    # Authorisation FIRST, when the target is already known. Restoring into an
+    # existing workspace drops its database and writes a bundle over it, losing
+    # whatever was being reproduced there as completely as `down --volumes` -- and
+    # this was reachable at member+ over HTTP with nothing consulted. Checked before
+    # the engine probe and before the bundle is read, so a refused caller is not
+    # first told to start Docker or handed a filesystem answer about the path.
+    if existing:
+        _require_may_destroy(existing)
     if not (existing and _kube(existing)):
         lifecycle.require_docker()
     path = Path(bundle).expanduser()
@@ -716,6 +738,10 @@ def restore(bundle: str | Path, *, name: str = "", new: bool = False,
         # caller has a bundle capable of recreating it.
         raise NotFoundError(
             f"{exc} - pass --new to create it from the bundle instead") from exc
+    # Again for the target that came from the MANIFEST rather than from `name`,
+    # which is only known once the bundle has been read. `--new` is deliberately not
+    # gated: it creates a workspace rather than overwriting somebody else's.
+    _require_may_destroy(target)
     with runner.repro_lock(target):
         return _restore_locked(target, path, manifest, emit,
                                allow_upgrade=allow_upgrade, force=force, created=False)
@@ -943,11 +969,11 @@ def _retarget_site_url(target: str, emit: Emit = null_emit) -> None:
         if not want:
             return
         auth = lifecycle.login(meta)
-        current = rcapi.get_setting(meta.root_url, auth, config.ADMIN_PASSWORD,
+        current = rcapi.get_setting(meta.root_url, auth, meta.admin_pass,
                                     "Site_Url")
         if isinstance(current, str) and current.rstrip("/") == want.rstrip("/"):
             return
-        if rcapi.set_setting(meta.root_url, auth, config.ADMIN_PASSWORD,
+        if rcapi.set_setting(meta.root_url, auth, meta.admin_pass,
                              "Site_Url", want):
             info(emit, f"Site_Url retargeted from {current!r} to {want!r} - the bundle "
                        f"carried the source workspace's address", phase="restore")

@@ -58,12 +58,12 @@ def _pr_saml_idp_cert(meta: runner.Metadata, auth: rcapi.Auth, action: dict, emi
     # pull its image before it can boot, which the Compose default did not allow for.
     cert = rcapi.fetch_saml_idp_cert(action["descriptor_url"],
                                      timeout=IDP_CERT_DEADLINE)
-    if cert and rcapi.set_setting(meta.root_url, auth, config.ADMIN_PASSWORD, action["setting"], cert):
+    if cert and rcapi.set_setting(meta.root_url, auth, meta.admin_pass, action["setting"], cert):
         enable = action.get("enable_setting")
         if enable:
-            rcapi.set_setting(meta.root_url, auth, config.ADMIN_PASSWORD, enable, False)
+            rcapi.set_setting(meta.root_url, auth, meta.admin_pass, enable, False)
             time.sleep(1)
-            rcapi.set_setting(meta.root_url, auth, config.ADMIN_PASSWORD, enable, True)
+            rcapi.set_setting(meta.root_url, auth, meta.admin_pass, enable, True)
         info(emit, "IdP cert applied; SAML login button registered.", phase="post_ready")
         return True
     warn(emit, "could not fetch/apply IdP cert (is the IdP up?)", phase="post_ready")
@@ -108,7 +108,7 @@ def _pr_create_oauth_provider(meta: runner.Metadata, auth: rcapi.Auth, action: d
     engineer sees as "I click the OIDC button and the page is blank" -- the button is
     real, the endpoint behind it is empty, and nothing in the create said so.
     """
-    if not rcapi.add_oauth_service(meta.root_url, auth, config.ADMIN_PASSWORD, action["name"]):
+    if not rcapi.add_oauth_service(meta.root_url, auth, meta.admin_pass, action["name"]):
         warn(emit, "could not create the OAuth provider", phase="post_ready")
         return False
     settings = dict(action["settings"])
@@ -138,12 +138,12 @@ def _apply_settings(meta: runner.Metadata, auth: rcapi.Auth, settings: dict,
                     emit: Emit) -> list[str]:
     """Apply each setting; return the ids that did not take."""
     return [sid for sid, val in settings.items()
-            if not rcapi.set_setting(meta.root_url, auth, config.ADMIN_PASSWORD,
+            if not rcapi.set_setting(meta.root_url, auth, meta.admin_pass,
                                      sid, val)]
 
 
 def _pr_livechat_setup(meta: runner.Metadata, auth: rcapi.Auth, action: dict, emit: Emit) -> bool:
-    url, pw = meta.root_url, config.ADMIN_PASSWORD
+    url, pw = meta.root_url, meta.admin_pass
     agents = [{"agentId": auth.user_id, "username": config.ADMIN_USERNAME}]
     rcapi.add_livechat_agent(url, auth, pw, config.ADMIN_USERNAME)
     for i in range(2, int(action.get("agents", 1)) + 1):

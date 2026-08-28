@@ -473,6 +473,25 @@ def _cert_field(pem: str, *args: str) -> str:
     return (proc.stdout or "").strip()
 
 
+def cert_names(pem: str) -> list[str]:
+    """The DNS names a certificate is valid for, from its subjectAltName.
+
+    NEEDED because a certificate can have no subject at all. cert-manager issues
+    exactly that shape -- the name lives only in the SANs -- so every Kubernetes
+    workspace's certificate reported `Subject: ?`, which reads as a parse failure
+    rather than as a perfectly good certificate. `tls_local.py` already says why the
+    SANs are the field that matters: browsers have ignored commonName since Chrome
+    58, so a certificate with only a CN is rejected outright.
+    """
+    raw = _cert_field(pem, "-ext", "subjectAltName")
+    out = []
+    for part in raw.replace("\n", ",").split(","):
+        part = part.strip()
+        if part.startswith("DNS:"):
+            out.append(part[4:].strip())
+    return out
+
+
 def verify(host: str, port: int = 443, timeout: float = 10.0,
            cafile: str | None = None, sni: str | None = None) -> dict:
     """Connect over TLS and report what is ACTUALLY being served.
@@ -485,7 +504,7 @@ def verify(host: str, port: int = 443, timeout: float = 10.0,
     import ssl
     out: dict = {"host": host, "port": port, "serving": False, "trusted": False,
                  "trusted_via_ca": False, "issuer": "", "subject": "", "dates": "",
-                 "fallback": False, "error": ""}
+                 "names": [], "fallback": False, "error": ""}
     # `sni` lets the caller connect to an ADDRESS while presenting a different
     # server name -- how you check what this host serves for a domain without
     # letting a proxy in front answer instead.
@@ -507,13 +526,23 @@ def verify(host: str, port: int = 443, timeout: float = 10.0,
     pem = ssl.DER_cert_to_PEM_cert(der)
     out["issuer"] = _cert_field(pem, "-issuer").removeprefix("issuer=").strip()
     out["subject"] = _cert_field(pem, "-subject").removeprefix("subject=").strip()
+    # The names, always, because the subject can legitimately be empty (see
+    # `cert_names`). A caller that shows one field should be able to fall back.
+    out["names"] = cert_names(pem)
     out["dates"] = " ".join(_cert_field(pem, "-enddate").splitlines())
     out["fallback"] = _TRAEFIK_FALLBACK.lower() in (out["issuer"] + out["subject"]).lower()
 
     def _accepts(ctx_cafile: str | None) -> bool:
-        ctx = (ssl.create_default_context(cafile=ctx_cafile) if ctx_cafile
-               else ssl.create_default_context())
+        # THE CONTEXT IS BUILT INSIDE THE TRY, and that is not style. A CA file that
+        # does not exist makes `create_default_context` raise FileNotFoundError -- an
+        # OSError, but raised one line ABOVE the handler that catches OSError -- so
+        # this reporting function crashed its caller instead of reporting. Hit live:
+        # a fresh RC_REPRO_HOME going straight to `--domain` has never minted a local
+        # certificate, so `ca/ca.crt` is simply not there, and `up` ended in a
+        # traceback after the workspace had been built and its certificate issued.
         try:
+            ctx = (ssl.create_default_context(cafile=ctx_cafile) if ctx_cafile
+                   else ssl.create_default_context())
             with socket.create_connection((host, port), timeout=timeout) as raw:
                 with ctx.wrap_socket(raw, server_hostname=servername):
                     return True

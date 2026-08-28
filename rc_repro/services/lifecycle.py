@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import signal
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -20,9 +21,9 @@ from dataclasses import asdict
 
 from rc_repro import compose, config, presets, rcapi, runner, versions
 from rc_repro import seed as seeder
-from rc_repro.errors import (ConflictError, CreateFailedError, DockerError,
-                            NotFoundError, NotReadyError, PreflightError,
-                            ReproError, ValidationError)
+from rc_repro.errors import (AuthorityGateError, ConflictError, CreateFailedError,
+                            DockerError, NotFoundError, NotReadyError,
+                            PreflightError, ReproError, ValidationError)
 from rc_repro.services import audit as auditsvc
 from rc_repro.services import edge as edgesvc
 from rc_repro.services import diagnose, postready, topology
@@ -64,6 +65,26 @@ def _require_valid_name(name: str) -> None:
 def sanitize(name: str) -> str:
     name = name.lower().replace(".", "-")
     return _NAME_RE.sub("-", name).strip("-")
+
+
+def _warn_name_coerced(req: "CreateReq", emit: Emit) -> None:
+    """Say so when `--name` is not the name the workspace gets.
+
+    `sanitize` slugifies rather than refusing, which is right -- `TICKET-1234` and
+    `ticket 1234` should both work -- but it was silent, and slugifying is not
+    injective: `../escape` and `escape` both become `escape`, as do `a/b` and `a-b`.
+    There is no traversal here (the result contains no separator) and no injection
+    (nothing reaches a shell), but two different tickets could silently land on ONE
+    workspace and share its data, which is the failure worth naming.
+    """
+    if not req.name:
+        return
+    became = sanitize(req.name)
+    if became and became != req.name:
+        warn(emit, f"--name {req.name!r} becomes {became!r} — a workspace name is a "
+                   f"directory and a DNS label. Another name that reduces to "
+                   f"{became!r} would be the same workspace, data included.",
+             phase="create")
 
 
 def derive_name(version: str, preset: str, actor: str = "") -> str:
@@ -113,7 +134,12 @@ def require_docker() -> None:
     workspace that has not finished booting.
     """
     if not runner.docker_available():
-        raise DockerError("Docker isn't running. Start Docker Desktop and try again.")
+        # Named for the platform, because "Start Docker Desktop" on Linux names a
+        # product that is usually not the one installed -- and a reader who cannot
+        # find the thing the error names tends to doubt the error, not the wording.
+        starter = ("Start Docker Desktop" if sys.platform in ("darwin", "win32")
+                   else "Start it with `sudo systemctl start docker`")
+        raise DockerError(f"Docker isn't running. {starter} and try again.")
     # AND the compose plugin, because every path here shells out to `docker compose`
     # and a box can have one without the other. Reported from a fresh Amazon Linux EC2
     # instance where `docker ps` worked and `rc-repro up` died with docker's own
@@ -758,6 +784,13 @@ def set_owner(name: str, to: str, *, by: str = "") -> dict:
     modelled at all: the record only ever knew who typed `up`.
     """
     target = resolve_name(name)
+    # Enforced HERE, beside the mutation, exactly as teardown() enforces
+    # may_destroy: the CLI and the GUI both reach this function, and a check at
+    # either front end alone would leave the other open.
+    allowed, why = may_chown(target, by or auditsvc.actor())
+    if not allowed:
+        auditsvc.record("chown", target, outcome="denied")
+        raise ConflictError(why)
     to = (to or "").strip().lower()
     if not to:
         raise ValidationError("no new owner given (--to <name>)")
@@ -930,7 +963,10 @@ def _resolve_tls(req: CreateReq, repro_name: str, bind_host: str, exclude: str =
                 "  rc-repro up ... --domain " + domain + " --email you@example.com\n"
                 "It is remembered after the first use, or set it once with:\n"
                 "  rc-repro config set acme.email you@example.com")
-        req.acme_staging = req.acme_staging or bool(cfg.get("acme_staging"))
+        # `config.truthy`, not `bool`: a config written by an older rc-repro holds the
+        # STRING "false", which bool() reads as True -- so staging could never be
+        # turned back off. See config.truthy for the measurement.
+        req.acme_staging = req.acme_staging or config.truthy(cfg.get("acme_staging"))
         _pick_challenge(req, cfg, emit)
     else:
         mode = tlsmod.MODE_LOCAL
@@ -950,6 +986,17 @@ def _resolve_tls(req: CreateReq, repro_name: str, bind_host: str, exclude: str =
     # probe, which the edge does once for every name instead of each workspace
     # fighting over :80.
     port = 443
+
+    # ONE NAME, ONE WORKSPACE. Both runtimes come through here, so this is the single
+    # place the collision can be refused -- and `exclude` already carries the
+    # workspace that is allowed to re-claim its own name.
+    taken = edgesvc.host_owner(host, excluding=exclude or repro_name)
+    if taken:
+        raise ConflictError(
+            f"{host} is already served for workspace {taken!r}, and the edge routes by "
+            f"hostname -- two claims on one name means Traefik picks one and the other "
+            f"silently never answers. Use a different name, or `rc-repro down --name "
+            f"{taken}` first.")
 
     return tlsmod.TlsSpec(
         mode=mode, host=host, port=port, acme_email=req.acme_email,
@@ -1020,6 +1067,27 @@ def _requested_bind_host(req: "CreateReq") -> str:
 
 #: Binds from which nothing off this machine can reach a published port.
 _LOOPBACK_BINDS = ("127.0.0.1", "localhost", "::1", "")
+
+
+def reachable_beyond_loopback(*, tlsspec=None, bind_host: str = "") -> bool:
+    """Whether anything off this machine can reach this workspace.
+
+    This is the ONE question `config.ADMIN_PASSWORD` turns on.
+    `config.DEFAULT_BIND_HOST`'s own comment states the threat model: loopback is
+    WHY a fixed weak credential is acceptable at all. Both ways of removing that
+    premise are here, and they are genuinely different mechanisms -- a public name
+    reaches Rocket.Chat through the edge while the workspace itself stays on
+    loopback, so the bind check alone answers "no" for the very case that matters
+    most, which is exactly how `--domain` came to be created in silence.
+
+    A LOCAL-CA `--https` name is deliberately NOT public: `<name>.rcrepro.localhost`
+    resolves to 127.0.0.1, nothing off the box can reach it, and treating it as
+    exposed would rotate the password for the common local case for no gain.
+    """
+    from rc_repro import tls as _tlsmod          # lazy, as everywhere else here
+    if tlsspec is not None and getattr(tlsspec, "mode", "") == _tlsmod.MODE_ACME:
+        return True
+    return bind_host not in _LOOPBACK_BINDS
 
 
 def _derive_idp_host(req: "CreateReq", emit: Emit = null_emit) -> None:
@@ -1100,7 +1168,16 @@ def _guard_project_collision(name: str) -> None:
 
 
 def login(meta: runner.Metadata) -> rcapi.Auth:
-    return rcapi.login(meta.root_url, mailpit_url=meta.extra.get(config.EXTRA_MAILPIT_URL))
+    """THE admin login every service function goes through.
+
+    `password=` is not optional here even though `rcapi.login` has a default. The
+    default is the shared loopback `admin123`, and a workspace with a public name
+    has its own -- so leaving it off would authenticate `pat`, `api`, `seed`,
+    `loadtest`, `monitor`, `upgrade` and readiness with the wrong password and
+    return a 401 that names nothing.
+    """
+    return rcapi.login(meta.root_url, password=meta.admin_pass,
+                       mailpit_url=meta.extra.get(config.EXTRA_MAILPIT_URL))
 
 
 def create_repro(req: CreateReq, emit: Emit = null_emit, *, stream_output: bool = False) -> dict:
@@ -1238,6 +1315,21 @@ def _create_repro_locked(req: CreateReq, emit: Emit = null_emit, *,
         resolved = versions.resolve(req.version, offline=req.offline)
     except ValueError as exc:
         raise ValidationError(str(exc)) from exc
+    # SAID BEFORE THE BUILD, not discovered after it. `resolve()` already knows when
+    # releases.rocket.chat answered 404 -- it stamps `source` -- and the create path
+    # ignored it, so `up --version 99.99.99` built the whole compose document, created
+    # containers and failed at the pull with docker's own "not found", ~90 seconds
+    # later, leaving a workspace to clean up. The fact was available the whole time.
+    #
+    # A WARNING rather than a refusal, deliberately: the shipped map can still pair a
+    # version the live index has never heard of -- a fresh release, an internal build
+    # with `--rc-image` -- and refusing would break those. This only makes sure the
+    # reader is told before they wait.
+    if getattr(resolved, "source", "") == "map (no such release)":
+        warn(emit, f"releases.rocket.chat has no {req.version} — the pairing below "
+                   f"comes from the shipped map, and the image pull will fail unless "
+                   f"this tag really exists (`rc-repro versions {req.version}`).",
+             phase="resolve")
     if req.rc_image or cfg.get("rc_image"):
         resolved.rc_image = req.rc_image or cfg["rc_image"]
     if req.mongo:
@@ -1265,9 +1357,16 @@ def _create_repro_locked(req: CreateReq, emit: Emit = null_emit, *,
 
     wait = req.wait or bool(pre.post_ready) or req.seed
     repro_name = _derive_for(req)
+    _warn_name_coerced(req, emit)
     # Before any docker work, and only for a workspace that does not exist yet:
     # `up` on an existing one reuses its containers and adds nothing.
-    if not runner.exists(_derive_for(req)) and not req.force:
+    # `--force` is NOT a reason to skip this. check_capacity() has its own force
+    # branch that warns loudly and proceeds -- written, per its comment, because
+    # "this is the guard that exists after an OOM took out a 10 GB host: overriding
+    # it has to stay visible". Excluding force HERE made that branch unreachable for
+    # a new workspace, so the loud override became a silent one: the function was
+    # never called at all. The caller is what turned the warning off.
+    if not runner.exists(_derive_for(req)):
         check_capacity(req, req.preset, emit)
     if not repro_name:
         raise ValidationError(f"name {req.name!r} contains no usable characters (want a-z, 0-9, '-')")
@@ -1331,18 +1430,21 @@ def _create_repro_locked(req: CreateReq, emit: Emit = null_emit, *,
         _side = ", ".join(
             f"{svc}:{config.PRESET_PORTS[svc][0]}"
             for svc in ([req.preset] if req.preset in config.PRESET_PORTS else []))
-        warn(emit, f"--bind {bind_host} publishes this workspace on every interface, "
-                   f"and it runs the FIXED credentials admin/admin123"
-                   + (f", plus {_side}" if _side else "")
-                   + (" and Grafana on admin/admin" if req.monitor else "")
-                   + ". Seeded users have their username as their password. Only do "
-                     f"this on a trusted network, and `rc-repro down --name "
-                     f"{repro_name} --volumes` when you are finished.",
-             phase="create")
+        # WHAT THE PANEL DOES NOT ALREADY SAY, and nothing else. The Rocket.Chat
+        # admin is generated for a workspace bound this wide and printed two lines
+        # below, so repeating it here -- as this used to -- is a sentence people
+        # learn to scroll past, which costs the next warning its reader. What is
+        # left is the part that is still weak and still fixed: the preset's own
+        # UIs, Grafana, and seeded users.
+        _weak = ([f"the {req.preset} UI on {_side}"] if _side else []) \
+            + (["Grafana on admin/admin"] if req.monitor else []) \
+            + (["seeded users, whose password is their username"] if req.seed else [])
+        warn(emit, f"--bind {bind_host} publishes this workspace on every interface"
+                   + (f" — and {', '.join(_weak)}" if _weak else "")
+                   + ". Only do this on a trusted network.", phase="create")
     # RC advertises the https URL (links, OAuth callbacks, CORS all derive from
     # ROOT_URL); `root` stays http so rc-repro's own API calls need no CA.
     public = tlsspec.root_url if tlsspec else ""
-
     # SAID AT CREATE TIME, because it cannot be discovered afterwards. The IdP presets
     # send the BROWSER to a hostname baked into Rocket.Chat's settings, and the default
     # names this machine -- `localhost:8081` for SAML, `keycloak:8085` for OIDC. A
@@ -1406,12 +1508,25 @@ def _create_repro_locked(req: CreateReq, emit: Emit = null_emit, *,
             pass
     env_overrides.update(req.env or {})
 
+    # THE ADMIN PASSWORD, decided here because this is where both halves of
+    # "reachable from off this box" are finally known. Generated for a public
+    # workspace and left empty -- meaning the shared `admin123` -- for a loopback
+    # one; `runner.Metadata.admin_pass` reads it back with that same fallback, and
+    # every login in the codebase goes through that property.
+    #
+    # It has to reach the compose document as well as the record: the document is
+    # what actually provisions the admin, so a password written only to repro.json
+    # would be a stored credential for a login that does not exist.
+    admin_password = (config.generate_admin_password()
+                      if reachable_beyond_loopback(tlsspec=tlsspec,
+                                                   bind_host=bind_host) else "")
     spec = compose.Spec.from_resolved(
         resolved, project_name=runner.project_name(repro_name),
         root_url=(req.root_url or public or root),
         host_port=host_port, reg_token=token or None, preset=pre,
         bind_host=bind_host, monitoring=req.monitor, tls=tlsspec,
         env_overrides=env_overrides)
+    spec.admin_password = admin_password
     try:
         doc = compose.build(spec)
     except ValueError as exc:
@@ -1423,7 +1538,7 @@ def _create_repro_locked(req: CreateReq, emit: Emit = null_emit, *,
         rc_image=resolved.rc_image, mongo_tag=resolved.mongo_tag,
         mongo_flavor=resolved.mongo_flavor, preset=pre.name, root_url=root,
         host_port=host_port, version_source=resolved.source, pinned=req.pin,
-        public_url=public,
+        public_url=public, admin_password=admin_password,
         created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
     # Stamped on every create, compose included, so "absent" keeps meaning exactly
     # one thing: a workspace older than the key. See services/topology.py.
@@ -1575,6 +1690,17 @@ def _create_repro_locked(req: CreateReq, emit: Emit = null_emit, *,
         meta.extra["notes"] = list(meta.extra["notes"]) + monitoring.notes()
 
     if runner.exists(repro_name):
+        # `--fresh` DELETES THE DATA VOLUME, which is the same irreversible act
+        # `down --volumes` is gated on -- and this branch consulted nobody. The gate
+        # sat on the two verbs whose NAMES sound destructive rather than on the set
+        # that actually is, so a colleague's reproduction state could be wiped by an
+        # `up` that reads as "start it again". Checked only for `--fresh`: a plain
+        # overwrite recreates containers and leaves the volume alone.
+        if req.fresh:
+            allowed, why = may_destroy(repro_name, auditsvc.actor())
+            if not allowed:
+                auditsvc.record("up-fresh", repro_name, outcome="denied")
+                raise ConflictError(why)
         # Volumes the OLD compose file declared but the new one doesn't (switching
         # preset with --force, dropping --monitor) would be orphaned: `down -v`
         # only removes what the file declares, so once it's rewritten nothing can
@@ -1819,7 +1945,7 @@ def _readiness_failure(meta: runner.Metadata, seen: dict, *, prefix: str = "",
 def finalize(meta: runner.Metadata, emit: Emit):
     try:
         auth = login(meta)
-        if rcapi.complete_setup_wizard(meta.root_url, auth, config.ADMIN_PASSWORD):
+        if rcapi.complete_setup_wizard(meta.root_url, auth, meta.admin_pass):
             info(emit, "setup wizard skipped - no registration needed.", phase="post_ready")
         return auth
     except Exception:  # noqa: BLE001 - finalize is best-effort
@@ -1965,6 +2091,48 @@ def scenario_group(meta: runner.Metadata) -> list[dict]:
     return [note_group(f"Scenario · {pre.name}", kind="scenario", body=notes)]
 
 
+def _kubernetes_https_group(meta: runner.Metadata, extra: dict,
+                            ns: str) -> list[dict]:
+    """The HTTPS card for a Kubernetes workspace: where TLS actually terminates.
+
+    The one thing genuinely different from Compose, and the thing a support case needs
+    told. On Compose the edge holds the certificate as a file; here it holds nothing
+    for this name -- it matches the SNI and forwards raw TCP, and the certificate is a
+    `kubernetes.io/tls` Secret that cert-manager filled from an annotation on the
+    chart's own Ingress. So the commands that answer "why is my certificate wrong" are
+    `kubectl describe certificate`, not `rc-repro edge logs`.
+    """
+    from rc_repro import tls as tlsmod
+    from rc_repro.services import k8s
+
+    local = str(extra.get("tls") or "") != tlsmod.MODE_ACME
+    endpoint = str(extra.get("ingress_endpoint") or "")
+    issuer = k8s.CA_ISSUER if local else k8s.ACME_ISSUER
+    body = [
+        f"{meta.public_url} is served by the chart's own Ingress in {ns}. TLS "
+        f"terminates IN THE CLUSTER, from the Secret {k8s.tls_secret_for(meta.name)} "
+        f"that cert-manager issued -- so the failure modes a customer hits (a wrong "
+        f"secretName, an expired Certificate, an annotation naming a missing issuer) "
+        f"are the real ones here.",
+    ]
+    if endpoint:
+        body.append(
+            f"The edge does not decrypt this name: it matches the SNI and forwards "
+            f"raw TCP to {endpoint}. Nothing about the certificate is the edge's, and "
+            f"`rc-repro edge logs` will not mention it.")
+    body.append(
+        "A locally-issued certificate: run `rc-repro trust-ca` once and the browser "
+        "accepts it, on every workspace on this box."
+        if local else
+        "A publicly trusted certificate from Let's Encrypt, obtained by cert-manager "
+        "over the http-01 challenge. Renewal is cert-manager's, not the edge's.")
+    return [note_group("HTTPS", body=body, commands=[
+        f"kubectl -n {ns} describe certificate {k8s.tls_secret_for(meta.name)}",
+        f"kubectl describe clusterissuer {issuer}",
+        f"rc-repro tls-status --name {meta.name}",
+    ])]
+
+
 def kubernetes_note_groups(meta: runner.Metadata) -> list[dict]:
     """What a Kubernetes workspace is and how to reach it, from its record."""
     from rc_repro.services import k8s
@@ -2056,7 +2224,7 @@ def kubernetes_note_groups(meta: runner.Metadata) -> list[dict]:
         reach = [note_group("Reachable from other machines", body=[
             f"This workspace publishes on {bind_host}, so it answers at "
             f"http://<this-box>:{port} from anything that can route here -- and it "
-            f"runs {config.ADMIN_USERNAME}/{config.ADMIN_PASSWORD}. Keep it off "
+            f"runs {config.ADMIN_USERNAME}/{meta.admin_pass}. Keep it off "
             f"untrusted networks."])]
     # GROUPS, not a flat list -- see `note_group` for why. The facts that used to be
     # sentences ("microservices on kind-x - about 9 pods, namespace rc-repro-y") are
@@ -2105,6 +2273,17 @@ def kubernetes_note_groups(meta: runner.Metadata) -> list[dict]:
             f"{root} stops answering:"],
             commands=[f"kubectl -n {ns} port-forward {addr}"
                       f"deployment/{release}-rocketchat {port}:3000"]),
+        # HTTPS, WHICH THIS RUNTIME'S NOTES SAID NOTHING ABOUT. `compose_note_groups`
+        # has an HTTPS card and this function had none, so a Kubernetes workspace with
+        # a name showed the port-forward and never mentioned it.
+        #
+        # And it must NOT reuse the Compose wording. That card says "served by the
+        # edge … the edge holds :443 for the whole box" -- true there and false here:
+        # the edge does not decrypt this name, the certificate is a Secret in the
+        # workspace's own namespace, and the thing that issued it is cert-manager. A
+        # card that named the wrong terminator would send someone to `edge logs` for a
+        # certificate the edge never saw.
+        *(_kubernetes_https_group(meta, extra, ns) if meta.public_url else []),
         note_group("3 · Look at what is inside", body=[
             "What is running, what Rocket.Chat is saying, and the values the release "
             "was installed with:"],
@@ -2303,6 +2482,7 @@ def _seed_inline_locked(meta: runner.Metadata, profile: str, stats: bool,
     tokens: dict = {}
     try:
         s = seeder.seed(meta.root_url, auth, plan, tokens_out=tokens,
+                        admin_password=meta.admin_pass,
                         workspace=meta.name,
                         log=lambda m: info(emit, m.strip(), phase="seed"))
     finally:
@@ -2333,7 +2513,7 @@ def _summary(meta: runner.Metadata) -> dict:
         "note_groups": groups,
         "name": meta.name, "rc_version": meta.rc_version, "mongo_tag": meta.mongo_tag,
         "mongo_flavor": meta.mongo_flavor, "preset": meta.preset, "root_url": meta.root_url,
-        "host_port": meta.host_port, "login": {"user": config.ADMIN_USERNAME, "password": config.ADMIN_PASSWORD},
+        "host_port": meta.host_port, "login": {"user": config.ADMIN_USERNAME, "password": meta.admin_pass},
         "pinned": meta.pinned,
         # Which runtime, and how Rocket.Chat is arranged inside it. `list_repros`
         # has carried the runtime all along and the DETAIL payload had neither, so
@@ -2917,14 +3097,14 @@ def _set_state_kubernetes(target: str, action: str,
     context = str(extra.get("context") or k8s.CONTEXT)
     with runner.repro_lock(target, timeout=_INTERACTIVE_LOCK_WAIT):
         if action in ("stop", "restart"):
-            k8s.stop_workspace(target, context=context)
+            k8s.stop_workspace(target, context=context, emit=emit)
             pid = extra.get("port_forward_pid")
             if pid:
                 _stop_port_forward(int(pid), namespace=k8s.namespace_for(target))
                 runner.update_meta(target,
                                    lambda m: m.extra.pop("port_forward_pid", None))
         if action in ("start", "restart"):
-            k8s.start_workspace(target, context=context)
+            k8s.start_workspace(target, context=context, emit=emit)
             # NO PORT-FORWARD HERE, and that is the tested answer rather than the
             # obvious one. Restoring it looks like the right symmetry -- `stop` killed
             # it, so `start` should put it back -- and it does not work: scaling up
@@ -3019,8 +3199,14 @@ def may_set_privileged_fields(actor: str) -> bool:
     return usersvc.at_least(usersvc.role_of(actor), "admin")
 
 
-def may_destroy(name: str, actor: str) -> tuple[bool, str]:
-    """(allowed, why not). Advisory for a front end, enforced by teardown()."""
+def _owner_gate(name: str, actor: str) -> tuple[bool, str]:
+    """(allowed, the current owner when refusing). The ownership rule itself.
+
+    ONE implementation, because two operations apply it and they must not drift:
+    `may_destroy` and `may_chown`. Reassigning a workspace is not a lesser act than
+    destroying it -- it is the act that DECIDES who may destroy it -- so it is
+    gated by the same rule rather than by a weaker one of its own.
+    """
     if config.load_config().get(DESTROY_POLICY_KEY) == "anyone":
         return True, ""
     if not actor:                     # no accounts on this box: nothing to bound
@@ -3031,9 +3217,40 @@ def may_destroy(name: str, actor: str) -> tuple[bool, str]:
     owner = owner_of(name)
     if not owner or owner == actor:
         return True, ""
+    return False, owner
+
+
+def may_destroy(name: str, actor: str) -> tuple[bool, str]:
+    """(allowed, why not). Advisory for a front end, enforced by teardown()."""
+    allowed, owner = _owner_gate(name, actor)
+    if allowed:
+        return True, ""
+    # The old message told the refused caller to run `chown --to <themselves>`,
+    # which was accurate -- `set_owner` was ungated, so following the refusal
+    # defeated it in one command. It is gated now, so the advice names who can
+    # actually run it instead of reading as an instruction to the wrong person.
     return False, (f"{name} belongs to {owner} — ask {owner}, or an admin can "
-                   f"force it. (`rc-repro chown -n {name} --to {actor}` hands it "
-                   "over for good.)")
+                   f"force it. ({owner} or an admin can run "
+                   f"`rc-repro chown -n {name} --to {actor}` to hand it over "
+                   "for good.)")
+
+
+def may_chown(name: str, actor: str) -> tuple[bool, str]:
+    """(allowed, why not). Advisory for a front end, enforced by set_owner().
+
+    `POST /api/repros/{name}/owner` is member+ and this was not checked at all, so
+    a member who had just been refused a destroy could reassign the workspace to
+    themselves and destroy it on the next call -- two HTTP requests, both audited,
+    neither prevented. Ownership is what `may_destroy` consults, so leaving the
+    write to it open made that check advisory in the literal sense.
+    """
+    allowed, owner = _owner_gate(name, actor)
+    if allowed:
+        return True, ""
+    return False, (f"{name} belongs to {owner} — only {owner} or an admin can "
+                   f"hand it over. Taking ownership is what decides who may "
+                   f"destroy a workspace, so it is gated the same way as "
+                   f"`down --volumes`.")
 
 
 def teardown(name: str, *, volumes: bool = False, confirm: bool = False, emit: Emit = null_emit) -> dict:
@@ -3157,6 +3374,18 @@ def teardown(name: str, *, volumes: bool = False, confirm: bool = False, emit: E
                                f"{target!r}. Remove that directory by hand.",
                          phase="teardown")
                 _clear_default_if(target)
+            # THE EDGE ROUTE, which this branch returned without dropping. The
+            # Compose path twenty lines below has always done it, for a reason that
+            # applies identically here: a route left behind points at something that
+            # is gone, so the hostname 502s instead of 404ing and the name can never
+            # be reused by anyone else. Placed AFTER the cluster work and after the
+            # early return above, because a teardown that could not confirm the
+            # namespace is gone has not torn the workspace down and its name should
+            # go on answering.
+            #
+            # No `detach`: that disconnects a Docker network a Kubernetes workspace
+            # does not have. Deregistering is the whole of it.
+            edgesvc.deregister(target)
             # Docker's nouns are wrong here. "containers, data volume, and
             # record" for a workspace that has a namespace and a PVC says nothing
             # about what actually went away -- and `helm uninstall` does NOT delete
@@ -3224,7 +3453,17 @@ def prunable() -> list[str]:
             # any of them anyway.
             from rc_repro.services import k8s
             context = str((m.extra or {}).get("context") or k8s.CONTEXT)
-            if k8s.workload_exists(m.name, context=context):
+            try:
+                running = k8s.workload_exists(m.name, context=context)
+            except DockerError:
+                # NOT PRUNABLE, rather than "down". `workload_exists` now refuses to
+                # guess when the cluster cannot be asked, and the safe reading of "I
+                # could not tell" is to leave the workspace alone -- it is not
+                # PROVABLY down, and this list is a delete list. Skipped rather than
+                # raised so one unreadable workspace does not stop the others being
+                # pruned, which is the same failure one function down.
+                continue
+            if running:
                 continue
             out.append(m.name)
             continue
@@ -3299,7 +3538,7 @@ def _reclaim_cluster(emit: Emit = null_emit) -> bool:
         return False
 
 
-def prune(*, confirm: bool = False, orphans: bool = False,
+def prune(*, confirm: bool = False, orphans: bool = False, force: bool = False,
           only: list[str] | None = None, emit: Emit = null_emit) -> dict:
     """Delete every `down` workspace. `only` narrows it to a list already shown.
 
@@ -3380,6 +3619,12 @@ def prune(*, confirm: bool = False, orphans: bool = False,
                                    f"`kubectl get ns {k8s.namespace_for(name)}`, then "
                                    f"prune again.", phase="done")
                         continue
+                    # Same route the Kubernetes branch of `teardown` now drops, for
+                    # the same reason: `prune` bypasses `teardown()` entirely, so it
+                    # has to do this itself or the edge is left pointing at a
+                    # namespace that no longer exists. The Compose branch below has
+                    # always had this line; this branch never did.
+                    edgesvc.deregister(name)
                     runner.remove(name)
                     _clear_default_if(name)
                     removed.append(name)
@@ -3399,6 +3644,16 @@ def prune(*, confirm: bool = False, orphans: bool = False,
             warn(emit, f"{name!r} is in use by another operation - skipping",
                  phase="done")
             continue
+        except DockerError as exc:
+            # ONE UNREADABLE WORKSPACE MUST NOT END THE SWEEP. `delete_namespace`
+            # raises DockerError when the cluster cannot be asked, and only
+            # ConflictError was caught -- so the first unreadable workspace aborted
+            # prune entirely and every later one was silently left, which is the
+            # reported "prune doesn't work". Measured: targets ['k8spf','k8stls'],
+            # the second genuinely prunable and never touched.
+            warn(emit, f"{name!r} could not be removed ({exc}) - skipping",
+                 phase="done")
+            continue
         _clear_default_if(name)
         removed.append(name)
         info(emit, f"pruned {name!r}", phase="done")
@@ -3412,7 +3667,26 @@ def prune(*, confirm: bool = False, orphans: bool = False,
     ctx = _orphan_context()
     if stray:
         from rc_repro.services import k8s
+        me = auditsvc.actor()
         for ns in stray:
+            # THE LABEL IS READ, and it is the only evidence there is. A stray is by
+            # definition a namespace no LOCAL record explains -- which on a shared
+            # cluster is exactly what a colleague's workspace looks like, because
+            # their `repro.json` is on their machine. `rc-repro.io/owner` is stamped
+            # on the namespace for this, and the sweep deleted it without ever
+            # looking: measured, a namespace labelled `owner=alice` removed with
+            # `✓ removed 1 orphaned namespace(s)` and its PersistentVolumeClaim
+            # with it.
+            owner = k8s.namespace_owner(ns, context=ctx)
+            if owner is None and not force:
+                warn(emit, f"cannot read who namespace {ns} belongs to, so it is "
+                           f"left alone — `--force` sweeps it unread", phase="done")
+                continue
+            if owner and owner != me and not force:
+                warn(emit, f"namespace {ns} belongs to {owner!r}, not to you — left "
+                           f"alone. Ask {owner}, or `--force` to sweep it anyway",
+                     phase="done")
+                continue
             res = k8s.run(["kubectl", "--context", ctx, "delete", "namespace",
                            ns, "--wait=false"], timeout=k8s.APPLY_TIMEOUT,
                           own=k8s.is_ours(ctx))
@@ -3469,10 +3743,25 @@ _KUBERNETES_UNSUPPORTED: tuple[tuple[str, str], ...] = (
     # local CA served Rocket.Chat over https with `ssl_verify_result: 0`, no
     # cert-manager anywhere. So the blocker is this side of the fence, and naming
     # someone else's cluster for it sends them to install something they do not need.
-    ("https", "rc-repro creates no Ingress for a workspace, and the Traefik edge it "
-              "terminates TLS on for Compose holds host ports and routes to container "
-              "names -- a cluster has neither. Reach the workspace on its port-forward"),
-    ("domain", "a hostname needs the Ingress that --https needs"),
+    # `https` IS NO LONGER HERE. The chart's own Ingress template builds the Ingress,
+    # cert-manager issues from a `ca` ClusterIssuer backed by rc-repro's CA, and the
+    # edge passes the name through by SNI instead of terminating it. What replaced the
+    # blanket refusal is a set of REFUSALS ABOUT THIS CLUSTER, in
+    # `_kubernetes_tls_plan`: no ingress class, no cert-manager, no reachable :443
+    # Service, a cluster that is not on this machine. Each names one missing thing and
+    # what to do about it, which a runtime-wide "not supported" could not.
+    #
+    # `--domain` stays, and its reason is now the true one. It used to say "a hostname
+    # needs the Ingress that --https needs" -- which stopped being true the moment
+    # --https built that Ingress. What is actually missing is the ACME ClusterIssuer;
+    # the ingress half is done and proven, including a real Let's Encrypt certificate
+    # issued from inside a cluster by hand.
+    # `domain` HAS ALSO LEFT, and for the same reason `https` did: what was missing
+    # was an ACME ClusterIssuer, and that is now one `IssuerSpec` away from the `ca`
+    # one -- the guide's own values.yaml with the issuer name swapped. What refuses
+    # instead is `_kubernetes_tls_plan`, per cluster: no ingress class, no
+    # cert-manager, no reachable :443 Service. The contact-email requirement is
+    # `_resolve_tls`'s, shared with Compose.
     ("fresh", "--fresh means DELETE this workspace's data, and the Kubernetes path "
               "keeps the PersistentVolumeClaim — use `rc-repro down --name <n> "
               "--volumes` first, which does delete it"),
@@ -3521,6 +3810,313 @@ def _refuse_unsupported_on_kubernetes(req: CreateReq) -> None:
                 f"{works}. Or use --runtime docker, where every preset works.")
 
 
+@dataclass
+class _KubeTls:
+    """What `--https` needs from the cluster, once every refusal has passed.
+
+    Built before the write-ahead record, from reads only, so a refusal leaves nothing
+    behind -- the same discipline `plan_cluster` and `assert_namespace_available`
+    already follow on this path.
+    """
+    host: str
+    ingress_class: str
+    endpoint: "object"
+    #: The cluster this workspace lives in, so the route step can ask whether the edge
+    #: needs to join its Docker network.
+    context: str = ""
+    #: Which ClusterIssuer this workspace's Ingress will name. `--https` and `--domain`
+    #: differ in this one field and nothing else, which is the guide's own values.yaml
+    #: with the issuer swapped.
+    issuer: "object" = None
+    #: Whether the CLUSTER is already receiving on this host's :443. When it is, the
+    #: name works through the cluster with no edge at all; when it is not, the edge
+    #: has to own :443 and pass through. Measured rather than assumed, because both
+    #: are normal and they need different things.
+    cluster_owns_443: bool = False
+
+
+def _kubernetes_tls_plan(req: CreateReq, tlsspec, plan, *,
+                         emit: Emit = null_emit) -> _KubeTls:
+    """Refuse, or return what the ingress needs. Reads only; writes nothing.
+
+    Every refusal here costs one probe and no state. That ordering is the point: an
+    `up --https` that cannot work should say so in a second, not after four minutes
+    of MongoDB and a chart install.
+    """
+    from rc_repro import tls as tlsmod
+    from rc_repro.services import k8s
+
+    # Both modes are honoured now, and they are the same code path with a different
+    # ClusterIssuer -- which is what the official values.yaml already implies.
+    spec = k8s.IssuerSpec(mode=("acme" if tlsspec.mode == tlsmod.MODE_ACME
+                                else "local"),
+                          acme_email=tlsspec.acme_email,
+                          acme_staging=tlsspec.acme_staging)
+    # Which request every refusal below is about. Defined here, beside the spec it is
+    # derived from, because the first refusal comes before the cluster is even probed.
+    asked = "--domain" if spec.mode == "acme" else "--https"
+    # THE CLUSTER HAS TO EXIST BEFORE IT CAN BE ASKED ANYTHING. This used to refuse
+    # outright when `plan.create` was set -- there was nothing to probe and rc-repro
+    # installed no ingress controller, so `--https` on a box whose only Kubernetes was
+    # a not-yet-created kind cluster was a dead end. Now the cluster is brought up
+    # first and filled in, so the refusal is gone.
+    #
+    # `ensure_kubeconfig` is what creates it, it takes the cluster lock, and it is
+    # idempotent -- `create_workspace` calls it again later and it short-circuits. The
+    # cost is stated rather than hidden: with a name asked for, the cluster is created
+    # slightly earlier than the write-ahead record, so an interrupted create can leave
+    # a cluster with no workspace. `prune` reclaims a cluster rc-repro made, which is
+    # what that is for.
+    context = k8s.ensure_kubeconfig(plan, emit=emit) if plan.create else plan.context
+    pre = k8s.preflight(context)
+    # WHERE THE CA KEY WOULD GO. `tls_local.py`: this key "can mint a certificate for
+    # any name the browser will trust". On this machine's own cluster that is the same
+    # trust boundary as the box. On somebody else's it is not, and there is a better
+    # answer that needs no CA at all.
+    #
+    # ONLY for the local issuer, and that asymmetry is the whole reason `--domain` is
+    # the answer this refusal points at: an ACME issuer holds a Let's Encrypt account
+    # key, which is the cluster's own and mints nothing this box trusts. So `--domain`
+    # works against a cluster anywhere, and `--https` does not.
+    if spec.mode == "local" and \
+            not k8s.is_local_cluster(pre.distribution or plan.distribution):
+        raise AuthorityGateError(
+            f"--https would copy rc-repro's CA private key into a Secret in cluster "
+            f"{context!r}, which is not on this machine "
+            f"({pre.distribution or plan.distribution or 'unknown'}). That key can "
+            f"mint a certificate for any name this box trusts, so it does not leave "
+            f"here. Use --domain for a publicly-trusted certificate instead, or "
+            f"reach the workspace on its port-forward.",
+            code="GATE_UNAPPROVED_CLUSTER")
+    # ADOPT WHAT IS THERE, INSTALL WHAT IS NOT -- and this is the FIRST thing on this
+    # path that changes the cluster, which is why every refusal above it is a read.
+    # It sat above the cert-manager check once, and a create on a fresh kind box then
+    # built a cluster, installed Traefik into it, and refused for want of cert-manager:
+    # a refusal that left an install behind. Measured exactly that way.
+    #
+    # Adopting comes first, and not only to save work: the ingress controller is the
+    # component a support case is usually about, so a cluster already running nginx
+    # keeps running nginx. Installing is only for a cluster that has none.
+    #
+    # It raises for the two cases it must not paper over: a read it could not make,
+    # and a cluster that is not on this machine -- where the chart's LoadBalancer
+    # Service would provision a billable cloud load balancer implicitly.
+    where = pre.distribution or plan.distribution
+    # THE GUIDE'S TWO PREREQUISITES, in the order they depend on each other. Both are
+    # adopted when the cluster has them and installed with the guide's own command when
+    # it does not; both refuse on a cluster that is not on this machine, where CRDs and
+    # a LoadBalancer are somebody else's to create; and neither is ever removed.
+    #
+    # cert-manager first: it is what the ingress annotation will name, and an issuer
+    # created before its webhook is serving is accepted and then never reconciled.
+    k8s.ensure_cert_manager(context=context, distribution=where, emit=emit)
+    ingress_class = k8s.ensure_ingress(context=context, distribution=where, emit=emit)
+    # AFTER `ensure_ingress`, because on a cluster that had none the ingress Service is
+    # something rc-repro has just created. Read before it, this found nothing and
+    # refused for want of the thing it was about to install.
+    endpoint = k8s.ingress_endpoint(context)
+    if endpoint is None:
+        raise PreflightError(
+            f"{asked}: cluster {context!r} has the ingress class {ingress_class!r} but "
+            f"no Service publishing :443 that can be reached from outside it, so "
+            f"nothing can route to this workspace's name. `kubectl get svc -A` — the "
+            f"controller's Service needs to be a LoadBalancer or a NodePort. An "
+            f"ingress exposed by a hostPort DaemonSet has none to find.")
+    claim = k8s.host_port_claim(context)
+    # HOW THE CHALLENGE GETS IN, said rather than discovered. cert-manager implements
+    # http01 and dns01 and NOT tls-alpn, so a public name needs Let's Encrypt to reach
+    # :80 for it. Two ways that happens, both measured:
+    #
+    #   * the cluster holds host :80 itself (k3s ServiceLB) -- the challenge arrives
+    #     at its ingress directly. Proven end to end with a real production
+    #     certificate.
+    #   * the edge holds :80 -- it answers 301 to https on the same host and path, and
+    #     that lands on the SNI passthrough, which reaches the cluster. Let's Encrypt
+    #     follows an http-01 redirect and does not validate the target's certificate,
+    #     so this works even before any certificate exists. Both halves measured
+    #     (a 301 preserving the path; the challenge path served 200 through the
+    #     passthrough from a cert-manager-shaped solver Ingress with no `tls:` block).
+    #
+    # No third case is refused, because a box where neither holds :80 has nothing
+    # listening on it and the failure is a plain connection refused that Let's Encrypt
+    # reports itself. Saying which of the two applies is worth more than a guard.
+    if spec.mode == "acme":
+        info(emit, ("the http-01 challenge will reach the cluster's ingress directly "
+                    "— it holds this host's :80"
+                    if claim and 80 in (claim.ports or []) else
+                    "the http-01 challenge arrives on the edge's :80 and is redirected "
+                    "onto the passthrough, which reaches the cluster"),
+             phase="tls")
+    # WHETHER THIS HOSTNAME REACHES THE CLUSTER, not whether the cluster holds *a*
+    # host address. `claim` answers the second question, and the two come apart on
+    # exactly the shape this branch is used on: k3s ServiceLB claims :443 at the
+    # host's own address, so `claim` said yes -- while `<name>.rcrepro.localhost`
+    # resolves to ::1 first, klipper's DNAT is IPv4-only, and the edge is what
+    # answers there. rc-repro therefore skipped writing the passthrough route and
+    # printed an https URL that returned 404. Measured on this box: the claim is
+    # 172.16.0.2 [80,443] while the name resolves to ['::1', '127.0.0.1'].
+    #
+    # So the claim now has to be true FOR THIS NAME. Getting it wrong in the other
+    # direction is cheap -- an unnecessary edge route is a passthrough that forwards
+    # to the same ingress -- which is why this is written to fail closed.
+    owns = bool(claim and 443 in (claim.ports or []))
+    if owns and not _name_reaches(tlsspec.host, claim):
+        info(emit, f"{tlsspec.host} does not resolve to the cluster's ingress "
+                   f"({claim.address}), so the name is published through the edge "
+                   f"rather than straight at the cluster", phase="tls")
+        owns = False
+    return _KubeTls(host=tlsspec.host, ingress_class=ingress_class,
+                    endpoint=endpoint, issuer=spec, context=context,
+                    cluster_owns_443=owns)
+
+
+def _name_reaches(host: str, claim) -> bool:
+    """Whether `host` resolves to the address the cluster's ingress answers on.
+
+    Unresolvable is True, deliberately: a `--domain` whose DNS has not propagated yet
+    is the normal case for a name being set up, and answering False there would move
+    a public name onto the edge for a reason that stops being true minutes later.
+    The case this exists to catch is a name that resolves SOMEWHERE ELSE, which is
+    a fact rather than a not-yet.
+    """
+    import socket
+    address = str(getattr(claim, "address", "") or "")
+    if not address:
+        return False
+    try:
+        addrs = {info[4][0] for info in socket.getaddrinfo(host, 443)}
+    except OSError:
+        return True
+    return address in addrs
+
+
+#: How long the proof below waits for the route to be LIVE, not merely written.
+#: Found by running it: the check fired on a chain that was completely correct and
+#: reported "answered with a proxy's own default certificate", because a route file
+#: appearing and Traefik's file provider having reloaded it are a second apart and
+#: `tls.verify` ran in between. Polling is what `cli._report_gui_tls` already does
+#: about ACME for exactly the same reason -- a single probe reports "not yet" for
+#: every healthy create and teaches people to ignore the line that matters.
+PUBLISH_PROOF_TRIES = 8
+PUBLISH_PROOF_PAUSE = 1.5
+
+
+def _route_kubernetes_name(name: str, ktls: _KubeTls, *,
+                           emit: Emit = null_emit) -> None:
+    """Put the name in front of the cluster. BEFORE the chart, and that is not tidiness.
+
+    An ACME order starts the moment cert-manager sees the Ingress -- which the chart
+    creates during `helm install` -- and the http-01 challenge arrives on this host's
+    :80. If the edge is not up and the route is not written by then, Let's Encrypt gets
+    a connection refused, the order fails, and `wait_for_certificate` spends its whole
+    budget on a challenge that could never have been answered. The first version of
+    this did exactly that: it published the name AFTER the install and after the
+    certificate wait.
+
+    Writing the route early is harmless in the other direction: it points at the
+    cluster's ingress, which exists whether or not this workspace does, so the name
+    404s from the cluster for the few minutes before its Ingress appears.
+    """
+    # Imported here rather than at module scope, like every other `k8s` use in this
+    # file: `lifecycle` is the Compose-shaped module both front-ends load, and keeping
+    # the Kubernetes seam a local import is what stops that becoming a hard dependency.
+    from rc_repro.services import k8s as k8s_mod
+
+    if not ktls.cluster_owns_443:
+        if not edgesvc.running():
+            info(emit, "starting the edge (one Traefik, :80 and :443 for every name)",
+                 phase="tls")
+            started = edgesvc.ensure_running()
+            if not started:
+                holder = edgesvc.port_holder(443)
+                because = (f" — {holder} is holding :443" if holder
+                           else (f" — {started.why}" if started.why else ""))
+                warn(emit, f"the edge did not start{because}, so {ktls.host} will not "
+                           f"answer yet. The workspace itself is unaffected; free the "
+                           f"port and `rc-repro edge start`.", phase="tls")
+    if edgesvc.installed():
+        # THE EDGE MAY NOT BE ABLE TO REACH THE ENDPOINT YET. A kind cluster's node is
+        # a container on kind's own Docker network, so its ingress NodePort answers
+        # from the host and not from a container on the default bridge -- measured:
+        # 172.18.0.2:30925 reachable from the host and from the `kind` network,
+        # unreachable from `bridge`. Joining is the same mechanism `attach` uses for a
+        # workspace's network, applied to the cluster's.
+        node = k8s_mod.kind_node_container(
+            str(getattr(ktls, "context", "") or ""))
+        if node:
+            net = edgesvc.container_network(node)
+            if net and edgesvc.attach_network(net):
+                info(emit, f"the edge joined the cluster's Docker network ({net}) — "
+                           f"its ingress is not reachable from the default bridge",
+                     phase="tls")
+        edgesvc.register(name, ktls.host, passthrough=str(ktls.endpoint))
+        info(emit, f"{ktls.host} → {ktls.endpoint} ({ktls.endpoint.source}), passed "
+                   f"through untouched — TLS terminates in the cluster",
+             phase="tls")
+    elif ktls.cluster_owns_443:
+        info(emit, f"{ktls.host} is served by the cluster's own ingress, which holds "
+                   f"this host's :443 — no edge needed", phase="tls")
+
+
+def _publish_kubernetes_name(name: str, ktls: _KubeTls, *,
+                             emit: Emit = null_emit, sleep=time.sleep) -> None:
+    """Put the name in front of the cluster, and then CHECK it rather than claim it.
+
+    Two topologies, both normal, and the difference decides whether the edge is
+    needed at all:
+
+    * the cluster is already receiving on this host's :443 (k3s ServiceLB) -- the
+      name reaches the cluster's own ingress directly, and an edge is not required.
+      A route is still registered when one exists, because it costs nothing and it is
+      what serves the name over any address the cluster's DNAT does not cover.
+    * the cluster is not -- the edge must own :443 and pass the name through by SNI.
+
+    The check at the end is the part that matters. Measured on a box in exactly this
+    state: the edge was bound, running, healthy, and answering every https name with
+    its own default certificate because the cluster had taken the port underneath it.
+    `tls.verify` already reports that as `fallback`, so proving it is one existing
+    call rather than a new mechanism -- and a name that does not work must say so at
+    create time, not be discovered in a browser.
+    """
+    from rc_repro import tls as tlsmod
+
+    # Routing happened before the install (`_route_kubernetes_name`); this is only the
+    # check. Kept a separate call because the two have opposite ordering needs: the
+    # route must exist before the chart creates the Ingress, and the proof cannot mean
+    # anything until it does.
+    # PROVED, NOT ANNOUNCED -- and polled, because a route being WRITTEN and a proxy
+    # having RELOADED it are not the same moment. Verified live: this reported a
+    # default certificate for a chain that was entirely correct, and the same name
+    # served the cluster's certificate seconds later.
+    # ONLY for the local issuer. A Let's Encrypt certificate is checked against the
+    # SYSTEM store -- that is the whole claim being made about it -- and rc-repro's own
+    # CA may not even exist on a box that has only ever used `--domain`, which is how
+    # this was found. `cli.tls_status` already makes exactly this distinction.
+    cafile = (str(tlsmod.ca_dir() / tlsmod.CA_CRT)
+              if getattr(ktls.issuer, "mode", "local") != "acme" else None)
+    seen: dict = {}
+    for attempt in range(PUBLISH_PROOF_TRIES):
+        seen = tlsmod.verify(ktls.host, 443, cafile=cafile)
+        if seen.get("serving") and not seen.get("fallback"):
+            break
+        if attempt < PUBLISH_PROOF_TRIES - 1:
+            sleep(PUBLISH_PROOF_PAUSE)
+    if seen.get("fallback"):
+        warn(emit, f"{ktls.host} answered with a proxy's own default certificate "
+                   f"({seen.get('issuer')}), not the one in the cluster — so "
+                   f"something in front is terminating TLS for this name instead of "
+                   f"passing it through. `rc-repro doctor` names a cluster holding "
+                   f"this host's ports.", phase="tls")
+    elif not seen.get("serving"):
+        warn(emit, f"nothing answered TLS for {ktls.host} yet "
+                   f"({seen.get('error') or 'no certificate offered'}). The workspace "
+                   f"is up on its port-forward; `rc-repro tls-status --name {name}` "
+                   f"re-checks the name.", phase="tls")
+    else:
+        info(emit, f"https://{ktls.host} is serving the cluster's certificate "
+                   f"({seen.get('issuer')})", phase="tls")
+
+
 def _create_kubernetes(req: CreateReq, emit: Emit = null_emit) -> dict:
     """The Kubernetes half of `_create_repro_locked`.
 
@@ -3533,6 +4129,7 @@ def _create_kubernetes(req: CreateReq, emit: Emit = null_emit) -> dict:
     from rc_repro.services import k8s
 
     repro_name = _derive_for(req)
+    _warn_name_coerced(req, emit)
     _require_valid_name(repro_name)
     # NO refusal for an existing workspace. `down` tells the user "bring it back:
     # rc-repro up ...", and this raised "already exists, down first or --force" at
@@ -3549,6 +4146,21 @@ def _create_kubernetes(req: CreateReq, emit: Emit = null_emit) -> dict:
         resolved = versions.resolve(req.version, offline=req.offline)
     except ValueError as exc:
         raise ValidationError(str(exc)) from exc
+    # SAID BEFORE THE BUILD, not discovered after it. `resolve()` already knows when
+    # releases.rocket.chat answered 404 -- it stamps `source` -- and the create path
+    # ignored it, so `up --version 99.99.99` built the whole compose document, created
+    # containers and failed at the pull with docker's own "not found", ~90 seconds
+    # later, leaving a workspace to clean up. The fact was available the whole time.
+    #
+    # A WARNING rather than a refusal, deliberately: the shipped map can still pair a
+    # version the live index has never heard of -- a fresh release, an internal build
+    # with `--rc-image` -- and refusing would break those. This only makes sure the
+    # reader is told before they wait.
+    if getattr(resolved, "source", "") == "map (no such release)":
+        warn(emit, f"releases.rocket.chat has no {req.version} — the pairing below "
+                   f"comes from the shipped map, and the image pull will fail unless "
+                   f"this tag really exists (`rc-repro versions {req.version}`).",
+             phase="resolve")
     if req.rc_image:
         resolved.rc_image = req.rc_image
     if req.mongo:
@@ -3597,6 +4209,20 @@ def _create_kubernetes(req: CreateReq, emit: Emit = null_emit) -> dict:
     # probes, and it is what refuses when there is no cluster and no `kind` -- so that
     # refusal now costs nothing, where before it left an `incomplete` record that `list`
     # showed as a workspace and whose port `used_ports()` went on reserving.
+    # THE CORE TOOLS FIRST, before anything is provisioned. `Preflight` models this
+    # exactly right and the create path never asked it: with `kubectl` absent, `up`
+    # built an entire kind cluster, THEN failed, and blamed the API server -- "cluster
+    # rc-repro-local was created but its API server is not answering" -- when the API
+    # server was fine and the binary rc-repro talks to it with was not installed. A
+    # `repro.json` holding a host port was left behind too. `doctor` has named these
+    # correctly all along; this is the same question asked where it can still refuse
+    # cheaply.
+    pre = k8s.preflight()
+    if pre.missing_tools:
+        raise PreflightError(
+            f"{', '.join(pre.missing_tools)} is not installed, and a Kubernetes "
+            f"workspace cannot be created or used without it. Install it and try "
+            f"again — `rc-repro doctor` lists what this runtime needs.")
     plan = k8s.plan_cluster()
     # BEFORE the write-ahead record below. Adopting a namespace that is not ours is
     # refused, and a refusal that created nothing must leave nothing behind -- the
@@ -3613,6 +4239,14 @@ def _create_kubernetes(req: CreateReq, emit: Emit = null_emit) -> dict:
     # Nothing is lost by skipping it: a cluster that does not exist yet holds no
     # namespace to collide with, and `ensure_namespace` makes the same check again once
     # the cluster is up.
+    # THE HTTPS PLAN, and it goes here for the same reason `plan_cluster` does: every
+    # refusal in it is a read, so an `up --https` that cannot work costs a second
+    # rather than four minutes of MongoDB followed by a chart install. `_resolve_tls`
+    # is the SHARED call the Compose path makes -- domain normalisation, the remembered
+    # ACME email, and restoring the name a workspace already had all come from there
+    # rather than being written twice.
+    tlsspec = _resolve_tls(req, repro_name, bind_host, exclude=repro_name, emit=emit)
+    ktls = None
     if not plan.create:
         # THE PREFLIGHT NEEDS A KUBECONFIG THAT KNOWS THIS CONTEXT, and on a fresh
         # RC_REPRO_HOME it does not have one: the cluster exists, so nothing was
@@ -3621,14 +4255,60 @@ def _create_kubernetes(req: CreateReq, emit: Emit = null_emit) -> dict:
         # failed identically, because the export runs later in the create it never
         # reached. Idempotent, and a no-op for a cluster rc-repro did not make.
         k8s.ensure_kubeconfig(plan, emit=emit)
+        # HELM'S OWN ANSWER, and this is the cheapest refusal on the path.
+        #
+        # rc-repro drives kubectl AND helm, they resolve their configuration
+        # differently, and only kubectl was ever asked. Measured on this box: a
+        # `~/.kube/config` carrying the server CA and client certificate of a
+        # PREVIOUS install of the same cluster left kubectl completely happy -- `get
+        # ns`, `auth whoami` as system:admin, the whole MongoDB phase -- while helm
+        # refused every call with `x509: certificate signed by unknown authority`. So
+        # this create built a namespace, a StatefulSet, a PersistentVolume and an
+        # initiated replica set, spent four minutes doing it, then died at the chart
+        # and rolled all of it back:
+        #
+        #     create failed — removing namespace rc-repro-k8slive
+        #     error: helm install failed: Error: kubernetes cluster unreachable ...
+        #
+        # An error naming neither the cause nor the cure, for a condition readable in
+        # one second. Only for an ADOPTED cluster: `plan.create` has no cluster to ask
+        # yet, and one rc-repro makes itself gets a kubeconfig it wrote.
+        _helm_why = k8s.helm_reachable(plan.context)
+        if _helm_why:
+            raise ValidationError(
+                f"helm cannot reach cluster {plan.context!r}, although kubectl can. "
+                f"The chart install would fail after MongoDB and roll the whole "
+                f"workspace back. helm said: {_helm_why} — a kubeconfig left over "
+                f"from a previous install of the same cluster does this. Regenerate "
+                f"it (k3s: `sudo cat /etc/rancher/k3s/k3s.yaml > ~/.kube/config`; "
+                f"kind: `kind export kubeconfig --name <cluster>`) and run this "
+                f"again. `rc-repro doctor` reports the same thing.")
         k8s.assert_namespace_available(repro_name, context=plan.context,
                                        owner=req.actor)
+    if tlsspec:
+        # AFTER `ensure_kubeconfig`, because every probe in it needs a kubeconfig that
+        # knows the context, and BEFORE the write-ahead record below, because a
+        # refusal must leave nothing. `plan.create` is refused inside.
+        ktls = _kubernetes_tls_plan(req, tlsspec, plan, emit=emit)
+    # Same decision as the compose path and the same reason -- see
+    # `reachable_beyond_loopback`. On this runtime the workspace's own ports are
+    # loopback port-forwards, so `--domain` is the case that removes the premise.
+    #
+    # Decided BEFORE the provisional record, not beside the chart install that uses
+    # it. The provisional exists precisely so a create that dies half way can still
+    # be cleaned up, and a chart installed with a generated password that was never
+    # written down is a workspace nobody can log into -- `down` would still work,
+    # and nothing else would.
+    admin_password = (config.generate_admin_password()
+                      if reachable_beyond_loopback(tlsspec=tlsspec,
+                                                   bind_host=bind_host) else "")
     provisional = runner.Metadata(
         name=repro_name, project=k8s.namespace_for(repro_name),
         rc_version=resolved.rc_version, rc_image=resolved.rc_image,
         mongo_tag=resolved.mongo_tag, mongo_flavor=resolved.mongo_flavor,
         preset=req.preset, root_url=root, host_port=host_port,
         version_source=resolved.source, pinned=req.pin,
+        admin_password=admin_password,
         created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
     topology.stamp(provisional.extra, topology.KUBERNETES)
     provisional.extra[config.EXTRA_DEPLOYMENT] = req.deployment or topology.MICROSERVICES
@@ -3640,14 +4320,46 @@ def _create_kubernetes(req: CreateReq, emit: Emit = null_emit) -> dict:
     provisional.extra["incomplete"] = True
     if req.actor:
         provisional.extra["created_by"] = req.actor
-    _ws = runner.workspace(repro_name)
-    _ws.mkdir(parents=True, exist_ok=True)
-    runner.atomic_write(_ws / "repro.json", json.dumps(asdict(provisional), indent=2))
+    # Through the runner seam, so the workspace directory is restricted to 0700 the
+    # way every Compose one is. Writing repro.json directly here skipped that, and
+    # this runtime is the one that also writes `kubernetes/values.yaml` with
+    # ADMIN_PASS in it.
+    runner.write_record(repro_name, provisional)
 
+    # BEFORE the create, so an ACME challenge has somewhere to land the moment the
+    # chart's Ingress appears. See `_route_kubernetes_name`.
+    if ktls:
+        _route_kubernetes_name(repro_name, ktls, emit=emit)
+
+    # The forward this workspace was LAST published on, so a `--port` change retires
+    # it instead of orphaning it. Read from the record rather than from the new
+    # request: the whole failure is that the two ports differ.
+    _prev_pid, _prev_port = 0, None
+    if reused:
+        try:
+            _old = runner.read_meta(repro_name)
+            _prev_pid = int((_old.extra or {}).get("port_forward_pid") or 0)
+            _prev_port = int(_old.host_port or 0) or None
+        except Exception:  # noqa: BLE001 - no record, no forward to retire
+            _prev_pid, _prev_port = 0, None
     out = k8s.create_workspace(
         name=repro_name, resolved=resolved, host_port=host_port,
         microservices=microservices, replicas=req.replicas or 1,
-        owner=req.actor, bind_host=bind_host,
+        owner=req.actor, bind_host=bind_host, admin_password=admin_password,
+        previous_pid=_prev_pid, previous_port=_prev_port,
+        # PASSED AT LAST. `create_workspace` has taken `root_url` since it was
+        # written and this call never supplied it, so `values_for` never set
+        # anything and the chart emitted no ROOT_URL -- Rocket.Chat ran on its own
+        # default while every human reached it here. The Compose path has always
+        # threaded this; the omission is why the two runtimes disagreed about what a
+        # workspace calls itself.
+        root_url=root,
+        # With a name, the chart's own Ingress template builds the Ingress -- rc-repro
+        # hand-writes none, which is what keeps the `/sockjs` and `/websocket` split to
+        # ddp-streamer the chart's business rather than something to emulate.
+        tls_host=(ktls.host if ktls else ""),
+        ingress_class=(ktls.ingress_class if ktls else ""),
+        issuer=(ktls.issuer if ktls else None),
         use_operator=req.mongo_operator,
         # Through a Secret referenced by `valueFrom`, never as a values literal:
         # `helm get values` is readable by anyone who can reach the release, and
@@ -3676,6 +4388,7 @@ def _create_kubernetes(req: CreateReq, emit: Emit = null_emit) -> dict:
         # consumer reading `mongo_flavor` still got a name for a different image.
         mongo_flavor="", preset=req.preset, root_url=root,
         host_port=host_port, version_source=resolved.source, pinned=req.pin,
+        admin_password=admin_password,
         created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
     topology.stamp(meta.extra, topology.KUBERNETES)
     meta.extra[config.EXTRA_DEPLOYMENT] = req.deployment or topology.MICROSERVICES
@@ -3684,6 +4397,28 @@ def _create_kubernetes(req: CreateReq, emit: Emit = null_emit) -> dict:
     # what lets `doctor`, the notes and a support case say "k3s" instead of leaving a
     # reader to infer it from a context name.
     meta.extra["distribution"] = plan.distribution
+    if ktls:
+        from rc_repro import tls as tlsmod
+
+        # The SAME three fields the Compose path records, so `list`, `info`,
+        # `repro_links`, the GUI grid and `tls-status` all work on a Kubernetes
+        # workspace for free -- none of them asks which runtime it is. `root_url`
+        # deliberately stays the plain http port-forward URL that rc-repro's own API
+        # calls use; `public_url` is what a human opens.
+        meta.public_url = f"https://{ktls.host}"
+        meta.extra["tls"] = (tlsmod.MODE_ACME if ktls.issuer.mode == "acme"
+                             else tlsmod.MODE_LOCAL)
+        # `edge` means "a route file speaks for this name". It is what `note_groups_of`
+        # keys the HTTPS card on, and it is False in the topology where the cluster
+        # holds :443 itself and no edge is involved at all.
+        meta.extra["edge"] = edgesvc.installed()
+        # Where TLS actually terminates, which is the one thing genuinely different
+        # from Compose and the thing a support case needs told: the certificate is a
+        # cluster Secret issued by cert-manager, not a file the edge loaded.
+        meta.extra["tls_terminates"] = "cluster"
+        meta.extra["ingress_endpoint"] = str(ktls.endpoint)
+        meta.extra["ingress_class"] = ktls.ingress_class
+        _publish_kubernetes_name(repro_name, ktls, emit=emit)
     if req.replicas > 1:
         meta.extra["instances"] = req.replicas
     if req.actor:
@@ -3764,7 +4499,7 @@ def _create_kubernetes(req: CreateReq, emit: Emit = null_emit) -> dict:
             warn(emit, f"retry it with: rc-repro monitor --name {repro_name}",
                  phase="monitor")
             result["monitoring"] = {"monitoring": False, "error": str(exc)}
-    info(emit, f"{root}  admin / {config.ADMIN_PASSWORD}", phase="done", pct=100)
+    info(emit, f"{root}  admin / {meta.admin_pass}", phase="done", pct=100)
     return result
 
 
@@ -3822,7 +4557,33 @@ def kubernetes_state(name: str, meta) -> str:
     # never going to move. The word has to match the verb the user just used.
     if k8s.desired_replicas(name, context=context) == 0:
         return "stopped"
-    return "running" if k8s.workspace_ready(name, context=context) else "starting"
+    if k8s.workspace_ready(name, context=context):
+        return "running"
+    # NOT-READY IS NOT ALWAYS STARTING. Everything that was not ready read as
+    # "starting", which is a promise: it says something is coming. For a wedged
+    # `pending-install` release or a pod in ImagePullBackOff / CreateContainerConfigError
+    # nothing is coming, and the column said "starting" for as long as anyone looked.
+    # Both facts were already available -- `terminal_pod_failure` returned the pod,
+    # the reason and the message while `list` printed "starting" beside it -- and
+    # nothing consulted them. Verified live: a deployment on an unpullable image
+    # reported `starting` while `terminal_pod_failure` named ImagePullBackOff.
+    #
+    # `failed` rather than a reason, because this is a state COLUMN: `info` and the
+    # detail panel carry the why. Any probe here may itself be refused, and a refused
+    # read must not manufacture a failure, so each is guarded and falls back to the
+    # honest "starting".
+    try:
+        if k8s.terminal_pod_failure(name, context=context):
+            return "failed"
+    except Exception:  # noqa: BLE001 - a refused probe is not evidence of failure
+        pass
+    try:
+        state, _ = k8s.release_state(k8s.RELEASE, k8s.namespace_for(name), context)
+        if state in k8s.PENDING_STATES or state == "failed":
+            return "failed"
+    except Exception:  # noqa: BLE001 - same
+        pass
+    return "starting"
 
 
 #: How many consecutive ready-but-not-Rocket.Chat rounds before the port is called

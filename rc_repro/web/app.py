@@ -51,8 +51,45 @@ from rc_repro.web.jobs import JobManager
 # throttle a colleague by guessing at their name.
 SIGNIN_MAX_FAILURES = 10
 SIGNIN_WINDOW = 60.0
+#: How many client addresses the throttle remembers. Process memory only, and that
+#: is a real limit: a restart forgets every accumulated failure. Bounded so an
+#: address-varying flood cannot grow it without limit -- see `_signin_failed`, which
+#: evicts oldest-first rather than clearing the whole map.
+_SIGNIN_MAX_KEYS = 4096
 _signin_fails: dict[str, list[float]] = {}
 _signin_lock = threading.Lock()
+
+#: How often one client address may put a PRE-AUTHENTICATION refusal in the audit
+#: log for the same reason. The WebSocket Host and Origin checks run before any
+#: credential is read, so an unauthenticated caller could write a line per request
+#: with a ~200-byte name of their choosing -- and audit.log rotates at 32 MB with 5
+#: kept, so a sustained flood pushes genuine `signin` and `denied` evidence off the
+#: end. `audit._field` already makes the CONTENT unforgeable; this bounds the
+#: VOLUME, which was the other half.
+PREAUTH_AUDIT_WINDOW = 60.0
+_preauth_seen: dict[tuple[str, str], float] = {}
+_preauth_lock = threading.Lock()
+
+
+def _preauth_should_audit(source: str, why: str) -> bool:
+    """Whether this pre-auth refusal is the first from `source` for `why` this window.
+
+    Coalescing rather than dropping: the first refusal of each kind from each address
+    is always recorded, so the evidence that something is probing survives -- what is
+    discarded is the thousandth identical copy of it.
+    """
+    now = time.monotonic()
+    key = (source, why)
+    with _preauth_lock:
+        last = _preauth_seen.get(key, 0.0)
+        if last and now - last < PREAUTH_AUDIT_WINDOW:
+            return False
+        if len(_preauth_seen) > _SIGNIN_MAX_KEYS:
+            for k in [k for k, seen in _preauth_seen.items()
+                      if now - seen > PREAUTH_AUDIT_WINDOW]:
+                del _preauth_seen[k]
+        _preauth_seen[key] = now
+        return True
 
 
 def _signin_retry_after(source: str) -> int:
@@ -69,9 +106,24 @@ def _signin_retry_after(source: str) -> int:
 def _signin_failed(source: str) -> None:
     now = time.monotonic()
     with _signin_lock:
-        # Bounded: an address-varying flood must not grow this without limit.
-        if len(_signin_fails) > 4096:
-            _signin_fails.clear()
+        # Bounded: an address-varying flood must not grow this without limit. It used
+        # to `.clear()` WHOLESALE at the limit, which handed the flood a way to erase
+        # the counter it was tripping -- 4096 requests from throwaway addresses reset
+        # every accumulated failure on the box, including the ones bounding a real
+        # attempt against a real account. Evicted oldest-first instead, so pressure
+        # costs the least recently active entries and never the active one.
+        if len(_signin_fails) > _SIGNIN_MAX_KEYS:
+            # Entries whose newest failure has aged out of the window carry no
+            # information at all, so they go first.
+            for key in [k for k, hits in _signin_fails.items()
+                        if not hits or now - hits[-1] > SIGNIN_WINDOW]:
+                del _signin_fails[key]
+            # Still over: drop the least recently active, keeping the newest half.
+            if len(_signin_fails) > _SIGNIN_MAX_KEYS:
+                for key in sorted(_signin_fails,
+                                  key=lambda k: _signin_fails[k][-1]
+                                  )[:len(_signin_fails) - _SIGNIN_MAX_KEYS // 2]:
+                    del _signin_fails[key]
         _signin_fails.setdefault(source, []).append(now)
 
 
@@ -139,6 +191,10 @@ ROUTE_ROLES: dict[tuple[str, str], str] = {
     ("POST", "/api/backups/compatibility"): _READ,   # a question, not a change
     ("GET", "/api/doctor"): _READ,
     ("GET", "/api/edge"): _READ,
+    # Destructive, and irreversibly so: it deletes a private key. Admin for the
+    # same reason people-management is -- a member can create and destroy their
+    # own workspaces, but the box's shared front door is not theirs to edit.
+    ("DELETE", "/api/edge/hosts/{host}"): _ADMIN,
     ("GET", "/api/kubernetes"): _READ,
     ("GET", "/api/machine"): _READ,
     ("GET", "/api/presets"): _READ,
@@ -300,14 +356,13 @@ def _prune_uploads(dest: Path, keep: int = 5) -> None:
 
 
 def _route_host(edgesvc, name: str) -> str:
-    """The hostname a route file serves, for display."""
-    try:
-        for line in edgesvc.route_path(name).read_text().splitlines():
-            if "rule:" in line and "Host(" in line:
-                return line.split("Host(`", 1)[1].split("`", 1)[0]
-    except (OSError, IndexError):
-        pass
-    return ""
+    """The hostname a route file serves, for display.
+
+    `edge.route_host` — which matches `Host()` and `HostSNI()` alike — rather than
+    the local copy that matched only the first, and so reported every Kubernetes
+    passthrough route as unreachable in three places at once.
+    """
+    return edgesvc.route_host(name)
 
 
 def _confined_backup_in(bundle: str, backupsvc) -> str:
@@ -368,6 +423,31 @@ def _read_upload(file: UploadFile) -> bytes:
         raise ValidationError(
             f"settings file is larger than {MAX_UPLOAD_BYTES // (1024 * 1024)} MB")
     return data
+
+
+def _rightmost_untrusted(forwarded: str, trusted: list) -> str:
+    """The first address from the RIGHT of an X-Forwarded-For that we do not trust.
+
+    An appending proxy writes the peer it saw onto the end of the header, so the
+    rightmost entries are the ones our own infrastructure vouched for and everything
+    to the left of them is whatever the client chose to send. Taking `[0]` therefore
+    took an attacker-supplied value: rotating it gave every request a fresh
+    rate-limit key, and the sign-in throttle -- which is the only thing bounding
+    password guessing, because scrypt is spent at the endpoint -- never tripped.
+
+    Returns "" when every hop is trusted or the header is empty, and the caller
+    keeps the socket peer, which is the only address it can actually verify.
+    """
+    hops = [h.strip() for h in forwarded.split(",") if h.strip()]
+    for hop in reversed(hops):
+        try:
+            addr = ipaddress.ip_address(hop)
+        except ValueError:
+            # Unparseable: not something we can vouch for, so it is the answer.
+            return hop
+        if not any(addr in net for net in trusted):
+            return hop
+    return ""
 
 
 def parse_trusted(entries) -> list:
@@ -575,6 +655,34 @@ def create_app(allow_hosts: list[str] | None = None, *,
         return any_host or _hostname(hdr) in allowed
     app.state.host_ok = host_ok
 
+    def origin_ok(hdr: str | None, host_hdr: str | None = None) -> bool:
+        """Whether an ORIGIN is ours. Deliberately NOT `host_ok`.
+
+        These are two different questions and `*` answered them differently.
+        `--allow-host '*'` is documented as widening the HOST allow-list -- "answer
+        to whatever name reaches you", which is what a proxy in front of `serve`
+        needs. Resolving Origin through the same closure made `*` mean "trust any
+        origin" too, silently disabling the cross-site guard whose docstring records
+        a confirmed attack: a forged `Origin: https://evil.example` that streamed a
+        workspace's container log, LDAP bind passwords and all.
+
+        The test is the actual definition of same-origin: the Origin's host equals
+        the HOST THIS REQUEST WAS MADE TO. That keeps `*` working for the case it
+        exists for -- the SPA served from whatever name the proxy uses posts to that
+        same name -- while a forged Origin still fails, because it names a host the
+        request was not addressed to. Simply requiring membership of the allow-list
+        would have broken sign-in entirely under `*`, which is the wrong trade: the
+        wildcard's whole point is that the name is not known in advance.
+
+        A NAMED entry also counts on its own, for the proxy that rewrites Host to an
+        internal name while the browser still sends the external one.
+        """
+        origin_host = _hostname(hdr)
+        if not origin_host:
+            return False
+        return origin_host in allowed or origin_host == _hostname(host_hdr)
+    app.state.origin_ok = origin_ok
+
     def _cross_site(headers, *, require_origin: bool = False) -> bool:
         """Whether this request was made from another site.
 
@@ -624,7 +732,7 @@ def create_app(allow_hosts: list[str] | None = None, *,
         if origin:
             if origin == "null":
                 return True
-            return not host_ok(origin.split("://", 1)[-1])
+            return not origin_ok(origin.split("://", 1)[-1], headers.get("host"))
         return require_origin
     app.state.cross_site = _cross_site
 
@@ -677,7 +785,14 @@ def create_app(allow_hosts: list[str] | None = None, *,
             if any(addr in net for net in trusted):
                 fwd = scope_headers.get("x-forwarded-for", "")
                 if fwd:
-                    peer = fwd.split(",")[0].strip()
+                    # THE RIGHTMOST UNTRUSTED HOP, not the leftmost. An appending
+                    # proxy adds the peer it saw to the END of whatever the client
+                    # sent, so the LEFT of the list is attacker-written: rotating a
+                    # fake leftmost value gave every request its own throttle key and
+                    # the sign-in bound never applied. Walking from the right past
+                    # the hops we trust yields the first address no proxy of ours
+                    # vouched for, which is the client as far as this box can know.
+                    peer = _rightmost_untrusted(fwd, trusted) or peer
                 proto = scope_headers.get("x-forwarded-proto", "")
                 if proto:
                     https = proto.split(",")[0].strip().lower() == "https"
@@ -782,7 +897,12 @@ def create_app(allow_hosts: list[str] | None = None, *,
                 from rc_repro.services import users as usersvc
                 role = usersvc.role_of(actor)      # live, never from the session
                 if need is None:
-                    auditsvc.audit(actor, "denied", f"{request.method} {template} "
+                    # The REQUESTED PATH when no route matched. `template` is ""
+                    # exactly then, so the line read `GET  (no role declared)` and
+                    # an operator reading audit.log could not tell which route had
+                    # been refused -- which is the one thing that line exists to say.
+                    where = template or (request.url.path or "?")
+                    auditsvc.audit(actor, "denied", f"{request.method} {where} "
                                    "(no role declared)", origin_="session",
                                    outcome="denied")
                     return JSONResponse(
@@ -1307,12 +1427,53 @@ def create_app(allow_hosts: list[str] | None = None, *,
         st["routes"] = [
             {"name": n,
              "host": _route_host(edgesvc, n),
-             # A route the edge cannot reach answers 502 rather than erroring,
-             # which is the one failure nothing else in the UI would surface.
-             "reachable": edgesvc.workspace_network(n) in attached}
+             # WHICH KIND OF ROUTE, because "reachable" means different things for the
+             # two and only one of them is an attachment question.
+             "passthrough": edgesvc.is_passthrough(n),
+             # A route the edge cannot reach answers 502 rather than erroring, which is
+             # the one failure nothing else in the UI would surface -- for a route that
+             # names a CONTAINER, which the edge resolves over a shared Docker network.
+             #
+             # A PASSTHROUGH ROUTE NAMES AN ADDRESS, and there is no network to join, so
+             # this test is not merely useless for it but inverted: it can never be true,
+             # so every Kubernetes workspace was reported unreachable. Seen in a browser
+             # against a name answering 200 from the public internet: the header said
+             # "edge: 1 unreachable", the rail filed the workspace under "Wants you", and
+             # the panel said "The edge cannot reach this workspace ... the edge is not on
+             # this workspace's network". Three places, one field, all of them wrong.
+             # The same helper `edge status` uses; the rule lives in the service.
+             "reachable": edgesvc.route_reachable(n, attached)}
             for n in st.get("routes", [])
         ]
+        # CERTIFICATES WITH NO ROUTE -- the other half of the blind spot `orphan_certs`
+        # covers. That one finds a declaration whose certificate is missing; this finds
+        # a certificate, and a private key, that nothing points at. Sent to the browser
+        # because a name cannot be cleaned up until it can be SEEN, and an operator
+        # handed `serve` and no shell had no way to see this at all.
+        claimed = {r["host"].casefold() for r in st["routes"] if r["host"]}
+        claimed.add((st["domain"] or "").casefold())
+        st["stale_certs"] = [h for h in edgesvc.acme_hosts()
+                             if h.casefold() not in claimed]
         return st
+
+    @app.delete("/api/edge/hosts/{host}")
+    def edge_host_delete(host: str, confirm: bool = False):
+        """Forget a name completely — route, certificate, private key, ACME entry.
+
+        The GUI needs this at least as much as the terminal does: a support engineer
+        handed `serve` and no shell has no other way to remove a Let's Encrypt
+        private key for a customer-shaped hostname from the box, and `down --volumes`
+        does not do it — it removes the route and walks past the certificate.
+
+        `confirm` is a query parameter rather than an assumption. `delete_host`
+        refuses without it, so a request that forgets the flag gets a 400 naming
+        what it would have destroyed instead of destroying it.
+        """
+        from rc_repro.services import edge as edgesvc
+
+        auditsvc.record("edge-delete-host", host,
+                        outcome="ok" if confirm else "denied")
+        return edgesvc.delete_host(host, confirm=confirm)
 
     @app.get("/api/doctor")
     def doctor():
@@ -1489,12 +1650,20 @@ def create_app(allow_hosts: list[str] | None = None, *,
         # ends of the connection could not tell a bad Host from a stale cookie
         # from an insufficient role. Recorded as `attempt`, the origin the
         # sign-in throttle already uses for a caller who has not proved anything.
-        def refuse(why: str, who: str = "") -> None:
+        def refuse(why: str, who: str = "", *, preauth: bool = False) -> None:
+            # `preauth` marks the refusals that happen BEFORE any credential is
+            # read -- Host and Origin -- which is exactly the set an unauthenticated
+            # caller can drive at will. Those are coalesced per address per window;
+            # everything after a credential check is recorded every time.
+            if preauth:
+                peer = getattr(getattr(ws, "client", None), "host", "") or "-"
+                if not _preauth_should_audit(peer, why):
+                    return
             auditsvc.audit(who or "-", "logs-open", f"{name} refused={why}",
                            origin_="attempt", outcome="denied")
 
         if not app.state.host_ok(ws.headers.get("host")):
-            refuse("host")
+            refuse("host", preauth=True)
             await ws.close(code=1008); return
         # Before accept(), and before any credential is read. `require_origin` is
         # on only when the credential is ambient: a Basic header is attached by
@@ -1505,7 +1674,8 @@ def create_app(allow_hosts: list[str] | None = None, *,
             # Origin, or the absence of one. A browser always sends it on an
             # upgrade, so "no origin" means a non-browser client -- worth telling
             # apart from an origin that IS present and simply not allowed.
-            refuse("origin" if ws.headers.get("origin") else "no-origin")
+            refuse("origin" if ws.headers.get("origin") else "no-origin",
+                   preauth=True)
             await ws.close(code=1008); return
         if app.state.accounts:
             # The cookie rides along on the upgrade automatically, which is what
@@ -1926,7 +2096,7 @@ def create_app(allow_hosts: list[str] | None = None, *,
             auth = lc.login(meta)
             # Not `token` -- that name is create_app's server auth token, and
             # rebinding it here reads like the handler is overwriting it.
-            pat = rcapi.generate_pat(meta.root_url, auth, config.ADMIN_PASSWORD,
+            pat = rcapi.generate_pat(meta.root_url, auth, meta.admin_pass,
                                      token_name=label, bypass_2fa=bypass_2fa,
                                      workspace=meta.name)
         except Exception as exc:  # noqa: BLE001 - surface as a 409, not a 500
@@ -2059,10 +2229,19 @@ def create_app(allow_hosts: list[str] | None = None, *,
 
     @app.post("/api/repros/{name}/upgrade/rollback")
     def upgrade_rollback(name: str, body: dict = Body(default={})):
+        from rc_repro.services import backup as backupsvc
         from rc_repro.services import upgrade as upgradesvc
         target = lc.resolve_name(name)
+        # Through the same confinement helper as /api/restore and
+        # /api/backups/compatibility. This third route was missed, so `bundle` went
+        # straight to `Path().expanduser()` and gave a member+ a filesystem oracle
+        # with distinguishable answers, readable back from GET /api/jobs/{id} at
+        # readonly+. Only when non-empty: empty legitimately means "use the bundle
+        # recorded on the workspace", which is the ordinary way to call this.
+        raw = str(body.get("bundle") or "")
+        bundle = _confined_backup_in(raw, backupsvc) if raw else ""
         job = jobs.submit("rollback", upgradesvc.rollback, target,
-                          bundle=str(body.get("bundle") or ""), label=target)
+                          bundle=bundle, label=target)
         return {"job_id": job.id}
 
     @app.get("/api/repros/{name}/tls")
@@ -2135,7 +2314,7 @@ def create_app(allow_hosts: list[str] | None = None, *,
                 # Same swap the CLI's --pat does: exercise the workspace the way a
                 # customer script does, through a token rather than a login session.
                 auth = rcapi.Auth(
-                    token=rcapi.generate_pat(meta.root_url, auth, config.ADMIN_PASSWORD,
+                    token=rcapi.generate_pat(meta.root_url, auth, meta.admin_pass,
                                              bypass_2fa=True, workspace=meta.name),
                     user_id=auth.user_id)
         except Exception as exc:  # noqa: BLE001 - surface as a 409, not a 500
@@ -2148,7 +2327,7 @@ def create_app(allow_hosts: list[str] | None = None, *,
         # so auditing there would drown the log in rc-repro talking to itself.
         # The body is never recorded: it can carry a password being set.
         auditsvc.record("api-call", f"{meta.name} {method} {path}")
-        extra = rcapi.password_2fa_headers(config.ADMIN_PASSWORD) if two_fa else None
+        extra = rcapi.password_2fa_headers(meta.admin_pass) if two_fa else None
         started = time.monotonic()
         try:
             status, text = rcapi.call(meta.root_url, method, path,
@@ -2198,17 +2377,43 @@ def create_app(allow_hosts: list[str] | None = None, *,
         return {"job_id": job.id}
 
     # --- jobs ----------------------------------------------------------------
+    def _may_read_job(request: Request, owner: str) -> bool:
+        """The `/api/audit` rule, applied to job output: an admin sees every job,
+        everyone else sees their own.
+
+        Job results and error text were not scoped to the submitter and sit at
+        readonly+, so any signed-in account could read another user's output --
+        which for `logs`, `env` and `api` is credentials, and which is also the
+        channel that made the rollback path oracle readable BELOW the role that
+        could trigger it. A job with no actor is token mode, where a shared secret
+        genuinely cannot say who asked, so there is nobody to scope it to.
+        """
+        from rc_repro.services import users as usersvc
+        me = getattr(request.state, "actor", "") or ""
+        if not me or not owner:
+            return True
+        return owner == me or usersvc.at_least(usersvc.role_of(me), "admin")
+
     @app.get("/api/jobs")
-    def jobs_list():
+    def jobs_list(request: Request):
         """Retained jobs, newest first. A job outlives the dialog that started it
         (and any page refresh), so without this the output of a long benchmark or
-        capacity search was computed and then unreachable."""
-        return {"jobs": jobs.list_jobs()}
+        capacity search was computed and then unreachable.
+
+        Filtered to what the caller may read, for the same reason `/api/audit` is:
+        a member's own work is a legitimate question, another member's is not.
+        """
+        return {"jobs": [j for j in jobs.list_jobs()
+                         if _may_read_job(request, str(j.get("actor") or ""))]}
 
     @app.get("/api/jobs/{job_id}")
-    def job_state(job_id: str):
+    def job_state(request: Request, job_id: str):
         job = jobs.get(job_id)
         if not job:
+            return JSONResponse({"error": "no such job"}, status_code=404)
+        if not _may_read_job(request, job.actor):
+            # 404, not 403: whether a job id exists is itself the answer here, and
+            # a distinguishable "exists but not yours" is the oracle again.
             return JSONResponse({"error": "no such job"}, status_code=404)
         return {"id": job.id, "kind": job.kind, "status": job.status,
                 "result": job.result, "error": job.error, "error_kind": job.error_kind,
@@ -2218,9 +2423,13 @@ def create_app(allow_hosts: list[str] | None = None, *,
                 "n_events": job.n_events}
 
     @app.get("/api/jobs/{job_id}/stream")
-    async def job_stream(job_id: str, since: int = 0):
+    async def job_stream(request: Request, job_id: str, since: int = 0):
         job = jobs.get(job_id)
         if not job:
+            return JSONResponse({"error": "no such job"}, status_code=404)
+        # The SAME scope as the polled endpoint. This is the live half of the same
+        # document, so leaving it open would have made the scoping above decorative.
+        if not _may_read_job(request, job.actor):
             return JSONResponse({"error": "no such job"}, status_code=404)
 
         async def gen():

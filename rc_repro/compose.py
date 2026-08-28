@@ -46,6 +46,12 @@ class Spec:
     # so they must not be reachable from the local network unless asked
     # (`up --bind 0.0.0.0` / RC_REPRO_BIND_HOST).
     bind_host: str = config.DEFAULT_BIND_HOST
+    #: The workspace's Rocket.Chat admin password. Empty means the shared loopback
+    #: `config.ADMIN_PASSWORD` -- see `runner.Metadata.admin_pass`, which is the
+    #: same fallback read from the other side. It is a SPEC field because the
+    #: compose document is what actually provisions the admin, so a password stored
+    #: in repro.json and not put here would be a record of a login that does not work.
+    admin_password: str = ""
 
     @classmethod
     def from_resolved(cls, resolved, *, project_name: str, root_url: str,
@@ -124,7 +130,7 @@ def _rc_environment(spec: Spec) -> dict:
         "ADMIN_USERNAME": config.ADMIN_USERNAME,
         "ADMIN_NAME": config.ADMIN_NAME,
         "ADMIN_EMAIL": config.ADMIN_EMAIL,
-        "ADMIN_PASS": config.ADMIN_PASSWORD,
+        "ADMIN_PASS": spec.admin_password or config.ADMIN_PASSWORD,
     }
     if spec.oplog:  # RC < 8 only; deprecated in 8.x
         env["MONGO_OPLOG_URL"] = config.MONGO_OPLOG_URL

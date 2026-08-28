@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import secrets
 import threading
 import uuid
 from pathlib import Path
@@ -32,8 +33,31 @@ RC_CONTAINER_PORT = 3000
 PROJECT_PREFIX = "rcrepro-"
 
 # Admin user auto-provisioned into every repro (see presets / compose).
+#
+# ADMIN_PASSWORD is the LOOPBACK password, and that is the whole of its contract.
+# `DEFAULT_BIND_HOST` below explains why a fixed weak credential is acceptable at
+# all: nothing outside this machine can reach the workspace. A workspace that gets a
+# public name or a non-loopback bind removes that premise, and `create_repro`
+# generates one per workspace instead -- see `runner.Metadata.admin_pass`, which is
+# what every login actually reads.
 ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = "admin123"
+
+#: Bytes of entropy in a generated workspace admin password. 15 bytes is 120 bits
+#: through `token_urlsafe`, which is 20 characters -- long enough that the answer to
+#: "is this brute-forcible from the internet" is not a calculation, short enough to
+#: read off a terminal and type into a browser once. `services/users.py` spends 12
+#: for GUI accounts, which are behind a lockout; a Rocket.Chat admin is not.
+_ADMIN_PASSWORD_BYTES = 15
+
+
+def generate_admin_password() -> str:
+    """A fresh admin password for one workspace.
+
+    `secrets`, not `random`: the module docstring in `services/users.py` makes the
+    same point and it is the only thing that matters here.
+    """
+    return secrets.token_urlsafe(_ADMIN_PASSWORD_BYTES)
 ADMIN_EMAIL = "admin@example.com"
 ADMIN_NAME = "Admin"
 
@@ -121,6 +145,42 @@ def reports_dir() -> Path:
 
 def config_file() -> Path:
     return home() / "config.yaml"
+
+
+#: What a person may type for a boolean setting, and what it means. Both directions
+#: are listed because only one of them was ever exercised.
+_TRUE = ("1", "true", "yes", "on", "y", "t")
+_FALSE = ("0", "false", "no", "off", "n", "f", "")
+
+
+def truthy(value, default: bool = False) -> bool:
+    """Read a remembered boolean, however it happens to be stored.
+
+    `bool("false")` IS TRUE, and that one line made `config set acme.staging false`
+    impossible to obey: `config set` wrote the raw string, every reader did
+    `bool(cfg.get("acme_staging"))`, and so turning staging ON worked while turning it
+    OFF did nothing at all. Measured on a live box -- `acme_staging: 'false'` in
+    config.yaml and the next create still ordering from the staging directory, with
+    nothing anywhere saying why.
+
+    The asymmetry is what hid it: the value people set first is the one that works.
+
+    Needed on the READ side and not only at the point of writing, because every
+    config.yaml already written by an older rc-repro holds a string -- a box that
+    once rehearsed against staging would otherwise stay there for ever.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in _TRUE:
+        return True
+    if text in _FALSE:
+        return False
+    return default
 
 
 def load_config(with_env: bool = True) -> dict:

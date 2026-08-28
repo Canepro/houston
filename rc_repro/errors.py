@@ -61,6 +61,21 @@ class NotFoundError(ReproError):
     exit_code = 4
 
 
+class MissingRecordError(NotFoundError, FileNotFoundError):
+    """A workspace directory with no readable `repro.json`.
+
+    BOTH BASES, deliberately. As a `NotFoundError` it carries `http_status = 404`,
+    so `serve` answers a half-written workspace with the documented status instead
+    of a 500 and a traceback -- `detail()` and `describe()` run on the request
+    thread, and a bare `FileNotFoundError` escaped the whole error contract.
+
+    As a `FileNotFoundError` it is still what a dozen callers already catch. Those
+    handlers are correct -- "this workspace has no record" genuinely is the thing
+    they mean to skip -- and rewriting each of them to catch a new type would have
+    been a wide change with one silent miss enough to turn a skip into a crash.
+    """
+
+
 class NotReadyError(ReproError):
     """Docker is down, or Rocket.Chat isn't serving / can't be logged into."""
     http_status = 409

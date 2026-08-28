@@ -290,6 +290,13 @@ def _fake_detail(name="t1234", state="running", **over):
         "mongo_flavor": "mongodb", "host_port": 3001, "uptime": "2h", "preset": "base",
         "health": "healthy", "url": "http://localhost:3001", "root_url": "http://localhost:3001",
         "public_url": "", "login": {"user": "admin", "password": "admin123"},
+        # DRIFTED, and invisible until the guard below learned to look at the
+        # branches production takes. `degraded` is only added when Docker answers,
+        # and `instances`/`instance_urls` only when the record carries a count -- so
+        # the multi-instance panel was rendered here from keys `detail()` never
+        # returns, and `app.js` reads all three.
+        "degraded": "",
+        "instances": 1, "instance_urls": [],
         # `service`, not `name` -- that is the key the containers tab reads, and
         # getting it wrong renders an empty table rather than an error.
         "containers": [{"service": "rocketchat", "state": "running",
@@ -551,6 +558,87 @@ def test_the_edge_badge_surfaces_an_unreachable_route(serve, page, monkeypatch):
         assert "t9999" in page.text_content("#edge-body")
         page.click("#edge-close")
         page.wait_for_function("() => !document.querySelector('#edge-dialog').open")
+        assert page.errors == [], page.errors
+
+
+def _seed_stale_cert(host="old-ticket-991.kestron.org"):
+    """A certificate in the ACME store that no route points at.
+
+    Written through the real files rather than a stub, because the whole point of
+    the payload key is that `acme_hosts()` reads the store: a stub would prove the
+    dialog renders a list and nothing about where the list comes from.
+    """
+    import json
+
+    from rc_repro import tls
+    tls.acme_dir().mkdir(parents=True, exist_ok=True)
+    (tls.acme_dir() / tls.ACME_FILE).write_text(json.dumps({"le": {
+        "Account": {"Email": "ops@example.com"},
+        "Certificates": [{"domain": {"main": host, "sans": []}}]}}), encoding="utf-8")
+    return host
+
+
+def test_an_admin_can_delete_a_certificate_nothing_points_at(serve, page, monkeypatch):
+    """`down --volumes` removes a workspace's ROUTE and walks past its certificate,
+    which is keyed by hostname -- so a Let's Encrypt certificate AND private key for
+    a name nobody serves stays on the box. An operator handed `serve` and no shell
+    had no way to see that, let alone remove it.
+    """
+    from rc_repro.services import edge as edgesvc
+
+    _stub_lifecycle(monkeypatch)
+    usersvc.add("alice", PASSWORD, role="admin")
+    host = _seed_stale_cert()
+    monkeypatch.setattr(edgesvc, "status", lambda: {
+        "installed": True, "running": True, "routes": [], "attached": []})
+    monkeypatch.setattr(edgesvc, "served_domain", lambda: "")
+    # Deleting an ACME entry restarts the edge so Traefik reloads the store; there
+    # is no Traefik here, and starting one is not what this test is about.
+    monkeypatch.setattr(edgesvc, "running", lambda: False)
+    monkeypatch.setattr(edgesvc, "foreign_edge", lambda: "")
+
+    with serve() as s:
+        _sign_in(page, s.url)
+        page.wait_for_selector("#edge-badge:not([hidden])")
+        page.click("#edge-badge")
+        page.wait_for_selector("#edge-dialog[open]")
+        assert "certificate held with no route" in page.text_content("#edge-body")
+        assert host in page.text_content("#edge-body")
+
+        page.on("dialog", lambda d: d.accept())
+        page.click("#edge-body button.danger")
+        page.wait_for_function(
+            "() => !document.querySelector('#edge-body').textContent"
+            ".includes('old-ticket-991')")
+        assert edgesvc.acme_hosts() == [], "the store on disk, not just the DOM"
+        assert page.errors == [], page.errors
+
+
+def test_a_member_is_not_offered_the_delete_at_all(serve, page, monkeypatch):
+    """ABSENT, not disabled -- the rule this GUI uses everywhere. The route is admin
+    in ROUTE_ROLES, so a member clicking it would get a 403 toast; showing them a
+    control that can only fail is the thing the rule exists to prevent.
+
+    They still SEE the row: knowing the box is holding a stray private key is not
+    privileged, and a member who can see it can ask someone who can remove it.
+    """
+    from rc_repro.services import edge as edgesvc
+
+    _stub_lifecycle(monkeypatch)
+    usersvc.add("alice", PASSWORD, role="admin")
+    usersvc.add("bob", "bobs-good-password", role="member")
+    host = _seed_stale_cert()
+    monkeypatch.setattr(edgesvc, "status", lambda: {
+        "installed": True, "running": True, "routes": [], "attached": []})
+    monkeypatch.setattr(edgesvc, "served_domain", lambda: "")
+
+    with serve() as s:
+        _sign_in(page, s.url, user="bob", password="bobs-good-password")
+        page.wait_for_selector("#edge-badge:not([hidden])")
+        page.click("#edge-badge")
+        page.wait_for_selector("#edge-dialog[open]")
+        assert host in page.text_content("#edge-body")
+        assert page.locator("#edge-body button.danger").count() == 0
         assert page.errors == [], page.errors
 
 
@@ -1596,20 +1684,56 @@ def test_the_create_dialog_offers_a_runtime_and_follows_it(serve, page, monkeypa
         # on the CLI defaults to microservices, and the two must not disagree.
         assert arrangement() == "microservices"
         assert not any("multi-instance" in d for d in arrangements()), arrangements()
-        # Kubernetes-only control appears; HTTPS, which the service layer refuses
-        # on this runtime, goes away.
+        # Kubernetes-only control appears.
         assert page.locator("#mongo-operator").count() == 1
-        # `hidden` rather than is_visible: the HTTPS block lives inside the
-        # Advanced disclosure, so is_visible() would be answering about the
-        # twisty, not about the runtime.
-        assert page.eval_on_selector("#create-https-block", "e => e.hidden") is True
-        # And the form says what it took away, from the server's own registry --
-        # not a list written in JS, which would still be refusing --reg-token.
+        # HTTPS STAYS, and it used to go away here. The chart's own Ingress and a
+        # cert-manager `ca` issuer made `--https` real on this runtime, so the field
+        # must be offered -- and the GUI got that for free, because `app.js` hides
+        # exactly the fields `/api/settings` names and nothing more. A copy of the
+        # list in JS would still be hiding this control.
+        #
+        # `hidden` rather than is_visible: the HTTPS block lives inside the Advanced
+        # disclosure, so is_visible() would be answering about the twisty.
+        assert page.eval_on_selector("#create-https-block", "e => e.hidden") is False
+        # And the form still says what it DID take away, from the server's own
+        # registry -- which is now only the destructive rebuild.
         assert page.eval_on_selector("#adv-gone", "e => e.hidden") is False
         # textContent, not inner_text: this line lives inside the same closed
-        # <details> as the HTTPS block, and inner_text answers "" for anything a
-        # closed twisty is hiding -- which would pass whatever the text said.
-        assert "HTTPS" in page.eval_on_selector("#adv-gone", "e => e.textContent")
+        # <details>, and inner_text answers "" for anything a closed twisty hides --
+        # which would pass whatever the text said.
+        gone = page.eval_on_selector("#adv-gone", "e => e.textContent")
+        assert "HTTPS" not in gone, gone
+        assert "domain" not in gone, gone
+        assert "DELETE data" in gone, gone
+        # BOTH certificate modes are offered, because both are built: `--https` from a
+        # `ca` ClusterIssuer holding rc-repro's CA, `--domain` from an ACME one.
+        modes = page.eval_on_selector_all(
+            "#https-mode option", "es => es.map(e => e.value)")
+        assert "local" in modes and "acme" in modes, modes
+
+        # AND THE REMOVAL PATH, driven directly, because no runtime refuses `--domain`
+        # any more and it would otherwise be untested code that a future one relies
+        # on. The re-add is the half that breaks: taking an option away is easy and
+        # putting it back in the right place is what gets forgotten.
+        def modes_for(unsupported):
+            page.evaluate("u => syncAdvancedForRuntime({unsupported: u})", unsupported)
+            return page.eval_on_selector_all(
+                "#https-mode option", "es => es.map(e => e.value)")
+
+        assert "acme" not in modes_for([{"field": "domain"}]), "removed, not disabled"
+        assert "local" in modes_for([{"field": "domain"}]), "the block itself stays"
+        assert "acme" in modes_for([]), "and it comes back"
+        assert page.eval_on_selector("#create-https-block", "e => e.hidden") is False
+        # Refusing HTTPS itself is what takes the whole block, and only that.
+        assert page.eval_on_selector(
+            "#create-https-block", "e => e.hidden") is False
+        modes_for([{"field": "https"}])
+        assert page.eval_on_selector("#create-https-block", "e => e.hidden") is True
+        # Back to what this runtime ACTUALLY refuses, because the assertions below
+        # continue from here -- driving the function directly means owning the state
+        # it leaves behind.
+        modes_for([{"field": "fresh"}])
+        assert page.eval_on_selector("#create-https-block", "e => e.hidden") is False
         # `fresh` is one OPTION of the existing-name select, not the whole control:
         # reuse and force work on both runtimes.
         opts = page.eval_on_selector_all(
@@ -1998,25 +2122,47 @@ def test_fake_detail_matches_the_real_payload(monkeypatch, tmp_path):
         "root_url": "http://localhost:3002", "host_port": 3002,
         "version_source": "x",
         "extra": {"runtime": "kubernetes", "namespace": "rc-repro-kub"}}))
-    # Neither branch may reach a daemon or a cluster from a unit test.
-    monkeypatch.setattr(runner, "docker_available", lambda **_k: False)
+    # A MULTI-INSTANCE workspace, because `instances`/`instance_urls` are only added
+    # when the record carries a count -- and with `extra: {}` this walk could not see
+    # them. Its own panel is the one nothing else covers.
+    (tmp_path / "repros" / "multi").mkdir(parents=True)
+    (tmp_path / "repros" / "multi" / "repro.json").write_text(_json.dumps({
+        "name": "multi", "project": "p", "rc_version": "7.4.1", "rc_image": "i",
+        "mongo_tag": "7.0", "mongo_flavor": "official", "preset": "multi-instance",
+        "root_url": "http://localhost:3003", "host_port": 3003,
+        "version_source": "x", "extra": {"instances": 3}}))
+    (tmp_path / "repros" / "multi" / "docker-compose.yml").write_text(
+        "services:\n  rocketchat:\n    image: i\n    ports:\n"
+        "    - 127.0.0.1:3003:3000\n    environment:\n      ROOT_URL: x\n")
+
     monkeypatch.setattr(lcsvc, "kubernetes_state", lambda name, meta: "running")
     monkeypatch.setattr(k8ssvc, "pod_rows", lambda name, **kw: [])
 
     fake = _fake_detail()
-    for name in ("cmp", "kub"):
-        real = lcsvc.detail(name)
-        missing = sorted(set(real) - set(fake))
-        assert not missing, (
-            f"detail({name!r}) returns keys the browser fixture does not have: "
-            f"{missing} — every test in this file renders from the fixture, so the "
-            f"panel can break in production with this file green")
-        for key in sorted(set(real) & set(fake)):
-            if real[key] is None or fake[key] is None:
-                continue
-            assert type(real[key]) is type(fake[key]), (
-                f"detail({name!r})[{key!r}] is {type(real[key]).__name__}, the "
-                f"fixture has {type(fake[key]).__name__}")
+    # BOTH VALUES OF docker_available, because they do not return the same set and
+    # PRODUCTION TAKES THE TRUE ONE. Stubbing only False hid `degraded`, which
+    # `detail` adds from the container list -- so the guard that exists to catch
+    # fixture drift could not see the key that had drifted.
+    for available in (False, True):
+        monkeypatch.setattr(runner, "docker_available",
+                            (lambda _a: lambda **_k: _a)(available))
+        # No daemon from a unit test: `ps` is the only thing the True branch would
+        # otherwise shell out to.
+        monkeypatch.setattr(runner, "ps", lambda *a, **k: "")
+        for name in ("cmp", "kub", "multi"):
+            real = lcsvc.detail(name)
+            missing = sorted(set(real) - set(fake))
+            assert not missing, (
+                f"detail({name!r}) with docker_available={available} returns keys "
+                f"the browser fixture does not have: {missing} — every test in this "
+                f"file renders from the fixture, so the panel can break in "
+                f"production with this file green")
+            for key in sorted(set(real) & set(fake)):
+                if real[key] is None or fake[key] is None:
+                    continue
+                assert type(real[key]) is type(fake[key]), (
+                    f"detail({name!r})[{key!r}] is {type(real[key]).__name__}, the "
+                    f"fixture has {type(fake[key]).__name__}")
 
 
 def test_a_credential_note_is_not_labelled_a_sudo_setup_step(serve, page, monkeypatch):

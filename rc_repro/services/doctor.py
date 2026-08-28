@@ -95,6 +95,7 @@ CHECKS: tuple[str, ...] = (
     "kubernetes-storage", "kubernetes-ingress", "kubernetes-loadbalancer",
     "kubernetes-metrics", "kubernetes-other-clusters", "inotify",
     "kubernetes-cert-manager", "kubernetes-edge-port", "kubernetes-chart-repo",
+    "kubernetes-https", "kubernetes-helm-reach",
     "install-fresh", "edge-config-drift", "preset-browser-host",
     "interrupted-work", "event-log",
 )
@@ -332,9 +333,19 @@ def run_checks() -> dict:
                 known = {m.name for m in runner.list_meta()}
                 stale = [r for r in routes if r not in known]
                 if stale:
+                    # `down --name <it>` was the advice and it CANNOT work here: the
+                    # workspace is what is missing, so `down` answers "no such
+                    # workspace" and the route stays. Found by running doctor against
+                    # a home with exactly this state. `edge delete` takes the HOSTNAME,
+                    # which is the thing that still exists -- and removes the
+                    # certificate and private key the route was serving, which `down`
+                    # never did for a workspace that was still there either.
+                    hosts = [edgesvc.route_host(r) or r for r in sorted(stale)[:5]]
                     line("warn", f"{len(stale)} edge route(s) with no workspace: "
-                                 f"{', '.join(sorted(stale)[:5])} — remove with "
-                                 f"`rc-repro down --name <it>`")
+                                 f"{', '.join(sorted(stale)[:5])} — `down` cannot "
+                                 f"remove these, the workspace is what is gone. "
+                                 f"`rc-repro edge delete {hosts[0]}` forgets a name, "
+                                 f"its certificate and its key")
                 # A route the edge cannot REACH is a 502 rather than an error, and
                 # nothing else in the tool would ever say so. Happens after the
                 # edge is recreated, since attachments are runtime state.
@@ -562,7 +573,8 @@ def run_checks() -> dict:
                 # than implied. All three are `ok` rows on purpose: a capability is a
                 # FACT, and severity belongs to whatever needs it -- an absent ingress
                 # controller cannot affect a workspace reached by port-forward, and
-                # `ingress_blocker` is what refuses when something asks for a hostname.
+                # `k8s.ensure_ingress` is what ADOPTS one or installs it when a workspace asks
+                # for a hostname, so an absent controller is not a fault here either.
                 # A doctor that warns about a feature you are not using teaches people
                 # to ignore its warnings.
                 if "ingress" in pre.unreadable:
@@ -613,13 +625,76 @@ def run_checks() -> dict:
                                      f"naming it", check="kubernetes-chart-repo")
                 except Exception:  # noqa: BLE001 - a check must never break the report
                     pass
+                # HELM'S OWN ANSWER, because rc-repro drives two clients and this
+                # check only ever asked one. They resolve their configuration
+                # differently -- `helm_env` gives helm rc-repro's HELM_* homes while
+                # leaving KUBECONFIG to whoever owns the cluster -- so they can
+                # disagree, and the create finds out four minutes in.
+                #
+                # Measured on this box: `~/.kube/config` carried the server CA and
+                # client certificate of a PREVIOUS k3s install. kubectl was happy --
+                # `get ns`, `auth whoami` as system:admin, the whole MongoDB phase of
+                # a create -- and helm refused every call with `x509: certificate
+                # signed by unknown authority`. So `up --runtime kubernetes` built a
+                # namespace, a StatefulSet, a PersistentVolume and an initiated
+                # replica set, then died at the chart and rolled all of it back. This
+                # row is the difference between that and one line before anything runs.
+                if pre.helm_reachable:
+                    line("fail", f"helm cannot reach cluster {pre.context!r} although "
+                                 f"kubectl can — every Kubernetes create will fail at "
+                                 f"the chart, after MongoDB, and roll back. helm said: "
+                                 f"{pre.helm_reachable}. A kubeconfig left over from a "
+                                 f"previous install of the same cluster does this; "
+                                 f"regenerate it (k3s: `sudo cat "
+                                 f"/etc/rancher/k3s/k3s.yaml > ~/.kube/config`, kind: "
+                                 f"`kind export kubeconfig --name <cluster>`)",
+                         check="kubernetes-helm-reach")
                 if k8s.cert_manager_installed(pre.context):
                     line("ok", "cert-manager: installed — a Certificate can be issued "
                                "in this cluster", check="kubernetes-cert-manager")
                 else:
-                    line("ok", "cert-manager: not installed — installed on first use by "
-                               "a workspace that asks for a certificate",
+                    line("ok", "cert-manager: not installed — installed on first use "
+                               "by a workspace that asks for a certificate, with the "
+                               "guide's own `kubectl apply`",
                          check="kubernetes-cert-manager")
+                # ONE ROW THAT ANSWERS "CAN THIS BOX SERVE A NAME, AND HOW". Everything
+                # in it is reported somewhere above -- the ingress class, the load
+                # balancer, the edge, the port claim -- and reading four rows and
+                # composing them is exactly what nobody does at the moment they need
+                # the answer. This says which of the two shapes the box is in, which is
+                # the fact every HTTPS question turns on.
+                try:
+                    _ep = k8s.ingress_endpoint(pre.context)
+                except Exception:  # noqa: BLE001 - a check must not break the report
+                    _ep = None
+                _cm = False
+                try:
+                    _cm = k8s.cert_manager_installed(pre.context)
+                except Exception:  # noqa: BLE001
+                    _cm = False
+                if _ep is None:
+                    line("ok", "https: not servable yet — this cluster publishes no "
+                               ":443 Service reachable from outside it. A workspace "
+                               "that asks for a name installs an ingress controller; "
+                               "port-forward needs none",
+                         check="kubernetes-https")
+                else:
+                    _owner = ("the CLUSTER's own ingress" if _ep.local and _ep.port == 443
+                              else "rc-repro's edge")
+                    _via = ("directly" if _ep.local and _ep.port == 443
+                            else f"passed through by SNI to {_ep}")
+                    # THE TWO ROWS MUST NOT SEEM TO DISAGREE. This said "TLS
+                    # terminates in the cluster, from a cert-manager Secret" directly
+                    # under a row saying cert-manager was not installed -- describing
+                    # what WOULD happen as though it already did.
+                    _where = ("TLS terminates in the cluster, from a cert-manager "
+                              "Secret" if _cm else
+                              "a name would be servable here once cert-manager is "
+                              "installed")
+                    line("ok", f"https: {_owner} answers this host's :443, and a "
+                               f"workspace name is served {_via} — {_where} "
+                               f"({_ep.source} {_ep}, {_ep.service})",
+                         check="kubernetes-https")
 
             elif pre.probe_failed:
                 # NOT "does not exist". `kind` talks to Docker, so this is what a
