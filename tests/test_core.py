@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 
+from conftest import source_of
 from rc_repro import compose, config, configimport, presets, rcapi, runner, scaleseed, seed, versions
 
 
@@ -2282,7 +2283,7 @@ def test_verify_can_present_a_different_sni_than_the_address_it_dials():
     from rc_repro import tls
     sig = inspect.signature(tls.verify)
     assert "sni" in sig.parameters
-    src = inspect.getsource(tls.verify)
+    src = source_of(tls.verify)
     assert "server_hostname=servername" in src
     assert "server_hostname=host" not in src, "every handshake must honour sni"
 
@@ -2333,6 +2334,7 @@ def test_env_overrides_apply_to_every_rocketchat_instance():
 def test_env_var_names_are_validated_before_reaching_compose():
     """An invalid name produces a compose file docker rejects, so refuse it here."""
     import pytest
+
     from rc_repro.errors import ValidationError
     from rc_repro.services import envvars
 
@@ -3780,8 +3782,7 @@ def test_scale_and_the_profiler_use_the_workspace_s_own_database():
         assert hasattr(mod, "_uri_for"), f"{mod.__name__} still hardcodes its URI"
         assert not hasattr(mod, "_URI"), f"{mod.__name__} kept the hardcoded URI"
         # And it reads through the one function that already answers this question.
-        import inspect
-        assert "database_of" in inspect.getsource(mod._db_of)
+        assert "database_of" in source_of(mod._db_of)
 
     # The fallback is still the default, so a workspace whose compose cannot be read
     # behaves as before rather than failing.

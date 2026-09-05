@@ -125,16 +125,15 @@ class AuthorityGateError(ReproError):
     http_status = 403
     code = "GATE"
     exit_code = 6
-    #: NOT ADVERTISED WHILE NOTHING RAISES IT. `_error_codes()` walks this hierarchy
-    #: and deliberately leaves `GATE_CODES` out, saying so in its own docstring --
-    #: "advertising a code nothing can produce is the exact failure this document
-    #: exists to prevent, and it would teach a caller to write a branch that never
-    #: runs". The walk then picked up the BASE code anyway, because exclusion was
-    #: applied to the registry and not to the class. `capabilities` really did
-    #: publish GATE, on a build with no `raise AuthorityGateError` anywhere.
-    #:
-    #: Set this True in the same commit that adds the first raise, not before.
-    advertised = False
+    #: ADVERTISED, because this build raises it: `lifecycle.py` refuses to copy the
+    #: local CA private key into a cluster that is not on this machine. The flag was
+    #: False with the instruction "set this True in the same commit that adds the
+    #: first raise, not before" -- and that commit landed without doing so, which
+    #: made the flag itself the defect: `capabilities` omitted every gate while one
+    #: was reachable, so a caller branching on `code` met one it was never told about.
+    #: The reverse of the failure the flag was added to prevent, by the same
+    #: mechanism.
+    advertised = True
 
     def __init__(self, message: str, *, kind: str = "", subject: str = "",
                  approve_with: str = "", code: str | None = None,
@@ -166,7 +165,27 @@ GATE_CODES: dict[str, str] = {
     "GATE_DELETE_UNOWNED": "the resource was not created by rc-repro",
     "GATE_PUBLIC_EXPOSURE": "the request would expose a repro beyond loopback",
     "GATE_RETENTION": "retaining this run was not authorised",
+    # DISTINCT from GATE_UNAPPROVED_CLUSTER, which already means "the CA private key
+    # may not go there". Giving one code two meanings breaks the premise jsonout rests
+    # on -- that a caller branches on `code` -- and these two want opposite responses:
+    # one is about a secret leaving this box, the other about money leaving an account.
+    "GATE_CLOUD_SPEND": "creating a cluster that costs money was not authorised",
 }
+
+
+#: The gate codes this build can actually PRODUCE, as opposed to the ones it knows
+#: about. `GATE_CODES` above is the registry and most of it is unreachable; publishing
+#: all of it is the exact failure `_error_codes()` exists to prevent -- a caller
+#: writing a branch that never runs. Advertising only the base "GATE" is the opposite
+#: failure, because the base is not what arrives: a gate carries its specific code,
+#: so a caller told to expect "GATE" and handed "GATE_UNAPPROVED_CLUSTER" cannot
+#: branch at all.
+#:
+#: Written out rather than derived, because deriving it means walking the source for
+#: `code=` literals at import time. `tests/test_json.py` does exactly that walk and
+#: asserts this tuple matches, so it cannot drift without the suite saying so.
+RAISED_GATE_CODES: tuple[str, ...] = ("GATE_UNAPPROVED_CLUSTER", "GATE_CLOUD_SPEND",
+                                      "GATE_DELETE_UNOWNED")
 
 
 def as_payload(exc: ReproError) -> dict:

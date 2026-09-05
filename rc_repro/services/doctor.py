@@ -14,6 +14,8 @@ import shutil
 
 import requests
 
+from concurrent.futures import ThreadPoolExecutor
+
 from rc_repro import config, runner
 from rc_repro.services import lifecycle as lc
 
@@ -95,14 +97,22 @@ CHECKS: tuple[str, ...] = (
     "kubernetes-storage", "kubernetes-ingress", "kubernetes-loadbalancer",
     "kubernetes-metrics", "kubernetes-other-clusters", "inotify",
     "kubernetes-cert-manager", "kubernetes-edge-port", "kubernetes-chart-repo",
-    "kubernetes-https", "kubernetes-helm-reach",
+    "kubernetes-https", "kubernetes-helm-reach", "kubernetes-cloud",
+    "kubernetes-skew", "kubernetes-cloud-owned",
     "install-fresh", "edge-config-drift", "preset-browser-host",
     "interrupted-work", "event-log",
 )
 
 
-def run_checks() -> dict:
+def run_checks(context: str = "") -> dict:
     """Run every preflight check and return the findings.
+
+    `context` names the cluster to report on, defaulting to the box's
+    `kubernetes.context`. It must be honoured for the reason k8s.py:1117 gives --
+    *"a preflight whose job is to predict a boot must not be a second opinion about
+    it"*. Without it, somebody about to run `up --context eks-support` would get a
+    report about the local kind cluster instead, which is the same disagreement that
+    comment records having already been fixed once.
 
     {"checks": [{"status": "ok"|"warn"|"fail", "message": str}, ...],
      "counts": {...}, "verdict": "ok"|"warn"|"fail",
@@ -147,6 +157,24 @@ def run_checks() -> dict:
         if elsewhere:
             row["elsewhere"] = elsewhere
         rows.append(row)
+
+    # THE AWS PROBE, STARTED NOW AND READ LATER. It is by far the slowest thing this
+    # report does and it shares nothing with the Docker and Kubernetes checks below:
+    # MEASURED at 1783ms of a 2485ms run, almost all of it a network round trip for
+    # `sts get-caller-identity`. Run where it is USED it simply added to the total;
+    # started here it finishes while the local checks run and is usually already
+    # waiting by the time the report gets to it.
+    #
+    # Errors are carried, not raised: `.result()` re-raises inside the block that reads
+    # it, which is inside the same `try` the sequential call was in, so a broken `aws`
+    # still degrades exactly as it did.
+    _aws_pool = ThreadPoolExecutor(max_workers=2)
+    try:
+        from rc_repro.services import eks as _ekssvc
+        _f_cloud = _aws_pool.submit(_ekssvc.preflight)
+        _f_owned = _aws_pool.submit(_ekssvc.remembered)
+    except Exception:  # noqa: BLE001 - a report must not fail to start over this
+        _f_cloud = _f_owned = None
 
     subject = "docker"
     # Docker daemon (everything else that needs Docker degrades gracefully).
@@ -500,7 +528,7 @@ def run_checks() -> dict:
                           if topology.of_meta(m) == topology.KUBERNETES]
         in_use = bool(k8s_workspaces)
         needed = "fail" if in_use else "warn"
-        pre = k8s.preflight()
+        pre = k8s.preflight(context or config.default_kube_context())
 
         if pre.missing_tools and not in_use:
             # One line, not five. Someone running only Compose repros should not
@@ -515,12 +543,99 @@ def run_checks() -> dict:
             for name in pre.outdated_tools:
                 got = pre.tools[name]
                 floor = ".".join(str(n) for n in k8s.TOOLS[name])
-                line(needed, f"{name} {got.pretty} is older than {floor}, the floor "
-                             "the official Rocket.Chat guide requires", check="kubernetes-tools")
+                why_floor = k8s.TOOL_FLOOR_REASON.get(
+                    name, k8s.DEFAULT_FLOOR_REASON)
+                line(needed, f"{name} {got.pretty} is older than {floor}, "
+                             f"{why_floor}", check="kubernetes-tools")
             if pre.tools_ready:
                 line("ok", "Kubernetes tools present (" + ", ".join(
                     f"{t.name} {t.pretty}" for t in pre.tools.values()
                     if t.present) + ")", check="kubernetes-tools")
+
+            # AWS, and ONLY when it is somebody's business. A box running Compose and
+            # kind must not have its report padded with cloud complaints it will never
+            # act on -- the same reasoning as the one-line "Kubernetes not set up"
+            # above. Relevant means: a cloud tool is installed, so somebody is setting
+            # this up, or the cluster being reported on IS an EKS one, in which case
+            # `aws` is not optional at all -- an EKS kubeconfig authenticates by
+            # shelling out to it, so without it every kubectl call fails opaquely.
+            from rc_repro.services import eks as ekssvc
+
+            # A CLOUD CLUSTER THIS BOX BUILT IS REPORTED WHATEVER ELSE IS TRUE, and
+            # deliberately outside the relevance gate below. The gate asks "is AWS
+            # somebody's business here" and answers from installed tooling — but a
+            # cluster does not stop billing because `aws` was uninstalled afterwards,
+            # and that is precisely the box most likely to have forgotten it. Read
+            # from the local pointer rather than from AWS, which is why the pointer
+            # exists: `doctor` must be able to say this without a credential or a
+            # round trip.
+            # Started at the top of this function; usually finished by now.
+            cloud = _f_cloud.result() if _f_cloud is not None else ekssvc.preflight()
+            remembered = (_f_owned.result() if _f_owned is not None
+                          else ekssvc.remembered())
+            for owned in remembered:
+                left = ekssvc.days_until(str(owned.get("expires") or ""))
+                # PAST ITS DATE is a louder answer than "still running", because the
+                # sum involved is one somebody stopped thinking about. It is still a
+                # warning and never a failure: nothing here deletes, and a report that
+                # blocks on somebody's spending decision is not a report.
+                when = ("" if left is None else
+                        f" — {left} day(s) left on its expiry" if left >= 0 else
+                        f" — {-left} day(s) PAST the expiry it was created with")
+                line("warn",
+                     f"rc-repro built the {owned.get('provider', 'cloud')} cluster "
+                     f"{owned.get('name')!r} in {owned.get('region')} "
+                     f"(account {owned.get('account')}) on "
+                     f"{str(owned.get('created_at', ''))[:10]}{when} — it is billing "
+                     f"until `rc-repro cluster delete {owned.get('name')}` removes it",
+                     check="kubernetes-cloud-owned")
+
+            # AND WHEN THE RECORD IS EMPTY BUT THE ACCOUNT IS RIGHT HERE. The loop
+            # above reads a local pointer, and silence from it means one of two very
+            # different things: nothing was ever built, or the pointer is gone. The
+            # pointer is deliberately "best effort, never load-bearing", and CLAUDE.md
+            # tells anyone writing a script to `export RC_REPRO_HOME=$(mktemp -d)` --
+            # so following this project's own instructions produces a create whose
+            # reminder is discarded. A fresh home, a rebuilt box or a colleague's
+            # machine all land in the same place.
+            #
+            # OBSERVED: a cluster tagged `rc-repro`, ACTIVE, expiring the next day,
+            # while `~/.rc-repro/clusters/` did not exist at all -- so `doctor` on that
+            # box said nothing about it. `doctor` is the command people run out of
+            # habit; `cluster list` is the one that actually asks AWS, and it has to be
+            # run deliberately. The whole gap is that nothing routed the first to the
+            # second.
+            #
+            # SAME CHECK ID, because it is the same SUBJECT -- what has rc-repro built
+            # that is costing money -- and `CHECKS` is per subject precisely so one
+            # check keeps one id whatever it finds. This finds "I cannot tell you from
+            # here", which is a third answer alongside "none" and "these".
+            #
+            # Only when the account is actually reachable. Saying this on a box with no
+            # credentials would be noise on every Compose-only machine, and the sweep
+            # it points at could not run there anyway.
+            if not remembered and cloud.ready:
+                line("warn",
+                     "this box has no local record of a cloud cluster, which is not "
+                     "the same as there being none — the record is best-effort and a "
+                     "fresh RC_REPRO_HOME, a rebuilt box or a create made elsewhere "
+                     f"all lose it. The account ({cloud.identity.pretty}) is reachable "
+                     "from here, so ask AWS instead: `rc-repro cluster list` sweeps "
+                     "every enabled region by tag.",
+                     check="kubernetes-cloud-owned")
+
+            on_eks = (pre.distribution or "") == "eks"
+            if on_eks or any(t.present for t in cloud.tools.values()):
+                if cloud.ready:
+                    line("ok", f"AWS ready — {cloud.identity.pretty}, region "
+                               f"{cloud.region}", check="kubernetes-cloud")
+                else:
+                    # `fail` only when a cluster in use NEEDS it. Otherwise this is
+                    # setup in progress, and a red line for a half-finished optional
+                    # feature is how a report teaches people to ignore red lines.
+                    for blocker in cloud.blockers:
+                        line("fail" if on_eks else "warn", f"AWS: {blocker}",
+                             check="kubernetes-cloud")
 
             if pre.cluster_reachable:
                 where = (f", {len(pre.namespaces)} workspace namespace(s)"
@@ -548,6 +663,26 @@ def run_checks() -> dict:
                                "cluster itself", check="kubernetes-cluster")
                 else:
                     line("ok", f"Cluster {k8s.CLUSTER_NAME!r} reachable{where}", check="kubernetes-cluster")
+                # SKEW, and it is a different question from the version floor above.
+                # A floor is a fact about rc-repro; skew is a fact about THIS cluster,
+                # and only the second can be true. The static floor is kubectl 1.21
+                # while Rocket.Chat's own Launchpad builds clusters at 1.33, so a
+                # kubectl eleven minors past the floor still cannot talk to one --
+                # and passing a floor is exactly what it would report doing.
+                gap = k8s.skew(pre.context)
+                if gap and not gap["ok"]:
+                    cv = ".".join(str(n) for n in gap["client"][:2])
+                    sv = ".".join(str(n) for n in gap["server"][:2])
+                    line(needed, f"kubectl {cv} is outside the supported ±"
+                                 f"{k8s.KUBECTL_SKEW} window for this cluster's API "
+                                 f"server ({sv}) — calls do not fail cleanly across "
+                                 f"that gap, they fail on a field one side does not "
+                                 f"know, which reads as a bug in whatever was being "
+                                 f"deployed", check="kubernetes-skew")
+                elif gap:
+                    line("ok", f"kubectl matches the API server "
+                               f"({'.'.join(str(n) for n in gap['server'][:2])})",
+                         check="kubernetes-skew")
                 if "storage" in pre.unreadable:
                     # NOT "no default StorageClass". The cluster refused the read, so
                     # rc-repro does not know whether a volume would bind -- and saying
@@ -649,7 +784,15 @@ def run_checks() -> dict:
                                  f"/etc/rancher/k3s/k3s.yaml > ~/.kube/config`, kind: "
                                  f"`kind export kubeconfig --name <cluster>`)",
                          check="kubernetes-helm-reach")
-                if k8s.cert_manager_installed(pre.context):
+                # ASKED ONCE. This is a CRD read against a remote API server -- 1.7s
+                # on a live EKS cluster -- and it was made twice within twenty lines,
+                # here and again for the https summary below, which cannot disagree
+                # with itself between the two.
+                try:
+                    _cm = k8s.cert_manager_installed(pre.context)
+                except Exception:  # noqa: BLE001 - a check must not break the report
+                    _cm = False
+                if _cm:
                     line("ok", "cert-manager: installed — a Certificate can be issued "
                                "in this cluster", check="kubernetes-cert-manager")
                 else:
@@ -667,11 +810,6 @@ def run_checks() -> dict:
                     _ep = k8s.ingress_endpoint(pre.context)
                 except Exception:  # noqa: BLE001 - a check must not break the report
                     _ep = None
-                _cm = False
-                try:
-                    _cm = k8s.cert_manager_installed(pre.context)
-                except Exception:  # noqa: BLE001
-                    _cm = False
                 if _ep is None:
                     line("ok", "https: not servable yet — this cluster publishes no "
                                ":443 Service reachable from outside it. A workspace "
@@ -739,10 +877,16 @@ def run_checks() -> dict:
                 # question is why rc-repro is building a second one.
                 other = k8s.active_context()
                 if other and other != pre.context and k8s.reachable(other):
+                    # The remedy USED to be "uninstall kind", which was the only one
+                    # there was and is a heavy thing to ask of somebody who wants both.
+                    # `--context` is now the direct answer, so it leads; uninstalling
+                    # still works and is no longer the headline.
                     line("ok", f"Your cluster {other!r} "
                                f"({k8s.distribution(other) or 'unknown'}) is running and "
-                               f"will NOT be used — rc-repro creates its own while kind "
-                               f"is installed. Uninstall kind to use {other!r} instead",
+                               f"will NOT be used by default — rc-repro creates its own "
+                               f"while kind is installed. Use it with "
+                               f"`--context {other}`, or make it this box's default "
+                               f"with `rc-repro config set kubernetes.context {other}`",
                          check="kubernetes-other-clusters")
             elif pre.context == k8s.CONTEXT and pre.cluster_exists:
                 # NOT "its API server is not answering", which is what this said and
@@ -920,6 +1064,10 @@ def run_checks() -> dict:
         except Exception:  # noqa: BLE001 - a tally must never break the report
             repros = None
 
+    # The pool started at the top of this function. Shut down explicitly rather
+    # than left to garbage collection: `serve` calls this on every visit to the
+    # dashboard, and an executor per call is a thread pool per call.
+    _aws_pool.shutdown(wait=False)
     return {"checks": rows, "counts": counts, "verdict": verdict, "repros": repros}
 
 

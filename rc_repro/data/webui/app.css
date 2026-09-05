@@ -1392,3 +1392,58 @@ form input, form select { padding: .55rem .7rem; font-family: var(--sans); }
 [data-theme="dark"] .rail-two select.input:focus {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%237FA8FF' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
 .rail-two { gap: .5rem; }
+
+/* ---- clusters: where workspaces run, and what that is costing ----
+   A peer of the edge and surfaced like one, but it needed a colour the file did
+   not have. The rule at the top gives amber to "wants you" and red to "about to
+   destroy something", and the two states this view must show -- a cluster past
+   the date somebody put on it, and one that would not answer -- are both the
+   first. `.chip.down` is RED, so reaching for it here would have painted a
+   cluster that is merely expensive in the colour reserved for destruction. */
+.chip.warn::before { color: var(--amber); }
+.pill.refusing { color: var(--amber); border-color: rgba(180,83,9,.4);
+  background: rgba(180,83,9,.10); }
+
+/* The four numbers that answer "what is this box costing" before any detail. */
+.cl-tot { display: flex; flex-wrap: wrap; border: 1px solid var(--line);
+  border-radius: var(--r); background: var(--panel); overflow: hidden;
+  margin: 0 0 1rem; }
+.cl-tot > div { flex: 1 1 8rem; padding: .7rem .95rem;
+  border-right: 1px solid var(--line); }
+.cl-tot > div:last-child { border-right: 0; }
+.cl-tot dt { font-size: .62rem; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--dim); margin: 0 0 .2rem; }
+.cl-tot dd { margin: 0; font-size: 1.2rem; font-weight: 650;
+  font-variant-numeric: tabular-nums; }
+
+/* One card per cluster. `--panel` because it stands on the stage, which is
+   ground -- the distinction this file's own note warns about. */
+.cl-card { border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--panel); margin: 0 0 .75rem; overflow: hidden; }
+.cl-card.attn { border-color: rgba(180,83,9,.45); }
+.cl-h { display: flex; align-items: center; gap: .6rem; padding: .7rem .95rem;
+  border-bottom: 1px solid var(--line); }
+.cl-name { font-family: var(--mono, ui-monospace, monospace); font-size: .78rem;
+  font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cl-sp { flex: 1; }
+.cl-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr)); }
+.cl-cell { padding: .55rem .95rem; border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line); }
+.cl-cell:last-child { border-right: 0; }
+.cl-k { font-size: .62rem; letter-spacing: .07em; text-transform: uppercase;
+  color: var(--dim); margin-bottom: .1rem; }
+.cl-v { font-size: .85rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+/* `?` is the whole point of the ledger: never a zero it did not read. Dim and
+   unbolded so it reads as absence rather than as a value. */
+.cl-v.unknown { color: var(--dim); font-weight: 500; }
+.cl-foot { padding: .6rem .95rem; display: flex; gap: .5rem; align-items: center;
+  flex-wrap: wrap; }
+.cl-foot .banner { margin: 0; padding: .4rem .6rem; }
+.cl-note { font-size: .74rem; color: var(--muted); }
+.cl-sweep { border: 1px dashed var(--line2); border-radius: var(--r);
+  padding: .8rem .95rem; margin: 1rem 0 0; }
+.cl-sweep h3 { margin: 0 0 .3rem; font-size: .88rem; }
+.cl-warn { color: var(--amber); font-size: .74rem; }
+.cl-doc { white-space: pre-wrap; word-break: break-all; font-size: .7rem;
+  max-height: 14rem; overflow: auto; background: var(--panel2);
+  border: 1px solid var(--line); border-radius: var(--r-sm); padding: .6rem; }

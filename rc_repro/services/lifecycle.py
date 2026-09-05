@@ -14,6 +14,7 @@ import shutil
 import signal
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -356,9 +357,125 @@ def _will_provision(req: "CreateReq") -> bool:
         return False
     try:
         from rc_repro.services import k8s
-        return k8s.plan_cluster().create
+        # The request's context, or this answers for the WRONG cluster: with `kind`
+        # installed, an un-passed context makes `plan_cluster` plan a kind create and
+        # return True, so `check_capacity` would reserve a control plane's RAM for a
+        # workspace going to a cluster that already exists somewhere else.
+        return k8s.plan_cluster(req_context(req)).create
     except Exception:  # noqa: BLE001 - no cluster and no kind: the create will refuse
         return False
+
+
+def infer_runtime(req: "CreateReq") -> str:
+    """The runtime this request means, with a context taken as saying Kubernetes.
+
+    A CONTEXT IS A KUBERNETES WORD. Somebody who typed `--context <an eks arn>` has
+    already said where this runs, and making them also type `--runtime kubernetes` is
+    rc-repro asking twice and refusing on the answer it did not repeat -- measured on
+    a first run, where the whole command had to be retyped for it.
+
+    Only from an EXPLICIT `--context`, never from the box default: a default cluster
+    is a convenience for the Kubernetes work somebody already does, and letting it
+    silently move `up` off Compose would change what an un-flagged command means for
+    every workspace on the box.
+    """
+    from rc_repro.services import topology
+    named = str(getattr(req, "runtime", "") or "").strip()
+    if named:
+        return named
+    if str(getattr(req, "context", "") or "").strip():
+        return topology.KUBERNETES
+    return named
+
+
+def _say_where_this_is_going(req: "CreateReq", typed_runtime: str,
+                             emit: Emit = null_emit) -> None:
+    """Say out loud when a SAVED setting decided where this workspace goes.
+
+    `kubernetes.context` changes what other commands mean and nothing ever mentioned
+    it, which produced two opposite complaints from the same silence:
+
+      * somebody sets a default cluster, runs `up`, and gets a Docker workspace --
+        because a bare `up` is Compose whatever is saved, deliberately, since letting
+        a saved cluster move every un-flagged command off Compose would change what
+        `up` means for the whole box;
+      * somebody runs `cluster create`, which SETS that default, and from then on
+        `--runtime kubernetes` quietly means the EKS cluster it just built rather than
+        the free local one it meant yesterday -- at roughly $8.46 a day.
+
+    Both are the same defect: a stored setting that decides something, with nothing on
+    screen saying it did. Neither is a refusal. The first is correct behaviour that
+    merely looks wrong, and the second is a thing people legitimately want -- so this
+    reports, and the operator decides.
+
+    An explicit `--context` says nothing here: naming the cluster on the command line
+    is already the unambiguous form, and a note repeating what was just typed is noise.
+    """
+    saved = config.default_kube_context()
+    if not saved or str(getattr(req, "context", "") or "").strip():
+        return
+    from rc_repro.services import topology
+    if topology.normalize(getattr(req, "runtime", "")) == topology.KUBERNETES:
+        # Only when it COSTS: a saved kind or k3s context being used by
+        # `--runtime kubernetes` is the whole point of saving one, and warning about it
+        # every time would train people to stop reading these.
+        if _saved_default_is_billable(saved):
+            warn(emit,
+                 f"this workspace is going to {saved!r}, which costs money by the "
+                 f"hour — it was chosen because it is this box's saved default "
+                 f"cluster, not because this command named one. `--context <name>` "
+                 f"names a cluster outright; `rc-repro config set "
+                 f"kubernetes.context ''` clears the default.",
+                 phase="preflight")
+        return
+    if typed_runtime:
+        return          # they said `--runtime docker`; they are not confused
+    info(emit,
+         f"this workspace is going to Docker. {saved!r} is saved as this box's "
+         f"default cluster, but a plain `up` never uses it — add `--runtime "
+         f"kubernetes` to send this one there, or `--context <name>` to name a "
+         f"cluster outright.",
+         phase="preflight")
+
+
+#: Context-name shapes that identify a managed cluster without asking anything.
+#: `aws eks update-kubeconfig` writes the cluster ARN as the context name and
+#: `gcloud container clusters get-credentials` writes `gke_<project>_<zone>_<name>`,
+#: so both name their own service. AKS is NOT here and cannot be: `az aks
+#: get-credentials` writes the bare cluster name, which is indistinguishable from a
+#: kind or k3s context -- so an AKS default is missed by this check rather than
+#: guessed at, and a guess that called someone's k3s billable would be the worse
+#: error of the two.
+_BILLABLE_CONTEXT_PREFIXES = ("arn:aws:eks:", "gke_")
+
+
+def _saved_default_is_billable(context: str) -> bool:
+    """Whether a saved context names a cluster somebody is paying for.
+
+    Read from the CONTEXT NAME, never by probing. This runs on the way into every
+    create, including Compose ones, and a create that pauses to ask a cloud API which
+    kind of cluster it is not about to use has bought nothing at a real price -- the
+    same reason `cluster.provider_of` falls back to the name when a cluster has no
+    nodes to ask.
+    """
+    low = context.strip().lower()
+    return any(low.startswith(p) for p in _BILLABLE_CONTEXT_PREFIXES)
+
+
+def req_context(req: "CreateReq") -> str:
+    """Which cluster this request names, falling back to the box's default.
+
+    ONE function because two callers need the same answer and disagreeing is a real
+    failure rather than an untidiness: `_will_provision` decides whether
+    `check_capacity` reserves a control plane's RAM, and `_create_kubernetes` decides
+    where the workspace actually goes. A default applied in one and not the other
+    reserves memory for a kind cluster while building in EKS, or the reverse.
+
+    Resolved here rather than in the CLI so both front ends get it -- `serve` has no
+    flags to fall back FROM, and the stored key is the box's setting either way.
+    """
+    named = str(getattr(req, "context", "") or "").strip()
+    return named or config.default_kube_context()
 
 
 def _check_engine_floor(req: "CreateReq", emit: Emit = null_emit,
@@ -861,6 +978,16 @@ class CreateReq:
     runtime: str = ""
     deployment: str = ""
     replicas: int = 0
+    #: WHICH cluster, for `--runtime kubernetes`. Empty means "decide for me" and
+    #: keeps `plan_cluster`'s existing four steps; naming one ADOPTS it and never
+    #: provisions -- see `k8s.plan_cluster` step 0 for why that asymmetry is the whole
+    #: safety property rather than a convenience.
+    #:
+    #: PRIVILEGED (see PRIVILEGED_CREATE_FIELDS). Choosing the cluster a workspace
+    #: lands in is the same class of decision as `rc_image` ("what code runs") and
+    #: `bind` ("where it listens"), and on a shared `serve` it can point a colleague's
+    #: workspace at a cluster they cannot see.
+    context: str = ""
     # Kubernetes only. The operator brings SCRAM auth and owns the MongoDB
     # bootstrap; it is opt-in because its default would replace a path proven on a
     # live cluster with one that is not. See services/k8s.py.
@@ -879,6 +1006,12 @@ class CreateReq:
     # exist, otherwise the inbound TLS-ALPN-01 the official compose uses.
     acme_challenge: str = "tlsalpn"
     acme_dns_provider: str = ""
+    # Kubernetes only, and only when a cluster has more than one. An EKS cluster
+    # carrying both `alb` and `nginx` had the choice made by whichever the API server
+    # listed first, and the two behave differently for ACME http-01 solving. Empty
+    # means "the cluster's own default class, else the first by name" -- see
+    # `k8s.ingress_classes`.
+    ingress_class: str = ""
     # `up --env KEY=VALUE`. Merged over the preset's env; a None value removes a key.
     env: dict = field(default_factory=dict)
     # Who asked for this, when the GUI has named accounts. Namespaces the derived
@@ -1191,6 +1324,14 @@ def create_repro(req: CreateReq, emit: Emit = null_emit, *, stream_output: bool 
     derived here rather than inside, because the lock needs it before any work
     starts -- it depends only on the request, so it is cheap to compute twice.
     """
+    # ONCE, HERE, before anything reads it. `runtime` is consulted at a dozen places
+    # downstream and inferring it at each would be a dozen chances to disagree; this
+    # is the entry point every create comes through, and after it `req.runtime` means
+    # what the caller meant rather than only what they typed.
+    typed_runtime = str(getattr(req, "runtime", "") or "").strip()
+    req.runtime = infer_runtime(req)
+    _say_where_this_is_going(req, typed_runtime, emit)
+
     name = _derive_for(req)
     if not name:
         raise ValidationError(
@@ -1946,13 +2087,40 @@ def finalize(meta: runner.Metadata, emit: Emit):
     try:
         auth = login(meta)
         if rcapi.complete_setup_wizard(meta.root_url, auth, meta.admin_pass):
-            info(emit, "setup wizard skipped - no registration needed.", phase="post_ready")
+            info(emit, "setup wizard skipped — no registration needed", phase="post_ready")
         return auth
     except Exception:  # noqa: BLE001 - finalize is best-effort
         return None
 
 
-def wait_and_finalize(meta: runner.Metadata, emit: Emit = null_emit, timeout: float = 300.0) -> dict:
+def _say_ready(emit: Emit, final: bool) -> None:
+    """The workspace is serving. Whether that is the END is the caller's to say."""
+    if final:
+        info(emit, "ready", phase="done", pct=100.0)
+    else:
+        # NO PERCENTAGE, deliberately. `wait_serving` has already emitted 100 by the
+        # time this runs, so naming any number here sends the bar BACKWARDS -- seen on
+        # a real create as `[100%] ... is serving at`, then `[85%] the workspace is
+        # up`, then `[100%]` again. `pct` is optional precisely so a step that is not a
+        # position on the bar can decline to move it.
+        info(emit, "the workspace is up", phase="wait")
+
+
+def wait_and_finalize(meta: runner.Metadata, emit: Emit = null_emit,
+                      timeout: float = 300.0, final: bool = True) -> dict:
+    """Wait for the workspace to serve, then finish it off.
+
+    `final` is whether this call is the END of what the user asked for. It is
+    for `rc-repro ready`, which is exactly this and nothing else; `up` seeds
+    afterwards, restore restores afterwards, and an upgrade has a rollback still
+    to consider. All three used to announce phase `done` at 100% here and then
+    carry on working -- MEASURED on a real create as `done: ready` at 414s
+    followed by 46 more seconds of seeding, and in the GUI as a progress bar
+    that fills up and then keeps going.
+
+    A caller that is not the end says the workspace is up, which is the true
+    and useful half, and leaves `done` to whoever actually finishes.
+    """
     started = time.monotonic()
     served = wait_serving(meta, emit, timeout)
     elapsed = int(time.monotonic() - started)
@@ -1988,13 +2156,13 @@ def wait_and_finalize(meta: runner.Metadata, emit: Emit = null_emit, timeout: fl
                        f"the note stays; `rc-repro seed --name {meta.name}` retries it",
                  phase="seed")
             running = served.get("version", "?")
-            info(emit, "ready", phase="done", pct=100.0)
+            _say_ready(emit, final)
             return {"booted_s": elapsed, "running_version": running}
     journal.clear_kind(journal.CREATE_UNFINISHED, meta.name)
     running = served.get("version", "?")
     if running != "?" and not meta.rc_version.startswith(running):
         warn(emit, f"running version {running} != requested {meta.rc_version}", phase="wait")
-    info(emit, "ready", phase="done", pct=100.0)
+    _say_ready(emit, final)
     return {"booted_s": elapsed, "running_version": running}
 
 
@@ -2140,7 +2308,7 @@ def kubernetes_note_groups(meta: runner.Metadata) -> list[dict]:
     extra = meta.extra if isinstance(meta.extra, dict) else {}
     ns = str(extra.get("namespace") or meta.project or "")
     release = str(extra.get("release") or "rocketchat")
-    context = str(extra.get("context") or k8s.CONTEXT)
+    context = str(extra.get(config.EXTRA_CONTEXT) or k8s.CONTEXT)
     micro = topology.axes_of_meta(meta).get("deployment", "") == topology.MICROSERVICES
     pods = 9 if micro else 5
     bind_host = str(extra.get("bind_host") or "")
@@ -2898,16 +3066,28 @@ def detail(name: str) -> dict:
     # workspace that was running perfectly well in the cluster.
     if topology.of_meta(m) == topology.KUBERNETES:
         from rc_repro.services import k8s
-        context = str(_x.get("context") or k8s.CONTEXT)
-        d["state"] = kubernetes_state(target, m)
-        # Pods, in the containers tab's own three columns. This block used to be
-        # deliberately empty on the reasoning that invented rows would be a
-        # plausible wrong answer -- true, but these are not invented, and the empty
-        # list was itself a wrong answer: the tab reads it as "no containers" and
-        # printed "this repro is down" under a running workspace, with no way at all
-        # to see an ImagePullBackOff from the browser.
-        d["containers"] = ([] if d["state"] == "down"
-                           else k8s.pod_rows(target, context=context))
+        context = str(_x.get(config.EXTRA_CONTEXT) or k8s.CONTEXT)
+        # BOTH AT ONCE. These are two independent reads of the same namespace, and on
+        # a managed cluster each is a round trip -- run in sequence they are most of
+        # what the detail panel spends, and the panel is what somebody stares at while
+        # deciding whether a workspace is healthy.
+        #
+        # The dependency below is only ever used to SKIP work, never to change what is
+        # asked, so starting both and discarding one is safe. The trade is explicit: a
+        # workspace that turns out to be down costs one extra list of an empty
+        # namespace -- a read, concurrent, so it adds no wall-clock -- and every
+        # running workspace, which is the case anyone actually watches, halves.
+        with ThreadPoolExecutor(max_workers=2) as _pool:
+            _f_state = _pool.submit(kubernetes_state, target, m)
+            _f_pods = _pool.submit(k8s.pod_rows, target, context=context)
+            d["state"] = _f_state.result()
+            # Pods, in the containers tab's own three columns. This block used to be
+            # deliberately empty on the reasoning that invented rows would be a
+            # plausible wrong answer -- true, but these are not invented, and the empty
+            # list was itself a wrong answer: the tab reads it as "no containers" and
+            # printed "this repro is down" under a running workspace, with no way at
+            # all to see an ImagePullBackOff from the browser.
+            d["containers"] = [] if d["state"] == "down" else _f_pods.result()
         # Uptime from the earliest RUNNING pod, which is as close as this runtime
         # gets to the workspace's own uptime. Left empty when nothing is running,
         # because "—" is the honest cell for a stopped workspace.
@@ -3094,7 +3274,7 @@ def _set_state_kubernetes(target: str, action: str,
 
     meta = runner.read_meta(target)
     extra = meta.extra if isinstance(meta.extra, dict) else {}
-    context = str(extra.get("context") or k8s.CONTEXT)
+    context = str(extra.get(config.EXTRA_CONTEXT) or k8s.CONTEXT)
     with runner.repro_lock(target, timeout=_INTERACTIVE_LOCK_WAIT):
         if action in ("stop", "restart"):
             k8s.stop_workspace(target, context=context, emit=emit)
@@ -3180,7 +3360,14 @@ CREATE_POLICY_KEY = "gui.create_policy"
 
 #: The fields CREATE_POLICY_KEY governs. Named here rather than inline in web/app.py
 #: so the check and the message cannot drift apart.
-PRIVILEGED_CREATE_FIELDS = ("rc_image", "reg_token", "bind")
+PRIVILEGED_CREATE_FIELDS = ("rc_image", "reg_token", "bind", "context")
+
+#: Distributions where a workspace costs money for as long as it exists, and so where
+#: reaching it only by port-forward is a waste rather than a choice. Named here rather
+#: than reusing `cluster.BILLABLE` because that one prices a cluster and this one warns
+#: about a workspace -- and a services module importing another for a tuple of three
+#: strings is a dependency bought at a poor price.
+_BILLABLE_DISTRIBUTIONS = ("eks", "gke", "aks")
 
 
 def may_set_privileged_fields(actor: str) -> bool:
@@ -3288,7 +3475,7 @@ def teardown(name: str, *, volumes: bool = False, confirm: bool = False, emit: E
             # than not being able to create one.
             from rc_repro.services import k8s
             meta = runner.read_meta(target)
-            context = str((meta.extra or {}).get("context") or k8s.CONTEXT)
+            context = str((meta.extra or {}).get(config.EXTRA_CONTEXT) or k8s.CONTEXT)
             pid = (meta.extra or {}).get("port_forward_pid")
             if pid:
                 _stop_port_forward(int(pid), namespace=k8s.namespace_for(target))
@@ -3452,7 +3639,7 @@ def prunable() -> list[str]:
             # live workspace among them, and its compose teardown could not remove
             # any of them anyway.
             from rc_repro.services import k8s
-            context = str((m.extra or {}).get("context") or k8s.CONTEXT)
+            context = str((m.extra or {}).get(config.EXTRA_CONTEXT) or k8s.CONTEXT)
             try:
                 running = k8s.workload_exists(m.name, context=context)
             except DockerError:
@@ -3594,7 +3781,7 @@ def prune(*, confirm: bool = False, orphans: bool = False, force: bool = False,
                     # namespace and PersistentVolumeClaim stayed on the cluster.
                     from rc_repro.services import k8s
                     meta = runner.read_meta(name)
-                    context = str((meta.extra or {}).get("context") or k8s.CONTEXT)
+                    context = str((meta.extra or {}).get(config.EXTRA_CONTEXT) or k8s.CONTEXT)
                     for ui_pid in (meta.extra or {}).get("scenario_forwards", {}).values():
                         try:
                             _stop_port_forward(
@@ -3910,7 +4097,8 @@ def _kubernetes_tls_plan(req: CreateReq, tlsspec, plan, *,
     # cert-manager first: it is what the ingress annotation will name, and an issuer
     # created before its webhook is serving is accepted and then never reconciled.
     k8s.ensure_cert_manager(context=context, distribution=where, emit=emit)
-    ingress_class = k8s.ensure_ingress(context=context, distribution=where, emit=emit)
+    ingress_class = k8s.ensure_ingress(context=context, distribution=where,
+                                       prefer=req.ingress_class, emit=emit)
     # AFTER `ensure_ingress`, because on a cluster that had none the ingress Service is
     # something rc-repro has just created. Read before it, this found nothing and
     # refused for want of the thing it was about to install.
@@ -3940,8 +4128,15 @@ def _kubernetes_tls_plan(req: CreateReq, tlsspec, plan, *,
     # No third case is refused, because a box where neither holds :80 has nothing
     # listening on it and the failure is a plain connection refused that Let's Encrypt
     # reports itself. Saying which of the two applies is worth more than a guard.
+    #   * the cluster's ingress is somewhere else entirely -- a managed cluster's load
+    #     balancer. The name resolves to IT, so the challenge arrives there and this
+    #     machine is not in the path at any point.
+    remote_ingress = endpoint is not None and not endpoint.local
     if spec.mode == "acme":
-        info(emit, ("the http-01 challenge will reach the cluster's ingress directly "
+        info(emit, ("the http-01 challenge goes straight to the cluster's own load "
+                    f"balancer ({endpoint.address}) — this machine is not in the path"
+                    if remote_ingress else
+                    "the http-01 challenge will reach the cluster's ingress directly "
                     "— it holds this host's :80"
                     if claim and 80 in (claim.ports or []) else
                     "the http-01 challenge arrives on the edge's :80 and is redirected "
@@ -3965,6 +4160,21 @@ def _kubernetes_tls_plan(req: CreateReq, tlsspec, plan, *,
                    f"({claim.address}), so the name is published through the edge "
                    f"rather than straight at the cluster", phase="tls")
         owns = False
+    # A REMOTE INGRESS CANNOT BE FRONTED BY A LOCAL EDGE, so there is nothing here to
+    # decide. `claim` asks whether the cluster holds THIS HOST's :443, which for any
+    # managed cluster is definitionally no -- its ingress is a load balancer in
+    # somebody else's data centre, which is the case `IngressEndpoint` already names:
+    # "a LoadBalancer address that is NOT one of this host's own -- kind with MetalLB,
+    # or any remote cluster". Falling through to the edge for it was not merely
+    # wasteful, it was impossible: the workspace's name resolves to that load
+    # balancer, so no packet for it ever arrives on this machine.
+    #
+    # MEASURED against EKS. `up --domain` announced "the http-01 challenge arrives on
+    # the edge's :80", tried to start an edge it had no use for, and refused the whole
+    # create because a different RC_REPRO_HOME on the box already owned one -- a
+    # shared support server being exactly what this feature is for.
+    if not owns and remote_ingress:
+        owns = True
     return _KubeTls(host=tlsspec.host, ingress_class=ingress_class,
                     endpoint=endpoint, issuer=spec, context=context,
                     cluster_owns_443=owns)
@@ -4058,7 +4268,7 @@ def _route_kubernetes_name(name: str, ktls: _KubeTls, *,
                    f"this host's :443 — no edge needed", phase="tls")
 
 
-def _publish_kubernetes_name(name: str, ktls: _KubeTls, *,
+def _publish_kubernetes_name(name: str, ktls: _KubeTls, *, cert_ready: bool = True,
                              emit: Emit = null_emit, sleep=time.sleep) -> None:
     """Put the name in front of the cluster, and then CHECK it rather than claim it.
 
@@ -4101,12 +4311,33 @@ def _publish_kubernetes_name(name: str, ktls: _KubeTls, *,
             break
         if attempt < PUBLISH_PROOF_TRIES - 1:
             sleep(PUBLISH_PROOF_PAUSE)
-    if seen.get("fallback"):
+    if seen.get("fallback") and not cert_ready:
+        # THE ORDINARY CASE, and it was being reported as the alarming one. An ingress
+        # controller serves its OWN default certificate for a name it has no
+        # certificate for yet -- so while cert-manager is still working through the
+        # ACME order, the cluster answers with exactly the certificate this branch
+        # used to blame on "something in front". `cert_ready` is False here, which
+        # says plainly that nothing was issued in time.
+        #
+        # OBSERVED through the GUI on a first workspace on a cold cluster: the image
+        # pull ate the certificate window, the wait expired, and the create finished
+        # by telling the reader to go looking for a port conflict on their own machine
+        # that did not exist. The certificate arrived a minute later.
+        warn(emit, f"{ktls.host} is answering with the ingress controller's own "
+                   f"default certificate ({seen.get('issuer')}) because cert-manager "
+                   f"has not issued one yet — the ACME order is usually still "
+                   f"running. The workspace is up. `rc-repro tls-status --name "
+                   f"{name}` re-checks it, and `kubectl -n rc-repro-{name} get "
+                   f"certificate` says what cert-manager is waiting on.",
+             phase="tls")
+    elif seen.get("fallback"):
+        # The certificate IS issued and the name still answers with somebody's default
+        # one, so the cluster is not the thing terminating TLS for it.
         warn(emit, f"{ktls.host} answered with a proxy's own default certificate "
-                   f"({seen.get('issuer')}), not the one in the cluster — so "
-                   f"something in front is terminating TLS for this name instead of "
-                   f"passing it through. `rc-repro doctor` names a cluster holding "
-                   f"this host's ports.", phase="tls")
+                   f"({seen.get('issuer')}), not the one in the cluster — the "
+                   f"certificate was issued, so something in front is terminating TLS "
+                   f"for this name instead of passing it through. `rc-repro doctor` "
+                   f"names a cluster holding this host's ports.", phase="tls")
     elif not seen.get("serving"):
         warn(emit, f"nothing answered TLS for {ktls.host} yet "
                    f"({seen.get('error') or 'no certificate offered'}). The workspace "
@@ -4142,6 +4373,14 @@ def _create_kubernetes(req: CreateReq, emit: Emit = null_emit) -> dict:
              phase="plan")
     check_capacity(req, req.preset, emit)
 
+    # SAID BEFORE IT IS DONE, not after. This is a live lookup against
+    # releases.rocket.chat and the cluster probing below it is a dozen kubectl round
+    # trips -- on EKS each one is a second or two. Together they were a minute or more
+    # of complete silence after the opening line, and a reader watching the GUI's log
+    # field sees a create that has stopped. The same defect as the install's 254-second
+    # gap, at the other end of the same command.
+    info(emit, f"resolving Rocket.Chat {req.version} and its MongoDB pairing",
+         phase="plan")
     try:
         resolved = versions.resolve(req.version, offline=req.offline)
     except ValueError as exc:
@@ -4223,7 +4462,20 @@ def _create_kubernetes(req: CreateReq, emit: Emit = null_emit) -> dict:
             f"{', '.join(pre.missing_tools)} is not installed, and a Kubernetes "
             f"workspace cannot be created or used without it. Install it and try "
             f"again — `rc-repro doctor` lists what this runtime needs.")
-    plan = k8s.plan_cluster()
+    plan = k8s.plan_cluster(req_context(req))
+    # A BILLABLE CLUSTER AND NO PUBLIC NAME. Warned, not refused, and the distinction
+    # matters: a refusal would remove the one way to reach a workspace whose ingress is
+    # broken, which is exactly when somebody needs it. But on a cluster that costs
+    # money by the hour, a port-forward is a poor thing to have paid for -- it is tied
+    # to a pod, dies with it, serves one machine, and leaves the cluster's whole reason
+    # for being remote unused.
+    if plan.distribution in _BILLABLE_DISTRIBUTIONS and not (req.domain or "").strip():
+        warn(emit,
+             f"{plan.context!r} is a {plan.distribution} cluster, and without --domain "
+             f"this workspace is reachable only by a port-forward from this machine — "
+             f"tied to a pod, gone when it restarts, and one person at a time. "
+             f"`--domain <name>` gives it a publicly-trusted address instead.",
+             phase="preflight")
     # BEFORE the write-ahead record below. Adopting a namespace that is not ours is
     # refused, and a refusal that created nothing must leave nothing behind -- the
     # provisional record exists so a create that dies HALF WAY can still be removed,
@@ -4286,6 +4538,13 @@ def _create_kubernetes(req: CreateReq, emit: Emit = null_emit) -> dict:
         k8s.assert_namespace_available(repro_name, context=plan.context,
                                        owner=req.actor)
     if tlsspec:
+        # Named before the probing starts. `_kubernetes_tls_plan` asks the cluster
+        # about its ingress classes, its cert-manager CRD and its ingress endpoint
+        # before it emits anything, which on a managed cluster is several seconds of
+        # nothing at the exact moment the reader is waiting to learn where HTTPS is
+        # coming from.
+        info(emit, f"checking {plan.context} for the ingress and cert-manager HTTPS "
+                   f"needs", phase="tls")
         # AFTER `ensure_kubeconfig`, because every probe in it needs a kubeconfig that
         # knows the context, and BEFORE the write-ahead record below, because a
         # refusal must leave nothing. `plan.create` is refused inside.
@@ -4315,7 +4574,7 @@ def _create_kubernetes(req: CreateReq, emit: Emit = null_emit) -> dict:
     provisional.extra["namespace"] = k8s.namespace_for(repro_name)
     # The chosen context, not a guess at it. This was `k8s.CONTEXT` unconditionally,
     # which was right only while rc-repro's own cluster was the only one it could use.
-    provisional.extra["context"] = plan.context
+    provisional.extra[config.EXTRA_CONTEXT] = plan.context
     provisional.extra["distribution"] = plan.distribution
     provisional.extra["incomplete"] = True
     if req.actor:
@@ -4418,7 +4677,12 @@ def _create_kubernetes(req: CreateReq, emit: Emit = null_emit) -> dict:
         meta.extra["tls_terminates"] = "cluster"
         meta.extra["ingress_endpoint"] = str(ktls.endpoint)
         meta.extra["ingress_class"] = ktls.ingress_class
-        _publish_kubernetes_name(repro_name, ktls, emit=emit)
+        # `certificate_ready` decides how a fallback certificate is EXPLAINED. It
+        # was computed here all along and thrown away, so the check that reports
+        # the result did not know whether one had ever been issued.
+        _publish_kubernetes_name(repro_name, ktls,
+                                 cert_ready=bool(out.get("certificate_ready")),
+                                 emit=emit)
     if req.replicas > 1:
         meta.extra["instances"] = req.replicas
     if req.actor:
@@ -4470,7 +4734,8 @@ def _create_kubernetes(req: CreateReq, emit: Emit = null_emit) -> dict:
         # wait_and_finalize, not bare wait_serving: it also finalizes the setup
         # wizard over REST and runs the preset's post_ready actions. Waiting and
         # stopping there left every self-configuring preset half-applied.
-        result.update(wait_and_finalize(meta, emit, timeout=600.0))
+        result.update(wait_and_finalize(meta, emit, timeout=600.0,
+                                        final=False))
         result["ready"] = True
     # NOT when the caller seeds. `seed_here` means the CLI runs it after this returns,
     # so seeding here as well would seed the workspace twice -- the manifest only ever
@@ -4532,7 +4797,7 @@ def kubernetes_state(name: str, meta) -> str:
     wrong runtime entirely.
     """
     from rc_repro.services import k8s
-    context = str((getattr(meta, "extra", None) or {}).get("context") or k8s.CONTEXT)
+    context = str((getattr(meta, "extra", None) or {}).get(config.EXTRA_CONTEXT) or k8s.CONTEXT)
     # "?" ON A REFUSED READ, which is the word the Docker branch one function up
     # already uses when the daemon is unreachable -- and which the browser already
     # renders (app.js `stateClass`, and the guard that stops it claiming "0 running").
@@ -4607,7 +4872,7 @@ def _wait_serving_kubernetes(meta: runner.Metadata, emit: Emit,
     from rc_repro.services import k8s
 
     extra = meta.extra if isinstance(meta.extra, dict) else {}
-    context = str(extra.get("context") or k8s.CONTEXT)
+    context = str(extra.get(config.EXTRA_CONTEXT) or k8s.CONTEXT)
     namespace = str(extra.get("namespace") or k8s.namespace_for(meta.name))
     deadline = _time.monotonic() + timeout
     last = 0.0

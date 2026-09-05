@@ -1,0 +1,42 @@
+# AmazonEKSAdminPolicy covers everything INSIDE a namespace. rc-repro also reads a
+# handful of cluster-scoped resources before it creates a workspace -- StorageClasses
+# above all, because that is how it knows whether the volume can bind. Read-only:
+# an engineer can see how the cluster is built and cannot change it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rc-repro-cluster-reader
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "persistentvolumes"]
+    verbs: ["get", "list", "watch"]
+  # A namespace per workspace is the whole model, and a namespace is cluster-scoped,
+  # so AmazonEKSAdminPolicy -- which is admin INSIDE a namespace -- cannot make one.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch", "update"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "csidrivers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingressclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rc-repro-cluster-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: rc-repro-cluster-reader
+subjects:
+  - kind: Group
+    name: rc-repro-engineers        # the group the EKS access entry puts them in
+    apiGroup: rbac.authorization.k8s.io

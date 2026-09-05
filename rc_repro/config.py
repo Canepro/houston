@@ -103,6 +103,37 @@ EXTRA_RUNTIME = "runtime"
 # the deployment can still be recovered: it WAS the preset name.
 EXTRA_DEPLOYMENT = "deployment"
 
+# Key under Metadata.extra naming WHICH Kubernetes cluster a workspace runs in, by
+# kubeconfig context name. Absent means rc-repro's own cluster -- every workspace
+# created before `--context` existed went wherever `plan_cluster` decided, and
+# `k8s.CONTEXT` is what that resolved to. Read as
+# `str((meta.extra or {}).get(EXTRA_CONTEXT) or k8s.CONTEXT)`, which was a bare
+# "context" literal at sixteen sites before this constant existed.
+EXTRA_CONTEXT = "context"
+
+# Stored config key: the default `--context` for this box. FLAT, not dotted, and the
+# reason is mechanical rather than stylistic -- _ENV_OVERRIDES below maps environment
+# variables onto flat keys only, so a dotted stored key could never have an env
+# override. `acme.email -> acme_email` is the family this joins; `gui.create_policy`,
+# which keeps its dot IN the key, is the one it does not.
+KUBE_CONTEXT_KEY = "kubernetes_context"
+
+# Stored config key: which AWS accounts this box may build a cluster in. Comma
+# separated, absent meaning none, and none meaning every create is gated.
+#
+# Keyed on the ACCOUNT rather than on a cluster name or a context, because the account
+# is the thing that gets BILLED -- it is the unit somebody actually owns and can
+# consent to. It is also per-machine on purpose: approval is a decision somebody made
+# at a keyboard, and copying a repo to a new box should not carry it along.
+CLOUD_ACCOUNTS_KEY = "cluster_approved_accounts"
+
+
+def approved_aws_accounts() -> set[str]:
+    """Accounts this box has been told it may spend in. Empty by default."""
+    raw = str(load_config().get(CLOUD_ACCOUNTS_KEY) or "")
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
 # RC's REST rate limiter — disabled for the duration of a load test (and the
 # seed) so the offered load isn't throttled into a false result, then restored.
 RC_RATE_LIMITER_SETTING = "API_Enable_Rate_Limiter"
@@ -110,11 +141,25 @@ RC_RATE_LIMITER_SETTING = "API_Enable_Rate_Limiter"
 # Environment overrides for config.yaml values (env wins over the file):
 #   RC_REPRO_REG_TOKEN  -> reg_token     RC_REPRO_RC_IMAGE -> rc_image
 #   RC_REPRO_BIND_HOST  -> bind_host     (RC_REPRO_HOME is handled in home())
+#   RC_REPRO_KUBE_CONTEXT -> kubernetes_context
 _ENV_OVERRIDES = {
     "reg_token": "RC_REPRO_REG_TOKEN",
     "rc_image": "RC_REPRO_RC_IMAGE",
     "bind_host": "RC_REPRO_BIND_HOST",
+    KUBE_CONTEXT_KEY: "RC_REPRO_KUBE_CONTEXT",
 }
+
+
+def default_kube_context() -> str:
+    """The box's default `--context`, or "".
+
+    ONE reader, because three callers need the same answer and disagreeing is a real
+    failure rather than an untidiness: `up` decides where a workspace goes, the
+    capacity preflight decides whose RAM to reserve, and `doctor` reports on a
+    cluster. A default honoured by two of the three makes `doctor` a second opinion
+    about the boot -- which k8s.py:1117 records as a bug already fixed once.
+    """
+    return str(load_config().get(KUBE_CONTEXT_KEY) or "").strip()
 
 
 def home() -> Path:

@@ -334,6 +334,11 @@ def _error_codes() -> list[str]:
             walk(sub)
 
     walk(errors.ReproError)
+    # The specific gate codes that are reachable, which the class walk cannot see:
+    # a gate carries its code as a constructor argument, not as a class attribute,
+    # so `AuthorityGateError.code` is the base "GATE" and the thing a caller actually
+    # receives is not in the hierarchy at all. See `errors.RAISED_GATE_CODES`.
+    seen.update(errors.RAISED_GATE_CODES)
     return sorted(seen)
 
 

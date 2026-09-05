@@ -452,7 +452,19 @@ def compose_stream(name: str, *args: str, on_line=None) -> int:
     return proc.wait()
 
 
-def up(name: str, *, pull: bool = True) -> int:
+def up(name: str, *, pull: bool = True, force_recreate: str = "") -> int:
+    """`docker compose up -d`. `force_recreate` names ONE service to rebuild anyway.
+
+    Compose decides what to recreate by comparing a config hash it stores on the
+    container. MEASURED that this is not always enough: an `env` apply interrupted
+    mid-recreate left the compose file carrying a variable the container did not
+    have, and a later `up` reported "Booted in 0s" without recreating -- so the
+    workspace kept running configuration its own recorded state disagreed with, and
+    no rc-repro command reconverged it.
+
+    Scoped to one service on purpose. Recreating everything would take Mongo down
+    with it on every apply, and the whole reason this is safe is that it does not.
+    """
     if pull:
         # A failed pull is deliberately non-fatal: cached images may satisfy
         # `up -d` anyway (e.g. registry hiccup), and `up` itself fails loudly
@@ -460,7 +472,11 @@ def up(name: str, *, pull: bool = True) -> int:
         _compose(name, "pull")
     # --remove-orphans: if the compose file changed shape (e.g. a different
     # preset after --force), containers of dropped services are cleaned up.
-    return _mutating(name, "up", "-d", "--remove-orphans")
+    args = ["up", "-d", "--remove-orphans"]
+    if force_recreate:
+        # `--no-deps` so rebuilding Rocket.Chat does not take its database with it.
+        args += ["--force-recreate", "--no-deps", force_recreate]
+    return _mutating(name, *args)
 
 
 def down(name: str, *, volumes: bool = False) -> int:
@@ -883,6 +899,47 @@ def project_config_files() -> dict[str, str] | None:
     if data is None:
         return None
     return {item.get("Name", ""): (item.get("ConfigFiles") or "") for item in data}
+
+
+def rc_container_env(name: str) -> dict | None:
+    """The RC container's ACTUAL environment, or None if it could not be read.
+
+    The compose document is what a workspace was ASKED to run; this is what it IS
+    running, and they diverge. MEASURED: an `env` apply interrupted mid-recreate
+    (a SIGPIPE from a truncating pipe is an ordinary way for that to happen, Ctrl-C
+    is another) left `OVERWRITE_SETTING_Accounts_RegistrationForm=Disabled` in both
+    the compose file and `repro.json`, and absent from the container -- and neither
+    `start`, `restart` nor a re-run `up` put it back, because none of them re-reads
+    the compose config.
+
+    NONE, NOT `{}`. "The container is not running" and "the container has no
+    environment" are different facts, and the caller reports drift by comparing two
+    sets -- so an empty one from a failed read would report every recorded variable
+    as missing.
+    """
+    ids = service_container_ids(name, "rocketchat") or service_container_ids(name, "rocketchat-1")
+    if not ids:
+        return None
+    try:
+        r = subprocess.run(
+            ["docker", "inspect", "--format", "{{json .Config.Env}}", ids[0]],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        rows = json.loads(r.stdout or "null")
+    except ValueError:
+        return None
+    if not isinstance(rows, list):
+        return None
+    out = {}
+    for row in rows:
+        key, sep, value = str(row).partition("=")
+        if sep:
+            out[key] = value
+    return out
 
 
 def rc_restart_count(name: str) -> int:

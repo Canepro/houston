@@ -17,10 +17,14 @@ from __future__ import annotations
 
 import re
 
-from rc_repro import compose, rcapi, runner
+from rc_repro import compose, config, rcapi, runner
 from rc_repro.errors import DockerError, ValidationError
 from rc_repro.services import lifecycle
 from rc_repro.services.events import Emit, info, null_emit, warn
+
+#: Sentinel for "this key is not in the container at all", which is not the
+#: same as it being there with an empty value.
+_MISSING = object()
 
 # A POSIX-ish environment variable name. Anything else produces a compose file
 # docker will not accept, so it is refused rather than written out.
@@ -141,7 +145,7 @@ def current(name: str) -> dict:
         # does not exist, and then refused outright; asking the container is both
         # honest and strictly more accurate than the Compose answer.
         from rc_repro.services import k8s
-        context = str((meta.extra or {}).get("context") or k8s.CONTEXT)
+        context = str((meta.extra or {}).get(config.EXTRA_CONTEXT) or k8s.CONTEXT)
         env = k8s.container_env(target, context=context)
         overrides = meta.extra.get("env") if isinstance(meta.extra, dict) else {}
         overrides = overrides if isinstance(overrides, dict) else {}
@@ -160,12 +164,44 @@ def current(name: str) -> dict:
         env = dict((e.split("=", 1) + [""])[:2] for e in env)
     overrides = meta.extra.get("env") if isinstance(meta.extra, dict) else {}
     overrides = overrides if isinstance(overrides, dict) else {}
+    # WHAT IT IS RUNNING, not only what it was asked to run. The Kubernetes branch
+    # above already reads the container and its comment says why -- "strictly more
+    # accurate". Compose could answer from the document it generated, so it did, and
+    # that is the wrong answer whenever the two disagree.
+    #
+    # MEASURED: an `env` apply interrupted mid-recreate left the variable in the
+    # compose file and in `repro.json` and absent from the container. `rc-repro env`
+    # then displayed it as `<- yours` while Rocket.Chat used the old value, and
+    # neither `start`, `restart` nor a re-run `up` reconverged it. That lands on the
+    # exact question this command exists to answer -- "is this setting actually
+    # set?" -- and answered it wrongly, with a confirming display.
+    #
+    # None means the container could not be read (not running, Docker down); then
+    # there is nothing to compare against and the document is all there is, reported
+    # as before rather than as universal drift.
+    live = runner.rc_container_env(target)
+    rows = []
+    drift = []
+    for key, value in sorted(env.items()):
+        row = {"key": key, "value": lifecycle.redact_env(key, str(value)),
+               "override": key in overrides}
+        if live is not None and str(live.get(key, _MISSING)) != str(value):
+            # RECORDED BUT NOT IN EFFECT. Reported as its own state rather than
+            # folded into the value, because a caller has to be able to say which
+            # of the two numbers it is showing.
+            row["drift"] = True
+            row["live"] = ("" if key not in live
+                           else lifecycle.redact_env(key, str(live[key])))
+            drift.append(key)
+        rows.append(row)
     return {
         "name": target,
-        "env": [{"key": k, "value": lifecycle.redact_env(k, str(v)),
-                 "override": k in overrides}
-                for k, v in sorted(env.items())],
+        "env": rows,
         "overrides": sorted(overrides),
+        # The keys the workspace records and is not running. Empty when there are
+        # none AND when the container could not be read -- `live_read` says which.
+        "drift": drift,
+        "live_read": live is not None,
     }
 
 
@@ -248,7 +284,13 @@ def _set_env_locked(target: str, sets: dict | None, unset: list[str] | None,
     # recreates just the services whose config changed, so Mongo keeps running and
     # its volume is untouched -- no data loss, and no image pull.
     info(emit, "recreating the Rocket.Chat container (data is kept)...", phase="boot")
-    if runner.up(target, pull=False) != 0:
+    # FORCED, so an interrupted apply is healed by the next one. Compose decides what
+    # to recreate from a config hash on the container, and that was measured not to
+    # fire: an apply interrupted mid-recreate left the compose file carrying a variable
+    # the container did not have, and re-running `env`, `restart` and `up` all reported
+    # success without changing anything. Scoped to the one service, so Mongo and its
+    # volume are untouched -- which is the reason recreating here is safe at all.
+    if runner.up(target, pull=False, force_recreate=rc_services[0]) != 0:
         raise DockerError("`docker compose up` failed applying the env change")
     info(emit, f"{target!r} restarted with the new environment", phase="done")
     return {"name": target, "restarted": True, "overrides": _shown(overrides)}

@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import source_index, source_of
+
 from rc_repro import errors, runner
 from rc_repro.services import backup as bk
 from rc_repro.services import upgrade as up
@@ -346,8 +348,11 @@ def test_delete_refuses_a_path_outside_the_managed_directory(tmp_path):
 
 @pytest.fixture
 def restorable(fake_docker, monkeypatch):
+    # `**kw` because the real one takes `timeout` and `final` too -- restore passes
+    # `final=False`, since it goes on to restore after the workspace is serving and
+    # must not have announced the end.
     monkeypatch.setattr(bk.lifecycle, "wait_and_finalize",
-                        lambda meta, emit: {"url": meta.root_url})
+                        lambda meta, emit, **kw: {"url": meta.root_url})
     write_repro("rc8-5-1")
     return bk.create("rc8-5-1")["path"]
 
@@ -987,7 +992,6 @@ def test_a_failed_rollback_names_both_failures(upgradable, monkeypatch):
 
 def test_every_mutating_service_operation_takes_the_repro_lock():
     """Each of these does read-compose -> write-compose -> `docker compose up`."""
-    import inspect
     from rc_repro.services import data as datasvc
     from rc_repro.services import envvars as envsvc
     from rc_repro.services import lifecycle as lcsvc
@@ -995,7 +999,7 @@ def test_every_mutating_service_operation_takes_the_repro_lock():
 
     for fn in (envsvc.set_env, monsvc.attach, monsvc.detach, datasvc.run_scale,
                lcsvc.create_repro, bk.create, bk.restore, up.run):
-        src = inspect.getsource(fn)
+        src = source_of(fn)
         assert "repro_lock" in src, f"{fn.__module__}.{fn.__qualname__} is unlocked"
 
 
@@ -1062,11 +1066,10 @@ def test_quiescing_a_kubernetes_workspace_leaves_mongodb_running():
     between `stop()` and `stop_services()`. So the Kubernetes path scales the
     Rocket.Chat deployments by label and nothing else.
     """
-    import inspect
 
     from rc_repro.services import k8s
 
-    src = inspect.getsource(k8s.scale_rocketchat)
+    src = source_of(k8s.scale_rocketchat)
     assert "app.kubernetes.io/name=rocketchat" in src, \
         "it must select Rocket.Chat by label, not scale everything"
     assert "statefulset" not in src.lower(), "MongoDB must keep running"
@@ -1075,7 +1078,7 @@ def test_quiescing_a_kubernetes_workspace_leaves_mongodb_running():
     # explain why it is the wrong one, so a substring check passes on the comment
     # and proves nothing about the code.
     from rc_repro.services import backup as bk
-    quiesce = inspect.getsource(bk._Quiesced)
+    quiesce = source_of(bk._Quiesced)
     assert "k8s.scale_rocketchat(" in quiesce, quiesce
     assert "k8s.stop_workspace(" not in quiesce, "MongoDB must keep running for a dump"
 
@@ -1389,8 +1392,7 @@ def test_the_database_tools_authenticate_when_the_operator_manages_mongodb(
     assert bk._mongo_auth("c") == []
 
     # --- and the flags actually reach mongodump AND mongorestore ----------
-    import inspect
-    src = inspect.getsource(bk)
+    src = source_of(bk)
     for tool in ("mongodump", "mongorestore"):
         idx = src.index(f'"{tool}"')
         window = src[idx:idx + 320]
@@ -1526,7 +1528,6 @@ def test_the_restore_records_the_window_where_the_database_is_empty(monkeypatch,
     GUI startup may spend; `doctor`'s `interrupted-work` row reports it and the same
     `restore` command finishes it.
     """
-    import inspect
 
     from rc_repro.services import backup, journal
 
@@ -1534,10 +1535,10 @@ def test_the_restore_records_the_window_where_the_database_is_empty(monkeypatch,
     assert journal.DATABASE_DROPPED in journal.ADVISORY, (
         "recovery must not silently re-run a mongorestore at startup")
 
-    src = inspect.getsource(backup._restore_locked)
+    src = source_of(backup._restore_locked)
     assert "journal.DATABASE_DROPPED" in src, "the drop window is still unrecorded"
     # BEFORE the drop, or it records nothing useful.
-    assert src.index("journal.DATABASE_DROPPED") < src.index("_drop_database("), src
+    assert source_index(src, "journal.DATABASE_DROPPED") < source_index(src, "_drop_database("), src
     # And cleared only on a successful load.
     assert "if rc == 0:" in src and "journal.clear(drop_note)" in src
 
@@ -1558,11 +1559,10 @@ def test_a_forced_mongo_major_upgrade_says_what_it_actually_does(monkeypatch, tm
     record still naming the old pairing, and the refusal never mentioned `--force` at
     all.
     """
-    import inspect
 
     from rc_repro.services import upgrade as upsvc
 
-    src = inspect.getsource(upsvc._run_locked)
+    src = source_of(upsvc._run_locked)
     # The refusal now names --force AND what it would really do.
     assert "upgrades Rocket.Chat only" in src, src[:200]
     # And forcing warns rather than proceeding silently.
@@ -1572,7 +1572,7 @@ def test_a_forced_mongo_major_upgrade_says_what_it_actually_does(monkeypatch, tm
     # Asserted on the loop's SELECTOR rather than on the word "mongodb", which also
     # appears in the oplog URL it sets: it iterates only services named `rocketchat`
     # or `rocketchat-*`, so no MongoDB service can be reached from it.
-    img = inspect.getsource(upsvc._apply_image)
+    img = source_of(upsvc._apply_image)
     assert 's == "rocketchat" or s.startswith("rocketchat-")' in img, (
         "if _apply_image no longer selects only Rocket.Chat services, the warning "
         "above is wrong")

@@ -122,7 +122,7 @@ def _kube(name: str) -> str:
     meta = runner.read_meta(name)
     extra = meta.extra if isinstance(meta.extra, dict) else {}
     from rc_repro.services import k8s
-    return str(extra.get("context") or k8s.CONTEXT)
+    return str(extra.get(config.EXTRA_CONTEXT) or k8s.CONTEXT)
 
 
 def _exec_capture(name: str, argv: list[str], timeout: float | None = None):
@@ -916,7 +916,8 @@ def _restore_locked(target: str, path: Path, manifest: dict, emit: Emit, *,
             raise DockerError(f"mongorestore failed for {target!r}: {out.strip()[-800:]}")
 
     info(emit, f"restored in {elapsed}s; waiting for Rocket.Chat", phase="restore", pct=85)
-    result = lifecycle.wait_and_finalize(runner.read_meta(target), emit)
+    result = lifecycle.wait_and_finalize(runner.read_meta(target), emit,
+                                         final=False)
     _retarget_site_url(target, emit)
     info(emit, f"{target!r} restored from {path.name}", phase="done", pct=100)
     return {"name": target, "bundle": str(path), "created": created,

@@ -17,7 +17,8 @@ Prefer a browser? [`rc-repro serve`](#13-web-gui) does everything the CLI does.
 ## Contents
 
 **Start here** — [1 Install](#1-install) · [2 First workspace](#2-your-first-workspace) ·
-[3 Where it runs](#3-where-it-runs) · [4 Lifecycle](#4-everyday-lifecycle)
+[3 Where it runs](#3-where-it-runs) · [3b Rocket.Chat on EKS](#3b-rocketchat-on-eks) ·
+[4 Lifecycle](#4-everyday-lifecycle)
 
 **Fill it** — [5 Scenarios](#5-scenarios) · [6 Sample data](#6-sample-data) ·
 [7 Settings and env vars](#7-settings-and-env-vars) · [8 Backup, restore, upgrade](#8-backup-restore-upgrade)
@@ -28,6 +29,8 @@ Prefer a browser? [`rc-repro serve`](#13-web-gui) does everything the CLI does.
 **Share it and script it** — [13 Web GUI](#13-web-gui) · [14 For scripts and agents](#14-for-scripts-and-agents)
 
 **[Reference](#reference)** — commands, exit codes, version pairing, state, development
+
+**How it is built** — [`rc_repro/data/docs/ARCHITECTURE.md`](rc_repro/data/docs/ARCHITECTURE.md)
 
 Every command has `--help`, and it is written to be read: this file is the map.
 
@@ -145,10 +148,17 @@ nothing it does can move the context you were using.
 `--mongo-operator` manages MongoDB with the official community operator (adds SCRAM
 auth, needs MongoDB 6.0+); without it MongoDB is a plain StatefulSet with no auth.
 
-**Which cluster.** If `kind` is installed rc-repro creates and manages its own
+**Which cluster.** `--context <name>` picks one explicitly and always ADOPTS it —
+naming a cluster never creates one, which is what keeps a routine `up` from ever
+building something billable. `rc-repro config set kubernetes.context <name>` makes that
+choice the default for this box.
+
+Without one: if `kind` is installed rc-repro creates and manages its own
 (`rc-repro-local`, ~600 MB, and `rc-repro prune` gives it back); if it is not, rc-repro
 uses the cluster `kubectl` already points at — k3s, minikube, Docker Desktop — creating
-namespaces there and never touching the cluster itself. With both present, kind wins.
+namespaces there and never touching the cluster itself. With both present, kind wins,
+which is exactly why `--context` exists: on a box with `kind` installed, a healthy
+cluster elsewhere is otherwise passed over.
 Provisioning is the only step that differs; everything after it is the same code.
 `rc-repro doctor` names the cluster it will use and what that cluster provides
 (storage, ingress, load balancer, metrics — a stock k3s has all four, a stock kind has
@@ -158,11 +168,15 @@ storage only, which is why `rc-repro stats` works on one and refuses on the othe
 
 | Refused | Because |
 |---|---|
-| `--https`, `--domain` | rc-repro does not create an Ingress for a Kubernetes workspace yet; the Traefik edge it uses on Compose holds host ports and routes to container names, and a cluster has neither |
 | `--fresh` | it means *delete this workspace's data*, and this path keeps the PVC — use `down --volumes` |
 | `loadtest`, `capacity` | the port-forward is one userspace relay; it saturates first, so the numbers would measure the forward |
 | `env --set` | an environment variable is a helm value there; the refusal hands over the `helm upgrade` that changes one |
-| `stats` | needs metrics-server in the cluster; the refusal says how to install it |
+
+`--domain` **works** on Kubernetes — the chart's own Ingress serves it and cert-manager
+issues the certificate, so TLS terminates in the cluster. `--https` (rc-repro's local
+CA) is refused on a cluster that is not on this machine: that key can mint a
+certificate for any name this box trusts, so it does not leave. `stats` is not refused
+either — it needs metrics-server in the cluster and says so if it is missing.
 
 `logs`, `env` (read), `upgrade`, `backup`, `restore`, `seed`, `monitor`, `api`, `pat`
 and `token` all work on both, and on either cluster. `down` leaves the shared cluster
@@ -174,6 +188,45 @@ operator and the shared Prometheus/Grafana stack — but only once no other work
 still needs them, and only in that order. The custom resources have to go while the
 operator is still alive to clear their finalizers; removing the operator first leaves
 the namespace stuck in `Terminating` with nothing left to finalise it.
+
+---
+
+## 3b. Rocket.Chat on EKS
+
+Everything in section 3 works the same on a managed cluster. What is different is that
+somebody has to make the cluster, it costs money by the hour, and taking it away is
+destructive — so **creating one is its own verb at its own lifecycle**, and `up` can
+never reach it, at any lifecycle, under any flag.
+
+**The full walkthrough is [`rc_repro/data/docs/eks.md`](rc_repro/data/docs/eks.md)** —
+prerequisites, the two IAM identities and the Kubernetes RBAC gate that IAM alone does
+not open, building the cluster, the one DNS record, a workspace on it, both removals in
+the order that works, what it costs, and the failures people actually hit. It ships
+with the package, so it is on any machine rc-repro is installed on:
+
+```bash
+rc-repro cluster guide           # print it
+rc-repro cluster guide --path    # where it is on this machine
+```
+
+It lives in one file rather than being repeated here, because a 190-line procedure kept
+in two places is a procedure that will disagree with itself.
+
+The shape of it, so you know what you are committing to:
+
+```bash
+rc-repro config set cluster.approved_accounts <aws-account-id>   # the spend gate
+rc-repro cluster create support --region us-east-1 --nodes 2     # ~20 min, billable
+# point a CNAME at the address it prints, then per ticket:
+rc-repro up -v 8.5.1 --name TICKET-1234 --context <arn> --domain t1234.rc.you.com --wait
+rc-repro down --name TICKET-1234 --volumes --yes
+kubectl delete svc -A --field-selector spec.type=LoadBalancer    # release the ELBs
+rc-repro cluster delete support --region us-east-1 --yes         # this stops the bill
+```
+
+A two-node cluster is about **$0.35/hr — $8.46/day** — for as long as it exists,
+whether or not anything is running in it. `rc-repro cluster status` prices the one you
+point it at; `rc-repro cluster list` sweeps every region for ones you have forgotten.
 
 ---
 
@@ -394,9 +447,31 @@ attempted: majors have to be stepped one at a time with a
 
 ## 9. HTTPS
 
-**Compose only** — on Kubernetes both flags are refused (see [3](#3-where-it-runs)).
+**This section describes the Compose path.** On Kubernetes `--domain` works too, and
+differently: the chart's own Ingress serves the name and cert-manager obtains the
+certificate, so **TLS terminates inside the cluster** rather than at the edge. The edge
+still holds `:80` and `:443` on this machine and matches the name by SNI, but forwards
+raw TCP without decrypting it — so `rc-repro edge logs` will not mention that name, and
+the failure modes a customer actually hits (a wrong `secretName`, an expired
+Certificate, an annotation naming a missing issuer) are the real ones there.
 
-**A workspace never terminates TLS.** One Traefik — the **edge** — holds `:80` and
+`--https`, which uses rc-repro's own certificate authority, is refused on any cluster
+that is not on this machine: that private key can mint a certificate for any name this
+box trusts, so it does not leave. Use `--domain` for a publicly-trusted certificate, or
+reach the workspace on its port-forward.
+
+On a cluster with more than one ingress controller — an EKS cluster carrying both `alb`
+and `nginx`, say — rc-repro adopts the one the cluster itself marks as default and says
+which it picked. `--ingress-class nginx` names one outright, and a class the cluster
+does not have is refused rather than quietly ignored.
+
+```bash
+rc-repro up -v 8.5.1 --name t1 --runtime kubernetes \
+  --domain rc.yourcompany.com --email you@company.com
+kubectl -n rc-repro-t1 describe certificate t1-tls   # what cert-manager did
+```
+
+**A Compose workspace never terminates TLS.** One Traefik — the **edge** — holds `:80` and
 `:443` and serves every name on the machine, starting itself with the first workspace
 that needs one.
 
@@ -556,6 +631,16 @@ rc-repro users remove alice       # and every session it minted
 | `member` | everyday use — create, seed, load-test, tear down |
 | `readonly` | look, but not touch — and **not** read logs or env vars, which carry LDAP bind passwords and OAuth client secrets |
 
+**Clusters.** The top bar has a **Clusters** link and, once this box knows of one, a
+chip showing what they are costing — amber when something wants you, which is what
+amber means throughout this GUI. The view lists a card per cluster with what it holds
+and what it costs, sweeps every AWS region for clusters you have forgotten, and copies
+out the permissions documents. Reading it is `readonly+`, because a report whose job is
+to stop a cluster being forgotten works better the more people can see it. Building and
+deleting a cluster are **admin**, and deleting one asks you to type its name — every
+other destructive control here acts on something visible on screen, and that one does
+not.
+
 **Roles govern the web GUI, and only the web GUI.** The table above is enforced by
 `ROUTE_ROLES` in the HTTP layer. The CLI is not role-aware: anyone with a shell on the
 box is already in the `docker` group, so a role check there would be a formality, and
@@ -671,9 +756,10 @@ Installs a skill describing this build's contract for an agent to follow, and
 | settings | `use` `config` `env` |
 | data | `seed` `config-import` `backup` `backups` `restore` `upgrade` |
 | performance (Compose only) | `benchmark` `loadtest` `capacity` |
+| cloud clusters | `cluster guide` `cluster status` `cluster list` `cluster create` `cluster prepare` `cluster delete` `cluster forget` `cluster iam-policy` |
 | REST | `token` `api` `pat` |
 | GUI + attribution | `serve` `users` `audit` `chown` |
-| HTTPS (Compose only) | `edge` `trust-ca` `tls-status` |
+| HTTPS | `edge` `trust-ca` `tls-status` |
 | other | `monitor` `presets` `versions` `doctor` `capabilities` `skill` |
 
 `rc-repro <command> --help` for flags.
@@ -732,14 +818,24 @@ is emitted only for RC < 8.
 ├── acme/                     # ACME state; dns.env, issued.json
 ├── edge/                     # the shared edge and one file per route
 ├── clients/kubernetes/       # rc-repro's own kubeconfig — never your ~/.kube/config
+├── clusters/<name>/          # one cloud cluster rc-repro built
+│   ├── cluster.json          # name, region, account, expiry — what `doctor` reads
+│   ├── cluster.yaml          # the exact config eksctl was handed
+│   └── storageclass.yaml     # what `cluster prepare` applied
 └── repros/<name>/
     ├── docker-compose.yml    # generated — re-run `up` rather than editing it
     └── repro.json            # the record: version, runtime, ports, seed, notes
 ```
 
+A cloud cluster's authority is a **tag on the cluster itself**, not `cluster.json` — a
+lost `RC_REPRO_HOME` must not leave something billable that rc-repro can no longer
+prove is its own. The local files are a convenience: they let `doctor` say "you are
+still paying for this" without an AWS round trip, and they keep a record of what was
+built after the cluster is gone.
+
 Config can also come from the environment, which wins over `config.yaml`:
 `RC_REPRO_HOME`, `RC_REPRO_REG_TOKEN`, `RC_REPRO_RC_IMAGE`, `RC_REPRO_BIND_HOST` (the
-`--bind` flag wins over both).
+`--bind` flag wins over both), `RC_REPRO_KUBE_CONTEXT`.
 
 ### Development
 
@@ -757,4 +853,7 @@ and without `[browser]` plus chromium the browser tests do too — both report g
 while testing nothing, which is how a broken form POST once shipped past 570 passing
 HTTP tests.
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the layout and how to add a preset.
+See [`rc_repro/data/docs/ARCHITECTURE.md`](rc_repro/data/docs/ARCHITECTURE.md) for how the
+tool is built and why —
+the seams, the contracts, and what breaking each one costs.
+[`CONTRIBUTING.md`](CONTRIBUTING.md) covers preset authoring.

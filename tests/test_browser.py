@@ -495,7 +495,7 @@ def test_the_doctor_dialog_renders_its_checks(serve, page, monkeypatch):
 
     _stub_lifecycle(monkeypatch)
     usersvc.add("alice", PASSWORD, role="admin")
-    monkeypatch.setattr(doctorsvc, "run_checks", lambda: {
+    monkeypatch.setattr(doctorsvc, "run_checks", lambda **_k: {
         "checks": [{"status": "ok", "message": "Docker daemon running (27.0.3)"},
                    # a fact the browser already shows permanently, and a PROBLEM
                    # about the same subject — only the first is the dialog's job
@@ -713,8 +713,20 @@ def test_the_create_dialog_follows_the_box_policy_not_the_role(serve, page,
         page.wait_for_selector("#btn-new")
         open_dialog()
         for name in lcmod.PRIVILEGED_CREATE_FIELDS:
+            if name == "context":
+                continue        # governed by TWO rules; asserted on its own below
             assert page.is_visible(f"#create-form [name={name}]"), \
                 f"a member is not offered {name!r}, which the server accepts"
+        # `context` is the first field governed by the box policy AND by the runtime:
+        # it picks a CLUSTER, which means nothing on Compose. So "the server accepts
+        # it" is only half the question here, and offering it on Docker would be the
+        # bug -- this dialog's rule is that a field with no meaning is ABSENT.
+        assert page.is_hidden("#create-form [name=context]"), \
+            "a cluster picker has no meaning on Compose"
+        page.locator("#runtime-forks button:has-text('Kubernetes')").click()
+        assert page.is_visible("#create-form [name=context]"), \
+            "a member is not offered a cluster on Kubernetes, which the server accepts"
+        page.locator("#runtime-forks button:has-text('Docker Compose')").click()
         assert page.is_visible("#create-form [name=port]"), \
             "a host port is a member's to choose"
         page.click("#create-cancel")
@@ -727,6 +739,11 @@ def test_the_create_dialog_follows_the_box_policy_not_the_role(serve, page,
         for name in lcmod.PRIVILEGED_CREATE_FIELDS:
             assert page.is_hidden(f"#create-form [name={name}]"), \
                 f"gui.create_policy=admin did not reach the dialog for {name!r}"
+        # And for `context`, on the runtime where it WOULD otherwise be offered --
+        # hidden on Compose proves nothing about it, since it is hidden there anyway.
+        page.locator("#runtime-forks button:has-text('Kubernetes')").click()
+        assert page.is_hidden("#create-form [name=context]"), \
+            "gui.create_policy=admin did not reach the cluster picker on Kubernetes"
         assert page.errors == [], page.errors
 
 
@@ -891,12 +908,21 @@ def test_people_rows_have_their_own_shape_not_activitys(serve, page, monkeypatch
         assert page.errors == [], page.errors
 
 
-def test_https_is_part_of_advanced_options_not_a_section_beside_it(serve, page,
-                                                                   monkeypatch):
-    """Two sibling twisties made the create form look like it had two Advanced
-    sections. HTTPS is one more thing about how the workspace gets built, so it is
-    a titled group inside Advanced options — and its fields still work, which is
-    the half a move like this quietly breaks.
+def test_https_is_in_section_two_and_is_still_not_a_second_twisty(serve, page,
+                                                                  monkeypatch):
+    """This test used to assert HTTPS lived inside Advanced options. It no longer
+    does, and the distinction matters: the failure it was written for was TWO SIBLING
+    TWISTIES making the form look like it had two Advanced sections, and being inside
+    Advanced was one way to avoid that rather than the point itself.
+
+    HTTPS is now a titled group in section 2, beside the cluster. It is not a
+    disclosure, so the original failure cannot recur -- and there is a reason it moved:
+    on a managed cluster the domain decides whether the workspace has a real address at
+    all, and it was the LAST field inside a collapsed Advanced, two clicks and a scroll
+    from the cluster choice it depends on.
+
+    The second half of the original test is kept exactly, because it guards the half a
+    move like this quietly breaks: that the mode selector still drives its fields.
     """
     _stub_lifecycle(monkeypatch)
     usersvc.add("alice", PASSWORD, role="admin")
@@ -906,16 +932,24 @@ def test_https_is_part_of_advanced_options_not_a_section_beside_it(serve, page,
         page.click("#btn-new")
         page.wait_for_selector("#create-dialog[open]")
 
+        # THE ORIGINAL FEAR, unchanged: one Advanced disclosure, and HTTPS is not a
+        # second one.
         assert page.locator("#create-dialog details.adv").count() == 1, \
             "the form has more than one Advanced disclosure again"
         assert page.eval_on_selector(
-            "#create-https-block", "el => !!el.closest('details.adv')"), \
-            "the HTTPS group is not inside Advanced options"
-        # collapsed by default, so it is not in anybody's way
+            "#create-https-block", "el => !el.closest('details')"), \
+            "HTTPS must not become a disclosure of its own"
+        # collapsed by default, so Advanced is still not in anybody's way
         assert page.eval_on_selector("#create-dialog details.adv", "d => d.open") is False
 
-        page.eval_on_selector("#create-dialog details.adv", "d => { d.open = true; }")
-        # and the mode selector still drives the Let's Encrypt fields
+        # And it is reachable without opening anything.
+        assert page.is_visible("#create-https-block")
+        assert page.eval_on_selector(
+            "#create-https-block",
+            "el => el.closest('section') === document.querySelector('#runtime-forks')"
+            ".closest('section')"), "HTTPS belongs with 'where it runs'"
+
+        # The mode selector still drives the Let's Encrypt fields.
         assert page.locator("input[name=domain]").is_hidden()
         page.select_option("#https-mode", "acme")
         assert page.locator("input[name=domain]").is_visible()
@@ -2294,19 +2328,28 @@ def test_the_create_dialog_says_what_it_builds_and_what_the_box_has_left(
         assert page.errors == [], page.errors
 
 
-def test_the_runtime_card_names_the_cluster_that_will_actually_be_used(
+def test_the_runtime_card_names_no_cluster_because_it_cannot_know_which(
         page, serve, monkeypatch):
-    """The card read the literal "Kubernetes (kind)". That was true while kind was the
-    only way to have a cluster and became wrong the moment rc-repro could adopt one:
-    on a box with no kind and a running k3s it named a cluster the create would not
-    touch -- the same defect `doctor` had, in the other front-end. So the label comes
-    from the probe, in `plan_cluster`'s branch order."""
+    """This test used to require the card to READ "Kubernetes (k3s)", and the reason
+    was sound: it once read the literal "Kubernetes (kind)" and so named a cluster the
+    create would not touch. The property being guarded is that the card must not name
+    the WRONG cluster.
+
+    It now names none, which satisfies that property for a reason the original could
+    not have: the card is chosen BEFORE the cluster is. A picker sits under it offering
+    EKS, kind and k3s, and the card does not re-render when that changes -- so any
+    distribution in the label is guaranteed to be wrong for somebody. Reported from a
+    real screen by somebody heading for EKS and told the card meant k3s, which reads as
+    the wrong choice.
+
+    The fact moved rather than vanished: the picker names the cluster that will
+    actually be used, including when there is none and one will be built.
+    """
+    from rc_repro.services import cluster as clustersvc
     from rc_repro.services import k8s, users as usersvc
 
     usersvc.add("alice", PASSWORD, role="admin")
 
-    # A cluster rc-repro did NOT create and cannot create: no kind binary, so
-    # `can_provision` is false and the adopted distribution is what matters.
     adopted = k8s.Preflight(tools={
         "kubectl": k8s.Tool(name="kubectl", path="/usr/bin/kubectl",
                             version=(1, 30, 0), raw="v1.30.0"),
@@ -2317,11 +2360,16 @@ def test_the_runtime_card_names_the_cluster_that_will_actually_be_used(
     adopted.distribution = "k3s"
     adopted.cluster_reachable = True
     monkeypatch.setattr(k8s, "preflight", lambda *a, **k: adopted)
+    monkeypatch.setattr(clustersvc, "known_contexts", lambda: {"contexts": [
+        {"context": "arn:aws:eks:us-east-1:1:cluster/support", "ours": False,
+         "provider": "eks", "billable": True, "is_default": True, "aliases": []},
+        {"context": "default", "ours": False, "provider": "",
+         "billable": False, "is_default": False, "aliases": []},
+    ], "unreadable": "", "default": "arn:aws:eks:us-east-1:1:cluster/support"})
 
     with serve() as s:
         _sign_in(page, s.url)
         page.wait_for_selector("#btn-new")
-        # The footer proves the probe reached the page before the dialog is opened.
         page.wait_for_function(
             "() => document.querySelector('#sb-engines')"
             ".textContent.includes('k3s')", timeout=15000)
@@ -2329,8 +2377,21 @@ def test_the_runtime_card_names_the_cluster_that_will_actually_be_used(
         page.wait_for_selector("#create-dialog[open]")
         page.wait_for_selector("#runtime-forks button")
         kube = page.locator("#runtime-forks button").nth(1).inner_text()
-        assert "Kubernetes (k3s)" in kube, kube
+
+        # THE ORIGINAL FEAR, unchanged: no cluster the create would not use.
         assert "kind" not in kube, "named a cluster the create would not use"
+        assert "k3s" not in kube, \
+            "and naming the local one is that same mistake once EKS is on the picker"
+        assert "Kubernetes" in kube
+
+        # The fact is under it, where the choice is actually made.
+        page.click("#runtime-forks >> text=Kubernetes")
+        page.wait_for_timeout(600)
+        opts = page.evaluate(
+            "Array.from(document.querySelectorAll('#context-select option'))"
+            ".map(o => o.textContent)")
+        assert any("cluster/support" in o for o in opts), \
+            "the picker must name the cluster that will actually be used"
         assert page.errors == [], page.errors
 
 
@@ -3489,3 +3550,621 @@ def test_the_stats_poll_discards_another_workspaces_answer(serve, page, monkeypa
         assert "inFlight" in src, "a slow poll must not be joined by the next one"
         assert "asked !== SELECTED" in src, "a late answer for another workspace is discarded"
         assert "finally" in src, "the guard must be released on every path"
+
+
+# --- clusters: the ledger in a browser -----------------------------------------------
+
+_CL_ARN = "arn:aws:eks:us-east-1:1:cluster/support"
+_CL_PERF = "arn:aws:eks:eu-west-1:1:cluster/perf"
+
+
+def _fake_cluster_status(context="", emit=None):
+    """Shaped like `cluster.status()`. See the shape test at the end of this block."""
+    if context == _CL_ARN:
+        return {"context": context, "distribution": "eks", "provider": "external",
+                "ours": False, "reachable": True, "unreadable": [],
+                "reach_status": "ok", "reach_why": "", "reach_advice": "",
+                "manageable": True, "unmanageable_why": "", "gone": False,
+                "nodes": 2, "age_hours": 148.0, "instance_types": {"t3.large": 2},
+                "workspaces": [{"name": "t1", "owner": "alice",
+                                "owner_readable": True, "pvcs": 1}],
+                "pvcs": 1, "loadbalancers": 1, "operator": False, "monitoring": False,
+                "cost": {"usd_hr": 0.3523, "basis": "us-east-1 on-demand",
+                         "unpriced": [], "incomplete": False}}
+    return {"context": context, "distribution": "", "provider": "", "ours": False,
+            "reachable": False, "unreadable": ["cluster"], "reach_status": "denied",
+            "reach_why": "it answered and refused these credentials",
+            "reach_advice": " Ask whoever created it to run `aws eks create-access-entry`.",
+            "manageable": True, "unmanageable_why": "", "gone": False,
+            "nodes": None, "age_hours": None, "instance_types": None,
+            "workspaces": None, "pvcs": None, "loadbalancers": None,
+            "operator": None, "monitoring": None, "cost": None}
+
+
+def _stub_clusters(monkeypatch):
+    from rc_repro.services import cluster as clustersvc
+    monkeypatch.setattr(clustersvc, "known_contexts", lambda: {"contexts": [
+        {"context": _CL_ARN, "ours": False, "provider": "eks",
+         "billable": True, "is_default": True},
+        {"context": _CL_PERF, "ours": False, "provider": "eks",
+         "billable": True, "is_default": False},
+    ], "unreadable": "", "default": _CL_ARN})
+    monkeypatch.setattr(clustersvc, "status", _fake_cluster_status)
+
+
+def test_the_clusters_view_never_shows_a_zero_it_did_not_read(serve, page, monkeypatch):
+    """The ledger's whole discipline, in the place a person actually reads it.
+
+    A cluster that refused must show `?` in every count and say WHY -- "0 workspaces,
+    nothing costing you money" is the sentence that lets a bill run, and it is the one
+    thing this screen must never print about a cluster it could not reach.
+    """
+    from rc_repro.services import users as usersvc
+
+    usersvc.add("alice", PASSWORD, role="admin")
+    _stub_clusters(monkeypatch)
+    with serve() as s:
+        _sign_in(page, s.url)
+        page.wait_for_selector("#btn-clusters")
+        page.click("#btn-clusters")
+        page.wait_for_selector(".cl-card", timeout=15000)
+        page.wait_for_timeout(900)
+
+        cards = page.query_selector_all(".cl-card")
+        assert len(cards) == 2, "one card per context"
+
+        good, bad = cards[0].inner_text(), cards[1].inner_text()
+        assert "2× t3.large" in good and "$0.3523/hr" in good
+        # The refusing one: unknown everywhere, and the cause named rather than guessed.
+        assert "?" in bad
+        assert "refusing" in bad
+        assert "refused these credentials" in bad
+        assert "create-access-entry" in bad, "the advice must point at the access entry"
+        assert "unknown, not zero" in bad.lower()
+        assert page.errors == []
+
+
+def test_the_cluster_chip_wants_you_in_amber_and_is_never_red(serve, page, monkeypatch):
+    """Colour is a signal here: red means about to destroy something.
+
+    A cluster that is merely expensive is not that, and `.chip.down` -- the only
+    non-green chip that existed -- is red. Painting the ledger with it would have said
+    "destruction" about a running cluster somebody is deliberately paying for.
+    """
+    from rc_repro.services import users as usersvc
+
+    usersvc.add("alice", PASSWORD, role="admin")
+    _stub_clusters(monkeypatch)
+    with serve() as s:
+        _sign_in(page, s.url)
+        page.wait_for_selector("#cluster-badge:not([hidden])", timeout=15000)
+        page.click("#btn-clusters")
+        page.wait_for_timeout(1200)
+        cls = page.get_attribute("#cluster-badge", "class")
+        assert "warn" in cls, "one cluster is refusing, which is exactly 'wants you'"
+        assert "down" not in cls, "red is for destroying something, not for a bill"
+        assert page.errors == []
+
+
+def test_only_an_admin_is_offered_the_controls_that_spend_or_destroy(serve, page, monkeypatch):
+    """Building a cluster costs money and deleting one is irreversible.
+
+    A readonly session still SEES the ledger -- that is the point of it -- and is
+    offered neither control. The role is resolved before the cards paint, because it
+    arrives on the four-second poll and drawing first produced an admin's cards with a
+    readonly user's buttons, differently on each run.
+    """
+    from rc_repro.services import users as usersvc
+
+    usersvc.add("alice", PASSWORD, role="admin")
+    usersvc.add("ronly", "read-only-password", role="readonly")
+    _stub_clusters(monkeypatch)
+    with serve() as s:
+        _sign_in(page, s.url, user="ronly", password="read-only-password")
+        page.wait_for_selector("#btn-clusters")
+        page.click("#btn-clusters")
+        page.wait_for_selector(".cl-card", timeout=15000)
+        page.wait_for_timeout(900)
+        body = page.inner_text("#detail")
+        assert "$0.3523/hr" in body, "a readonly session still sees what the box costs"
+        assert "Delete cluster" not in body
+        assert "Build a managed cluster" not in page.inner_text("#actpane")
+        assert "admin action" in page.inner_text("#actpane")
+        assert page.errors == []
+        # The admin half is asserted by the delete-dialog test below, which can only
+        # reach the dialog if the control is offered. Signing in twice on one page
+        # cannot test it: the second visit to /signin is already authenticated and
+        # redirects, so the form is never there to fill.
+
+
+def test_the_delete_dialog_will_not_arm_until_the_name_is_typed(serve, page, monkeypatch):
+    """Every other destructive control here acts on something visible on screen.
+
+    This one destroys a cluster that may be holding colleagues' work on machines this
+    box has never seen, so the name has to be typed -- and the dialog says what it is
+    holding before asking.
+    """
+    from rc_repro.services import users as usersvc
+
+    usersvc.add("alice", PASSWORD, role="admin")
+    _stub_clusters(monkeypatch)
+    with serve() as s:
+        _sign_in(page, s.url)
+        page.wait_for_selector("#btn-clusters")
+        page.click("#btn-clusters")
+        page.wait_for_selector(".cl-card", timeout=15000)
+        page.wait_for_timeout(900)
+        # The admin-positive half of the role test above: an admin IS offered both.
+        assert "Build a managed cluster" in page.inner_text("#actpane")
+        assert "Delete cluster" in page.inner_text("#detail")
+        page.click(".cl-card >> nth=0 >> text=Delete cluster")
+        page.wait_for_selector("#cluster-delete-dialog[open]")
+        assert page.is_disabled("#cluster-delete-go")
+        assert "holding 1 workspace(s)" in page.inner_text("#cluster-delete-holds")
+        page.fill("#cluster-delete-form input[name=confirm]", "wrong")
+        assert page.is_disabled("#cluster-delete-go"), "a near miss must not arm it"
+        page.fill("#cluster-delete-form input[name=confirm]", "support")
+        assert not page.is_disabled("#cluster-delete-go")
+        assert page.errors == []
+
+
+def test_the_fake_cluster_status_matches_the_real_payload(monkeypatch, tmp_path):
+    """The payload-shape trap, closed for the ledger as well as the panel.
+
+    Every cluster test above renders from `_fake_cluster_status`, so a key that
+    differs from what `cluster.status()` really returns breaks this screen in
+    production with the file green -- which is exactly how three keys drifted on the
+    workspace panel before the equivalent test existed.
+    """
+    from rc_repro.services import cluster as clustersvc
+    from rc_repro.services import k8s as k8ssvc
+
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setattr(k8ssvc, "contexts", lambda: ([_CL_ARN], ""))
+    monkeypatch.setattr(k8ssvc, "is_ours", lambda c: False)
+    monkeypatch.setattr(k8ssvc, "reach", lambda *a, **k: k8ssvc.Reach(status=k8ssvc.REACH_DENIED))
+    real = clustersvc.status(_CL_ARN)
+    fake = _fake_cluster_status(_CL_ARN)
+    missing = sorted(set(real) - set(fake))
+    assert not missing, (
+        f"cluster.status() returns keys the browser fake does not have: {missing}. "
+        "The screen renders from the fake, so this is a panel that breaks in "
+        "production with this file green.")
+
+
+def test_the_cluster_action_pane_survives_the_four_second_poll(serve, page, monkeypatch):
+    """It did not, and no screenshot taken inside four seconds could show it.
+
+    `render()` runs on a four-second timer and does two separate things to this
+    column: it clears `#actpane`'s contents, and it toggles `no-detail` on `.panes`,
+    which hides the column outright. Both had to learn about this view. Fixing only
+    the first looked completely correct in every screenshot and in every test above,
+    because they all assert within a second or two of opening the page -- so the
+    build button and the permissions documents vanished a few seconds later, which is
+    exactly when somebody would be reaching for them.
+
+    The wait is what this test IS. Do not shorten it.
+    """
+    from rc_repro.services import users as usersvc
+
+    usersvc.add("alice", PASSWORD, role="admin")
+    _stub_clusters(monkeypatch)
+    with serve() as s:
+        _sign_in(page, s.url)
+        page.wait_for_selector("#btn-clusters")
+        page.click("#btn-clusters")
+        page.wait_for_selector(".cl-card", timeout=15000)
+        assert page.is_visible("text=Build a managed cluster")
+
+        page.wait_for_timeout(5200)          # longer than the poll, deliberately
+        assert "no-detail" not in (page.get_attribute(".panes", "class") or ""), \
+            "the poll hid the action pane's whole column again"
+        assert page.is_visible("text=Build a managed cluster"), \
+            "the build button vanished a few seconds after the view was opened"
+        assert page.is_visible("text=Copy operator policy")
+        assert page.errors == []
+
+
+def test_the_create_form_says_what_a_managed_cluster_commits_you_to(serve, page, monkeypatch):
+    """WHICH cluster is part of "where it runs", so it is section 2, not Advanced.
+
+    Advanced is for fields whose default is right until you have a reason to change
+    it. On a managed cluster neither of the two that matter has a working default:
+    the cluster falls back to whatever this box was last pointed at -- possibly a
+    colleague's, possibly one that bills by the hour -- and no domain means the
+    workspace is reachable only by a port-forward, which on a cluster you are paying
+    to have somewhere else wastes the entire point of it.
+
+    The domain field is NOT duplicated into section 2. One field, made findable.
+    """
+    from rc_repro.services import cluster as clustersvc
+    from rc_repro.services import users as usersvc
+
+    usersvc.add("alice", PASSWORD, role="admin")
+    monkeypatch.setattr(clustersvc, "known_contexts", lambda: {"contexts": [
+        {"context": _CL_ARN, "ours": False, "provider": "eks",
+         "billable": True, "is_default": True},
+        {"context": "kind-rc-repro-local", "ours": True, "provider": "",
+         "billable": False, "is_default": False},
+    ], "unreadable": "", "default": _CL_ARN})
+
+    with serve() as s:
+        _sign_in(page, s.url)
+        page.wait_for_selector("#btn-new")
+        page.click("#btn-new")
+        page.wait_for_selector("#create-dialog[open]")
+
+        # Compose says nothing about clusters at all.
+        assert page.is_hidden("#context-row")
+        assert page.is_hidden("#cluster-note")
+
+        page.click("#runtime-forks >> text=Kubernetes")
+        page.wait_for_timeout(600)
+        assert page.is_visible("#context-row"), \
+            "the cluster picker must be reachable without opening Advanced"
+        assert page.evaluate(
+            "(()=>{let e=document.querySelector('#context-row');"
+            "while(e){if(e.tagName==='DETAILS')return false;e=e.parentElement}return true})()"), \
+            "it must not be inside the Advanced disclosure"
+        assert page.evaluate(
+            "!!document.querySelector('#runtime-forks').closest('section')"
+            ".querySelector('#context-row')"), "and it must be in section 2"
+
+        # The picker says which of them costs money, from the SERVER's judgement.
+        labels = page.evaluate(
+            "Array.from(document.querySelectorAll('#context-select option'))"
+            ".map(o=>o.textContent)")
+        assert any("costs money" in t for t in labels)
+        assert not any("costs money" in t and "kind" in t for t in labels), \
+            "a local cluster must not be labelled as billable"
+
+        # LEAVING THE PICKER ALONE IS THE LIKELIEST THING ANYBODY DOES, and on a box
+        # whose saved default is a managed cluster it lands there. This note used to
+        # key on an EXPLICIT choice, so the default path -- the one most people take
+        # -- was the single path with nothing said about the money.
+        implicit = page.inner_text("#cluster-note")
+        assert "costs money" in implicit, \
+            "the default option resolves to a billing cluster and must say so"
+        assert _CL_ARN in implicit, "and must name the cluster it would pick"
+        # The option itself says where it goes, rather than only "Decide for me".
+        assert any("Decide for me" in t and _CL_ARN in t for t in labels), \
+            "'Decide for me' must say what it decided"
+
+        # Choosing the managed one explicitly says the same thing.
+        page.select_option("#context-select", _CL_ARN)
+        page.wait_for_timeout(400)
+        note = page.inner_text("#cluster-note")
+        assert "costs money" in note
+        assert "port-forward" in note, "and that no domain means no real address"
+
+        # HTTPS IS IN SECTION 2 NOW, beside the cluster it depends on. It used to be
+        # the last thing inside Advanced -- two clicks and a scroll from the decision
+        # it belongs to -- which on a managed cluster hid the field that decides
+        # whether the workspace has a real address at all.
+        assert page.is_visible("#create-https-block"), \
+            "the certificate choice must be reachable without opening Advanced"
+        assert page.evaluate(
+            "(()=>{let e=document.querySelector('#create-https-block');"
+            "while(e){if(e.tagName==='DETAILS')return false;e=e.parentElement}return true})()"), \
+            "and it must not be inside the Advanced disclosure"
+
+        # One field, made findable: the button sets the mode and lands in it.
+        page.click("#cluster-note >> text=Set a domain")
+        page.wait_for_timeout(400)
+        assert page.evaluate("document.activeElement.name") == "domain"
+        assert page.input_value("#https-mode") == "acme"
+
+        # Once it has one, it stops asking.
+        page.fill("#create-form [name=domain]", "t1.rc.example.com")
+        page.wait_for_timeout(300)
+        assert "port-forward" not in page.inner_text("#cluster-note"), \
+            "it kept telling somebody to set a domain they had just set"
+        assert "costs money" in page.inner_text("#cluster-note"), \
+            "the cost is still true whether or not a domain was given"
+
+        # A free cluster is not nagged about at all.
+        page.select_option("#context-select", "kind-rc-repro-local")
+        page.wait_for_timeout(300)
+        assert page.is_hidden("#cluster-note")
+        assert page.errors == []
+
+
+def test_section_two_does_not_quote_this_laptops_memory_for_a_cluster_in_aws(
+        serve, page, monkeypatch):
+    """"5.4 GB free · room for about 4 more" is about the machine you are sitting at.
+
+    It sat in section 2's header unconditionally, so choosing a managed cluster left a
+    number about a laptop next to a decision to run in AWS -- and "room for about 4
+    more" is not merely irrelevant there, it is false: the capacity that decides is the
+    cluster's, which this dialog does not have and `cluster status` reports instead.
+
+    It still shows for Compose and for the local cluster rc-repro builds, which are the
+    cases where it is the right number and where `up` really does refuse without it.
+    """
+    from rc_repro.services import cluster as clustersvc
+    from rc_repro.services import users as usersvc
+
+    usersvc.add("alice", PASSWORD, role="admin")
+    monkeypatch.setattr(clustersvc, "known_contexts", lambda: {"contexts": [
+        {"context": _CL_ARN, "ours": False, "provider": "eks",
+         "billable": True, "is_default": False},
+        {"context": "kind-rc-repro-local", "ours": True, "provider": "",
+         "billable": False, "is_default": False},
+    ], "unreadable": "", "default": ""})
+
+    with serve() as s:
+        _sign_in(page, s.url)
+        page.wait_for_selector("#btn-new")
+        page.click("#btn-new")
+        page.wait_for_selector("#create-dialog[open]")
+        page.wait_for_timeout(700)
+
+        # Compose runs here, so the number is the right one.
+        assert "free" in page.inner_text("#create-room"), \
+            "on Compose this is exactly the number `up` refuses on"
+
+        page.click("#runtime-forks >> text=Kubernetes")
+        page.wait_for_timeout(600)
+        page.select_option("#context-select", "kind-rc-repro-local")
+        page.wait_for_timeout(400)
+        assert "free" in page.inner_text("#create-room"), \
+            "rc-repro's own cluster runs on this machine too"
+
+        page.select_option("#context-select", _CL_ARN)
+        page.wait_for_timeout(400)
+        assert page.inner_text("#create-room").strip() == "", \
+            "a cluster in AWS is not this laptop, and its memory says nothing about it"
+        assert page.errors == []
+
+
+def test_the_clusters_view_speaks_english_and_explains_its_own_numbers(
+        serve, page, monkeypatch):
+    """Three things a first-timer read as broken.
+
+    The card said ``default for `up` `` with the backtick CHARACTERS on screen, where
+    every other code fragment in this GUI is a <code> element -- it simply looked like
+    a rendering fault. "Copy context" is a word from the terminal, on a screen built
+    for somebody who does not open one. And the rail said "No workspaces yet" beside a
+    card saying "holding TICKET-1234": both true, because one counts this machine's
+    records and the other counts what is in the cluster, and on a shared cluster they
+    disagree permanently, since a colleague's workspace is in the cluster and will
+    never be in your rail. Nothing said so.
+    """
+    from rc_repro.services import users as usersvc
+
+    usersvc.add("alice", PASSWORD, role="admin")
+    _stub_clusters(monkeypatch)
+    with serve() as s:
+        _sign_in(page, s.url)
+        page.wait_for_selector("#btn-clusters")
+        page.click("#btn-clusters")
+        page.wait_for_selector(".cl-card", timeout=15000)
+        page.wait_for_timeout(900)
+        body = page.inner_text("#detail")
+
+        assert "`" not in body, \
+            "a backtick on screen is a rendering fault to everybody who sees it"
+        assert page.query_selector(".cl-card code"), \
+            "code fragments are <code> here, as everywhere else in this GUI"
+
+        assert "Copy context" not in body, "'context' is terminal vocabulary"
+        assert "Copy name" in body
+
+        # The two counts are reconciled where they disagree.
+        assert "holding" in body
+        assert "only this machine's" in body, \
+            "the rail and the card count different things and must say so"
+        assert page.errors == []
+
+
+def test_a_cluster_aws_says_is_gone_does_not_read_as_one_that_is_down(serve, page,
+                                                                     monkeypatch):
+    """A deleted cluster and an unreachable one are opposite situations that the
+    screen used to draw identically: "not answering", every count dimmed, and "These
+    are unknown, not zero."
+
+    For a cluster AWS says does not exist, all three are wrong. Nothing is unknown,
+    nothing is costing anything, and the only thing wanted is that the leftover
+    kubeconfig entry be cleared. Reported from a real screen after a delete that had
+    worked -- the cluster kept appearing, and the card made it look like a cluster
+    that was still there and merely unwell.
+    """
+    from rc_repro.services import cluster as clustersvc
+    from rc_repro.services import users as usersvc
+
+    usersvc.add("alice", PASSWORD, role="admin")
+
+    def gone_status(context="", emit=None):
+        row = dict(_fake_cluster_status(context))
+        if context == _CL_PERF:
+            row.update({"gone": True, "reach_advice":
+                        "AWS says this cluster no longer exists, so it is not costing "
+                        "anything. The kubeconfig entry naming it is left over — "
+                        "`rc-repro cluster forget perf` removes it."})
+        return row
+
+    _stub_clusters(monkeypatch)
+    monkeypatch.setattr(clustersvc, "status", gone_status)
+    with serve() as s:
+        _sign_in(page, s.url)
+        page.wait_for_selector("#btn-clusters")
+        page.click("#btn-clusters")
+        page.wait_for_selector(".cl-card", timeout=15000)
+        page.wait_for_timeout(900)
+
+        card = page.query_selector_all(".cl-card")[1].inner_text()
+        assert "gone" in card.lower(), card
+        assert "no longer exists" in card, card
+        assert "not answering" not in card, \
+            "a cluster that has been deleted is not a cluster that is down"
+        assert "unknown, not zero" not in card.lower(), \
+            "nothing about a deleted cluster is unknown"
+        assert "nothing" in card, "its cost is nothing, definitely, not unreadably"
+        assert page.errors == []
+
+
+def test_a_gone_cluster_offers_only_controls_that_can_work(serve, page, monkeypatch):
+    """"A control that cannot succeed is worse than no control" — the rule this file
+    already applies to a readonly user's logs and env tabs.
+
+    On a cluster AWS says does not exist, "Prepare" has nothing to prepare and "Delete
+    cluster" has nothing to delete; both could only ever produce a red toast. What is
+    actually wanted is the leftover kubeconfig entry cleared, so that is the control
+    offered instead — and it is not red, because it destroys nothing.
+    """
+    from rc_repro.services import cluster as clustersvc
+    from rc_repro.services import users as usersvc
+
+    usersvc.add("alice", PASSWORD, role="admin")
+
+    def status(context="", emit=None):
+        row = dict(_fake_cluster_status(context))
+        if context == _CL_PERF:
+            row.update({"gone": True, "reach_advice": "AWS says this cluster no longer "
+                        "exists, so it is not costing anything."})
+        return row
+
+    _stub_clusters(monkeypatch)
+    monkeypatch.setattr(clustersvc, "status", status)
+    with serve() as s:
+        _sign_in(page, s.url)
+        page.wait_for_selector("#btn-clusters")
+        page.click("#btn-clusters")
+        page.wait_for_selector(".cl-card", timeout=15000)
+        page.wait_for_timeout(900)
+
+        cards = page.query_selector_all(".cl-card")
+        live = [b.inner_text() for b in cards[0].query_selector_all(".cl-foot button")]
+        dead = [b.inner_text() for b in cards[1].query_selector_all(".cl-foot button")]
+
+        assert "Prepare" in live and any("Delete" in b for b in live), live
+        assert "Prepare" not in dead, "there is nothing to prepare on a cluster that is gone"
+        assert not any("Delete" in b for b in dead), \
+            "there is nothing to delete either — AWS already has not got it"
+        assert any("Forget" in b for b in dead), \
+            "the one thing wanted is the leftover entry cleared"
+        # NOT RED. Red means about to destroy something, and this destroys nothing —
+        # the cluster is already gone and only a local file changes.
+        forget = [b for b in cards[1].query_selector_all(".cl-foot button")
+                  if "Forget" in b.inner_text()][0]
+        assert "danger" not in (forget.get_attribute("class") or "")
+        assert page.errors == []
+
+
+def test_the_local_certificate_option_goes_when_the_cluster_is_not_on_this_machine(
+        serve, page, monkeypatch):
+    """"Local certificate" would copy rc-repro's CA PRIVATE KEY into a Secret in a
+    cluster that is not this machine's, and that key can mint a certificate for any
+    name this box trusts. `_kubernetes_tls_plan` refuses it as an authority gate.
+
+    An option that cannot succeed is worse than no option — it invites a click, costs
+    a filled-in form, and explains itself only after the submit. This dialog's rule is
+    that such fields are ABSENT, not disabled.
+
+    ONLY WHEN WE POSITIVELY KNOW. Compose, an unknown cluster and the local one
+    rc-repro would build all keep the option; only a cluster the server says is
+    billable takes it away. Removing a working choice on a guess is the worse of the
+    two mistakes.
+    """
+    from rc_repro.services import cluster as clustersvc
+    from rc_repro.services import users as usersvc
+
+    usersvc.add("alice", PASSWORD, role="admin")
+    monkeypatch.setattr(clustersvc, "known_contexts", lambda: {"contexts": [
+        {"context": _CL_ARN, "ours": False, "provider": "eks",
+         "billable": True, "is_default": True},
+        {"context": "kind-rc-repro-local", "ours": True, "provider": "",
+         "billable": False, "is_default": False},
+    ], "unreadable": "", "default": _CL_ARN})
+
+    modes = ("Array.from(document.querySelectorAll('#https-mode option'))"
+             ".map(o=>o.value)")
+    with serve() as s:
+        _sign_in(page, s.url)
+        page.wait_for_selector("#btn-new")
+        page.click("#btn-new")
+        page.wait_for_selector("#create-dialog[open]")
+
+        # Compose runs here by definition, so both certificate routes stay.
+        assert "local" in page.evaluate(modes)
+
+        # Kubernetes defaulting to the managed cluster: the local CA cannot go there.
+        page.click("#runtime-forks >> text=Kubernetes")
+        page.wait_for_timeout(700)
+        assert "local" not in page.evaluate(modes), \
+            "the CA private key does not leave this box, so the option must not be offered"
+        assert "acme" in page.evaluate(modes), \
+            "Let's Encrypt DOES work against a cluster anywhere — it must stay"
+
+        # Choosing the local cluster brings it back: this is about where the cluster
+        # is, not about the runtime.
+        page.select_option("#context-select", "kind-rc-repro-local")
+        page.wait_for_timeout(700)
+        assert "local" in page.evaluate(modes), \
+            "a cluster on this machine can hold rc-repro's own CA"
+
+        # And selecting it, then moving back to the managed cluster, must not leave
+        # the form carrying a mode that has just been removed.
+        page.select_option("#https-mode", "local")
+        page.select_option("#context-select", _CL_ARN)
+        page.wait_for_timeout(700)
+        assert page.eval_on_selector("#https-mode", "e=>e.value") != "local", \
+            "a removed option must not stay selected"
+        assert page.errors == []
+
+
+def test_the_cluster_picker_shows_a_name_not_sixty_characters_of_arn(serve, page,
+                                                                    monkeypatch):
+    """An EKS context is `arn:aws:eks:<region>:<account>:cluster/<name>`. With
+    "costs money" and "default" appended that made a ninety-five character `<option>`,
+    and a native select cannot shrink text — it ran out of its box. Reported from a
+    real screen.
+
+    The name and the region are the two facts a person needs to pick a cluster; the
+    account id is not. Both come from the SERVER beside `billable`, because deriving
+    them here would be a second copy of a rule the service owns.
+
+    THE VALUE IS UNTOUCHED. Shortening what is SENT would send a name the server
+    cannot resolve, which is the one way this change could do damage.
+    """
+    from rc_repro.services import cluster as clustersvc
+    from rc_repro.services import users as usersvc
+
+    arn = "arn:aws:eks:us-east-1:533674205877:cluster/chatrepo"
+    usersvc.add("alice", PASSWORD, role="admin")
+    monkeypatch.setattr(clustersvc, "known_contexts", lambda: {"contexts": [
+        {"context": arn, "short": "chatrepo", "region": "us-east-1", "ours": False,
+         "provider": "eks", "billable": True, "is_default": True},
+        {"context": "kind-rc-repro-local", "short": "kind-rc-repro-local",
+         "region": "", "ours": True, "provider": "", "billable": False,
+         "is_default": False},
+    ], "unreadable": "", "default": arn})
+
+    with serve() as s:
+        _sign_in(page, s.url)
+        page.wait_for_selector("#btn-new")
+        page.click("#btn-new")
+        page.wait_for_selector("#create-dialog[open]")
+        page.click("#runtime-forks >> text=Kubernetes")
+        page.wait_for_timeout(700)
+
+        opts = page.evaluate(
+            "Array.from(document.querySelectorAll('#context-select option'))"
+            ".map(o => ({t: o.textContent, v: o.value}))")
+        managed = next(o for o in opts if o["v"] == arn)
+        assert "chatrepo" in managed["t"] and "us-east-1" in managed["t"], managed
+        assert arn not in managed["t"], \
+            "the whole ARN in an option is what overflowed the control"
+        assert "533674205877" not in managed["t"], \
+            "the account id is the half of an ARN nobody needs in a picker"
+        assert len(managed["t"]) < 60, f"still {len(managed['t'])} characters: {managed['t']}"
+        # The facts that made it worth showing at all are still there.
+        assert "costs money" in managed["t"] and "default" in managed["t"], managed
+
+        # AND WHAT IS SENT IS UNCHANGED. This is the invariant that matters.
+        assert managed["v"] == arn
+        assert any(o["v"] == "kind-rc-repro-local" for o in opts)
+        # "Decide for me" names the cluster it would pick, and shortly.
+        decide = next(o for o in opts if o["v"] == "")
+        assert "chatrepo" in decide["t"] and arn not in decide["t"], decide
+        assert page.errors == []

@@ -72,7 +72,7 @@ def _kube_target(m) -> tuple[str, str]:
     extra = getattr(m, "extra", None) or {}
     from rc_repro.services import k8s
     return (str(extra.get("namespace") or k8s.namespace_for(m.name)),
-            str(extra.get("context") or k8s.CONTEXT))
+            str(extra.get(config.EXTRA_CONTEXT) or k8s.CONTEXT))
 
 
 def _attach_kubernetes(target: str, emit: Emit = null_emit) -> dict:

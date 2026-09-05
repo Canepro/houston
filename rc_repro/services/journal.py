@@ -31,6 +31,7 @@ import json
 import os
 import secrets
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -87,9 +88,17 @@ EMAIL_2FA_OFF = "email_2fa_off"
 #: workspace repaired. README promises "the target database is dropped first, so you
 #: never get a hybrid" -- true, and it swapped in a worse failure that nothing recorded.
 DATABASE_DROPPED = "database_dropped"
+#: An `eksctl create cluster` that was started and never seen to return.
+#:
+#: ADVISORY, and recovery must NEVER act on it. Deleting a cloud cluster is minutes
+#: of destructive work on somebody's AWS account, and a process that already crashed
+#: once is not the thing that should decide to do it. So this note is REPORTED, loudly,
+#: with the exact commands to run -- and its `workspace` field carries the CLUSTER
+#: name, which is precisely why `still_there` had to stop meaning `runner.exists`.
+CLUSTER_UNFINISHED = "cluster_unfinished"
 KINDS = (RATE_LIMITER_OFF, ROCKETCHAT_STOPPED, BENCH_WORKSPACE,
          CONSTRAINTS_APPLIED, CREATE_UNFINISHED, RC_METRICS_ON, MONGO_PROFILER_ON,
-         EMAIL_2FA_OFF, DATABASE_DROPPED)
+         EMAIL_2FA_OFF, DATABASE_DROPPED, CLUSTER_UNFINISHED)
 #: The setting EMAIL_2FA_OFF is about, named once so the seed path and the repair cannot
 #: disagree about which key they mean.
 EMAIL_2FA_SETTING = "Accounts_TwoFactorAuthentication_By_Email_Enabled"
@@ -103,7 +112,7 @@ EMAIL_2FA_SETTING = "Accounts_TwoFactorAuthentication_By_Email_Enabled"
 #: about yet. `rc-repro ready --name <it>` is the same work on demand, and it clears
 #: the note when it succeeds -- so this is a note that closes itself once acted on,
 #: not one that sits there forever.
-ADVISORY = (CREATE_UNFINISHED, DATABASE_DROPPED)
+ADVISORY = (CREATE_UNFINISHED, DATABASE_DROPPED, CLUSTER_UNFINISHED)
 
 
 @dataclass
@@ -245,6 +254,60 @@ def open_entries() -> list[Entry]:
     return out
 
 
+#: How to ask "is the thing this note is ABOUT still here", per kind.
+#:
+#: `recover()` clears an advisory note whose subject is gone, and it used to ask that
+#: question as `runner.exists(entry.workspace)`. That is the right question for every
+#: kind today, because every one of them is about a workspace -- and it is only
+#: ACCIDENTALLY right. An `Entry` is keyed on a workspace name and `runner.exists()`
+#: tests for workspace markers under `repros/<name>/`, so a note whose subject is NOT
+#: a workspace -- a cluster, say -- would find that False always, and be cleared
+#: silently at the next `serve` startup by a branch whose comment correctly explains
+#: why it is right for the case it was written for. The most expensive note in the
+#: product would be the one guaranteed not to survive.
+#:
+#: The fix is to keep ONE rule and make the rule true, rather than special-casing a
+#: kind out of a rule stated as general -- which is the shape that produced this. A
+#: kind whose subject is something else registers how to ask about that thing;
+#: everything else keeps the default and behaves exactly as it always has.
+def _cluster_still_there(entry: Entry) -> bool:
+    """Whether the cluster a CLUSTER_UNFINISHED note is about still exists.
+
+    Asks AWS, not the filesystem. Imported lazily so `journal` does not depend on the
+    AWS seam at import time, and a box with no cloud tooling pays nothing for a kind
+    it will never write.
+
+    A REFUSED read KEEPS the note, by the contract in `still_there`: the note says a
+    billable cluster may exist, and the one thing that must not happen is losing that
+    record because a credential expired between the create and the next `serve` start.
+    """
+    from rc_repro.services import eks
+    return not eks.cluster_exists(
+        entry.workspace, str(entry.detail.get("region") or "")).absent
+
+
+_SUBJECT_EXISTS: dict[str, Callable[[Entry], bool]] = {
+    CLUSTER_UNFINISHED: _cluster_still_there,
+}
+
+
+def still_there(entry: Entry) -> bool:
+    """Whether the thing an advisory note is about still exists.
+
+    A predicate that RAISES answers True, and that direction is deliberate: "I could
+    not ask" is not "it is gone", and the cost of the two mistakes is not symmetric.
+    Keeping a stale note wastes a line of output; dropping a live one loses the only
+    record that something is still running -- and for a cloud cluster, still billing.
+    """
+    ask = _SUBJECT_EXISTS.get(entry.kind)
+    if ask is None:
+        return runner.exists(entry.workspace)
+    try:
+        return ask(entry)
+    except Exception:  # noqa: BLE001 - see the docstring: unaskable is not gone
+        return True
+
+
 def abandoned() -> list[Entry]:
     """Entries whose owning process is gone -- the ones safe to act on."""
     return [e for e in open_entries() if not e.owner_alive]
@@ -273,6 +336,25 @@ def describe(entry: Entry) -> str:
                 f"against an EMPTY or partial database. `rc-repro restore "
                 f"{entry.detail.get('bundle') or '<bundle>'} --name {entry.workspace}` "
                 f"again is what completes it")
+    if entry.kind == CLUSTER_UNFINISHED:
+        name = entry.workspace
+        region = str(entry.detail.get("region") or "<region>")
+        account = str(entry.detail.get("account") or "unknown account")
+        # CloudFormation-shaped, because the obvious advice is the advice that fails:
+        # a rolled-back `eksctl create` can leave its stack behind, and `eksctl delete`
+        # then reports that the cluster does not exist while a VPC and a NAT gateway
+        # carry on billing.
+        return (f"an `eksctl create cluster` for {name!r} in {region} "
+                f"(account {account}) was interrupted at {entry.at} and never "
+                f"returned. It may have created a VPC, a NAT gateway and a control "
+                f"plane, which are BILLING NOW. rc-repro will not delete a cloud "
+                f"cluster it did not see finish — that is minutes of destructive work "
+                f"on your AWS account decided by a process that already crashed. "
+                f"Run `eksctl delete cluster --name {name} --region {region} --wait`; "
+                f"if that says the cluster does not exist, the CloudFormation stack "
+                f"may have rolled back and SURVIVED, so check `aws cloudformation "
+                f"describe-stacks --stack-name eksctl-{name}-cluster --region "
+                f"{region}` and delete it directly")
     if entry.kind == EMAIL_2FA_OFF:
         return (f"{entry.workspace!r}: email two-factor authentication was turned off "
                 f"for a seed at {entry.at} and never turned back on — seeded users are "
@@ -304,17 +386,20 @@ def recover(emit: Emit = null_emit, *, dry_run: bool = False) -> list[dict]:
     for entry in abandoned():
         row = {"id": entry.id, "kind": entry.kind, "workspace": entry.workspace,
                "what": describe(entry), "repaired": False, "why": ""}
-        if entry.kind in ADVISORY and not runner.exists(entry.workspace):
-            # The workspace is gone, so an unfinished create is no longer anybody's
-            # problem. Advisory notes are never repaired, so without this they would
-            # warn forever about something that cannot be acted on.
+        if entry.kind in ADVISORY and not still_there(entry):
+            # The thing the note is about is gone, so an unfinished create is no longer
+            # anybody's problem. Advisory notes are never repaired, so without this they
+            # would warn forever about something that cannot be acted on.
+            #
+            # `still_there`, not `runner.exists(entry.workspace)`: see that function for
+            # why the two are the same today and must not be assumed to stay so.
             #
             # UNDER dry_run THIS IS A READ. The clear used to sit above the dry_run
             # check, so a dry run over two notes reported one and DELETED the other --
             # and a dry run is the only way to inspect the journal without repairing
             # it, which makes mutating one a contradiction in terms.
             if dry_run:
-                row["why"] = "workspace is gone; would be dropped"
+                row["why"] = "the thing it is about is gone; would be dropped"
                 results.append(row)
                 continue
             clear(entry.id)

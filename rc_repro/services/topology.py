@@ -373,5 +373,16 @@ def axes_of_meta(meta) -> dict:
         replicas = int(extra.get(LEGACY_REPLICA_PARAM) or 0)
     except (TypeError, ValueError):
         replicas = 0
-    return {"runtime": runtime, "deployment": deployment,
-            "preset": preset, "replicas": replicas}
+    # The CLUSTER is an axis too, and leaving it out silently RETARGETS. Both callers
+    # rebuild a CreateReq from this -- `restore`, and the GUI's start-a-downed-workspace
+    # button (web/app.py) -- and a request with no context sends `plan_cluster` back
+    # through its own four steps. On a box with the `kind` binary that means step 2:
+    # a workspace living in a remote cluster would be rebuilt by BUILDING A LOCAL
+    # CLUSTER for it. Empty stays empty, so a workspace older than `--context` keeps
+    # resolving exactly as it always did.
+    out = {"runtime": runtime, "deployment": deployment,
+           "preset": preset, "replicas": replicas}
+    context = str(extra.get(config.EXTRA_CONTEXT) or "").strip()
+    if context:
+        out["context"] = context
+    return out

@@ -31,7 +31,7 @@ def _exec_in(meta: runner.Metadata, service: str, argv: list[str]) -> int:
         return runner.compose_exec(meta.name, service, argv)
     from rc_repro.services import k8s
     extra = meta.extra if isinstance(meta.extra, dict) else {}
-    context = str(extra.get("context") or k8s.CONTEXT)
+    context = str(extra.get(config.EXTRA_CONTEXT) or k8s.CONTEXT)
     namespace = str(extra.get("namespace") or k8s.namespace_for(meta.name))
     pod = k8s.run(["kubectl", "--context", context, "-n", namespace, "get", "pod",
                    "-l", f"app=rc-repro-{service}", "-o",

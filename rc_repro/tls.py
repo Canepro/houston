@@ -504,7 +504,8 @@ def verify(host: str, port: int = 443, timeout: float = 10.0,
     import ssl
     out: dict = {"host": host, "port": port, "serving": False, "trusted": False,
                  "trusted_via_ca": False, "issuer": "", "subject": "", "dates": "",
-                 "names": [], "fallback": False, "error": ""}
+                 "names": [], "fallback": False, "self_signed": False,
+                 "staging": False, "error": ""}
     # `sni` lets the caller connect to an ADDRESS while presenting a different
     # server name -- how you check what this host serves for a domain without
     # letting a proxy in front answer instead.
@@ -531,6 +532,20 @@ def verify(host: str, port: int = 443, timeout: float = 10.0,
     out["names"] = cert_names(pem)
     out["dates"] = " ".join(_cert_field(pem, "-enddate").splitlines())
     out["fallback"] = _TRAEFIK_FALLBACK.lower() in (out["issuer"] + out["subject"]).lower()
+    # WHY an untrusted certificate is untrusted, which is three different situations
+    # and had one message. `--acme-staging` was treated as the only explanation, so a
+    # workspace on Kubernetes whose cert-manager had not finished yet was reported as
+    # "a real Let's Encrypt-issued certificate ... normal for --acme-staging" -- wrong
+    # twice, since it is neither Let's Encrypt nor staging. Seen on a live EKS
+    # workspace, where the ingress serves its own self-signed certificate until the
+    # Certificate resource goes Ready, which is a minute or three after the workspace
+    # answers.
+    #
+    #   self_signed  - issuer is the subject: nothing has issued this, it is a
+    #                  placeholder. On a cluster that means "not issued YET".
+    #   staging      - Let's Encrypt's staging root says so in its own name.
+    out["self_signed"] = bool(out["issuer"]) and out["issuer"] == out["subject"]
+    out["staging"] = "staging" in out["issuer"].lower()
 
     def _accepts(ctx_cafile: str | None) -> bool:
         # THE CONTEXT IS BUILT INSIDE THE TRY, and that is not style. A CA file that

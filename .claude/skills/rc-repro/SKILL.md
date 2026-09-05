@@ -53,7 +53,7 @@ question is about documented behaviour rather than observed behaviour.
 Every `--json` reply is one envelope:
 
 ```json
-{"schema":"rc-repro.info.v1","contract":1,"rc_repro_version":"0.77.0",
+{"schema":"rc-repro.info.v1","contract":1,"rc_repro_version":"0.78.0",
  "generated_at":"...","ok":true,"data":{...},"warnings":[],"error":null}
 ```
 
@@ -165,11 +165,9 @@ from a distribution name: a stock k3s has all four, a stock kind has storage onl
 
 These are refusals, not gaps — the refusal names the reason and the alternative:
 
-- `--https` / `--domain`: rc-repro does not create an Ingress for a Kubernetes
-  workspace yet. Reach it on `http://localhost:<port>` via its port-forward, or use
-  `--runtime docker` when the case needs TLS. Do NOT tell a user their cluster is
-  missing an ingress controller or cert-manager -- a stock k3s has Traefik as the
-  default class and needs neither.
+- `--fresh`: it means DELETE this workspace's data, and the Kubernetes path keeps the
+  PersistentVolumeClaim. `rc-repro down --name <n> --volumes` does delete it, so the
+  refusal names that.
 - `loadtest` / `capacity`: a Kubernetes workspace is reached through a
   `kubectl port-forward`, a single userspace relay that saturates long before
   Rocket.Chat does — the numbers would measure the forward. Run these against a
@@ -180,6 +178,42 @@ These are refusals, not gaps — the refusal names the reason and the alternativ
 
 `logs`, `env` (read), `upgrade`, `backup`, `restore`, `seed`, `monitor`, `api`,
 `pat` and `token` all work on both runtimes.
+
+### HTTPS on Kubernetes works — do not send a user to Docker for it
+
+`--domain` creates an Ingress, cert-manager obtains a real Let's Encrypt certificate,
+and **TLS terminates inside the cluster** rather than at the edge. Verified end to end
+against EKS. What refuses is per CLUSTER, never per runtime, and each refusal names one
+missing thing: no ingress class, no cert-manager, no reachable `:443` Service.
+
+Two things worth knowing before you report a failure:
+
+- A **placeholder certificate** right after a create means cert-manager has not issued
+  yet, not that it failed. On a fresh cluster that is normal for the first minute or
+  three. `rc-repro tls-status --name <n> --json` re-checks; `fallback: true` with the
+  workspace up is "still coming".
+- `--https` (rc-repro's own CA) IS refused on a cluster that is not on this machine,
+  because that private key would leave the box. `--domain` is the answer there, and it
+  works against a cluster anywhere.
+
+### Cloud clusters cost money, and `up` never creates one
+
+Two verbs at two lifetimes, and conflating them is how bills happen:
+
+- `rc-repro cluster create <name> --region <r>` — about twenty minutes, **billing from
+  the first minute whether or not anything runs in it**, roughly $0.35/hr for a
+  two-node EKS cluster. Only `cluster delete` stops it.
+- `rc-repro up ... --context <name>` — per ticket, minutes, free beyond the cluster
+  that was already running.
+
+`up` **cannot** provision a cloud cluster, structurally. If you are asked to reproduce
+something on EKS and no cluster exists, say so and ask — do not create one.
+
+Before reporting that nothing is running: `rc-repro cluster list --force --json` sweeps
+every enabled region by tag. Read `unreadable` in that envelope as carefully as
+`clusters` — a region that could not be asked is NOT covered by the report. A stale
+kubeconfig entry for a cluster deleted elsewhere is cleared with `rc-repro cluster
+forget <context>`, which refuses one that still answers.
 
 ### Collect what a case needs
 

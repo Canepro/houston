@@ -18,6 +18,8 @@ import re
 from pathlib import Path
 
 import pytest
+
+from conftest import source_of
 from typer.testing import CliRunner
 
 from rc_repro import cli, errors, jsonout, ui
@@ -330,13 +332,20 @@ def test_capabilities_lists_a_grouped_subcommand():
 
 
 def test_capabilities_does_not_advertise_an_error_code_nothing_can_raise():
-    """`errors.GATE_CODES` names seven authority gates and this build raises none of
-    them -- `AuthorityGateError` is defined and never used. Publishing them would
-    teach a caller to write a branch that never runs, which is the same class of
-    wrongness as advertising a flag that does not exist."""
+    """`errors.GATE_CODES` names seven authority gates and this build raises ONE.
+
+    The premise used to be "raises none of them", and it stopped being true when the
+    HTTPS work added a gate refusing to copy the local CA key into a cluster that is
+    not on this machine. Publishing all seven would teach a caller to write six
+    branches that never run; publishing none left the one that does fire unannounced.
+    So the assertion is neither "all" nor "none" -- it is exactly the reachable set.
+    """
     codes = set(jsonout.capabilities(cli.app)["error_codes"])
     assert "VALIDATION_FAILED" in codes and "NOT_READY" in codes
-    assert not (codes & set(errors.GATE_CODES)), sorted(codes & set(errors.GATE_CODES))
+    unreachable = set(errors.GATE_CODES) - set(errors.RAISED_GATE_CODES)
+    assert not (codes & unreachable), sorted(codes & unreachable)
+    assert set(errors.RAISED_GATE_CODES) <= codes, \
+        "a gate this build can raise must be advertised"
 
 
 def test_capabilities_says_which_commands_stream_by_looking_at_them():
@@ -369,6 +378,10 @@ def test_capabilities_needs_no_engine_and_no_home(tmp_path, monkeypatch):
 JSON_COMMANDS: dict[str, tuple[list[str], bool]] = {
     "list": (["list", "--json"], True),
     "doctor": (["doctor", "--json"], True),
+    # An unknown context: no cluster needed, and it exercises the path where the
+    # ledger must NOT report an empty cluster. Expected to fail, because the human
+    # path fails on it and the two must not disagree.
+    "cluster": (["cluster", "status", "--context", "no-such-ctx", "--json"], False),
     "skill status": (["skill", "status", "--json"], True),
     "skill install": (["skill", "install", "--json"], True),
     "info": (["info", "--name", "nope", "--json"], False),
@@ -522,8 +535,7 @@ def test_every_documented_edge_action_is_reachable():
 
     edge = next(c for c in cli.app.registered_commands if (c.name or "") == "edge")
     assert edge.callback.__name__ == "edge_cmd", edge.callback.__name__
-    import inspect
-    src = inspect.getsource(edge.callback)
+    src = source_of(edge.callback)
     for action in ("status", "start", "stop", "restart", "logs"):
         assert f'"{action}"' in src, f"`edge {action}` is advertised and unhandled"
 
@@ -563,6 +575,15 @@ def test_every_advertised_error_code_can_actually_be_raised():
             cls = getattr(errors, name, None)
             if isinstance(cls, type) and getattr(cls, "code", None):
                 raised.add(cls.code)
+            # A GATE carries its specific code as a CONSTRUCTOR ARGUMENT, so the class
+            # walk above sees only the base "GATE" while the thing a caller actually
+            # receives is `GATE_UNAPPROVED_CLUSTER`. Reading the keyword is what makes
+            # `RAISED_GATE_CODES` impossible to drift from the raises it describes.
+            if isinstance(exc, ast.Call):
+                for kw in exc.keywords:
+                    if kw.arg == "code" and isinstance(kw.value, ast.Constant) \
+                            and isinstance(kw.value.value, str):
+                        raised.add(kw.value.value)
 
     advertised = set(jsonout._error_codes())
     # REPRO_ERROR is the base and is raised through `_err`/`_fail` wrappers rather
@@ -572,11 +593,21 @@ def test_every_advertised_error_code_can_actually_be_raised():
         f"capabilities advertises {sorted(unraisable)}, which nothing in rc_repro/ "
         f"raises — a caller told to expect it would write a branch that never runs")
 
-    # And the converse guard, so the exclusion cannot quietly hide a real code: an
-    # error class that IS raised must be advertised.
-    assert "GATE" not in advertised, (
-        "GATE is advertised again — set AuthorityGateError.advertised in the same "
-        "commit that adds the first raise, not before")
+    # THE CONVERSE, and it is now general rather than one hardcoded class name. It
+    # used to read `assert "GATE" not in advertised`, with the message "set
+    # AuthorityGateError.advertised in the same commit that adds the first raise".
+    # That commit landed and did not, so the guard went on asserting the old world was
+    # still true -- a hardcoded name cannot notice the thing it names has changed.
+    # Stated as the invariant instead, it fails the moment any raisable code stops
+    # being advertised.
+    unadvertised = raised - advertised
+    assert not unadvertised, (
+        f"{sorted(unadvertised)} can be raised but is not advertised — a caller "
+        f"branching on `code` would meet one it was never told about")
+
+    # And the reachable gate codes are exactly what `errors` says they are.
+    assert set(errors.RAISED_GATE_CODES) == raised & set(errors.GATE_CODES), (
+        "RAISED_GATE_CODES has drifted from the `code=` literals in rc_repro/")
 
 
 def test_an_unhandled_exception_is_still_one_envelope_on_stdout():

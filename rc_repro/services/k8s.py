@@ -40,7 +40,9 @@ import signal
 import shutil
 import socket
 import subprocess
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -101,13 +103,55 @@ CORE_TOOLS: dict[str, tuple[int, int]] = {
     "helm": (3, 0),
 }
 
-#: Needed only to PROVISION a cluster, never to use one. kind has no documented
-#: floor, so 0.20 is where `extraPortMappings` and the config API settled.
-#: Without it rc-repro cannot create a cluster; it can still run perfectly well
-#: in one you already have.
-PROVISION_TOOLS: dict[str, tuple[int, int]] = {
+#: WHY each floor is the number it is, so `doctor` can say something true when a tool
+#: is below one. It rendered every floor as "the floor the official Rocket.Chat guide
+#: requires", which is unverifiable for all of them: the guide's prerequisites name
+#: `kubectl` and `eksctl` with NO versions, and do not mention `kind` at all. A reason
+#: attached to the wrong number is worse than no reason -- it sends somebody to a
+#: document that does not contain the requirement they are being held to.
+TOOL_FLOOR_REASON: dict[str, str] = {
+    "kind": "where kind's config API and `extraPortMappings` settled",
+}
+DEFAULT_FLOOR_REASON = "the floor rc-repro requires"
+
+
+#: Needed only to PROVISION a cluster ON THIS MACHINE, never to use one. kind has no
+#: documented floor, so 0.20 is where `extraPortMappings` and the config API settled.
+#: Without it rc-repro cannot create a cluster; it can still run perfectly well in one
+#: you already have.
+#:
+#: `Preflight.can_provision` is keyed on THIS dict rather than on PROVISION_TOOLS
+#: below, and the distinction is not cosmetic. The property is an `all()`, so a second
+#: entry in the dict it reads would make it False on every box that has kind and not
+#: the other tool -- taking `preflight`'s own `cluster_exists` probe with it, along
+#: with two strings in the GUI create dialog that read `can_provision` to decide
+#: whether to say "no cluster yet" and "Kubernetes (kind)". Adding an entry HERE is a
+#: breaking change; adding one to the cloud dict below is not.
+LOCAL_PROVISION_TOOLS: dict[str, tuple[int, int]] = {
     "kind": (0, 20),
 }
+
+#: Needed to provision a cluster on a CLOUD provider, and never to use one. Separate
+#: from the local dict for the reason given there, and empty until the cloud work
+#: lands -- `all()` over nothing is True, which is why `can_provision_cloud` guards
+#: against an empty registry rather than trusting it.
+#: NO FLOOR ENFORCED, AND THAT IS THE HONEST ANSWER RATHER THAN A MISSING ONE.
+#: rc-repro needs eksctl to accept a ClusterConfig with `managedNodeGroups`, an
+#: `addons` entry carrying a pinned version, and `metadata.version: "1.33"` -- and
+#: which eksctl release first satisfied all three has not been MEASURED here, because
+#: no cluster has been built with it. A guessed floor is not a safe default in either
+#: direction: too high refuses a setup that works, too low admits one that fails at
+#: create with a cryptic error either way. (0, 0) reports the version found and
+#: enforces nothing, which is what "we have not measured this yet" actually looks
+#: like. Raise it the moment a real create says what it needs.
+CLOUD_PROVISION_TOOLS: dict[str, tuple[int, int]] = {
+    "eksctl": (0, 0),
+}
+
+#: Everything that can provision anything. Kept because `doctor` reports on all tools
+#: and `TOOLS` below is built from it; no property is keyed on this one.
+PROVISION_TOOLS: dict[str, tuple[int, int]] = {**LOCAL_PROVISION_TOOLS,
+                                               **CLOUD_PROVISION_TOOLS}
 
 TOOLS: dict[str, tuple[int, int]] = {**CORE_TOOLS, **PROVISION_TOOLS}
 
@@ -214,12 +258,27 @@ class Preflight:
 
     @property
     def can_provision(self) -> bool:
-        """Whether rc-repro can CREATE a cluster, as opposed to use one.
+        """Whether rc-repro can CREATE a cluster ON THIS MACHINE, as opposed to use one.
 
-        Same reasoning as `tools_ready`: no information is not a yes.
+        Same reasoning as `tools_ready`: no information is not a yes. Keyed on
+        LOCAL_PROVISION_TOOLS, so a cloud tool appearing in the registry cannot turn
+        this False on a box that has kind -- see that dict for what that would break.
         """
         return all(n in self.tools and self.tools[n].present
-                   and self.tools[n].new_enough for n in PROVISION_TOOLS)
+                   and self.tools[n].new_enough for n in LOCAL_PROVISION_TOOLS)
+
+    @property
+    def can_provision_cloud(self) -> bool:
+        """Whether rc-repro can CREATE a cluster on a cloud provider.
+
+        False on an empty registry, deliberately: `all()` over nothing is True, and
+        "there is no cloud tooling compiled in" must not read as "yes, this box can
+        build you an EKS cluster".
+        """
+        if not CLOUD_PROVISION_TOOLS:
+            return False
+        return all(n in self.tools and self.tools[n].present
+                   and self.tools[n].new_enough for n in CLOUD_PROVISION_TOOLS)
 
     @property
     def missing_tools(self) -> list[str]:
@@ -319,6 +378,57 @@ def which(tool: str) -> str:
     return shutil.which(tool) or ""
 
 
+def user_env() -> dict[str, str] | None:
+    """The environment for talking to a cluster rc-repro does NOT own, or None.
+
+    None means "inherit unchanged", which is what every non-owned call used to do --
+    and it made rc-repro's idea of "your kubeconfig" depend on which `kubectl` BINARY
+    is installed rather than on the kubeconfig itself.
+
+    MEASURED, on a box where that diverges: `kubectl` was a symlink to k3s, whose
+    embedded client reads `/etc/rancher/k3s/k3s.yaml` when KUBECONFIG is unset. `aws
+    eks update-kubeconfig` had just written the cluster into `~/.kube/config`, the
+    standard path, and the two files never met -- so `--context <the arn>` was refused
+    with a message telling the operator to run the exact command they had just run.
+    The context existed, was correct, and was invisible.
+
+    So the standard path is named explicitly when nothing else has been said. On a box
+    with ordinary kubectl this changes nothing, because it is already the default; on
+    one where the client disagrees, it makes rc-repro agree with the AWS CLI, which is
+    what wrote the file.
+
+    Two deliberate non-actions. An operator who has SET `KUBECONFIG` has said which
+    files they mean, and that is obeyed untouched. And a missing `~/.kube/config` is
+    left alone rather than forced, because pointing kubectl at a file that does not
+    exist would take away whatever default it does have.
+    """
+    if os.environ.get("KUBECONFIG"):
+        return None
+    standard = Path.home() / ".kube" / "config"
+    if not standard.is_file():
+        return None
+    env = os.environ.copy()
+    env["KUBECONFIG"] = str(standard)
+    return env
+
+
+def env_for(context: str) -> dict[str, str] | None:
+    """The environment for talking to `context`, whoever owns it.
+
+    ONE function, because the rule was written out at EIGHT call sites as
+    `owned_env() if is_ours(context) else None` and a fix to it reached exactly one.
+    When `user_env()` was added to stop rc-repro's view of a kubeconfig depending on
+    which kubectl BINARY is installed, `run()` got it and the seven places that build
+    their own subprocess -- apply, helm install and upgrade, port-forward, logs, exec
+    in and exec out -- did not. The preflight would pass on an EKS context and the
+    first `kubectl apply` would fail on the same missing context the preflight had
+    just found.
+
+    A rule repeated at eight sites is a rule that will be fixed at one of them.
+    """
+    return owned_env() if is_ours(context) else user_env()
+
+
 def run(argv: list[str], *, timeout: float = PROBE_TIMEOUT,
         own: bool = False,
         env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
@@ -338,7 +448,7 @@ def run(argv: list[str], *, timeout: float = PROBE_TIMEOUT,
         return subprocess.run(argv, capture_output=True, text=True,
                               timeout=timeout, check=False,
                               env=env if env is not None
-                              else (owned_env() if own else None))
+                              else (owned_env() if own else user_env()))
     except (OSError, subprocess.SubprocessError) as exc:
         return subprocess.CompletedProcess(argv, returncode=127, stdout="",
                                            stderr=str(exc))
@@ -560,16 +670,70 @@ def tool(name: str) -> Tool:
     found = Tool(name=name, path=which(name))
     if not found.present:
         return found
+    # The fallback is `--version`, and a tool that does not accept it is not merely
+    # unprobed: `_parse_version` returns () on the error text, and `Tool.new_enough`
+    # answers True on an empty version -- deliberately and correctly, so that an
+    # unparseable version never blocks a working tool. The two combine into a floor
+    # that silently passes. `eksctl` is cobra-based and spells it `eksctl version`,
+    # so it is listed here rather than left to a fallback it would fail.
     argv = {
         "kind": [name, "version"],
         "kubectl": [name, "version", "--client"],
         "helm": [name, "version", "--short"],
+        "eksctl": [name, "version"],
     }.get(name, [name, "--version"])
     res = run(argv, timeout=PROBE_TIMEOUT)
     found.raw = (res.stdout or res.stderr or "").strip().splitlines()[0] if (
         res.stdout or res.stderr) else ""
     found.version = _parse_version(found.raw)
     return found
+
+
+#: How many MINOR versions kubectl may differ from the API server and still be
+#: supported. Kubernetes publishes ±1; outside it, calls do not fail cleanly -- they
+#: fail on a field the other side does not know about, which reads as a bug in
+#: whatever was being deployed.
+KUBECTL_SKEW = 1
+
+
+def server_version(context: str) -> tuple[int, ...] | None:
+    """The API server's version, or None if it could not be read.
+
+    Separate from `tool("kubectl").version`, which is the CLIENT, and the distinction
+    is the whole point of the check below. A static floor cannot express skew: the
+    floor here is `kubectl >= 1.21`, and Rocket.Chat's own Launchpad builds clusters at
+    1.33 -- so a kubectl that passes the floor by eleven minors is still outside the
+    supported window, and passing a floor is exactly what it will report doing.
+    """
+    res = run(["kubectl", "--context", context, "version", "--output=json"],
+              own=is_ours(context))
+    if res.returncode != 0:
+        return None
+    try:
+        raw = (json.loads(res.stdout or "{}").get("serverVersion") or {}
+               ).get("gitVersion") or ""
+    except ValueError:
+        return None
+    return _parse_version(raw) or None
+
+
+def skew(context: str, client: tuple[int, ...] | None = None) -> dict | None:
+    """How far kubectl is from this cluster's API server, or None if unaskable.
+
+    Returns the two versions and whether the gap is supported, rather than a verdict:
+    `doctor` wants to say which two numbers it is talking about, and a check that
+    reports "unsupported" without them sends somebody to look up both.
+    """
+    server = server_version(context)
+    if not server:
+        return None
+    if client is None:
+        client = tool("kubectl").version
+    if not client or len(client) < 2 or len(server) < 2:
+        return None
+    gap = abs(client[1] - server[1]) if client[0] == server[0] else 99
+    return {"client": client, "server": server, "gap": gap,
+            "ok": gap <= KUBECTL_SKEW}
 
 
 def clusters() -> tuple[list[str], str]:
@@ -587,13 +751,233 @@ def clusters() -> tuple[list[str], str]:
             if ln.strip() and "No kind clusters" not in ln], ""
 
 
+def forget_context(context: str) -> bool:
+    """Remove one context from whichever kubeconfig holds it. True if it is now gone.
+
+    BOTH FILES, because rc-repro wrote into both. `cluster create` runs `aws eks
+    update-kubeconfig`, which writes to the USER's kubeconfig -- so an entry for a
+    cluster rc-repro built and then deleted is rc-repro's own litter, and removing it
+    is symmetry rather than editing somebody's configuration behind their back.
+
+    VERIFIED, not assumed. The first version returned the exit status, and `kubectl
+    config unset users.<name>` succeeds whether or not there was anything to unset --
+    so it reported True for a context it had not touched, on a box where the entry
+    lived in the other file.
+    """
+    for own in (True, False):
+        for verb, target in (("delete-context", context), ("delete-cluster", context),
+                             ("unset", f"users.{context}")):
+            run(["kubectl", "config", verb, target], own=own)
+        # AND THE POINTER AT IT. `kubectl config delete-context` removes the entry and
+        # leaves `current-context` naming it, so the file is left pointing at something
+        # that is no longer in it. Everything that asks "which cluster is kubectl on"
+        # then gets a name with nothing behind it, and rc-repro reported "pointed at
+        # <arn>, which is not answering" -- about a cluster that had been deleted, whose
+        # entry had been removed, and which `contexts()` correctly no longer listed.
+        #
+        # MEASURED on this box after a real delete: `contexts()` answered ['default']
+        # and `active_context()` answered the dead ARN, and six unrelated Kubernetes
+        # tests failed on a cluster nothing could see.
+        now = run(["kubectl", "config", "current-context"], own=own)
+        if now.returncode == 0 and (now.stdout or "").strip() == context:
+            run(["kubectl", "config", "unset", "current-context"], own=own)
+    return context not in contexts()[0]
+
+
+def context_servers() -> tuple[dict[str, str], str]:
+    """(context name -> the API server it points at, why the question failed).
+
+    TWO CONTEXTS CAN BE ONE CLUSTER, and on EKS that is the normal case rather than an
+    oddity: `eksctl create cluster` writes `<iam-user>@<cluster>.<region>.eksctl.io`
+    and `aws eks update-kubeconfig` writes the cluster ARN, and a cluster built with
+    one and adopted with the other has both. Anything that lists CONTEXTS then lists
+    that cluster twice.
+
+    The server URL is what settles it. Two contexts naming the same API server are the
+    same cluster whatever they are called, and it needs no probe -- the kubeconfig
+    already knows.
+    """
+    servers: dict[str, str] = {}
+    reasons: list[str] = []
+    for own in (False, True):
+        res = run(["kubectl", "config", "view", "-o", "json"], own=own)
+        if res.returncode != 0:
+            reasons.append(why(res, limit=120))
+            continue
+        try:
+            doc = json.loads(res.stdout or "{}")
+        except ValueError:
+            reasons.append("kubeconfig is not readable as JSON")
+            continue
+        by_name = {c.get("name"): ((c.get("cluster") or {}).get("server") or "")
+                   for c in (doc.get("clusters") or [])}
+        for ctx in (doc.get("contexts") or []):
+            name = ctx.get("name")
+            target = (ctx.get("context") or {}).get("cluster")
+            if name and by_name.get(target):
+                servers.setdefault(name, by_name[target])
+    return servers, "; ".join(reasons) if reasons and not servers else ""
+
+
+def contexts() -> tuple[list[str], str]:
+    """(every context this machine can name, why the question could not be answered).
+
+    BOTH kubeconfigs, because `--context` may legitimately name either: the ones the
+    user set up -- `aws eks update-kubeconfig` writes one -- and the one rc-repro keeps
+    for a cluster it created. Reading only the user's would refuse
+    `--context kind-rc-repro-local`, which is a reasonable thing to type and means
+    "use the cluster you already made, do not make another".
+
+    Two answers rather than one, for the reason `clusters()` gives: a kubeconfig that
+    cannot be READ is not a kubeconfig with no contexts IN it, and only one of those is
+    safe to act on. The caller that refuses an unknown context must not fire on the
+    first.
+    """
+    found: list[str] = []
+    reasons: list[str] = []
+    for own in (False, True):
+        res = run(["kubectl", "config", "get-contexts", "-o", "name"], own=own)
+        if res.returncode != 0:
+            reasons.append(why(res, limit=120))
+            continue
+        found.extend(ln.strip() for ln in (res.stdout or "").splitlines() if ln.strip())
+    if not found and reasons:
+        return [], "; ".join(dict.fromkeys(reasons))
+    return sorted(dict.fromkeys(found)), ""
+
+
+#: `reach()` answers. Four, because the probe can fail in four ways that need four
+#: different things done about them, and collapsing them to a bool sent people to
+#: check a healthy cluster three separate times in one day of live testing.
+REACH_OK = "ok"
+REACH_DENIED = "denied"
+REACH_NO_CONTEXT = "no-context"
+REACH_DOWN = "down"
+
+#: What the API server says when it is answering and refusing. EKS phrases it two
+#: ways depending on which client asks -- `kubectl get --raw` gets the first, the
+#: discovery client the second -- and both were observed on one cluster on the same
+#: afternoon, so matching only one of them is matching none of them half the time.
+_DENIED_MARKS = (
+    "unauthorized",
+    "must be logged in",
+    "asked for the client to provide credentials",
+    "forbidden",
+    "error from server (forbidden)",
+)
+
+#: What kubectl says when the kubeconfig has never heard of the context. NOT a
+#: statement about the cluster: this is the answer for a perfectly healthy cluster
+#: that nobody has run `aws eks update-kubeconfig` for on this box, and reading it as
+#: "the cluster is down" is how `cluster delete` came to report an ACTIVE cluster as
+#: not answering.
+#:
+#: TWO PHRASINGS, both observed on this box on the same day: `kubectl get --raw`
+#: answers `error: context "x" does not exist`, while the client-config path answers
+#: `Error in configuration: context was not found for specified context: x`. Matching
+#: one of them is matching none of them half the time, which is why these are patterns
+#: rather than the substring list the denied marks can afford to be.
+_NO_CONTEXT_PATTERNS = (
+    re.compile(r"context .*(?:does not exist|was not found)"),
+    re.compile(r"no context exists with the name"),
+)
+
+
+@dataclass
+class Reach:
+    """Whether the API server answers, and when it does not, WHY it did not.
+
+    The three-answer rule this module is governed by, applied to reachability. A
+    probe that comes back false is not one fact, it is four, and they are not
+    interchangeable:
+
+      REACH_OK          the cluster answered
+      REACH_DENIED      it answered and refused us -- an RBAC or access-entry problem,
+                        and the cluster is perfectly healthy
+      REACH_NO_CONTEXT  this box has no kubeconfig entry for it -- also not a
+                        statement about the cluster
+      REACH_DOWN        nothing answered: stopped, deleted, or unroutable from here
+
+    Only the last one means "check the cluster", and it was the only advice given for
+    all four. MEASURED, three times in one day: `cluster status` told an engineer to
+    check an ACTIVE cluster that was merely refusing them; `cluster delete` said an
+    ACTIVE cluster "is not answering" when the real cause was a fresh RC_REPRO_HOME
+    with no kubeconfig entry; and the original kubeconfig-resolution defect produced
+    an error telling the reader to run the command they had just run.
+    """
+    status: str = REACH_DOWN
+    detail: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.status == REACH_OK
+
+    @property
+    def denied(self) -> bool:
+        """Answered, and said no. The cluster is up; the credential is the problem."""
+        return self.status == REACH_DENIED
+
+    def why(self) -> str:
+        """One sentence naming the actual cause, for a refusal message to carry."""
+        if self.status == REACH_OK:
+            return ""
+        if self.status == REACH_DENIED:
+            return ("it answered and refused these credentials, so the cluster is up "
+                    "and this is a permissions problem")
+        if self.status == REACH_NO_CONTEXT:
+            return ("this machine has no kubeconfig entry for it, which is not a "
+                    "statement about the cluster")
+        return "nothing answered: it may be stopped, deleted, or unreachable from here"
+
+    def advice(self, context: str = "") -> str:
+        """What to actually do about it. Empty when there is nothing to say."""
+        if self.status == REACH_DENIED:
+            return (" An EKS cluster grants Kubernetes access separately from IAM: ask "
+                    "whoever created it to run `aws eks create-access-entry`, or check "
+                    "`kubectl auth whoami`.")
+        if self.status == REACH_NO_CONTEXT:
+            if context.startswith("arn:aws:eks:"):
+                return (" For an EKS cluster, `aws eks update-kubeconfig --name "
+                        "<cluster> --region <region>` writes it.")
+            return " `kubectl config get-contexts` lists the ones this box knows."
+        return ""
+
+
+def reach(context: str = CONTEXT,
+          timeout: float = PROBE_TIMEOUT) -> Reach:
+    """Probe the API server and classify what came back. Never raises."""
+    res = run(["kubectl", "--context", context, "get", "--raw", "/readyz"],
+              own=is_ours(context), timeout=timeout)
+    if res.returncode == 0 and "ok" in (res.stdout or "").lower():
+        return Reach(status=REACH_OK)
+    # BOTH STREAMS. kubectl writes its configuration errors to stderr and some server
+    # errors to stdout, and which one carries the reason varies by subcommand -- so a
+    # classifier that reads one of them misfiles the other as REACH_DOWN, which is the
+    # exact conflation this type exists to end.
+    said = f"{res.stderr or ''}\n{res.stdout or ''}".lower()
+    detail = (res.stderr or res.stdout or "").strip().splitlines()
+    first = detail[0].strip() if detail else ""
+    for pat in _NO_CONTEXT_PATTERNS:
+        if pat.search(said):
+            return Reach(status=REACH_NO_CONTEXT, detail=first)
+    for mark in _DENIED_MARKS:
+        if mark in said:
+            return Reach(status=REACH_DENIED, detail=first)
+    return Reach(status=REACH_DOWN, detail=first)
+
+
 def reachable(context: str = CONTEXT,
               timeout: float = PROBE_TIMEOUT) -> bool:
     """Whether the API server answers. A cluster can exist and not respond --
-    a stopped Docker, a half-deleted cluster, a machine that just woke up."""
-    res = run(["kubectl", "--context", context, "get", "--raw", "/readyz"],
-               own=is_ours(context), timeout=timeout)
-    return res.returncode == 0 and "ok" in (res.stdout or "").lower()
+    a stopped Docker, a half-deleted cluster, a machine that just woke up.
+
+    KEPT AS A BOOL on purpose. Most callers are resolution order -- `if ours and
+    reachable(ours)` -- where the four-way answer would be noise and the only question
+    is whether this candidate can be used. Callers that put the result in front of a
+    person use `reach()` instead, because that is where the difference is the whole
+    value.
+    """
+    return reach(context, timeout=timeout).ok
 
 
 def helm_reachable(context: str = CONTEXT,
@@ -692,17 +1076,89 @@ def loadbalancer_service(context: str = CONTEXT) -> tuple[str, str]:
     This is also the address the Kubernetes HTTPS work needs -- the endpoint an edge
     passes TLS through to -- so it is a seam rather than a helper for one check.
     """
-    res = run(["kubectl", "--context", context, "get", "svc", "-A", "-o",
-               "jsonpath={range .items[?(@.spec.type=='LoadBalancer')]}"
-               "{.metadata.name}={.status.loadBalancer.ingress[0].ip}"
-               "{.status.loadBalancer.ingress[0].hostname} {end}"],
-              own=is_ours(context))
-    if res.returncode != 0:
-        return "", ""
-    for pair in (res.stdout or "").split():
-        name, _, addr = pair.partition("=")
-        if addr:
-            return name, addr
+    # READ AS OBJECTS, NOT AS A JSONPATH. The jsonpath this replaces interpolated
+    # `{...ingress[0].ip}{...ingress[0].hostname}` adjacently, with nothing between
+    # them. It was safe only because the two platforms in play populate exactly one
+    # each -- k3s ServiceLB sets `ip`, an AWS ELB/NLB sets `hostname` -- so a Service
+    # carrying BOTH (some controllers do, and dual-stack setups do) yielded the two
+    # concatenated into one nonsense string, which then travelled into
+    # `IngressEndpoint.address` and out as a printed CNAME target somebody would paste
+    # into DNS.
+    #
+    # HOSTNAME IS PREFERRED EXPLICITLY rather than by hoping the other field is empty.
+    # A CNAME target has to be a name, and where a provider gives both, the name is
+    # the stable one -- an ELB's addresses change under it.
+    #
+    # And every ingress entry is considered, not `[0]` alone: a provider that lists an
+    # address-less entry first would otherwise read as a load balancer with no address.
+    name, address, _pending = loadbalancer_state(context)
+    return name, address
+
+
+def loadbalancer_state(context: str = CONTEXT) -> tuple[str, str, int]:
+    """`(service name, address, how many LoadBalancer Services have no address yet)`.
+
+    THE THIRD VALUE IS THE ONE `loadbalancer_service` COULD NOT EXPRESS. It returns a
+    name only alongside an address, so "this cluster has no LoadBalancer Service" and
+    "it has one and the provider has not published an address yet" both came back as
+    `("", "")` -- and a caller that wanted to wait could not tell whether waiting had
+    any point. On EKS the second is the normal state for the first minute or two after
+    a create.
+    """
+    found = ask_list("svc", context=context, all_namespaces=True)
+    if found.refused:
+        return "", "", 0
+    pending = 0
+    for svc in found.items:
+        if str(((svc.get("spec") or {}).get("type")) or "") != "LoadBalancer":
+            continue
+        status = ((svc.get("status") or {}).get("loadBalancer") or {})
+        for entry in (status.get("ingress") or []):
+            addr = str(entry.get("hostname") or entry.get("ip") or "").strip()
+            if addr:
+                return str((svc.get("metadata") or {}).get("name") or ""), addr, pending
+        pending += 1
+    return "", "", pending
+
+
+#: How long `wait_for_loadbalancer` will wait for a provider to publish an address.
+#: An AWS ELB/NLB commonly takes one to three minutes; k3s ServiceLB is immediate.
+LOADBALANCER_TRIES = 60
+LOADBALANCER_INTERVAL = 3.0
+
+
+def wait_for_loadbalancer(context: str, *, emit: Emit = null_emit,
+                          sleep=time.sleep) -> tuple[str, str]:
+    """`(service name, address)` once a provider has published one, or ("", "").
+
+    `loadbalancer_service` asks once, which is right for a report. It is wrong for
+    `cluster prepare`, which runs immediately after a 20-minute `cluster create` and
+    whose `cname_target` is the one line an operator needs in order to finish the job:
+    an ELB commonly takes one to three minutes to publish a hostname, so the normal
+    outcome of a successful create was a blank CNAME target.
+
+    A BLANK IS STILL A REAL ANSWER at the end of the wait -- no controller, or nobody
+    asked for a LoadBalancer Service -- and the caller must not print it as though it
+    were a hostname. This only stops "not yet" being reported as "none".
+    """
+    said = False
+    for attempt in range(LOADBALANCER_TRIES):
+        name, address, pending = loadbalancer_state(context)
+        if address:
+            return name, address
+        if not pending:
+            # NOTHING IS PENDING. No LoadBalancer Service is waiting on an address, so
+            # no amount of waiting will produce one, and spending three minutes proving
+            # it would be the slowest possible way to say "there is no ingress here".
+            # This is also the answer on a refused read -- see `loadbalancer_state`.
+            return "", ""
+        if not said:
+            info(emit, f"waiting for {pending} load balancer(s) to be given an "
+                       f"address — a cloud provider takes a minute or two",
+                 phase="provision")
+            said = True
+        if attempt < LOADBALANCER_TRIES - 1:
+            sleep(LOADBALANCER_INTERVAL)
     return "", ""
 
 
@@ -1005,18 +1461,37 @@ def nodes_summary(context: str = CONTEXT) -> tuple[int, list[str]] | None:
 
 
 def ingress_classes(context: str = CONTEXT) -> list[str] | None:
-    """Ingress controllers installed in this cluster.
+    """Ingress controllers installed in this cluster, best choice first.
 
     kind ships none -- verified on this box, `get ingressclass` returns "No
     resources found" -- which is why rc-repro installs Traefik into its OWN
     cluster and refuses `--domain` against yours rather than installing into it.
+
+    ORDERED, because the caller adopts the first one and the API's order is not a
+    preference. An EKS cluster carrying both `alb` (AWS Load Balancer Controller) and
+    `nginx` would otherwise have the choice made by whichever the API server happened
+    to list first -- and the two behave differently for ACME http-01 solving and for
+    `ingress_endpoint` discovery, so that is a real difference decided by nothing.
+
+    The cluster's OWN default wins: `ingressclass.kubernetes.io/is-default-class` is
+    Kubernetes' way of saying which controller an Ingress with no class gets, so
+    somebody has already answered this question and rc-repro should not overrule them.
+    Names are the tiebreak after that -- arbitrary, but the same arbitrary answer every
+    time, which "whatever the API listed first" was not.
     """
     seen = ask_list("ingressclass", context=context)
     if seen.refused:
         return None
-    return [str(((it.get("metadata") or {}).get("name")) or "")
-            for it in seen.items
-            if ((it.get("metadata") or {}).get("name"))]
+    rows = []
+    for it in seen.items:
+        meta = (it.get("metadata") or {})
+        name = str(meta.get("name") or "")
+        if not name:
+            continue
+        default = str((meta.get("annotations") or {}).get(
+            "ingressclass.kubernetes.io/is-default-class") or "").lower() == "true"
+        rows.append((0 if default else 1, name))
+    return [name for _rank, name in sorted(rows)]
 
 
 def workspace_namespaces(context: str = CONTEXT) -> list[str] | None:
@@ -1127,36 +1602,117 @@ def preflight(context: str = "") -> Preflight:
     out.cluster_reachable = reachable(out.context)
     if not out.cluster_reachable:
         return out
-    # Asked HERE, beside kubectl's answer, so a disagreement is found before a
-    # create spends four minutes earning it.
-    out.helm_reachable = helm_reachable(out.context)
-    # EACH ANSWER READ, not assumed. `reachable()` probes /readyz, which a
-    # restricted credential can usually still get -- so passing it is not evidence
-    # that any of the reads below will be permitted.
-    sc = storage_classes(out.context)
-    if sc is None:
-        out.unreadable.append("storage")
-    else:
-        out.storage_classes, out.default_storage_class = sc
-    ic = ingress_classes(out.context)
-    if ic is None:
-        out.unreadable.append("ingress")
-    else:
-        out.ingress_classes = ic
-    ns_seen = workspace_namespaces(out.context)
-    if ns_seen is None:
-        out.unreadable.append("namespaces")
-    else:
-        out.namespaces = ns_seen
-    out.distribution = distribution(out.context)
-    ns_ = nodes_summary(out.context)
-    if ns_ is None:
-        out.unreadable.append("nodes")
-    else:
-        out.node_count, out.architectures = ns_
-    out.metrics = metrics_available(out.context)
-    out.loadbalancer = loadbalancer_address(out.context)
+    # EIGHT INDEPENDENT READS, TOGETHER. The ordering rule this function is built on
+    # is about the PRECONDITION above -- there is no point asking an API server for
+    # storage classes when kubectl is absent or the server is not answering -- and
+    # that gate stays exactly where it was. Everything below it needs only
+    # `out.context` and nothing below it needs anything else below it.
+    #
+    # MEASURED against a live EKS cluster: `doctor` made 42 calls in 24.3 seconds, and
+    # about forty of them were kubectl or helm round trips at 1.2-2.2s each. Run one
+    # after another these eight are most of that; the AWS block this function sits
+    # beside was parallelised first and simply stopped being the slow half.
+    #
+    # `unreadable` is appended in a FIXED order afterwards rather than as each answer
+    # lands, so the report does not vary with which call happened to return first.
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        # Asked HERE, beside kubectl's answer, so a disagreement is found before a
+        # create spends four minutes earning it.
+        f_helm = pool.submit(helm_reachable, out.context)
+        # EACH ANSWER READ, not assumed. `reachable()` probes /readyz, which a
+        # restricted credential can usually still get -- so passing it is not evidence
+        # that any of these reads will be permitted.
+        f_sc = pool.submit(storage_classes, out.context)
+        f_ic = pool.submit(ingress_classes, out.context)
+        f_ns = pool.submit(workspace_namespaces, out.context)
+        f_dist = pool.submit(distribution, out.context)
+        f_nodes = pool.submit(nodes_summary, out.context)
+        f_metrics = pool.submit(metrics_available, out.context)
+        f_lb = pool.submit(loadbalancer_address, out.context)
+
+        out.helm_reachable = f_helm.result()
+        sc = f_sc.result()
+        if sc is None:
+            out.unreadable.append("storage")
+        else:
+            out.storage_classes, out.default_storage_class = sc
+        ic = f_ic.result()
+        if ic is None:
+            out.unreadable.append("ingress")
+        else:
+            out.ingress_classes = ic
+        ns_seen = f_ns.result()
+        if ns_seen is None:
+            out.unreadable.append("namespaces")
+        else:
+            out.namespaces = ns_seen
+        out.distribution = f_dist.result()
+        ns_ = f_nodes.result()
+        if ns_ is None:
+            out.unreadable.append("nodes")
+        else:
+            out.node_count, out.architectures = ns_
+        out.metrics = f_metrics.result()
+        out.loadbalancer = f_lb.result()
     return out
+
+
+#: The first Rocket.Chat release published as a MULTI-ARCHITECTURE image.
+#:
+#: MEASURED with `docker manifest inspect` against registry.rocket.chat: 7.8.0, 7.9.0
+#: and 7.10.0 each return a single `manifest.v2+json` -- one architecture, amd64 --
+#: while 8.0.0 and 8.5.1 return `manifest.list.v2+json` carrying amd64 and arm64. The
+#: audit that prompted this measured the same thing at 6.5.0, 4.8.0 and 3.18.0.
+#:
+#: Recorded as a version rather than read from the registry on every create, because
+#: asking would put a network call to a third-party registry -- and, with
+#: `docker manifest inspect`, a Docker dependency -- inside the one runtime that is
+#: meant not to need Docker at all.
+FIRST_MULTIARCH_RC = (8, 0, 0)
+
+#: What Kubernetes calls the architectures rc-repro's images are built for. Node
+#: architectures come back in these terms from `.status.nodeInfo.architecture`.
+AMD64 = "amd64"
+
+
+def architecture_blocker(pre: Preflight, rc_version: str) -> str:
+    """Why this cluster's nodes cannot run this Rocket.Chat image, or "".
+
+    Same shape and same reason as `storage_blocker`: a refusal beats a create that
+    installs cleanly and then cannot pull. `nodes_summary` has always READ the node
+    architectures and its docstring has always said why they matter -- the value went
+    to one string on `doctor`'s screen and was never compared against anything.
+
+    THE IRONY IS THE POINT: the amd64-only range is precisely the range rc-repro exists
+    for. Reproducing a customer's old version is the product's whole purpose, and a
+    Graviton node group is an ordinary way to run EKS cheaply.
+
+    Bounded by what is actually known. An unread architecture is not a mismatch, an
+    unreachable cluster is not our question, and a cluster with even one amd64 node can
+    run the image -- Kubernetes will schedule it there, and pinning it with a
+    nodeSelector would trade a fast, legible `ErrImagePull` for a silent `Pending`.
+    """
+    if not pre.cluster_reachable or not pre.architectures:
+        return ""
+    key = _version_key(rc_version)
+    # A VERSION THIS CANNOT READ MUST NOT BECOME A REFUSAL. `_version_key` answers
+    # `(-1,)` for anything non-numeric, which sorts BELOW every real release -- so a
+    # version it could not parse would read as "older than 8.0.0" and block a create
+    # that is very likely fine. Unreachable today, because `versions.resolve` refuses
+    # `latest` long before here, but the direction of the mistake is the one this
+    # module exists to prevent: "I could not tell" turning into "no".
+    if not key or key[0] < 0 or key >= FIRST_MULTIARCH_RC:
+        return ""
+    if AMD64 in pre.architectures:
+        return ""
+    shape = ", ".join(sorted(pre.architectures))
+    return (f"Rocket.Chat {rc_version} is published for {AMD64} only, and every node in "
+            f"this cluster is {shape}. The workspace would install and then fail to "
+            f"pull with 'no matching manifest'. Add an {AMD64} node group, or use "
+            f"Rocket.Chat {'.'.join(str(n) for n in FIRST_MULTIARCH_RC)} or newer, or "
+            f"reproduce this version on the Docker runtime — which pins "
+            f"`platform: linux/{AMD64}` and runs it under emulation, something a "
+            f"Kubernetes node cannot do.")
 
 
 def storage_blocker(pre: Preflight) -> str:
@@ -1253,10 +1809,33 @@ def cluster_context() -> str:
     return found or CONTEXT
 
 
-#: What `distribution` a cluster is, for the one thing a name may decide: the wording
-#: of a message. Never a branch -- `k3s --disable traefik` is a real setup, minikube
+#: What `distribution` a cluster is. `k3s --disable traefik` is a real setup, minikube
 #: ships ingress as an addon that is off, and kind gains one when rc-repro installs it,
-#: so what a cluster CAN do is probed (see Preflight) and what it IS is only labelled.
+#: so what a cluster CAN do is always PROBED (see Preflight); what it IS is a label.
+#:
+#: THE RULE IS NOT "NEVER A BRANCH" -- this comment used to say that, and it was not
+#: true. The label does reach conditionals, and a reader who trusted the absolute would
+#: not go looking for them:
+#:
+#:   * `is_local_cluster()`      -- may an ingress be installed, and may the local CA's
+#:                                  PRIVATE KEY be copied into a cluster Secret
+#:   * `cluster.BILLABLE`        -- whether a cost estimate is produced at all
+#:   * `lifecycle._BILLABLE_DISTRIBUTIONS` -- the "no --domain, port-forward only" warn
+#:   * `doctor`'s `on_eks`       -- missing AWS tooling as `fail` rather than `warn`
+#:
+#: The rule that IS true, and the one that matters: **a distribution label never widens
+#: what rc-repro may do, and every branch on it fails closed.** `is_local_cluster` says
+#: so itself -- "Unknown answers False, deliberately... 'I do not know where this
+#: cluster is' must not come out as yes" -- so a mislabelled or unreadable cluster
+#: loses capability rather than gaining it. `cluster.provider_of` then repairs the
+#: commonest mislabel one layer up by reading `eks` out of an `arn:aws:eks:` context
+#: name when the node probe answers "unknown", which was measured against a real
+#: cluster whose node group was mid-delete.
+#:
+#: The residual effect of a mislabel is therefore UNDER-reporting: an EKS cluster that
+#: answers "unknown" and whose context is not an ARN gets no cost estimate and no
+#: port-forward warning. That is the safe direction for a capability and the unsafe
+#: one for a bill, which is what `cluster list` exists to catch.
 #:
 #: Signals in order of reliability, each verified against a live cluster: `providerID`
 #: (`kind://docker/…`, `k3s://docker-01`), then the kubelet's version suffix (`+k3s`,
@@ -1314,7 +1893,118 @@ class ClusterPlan:
     create: bool = False          # this call will bring the cluster into existence
 
 
-def plan_cluster() -> ClusterPlan:
+def short_name(context: str) -> str:
+    """The cluster's own name inside a context name.
+
+    `aws eks update-kubeconfig` writes the cluster ARN as the context, so the name
+    somebody actually calls the cluster is the last path segment of it. For a short
+    context -- `default`, `kind-rc-repro-local` -- the whole thing already is that
+    name, which is why this is safe to apply to every context rather than to EKS ones.
+
+    AND THE OTHER SHAPE AWS WRITES. `eksctl` names its context
+    `<user>@<cluster>.<region>.eksctl.io`, which has no `/` at all -- so this returned
+    the whole forty-four-character string as the cluster's "short" name. That made
+    `--context support` fail to match a cluster whose only context was the eksctl one,
+    and put the untouched string into a picker that had asked for something short.
+    Both halves of the same fact: the two tools name one cluster differently, which is
+    also why `known_contexts` dedupes them.
+    """
+    if context.endswith(".eksctl.io") and "@" in context:
+        return context.split("@", 1)[1].split(".", 1)[0]
+    return context.rsplit("/", 1)[-1]
+
+
+def assert_context_known(context: str) -> tuple[str, str]:
+    """Resolve a context to its full name, or refuse. Returns (resolved, unreadable).
+
+    Shared, because `up --context` and `cluster status --context` must refuse the same
+    typo the same way -- two commands taking the same option and disagreeing about
+    whether its value exists is the shape `doctor` and `up` were already fixed for.
+
+    A CLUSTER'S OWN NAME IS ACCEPTED, not only its full context name. On EKS the
+    context is the cluster ARN --
+    `arn:aws:eks:us-east-1:533674205877:cluster/support` -- which has to be pasted on
+    every `up`, several times a day, for a workspace that lives for an afternoon.
+    `--context support` means the same thing and is the form people actually hold in
+    their heads. Resolved rather than guessed: an exact context name always wins, a
+    short name has to match exactly one cluster, and two clusters of the same name in
+    different regions or accounts REFUSE and name both -- acting on the wrong one is
+    this feature's whole failure mode, and a silent pick of the first is how that
+    happens.
+
+    The second return value is the reason `contexts()` could not answer, and it is a
+    reason rather than a refusal ON PURPOSE: "I could not read the kubeconfig" is not
+    "that context is not in it", so an unreadable list must not turn a real cluster
+    name into an argument error. The caller decides what to do with it.
+    """
+    known, unreadable = contexts()
+    if not known or context in known:
+        return context, unreadable
+    hits = [c for c in known if short_name(c) == context]
+    # TWO NAMES FOR ONE CLUSTER IS NOT AMBIGUITY. `eksctl create cluster` writes
+    # `<user>@<name>.<region>.eksctl.io` and `aws eks update-kubeconfig` writes the
+    # ARN, so a cluster rc-repro built has BOTH -- and once `short_name` learned the
+    # eksctl shape, both started matching the short name and this refused the normal
+    # case with "they are different clusters", which they are not.
+    #
+    # MEASURED on a cluster created minutes earlier: `up --context chatrepo` -- the
+    # exact form `cluster create` prints in its own closing line -- was refused.
+    #
+    # The API server settles it with no probe, the same way `known_contexts` dedupes
+    # the ledger: two contexts naming the same server are one cluster. The ARN is
+    # preferred as the answer because it says which account and region, which is what
+    # matters when the refusal below is genuinely warranted.
+    if len(hits) > 1:
+        servers, _why = context_servers()
+        distinct = {servers.get(c) for c in hits if servers.get(c)}
+        if len(distinct) == 1 and len(servers) >= len(hits):
+            best = next((c for c in sorted(hits) if c.startswith("arn:aws:eks:")),
+                        sorted(hits)[0])
+            return best, unreadable
+    if len(hits) == 1:
+        return hits[0], unreadable
+    if len(hits) > 1:
+        raise ValidationError(
+            f"{context!r} names more than one cluster this machine can see: "
+            + ", ".join(repr(c) for c in sorted(hits))
+            + ". Give the full context name — they are different clusters, and "
+              "acting on the wrong one is not recoverable.")
+    raise ValidationError(
+        f"no kubeconfig context named {context!r}. This machine can see: "
+        + ", ".join(repr(c) for c in known)
+        + "." + _context_advice(context, absent=True))
+
+
+def _context_advice(context: str, *, absent: bool) -> str:
+    """The remedy line for a context rc-repro was asked for and cannot use.
+
+    Split out because BOTH refusals in `plan_cluster` need one and both used to end
+    in advice about `aws eks update-kubeconfig` -- the right hint for the case
+    `--context` was built for, and exactly the WRONG one for rc-repro's own cluster,
+    where the answer is to stop passing `--context` at all. Measured: on a fresh
+    `RC_REPRO_HOME`, `--context kind-rc-repro-local` refused correctly and then told
+    the user to run an AWS command about a local kind cluster.
+
+    `absent` separates the two cases, because they have different remedies: a context
+    that is not in the kubeconfig needs one PUT there, while one that is there and
+    does not answer needs the cluster looked at.
+    """
+    if context == CONTEXT:
+        if not which("kind"):
+            return (f" {context!r} is the cluster rc-repro builds for itself, and "
+                    f"`kind` is not installed, so it cannot be built. Install kind, "
+                    f"or name a cluster you already have.")
+        return (f" {context!r} is the cluster rc-repro builds for itself, and a named "
+                f"context is always adopted rather than created — run `up` WITHOUT "
+                f"`--context` and it will be built.")
+    if absent:
+        return (" For an EKS cluster, `aws eks update-kubeconfig --name <cluster> "
+                "--region <region>` writes one.")
+    return (f" Check that `kubectl --context {context} get nodes` works; for EKS that "
+            f"also needs `aws` on PATH to mint a token.")
+
+
+def plan_cluster(context: str = "") -> ClusterPlan:
     """Choose the cluster, probing only -- nothing here writes to the machine.
 
     Separate from `ensure_cluster` on purpose, and the reason is a measured defect: the
@@ -1325,16 +2015,58 @@ def plan_cluster() -> ClusterPlan:
 
     Order, and it is short because it is not a precedence contest:
 
+      0. the context asked for                           -- ADOPTS. never creates.
       1. a cluster rc-repro created, if it still answers  -- ask the cluster, not `kind`
       2. `kind` present                                   -- create ours, as today
       3. whatever `kubectl` points at, if it answers       -- k3s, minikube, anything
       4. refuse
+
+    Step 0 exists because steps 1-4 have no way to say "that one". With the `kind`
+    BINARY present, step 2 wins over step 3 -- MEASURED, a healthy k3s answering in
+    0.083s passed over for a cluster that did not exist yet -- so a remote cluster was
+    unreachable by any means: there was no flag, no config key and no field, and
+    `kubectl config use-context` only moves the ACTIVE context, which step 2 never
+    reaches.
 
     Step 1 asks the owned kubeconfig rather than `kind get clusters` deliberately: that
     probe needs the kind BINARY, so uninstalling kind while its cluster still ran made
     the cluster invisible -- containers holding memory that nothing in rc-repro could
     see or remove, and resolution quietly falling through to a different cluster.
     """
+    if context:
+        # NEVER `create=True` on an explicitly named context, and this is the whole
+        # safety property of the cloud work rather than a nicety. `up` may bring
+        # exactly one kind of cluster into existence -- the local one -- and everything
+        # else is a cluster somebody else made, or one `cluster create` made on
+        # purpose, at a different lifecycle, with a human watching it spend money.
+        #
+        # A `--provider eks` BRANCH HERE would be the bug: this function is called by
+        # `up`, by `preflight()`, and transitively by `check_capacity()` through
+        # `_will_provision()` -- so such a branch is a code path on which a CAPACITY
+        # CHECK can spend twenty minutes and real money. Keeping `create` meaning
+        # exactly "this `up` will build a kind cluster" is what makes that impossible
+        # by construction instead of by care.
+        context, unreadable = assert_context_known(context)
+        # `unreadable` deliberately does NOT refuse. "I could not read the kubeconfig"
+        # is not "that context is not in it", and acting on the first as though it were
+        # the second is the conflation this module keeps being fixed for. The
+        # reachability probe below is the real test and it answers for itself.
+        got = reach(context)
+        if not got.ok:
+            # NAME WHICH OF THE FOUR IT WAS. "does not answer" plus a guess at three
+            # causes was the message for a cluster that was answering perfectly and
+            # refusing the credential, and for one this box simply had no kubeconfig
+            # entry for -- both of which sent the reader to check a healthy cluster.
+            raise PreflightError(
+                f"context {context!r} cannot be used: {got.why()}"
+                + (f" ({got.detail})" if got.detail else "")
+                + (f" (and the kubeconfig could not be listed: {unreadable})"
+                   if unreadable else "")
+                + "."
+                + (got.advice(context)
+                   or _context_advice(context, absent=False)))
+        return ClusterPlan(context=context, distribution=distribution(context),
+                           create=False)
     if which("kind"):
         # `create` is decided by whether the CLUSTER exists, never by whether this
         # home's kubeconfig happens to know about it. An earlier version required the
@@ -1710,6 +2442,22 @@ def _version_key(text: str) -> tuple:
     return tuple(out)
 
 
+#: The oldest chart series whose values schema is the one `values_for()` emits.
+#:
+#: MEASURED against the live index: it holds 96 chart versions, and below 3.0.0 there
+#: is exactly ONE -- 0.1.0, appVersion 1.16.0 -- with nothing in between. So the floor
+#: rule ("newest chart whose appVersion is at or below the request"), which is correct
+#: everywhere else, drops any request below chart 3.0.0's appVersion straight onto a
+#: 1.16-era chart. That chart predates `extraEnv`, `microservices.*`, `mongodb.enabled`
+#: and the security-context handling -- every values key rc-repro sets -- so it would
+#: render something, and not a working workspace.
+#:
+#: Refusing is better than that, and better than silently succeeding into a pod that
+#: never starts, because the tool HAS an answer for these versions: the Docker runtime
+#: handles them natively, which is what `bitnamilegacy` and the oplog rule are for.
+OLDEST_CHART_SERIES = 3
+
+
 def resolve_chart_version(rc_version: str, emit: Emit = null_emit) -> str:
     """Pin a chart version for a Rocket.Chat version.
 
@@ -1745,14 +2493,40 @@ def resolve_chart_version(rc_version: str, emit: Emit = null_emit) -> str:
         return str(exact[0]["version"])
     at_or_below = [e for e in entries
                    if _version_key(str(e.get("app_version") or "0")) <= want]
-    if at_or_below:
-        best = max(at_or_below, key=lambda e: _version_key(str(e.get("version"))))
-        return str(best["version"])
-    newest = max(entries, key=lambda e: _version_key(str(e.get("version"))))
-    warn(emit, f"no chart deploys Rocket.Chat {rc_version} or older; using "
-               f"{newest.get('version')} (appVersion {newest.get('app_version')})",
-         phase="plan")
-    return str(newest["version"])
+    # OLDER THAN EVERY CHART. There is no floor left to stand on, and the branch that
+    # used to catch this fell back to the NEWEST chart -- the furthest possible thing
+    # from what was asked. Measured: RC 1.0.0 resolved to chart 7.0.2, which deploys
+    # 8.6.1. A request NEWER than every chart is the opposite case and is NOT here:
+    # every chart's appVersion is at or below it, so it takes the branch below and gets
+    # the newest, which for a fresh RC release the chart repo has not caught up with is
+    # the honest best effort.
+    if not at_or_below:
+        oldest = min(entries,
+                     key=lambda e: _version_key(str(e.get("app_version") or "0")))
+        raise ValidationError(
+            f"the Kubernetes runtime cannot reproduce Rocket.Chat {rc_version}: no "
+            f"chart deploys it or anything older — the oldest is "
+            f"{oldest.get('version')} (appVersion {oldest.get('app_version')}). Use "
+            f"the Docker runtime for this version by leaving `--runtime` off.")
+    best = max(at_or_below, key=lambda e: _version_key(str(e.get("version"))))
+    chosen = str(best["version"])
+    # A CHART FROM ANOTHER ERA IS NOT A MATCH, it is the floor rule running out of
+    # charts at the old end. See OLDEST_CHART_SERIES for the measurement.
+    if _version_key(chosen)[0] < OLDEST_CHART_SERIES:
+        raise ValidationError(
+            f"the Kubernetes runtime cannot reproduce Rocket.Chat {rc_version}: "
+            f"the oldest chart that deploys it is {chosen} (appVersion "
+            f"{best.get('app_version')}), which predates every values key rc-repro "
+            f"sets, so it would install something other than what you asked for. "
+            f"Use the Docker runtime for this version — it supports it natively — "
+            f"by leaving `--runtime` off.")
+    # DELIBERATELY SILENT WHEN THE CHART IS MERELY BEHIND THE APP. That is the normal
+    # case -- this function's own docstring says "most Rocket.Chat releases have no
+    # chart with a matching appVersion" -- and a line saying so fired on essentially
+    # every create, immediately before `chart X for Rocket.Chat Y` said the same thing
+    # more clearly. Seen on a real create and it was noise, which is the defect the
+    # rest of this log work exists to remove.
+    return chosen
 
 
 def container_security_context(chart_version: str) -> dict:
@@ -2307,7 +3081,7 @@ def ensure_namespace(name: str, *, context: str, owner: str = "",
             f"could not label namespace {ns}: "
             + why(res)
             + " — without the label it would be invisible to teardown")
-    info(emit, f"namespace {ns}", phase="provision")
+    info(emit, f"created namespace {ns}", phase="provision")
     return ns
 
 
@@ -2317,12 +3091,99 @@ def apply(manifest: str, *, namespace: str, context: str) -> None:
     try:
         res = subprocess.run(argv, input=manifest, capture_output=True, text=True,
                              timeout=APPLY_TIMEOUT, check=False,
-                             env=owned_env() if is_ours(context) else None)
+                             env=env_for(context))
     except (OSError, subprocess.SubprocessError) as exc:
         raise DockerError(f"kubectl apply failed: {exc}") from exc
     if res.returncode != 0:
         raise CreateFailedError("kubectl apply failed: "
                                 + why(res))
+
+
+#: How long an install may stay silent before it starts saying what it is waiting
+#: for, and how often after that. The first is generous on purpose: a warm cluster
+#: installs in well under it and should not narrate a step that is already over.
+INSTALL_QUIET_S = 30
+INSTALL_REPORT_EVERY_S = 30
+
+
+def _pods_waiting(namespace: str, context: str) -> str:
+    """One line naming what the pods in `namespace` are doing, or "" if it cannot ask.
+
+    Deliberately best-effort and deliberately silent on failure: this runs beside an
+    install that is going perfectly well, and a progress report that turned a slow
+    create into a failed one would be worse than the silence it replaces.
+    """
+    res = run(["kubectl", "--context", context, "-n", namespace, "get", "pods",
+               "-o", "json"], timeout=PROBE_TIMEOUT, own=is_ours(context))
+    if res.returncode != 0:
+        return ""
+    try:
+        items = (json.loads(res.stdout or "{}").get("items") or [])
+    except ValueError:
+        return ""
+    if not items:
+        return "no pods yet"
+    tally: dict[str, int] = {}
+    for pod in items:
+        status = pod.get("status") or {}
+        reason = ""
+        for cs in (status.get("containerStatuses") or []):
+            waiting = ((cs.get("state") or {}).get("waiting") or {}).get("reason")
+            if waiting:
+                reason = waiting
+                break
+        # ContainerCreating on a fresh cluster is almost always the image coming
+        # down, and saying so is the difference between "it is stuck" and "it is
+        # doing the 1.6 GB". Named as what it IS, not as what it is probably doing.
+        label = {"ContainerCreating": "starting (usually pulling the image)",
+                 "PodInitializing": "initialising",
+                 "ImagePullBackOff": "cannot pull its image",
+                 "ErrImagePull": "cannot pull its image",
+                 "CrashLoopBackOff": "crashing on start"}.get(
+                     reason, reason or (status.get("phase") or "unknown").lower())
+        tally[label] = tally.get(label, 0) + 1
+    return ", ".join(f"{n} {what}" for what, n in sorted(tally.items()))
+
+
+def _report_install_progress(namespace: str, context: str, emit: Emit,
+                             stop: threading.Event) -> None:
+    """Say what the longest step of a create is waiting for, while it waits.
+
+    THE SILENCE THIS REPLACES WAS MEASURED: 254 seconds between "installing
+    rocketchat/rocketchat" and the next line, on a real EKS create. `--atomic` (helm
+    3) and `--rollback-on-failure` (helm 4) both imply `--wait`, so helm blocks until
+    the pods are Ready and prints nothing at all while it does -- and the comment at
+    the call site claimed passing `emit` made "helm's own progress reach both front
+    ends", which it never could: the output is captured and returns in one piece at
+    the end.
+
+    Four minutes of nothing is the single worst thing a create does to whoever is
+    watching it, and on a cloud cluster it is also the most expensive: it is where
+    somebody decides the tool has hung and kills it, leaving a half-installed release
+    that the next `up` then has to clear.
+    """
+    waited = 0.0
+    while not stop.wait(1.0):
+        waited += 1.0
+        if waited < INSTALL_QUIET_S:
+            continue
+        if (waited - INSTALL_QUIET_S) % INSTALL_REPORT_EVERY_S:
+            continue
+        try:
+            doing = _pods_waiting(namespace, context)
+        except Exception:  # noqa: BLE001 - never fail a good install to report on it
+            return
+        # CHECKED AGAIN AFTER THE PROBE, not only before it. `_pods_waiting` is a
+        # kubectl call that can take PROBE_TIMEOUT, and the install can finish while it
+        # is in flight -- `install` then sets the event and gives the thread two
+        # seconds, which is not enough to interrupt a call already made. Without this
+        # the reporter emits "still installing" AFTER the install has finished, into
+        # the middle of the next phase's output: the exact kind of out-of-order log
+        # line this reporter was added to remove.
+        if stop.is_set() or not doing:
+            continue
+        mins, secs = divmod(int(waited), 60)
+        info(emit, f"still installing ({mins}m{secs:02d}s) — {doing}", phase="boot")
 
 
 def install(*, namespace: str, context: str, values: dict,
@@ -2358,12 +3219,25 @@ def install(*, namespace: str, context: str, values: dict,
             *helm_rollback_on_failure()]
     if chart_version:
         argv += ["--version", chart_version]
+    # BESIDE the install, not instead of it. helm is left exactly as it was -- one
+    # blocking call whose output comes back in one piece -- and a reporter runs
+    # alongside to say what the pods are doing, because helm says nothing at all
+    # while `--wait` waits. See `_report_install_progress` for the measurement.
+    stop = threading.Event()
+    watcher = threading.Thread(target=_report_install_progress,
+                               args=(namespace, context, emit, stop), daemon=True)
+    watcher.start()
     try:
         res = subprocess.run(argv, input=json.dumps(values), capture_output=True,
                              text=True, timeout=INSTALL_TIMEOUT, check=False,
                              env=helm_env(context))
     except (OSError, subprocess.SubprocessError) as exc:
         raise DockerError(f"helm install failed: {exc}") from exc
+    finally:
+        # In a `finally`, so a failed install does not leave a thread reporting on
+        # a namespace nothing is installing into any more.
+        stop.set()
+        watcher.join(timeout=2.0)
     if res.returncode != 0:
         raise CreateFailedError("helm install failed: "
                                 + why(res))
@@ -2886,17 +3760,35 @@ def port_forward(name: str, *, namespace: str, context: str, host_port: int,
     try:
         proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, start_new_session=True,
-                                env=owned_env() if is_ours(context) else None)
+                                env=env_for(context))
     except (OSError, subprocess.SubprocessError):
         return 0
     # CONFIRMED, not assumed: `return proc.pid` recorded a pid for a kubectl that had
     # already exited because the port was taken. See `forward_bound`.
     if not forward_bound(proc, host_port, sleep=sleep):
-        warn(emit, f"the port-forward for {name!r} did not come up on port "
-                   f"{host_port}, so nothing is published there. Something else "
-                   f"probably holds that port — `ss -ltnp | grep {host_port}` says "
-                   f"what, and `rc-repro down --name {name}` then `rc-repro up` "
-                   f"picks a free one.", phase="wait")
+        # WHY IT DID NOT COME UP, rather than one guess applied to every cause. This
+        # asserted "Something else probably holds that port" unconditionally, and the
+        # commonest cause is the exact opposite: during an upgrade -- or any rolling
+        # update -- the pod the forward attached to goes away, kubectl exits, and
+        # NOTHING holds the port.
+        #
+        # MEASURED on a live upgrade: the alarm fired, told the reader to run `down`
+        # then `up`, and the next readiness check re-established the forward on its
+        # own a few seconds later. A false alarm that prescribes destroying the
+        # workspace is worse than no alarm.
+        if _listening_inodes(host_port):
+            warn(emit, f"the port-forward for {name!r} did not come up on port "
+                       f"{host_port}: something else already holds it — `ss -ltnp | "
+                       f"grep {host_port}` says what, and `rc-repro down --name "
+                       f"{name}` then `rc-repro up` picks a free one.", phase="wait")
+        else:
+            # Nothing holds it, so this is the pod moving rather than a collision.
+            # Recoverable, and usually already recovering.
+            warn(emit, f"the port-forward for {name!r} dropped while the pod was "
+                       f"moving — nothing holds port {host_port}, so this is not a "
+                       f"collision. `rc-repro ready --name {name}` re-establishes it; "
+                       f"a create or upgrade does that for you on the next check.",
+                 phase="wait")
         return 0
     return proc.pid
 
@@ -2998,7 +3890,7 @@ def scenario_ui_forwards(name: str, *, namespace: str, context: str,
         try:
             proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL, start_new_session=True,
-                                    env=owned_env() if is_ours(context) else None)
+                                    env=env_for(context))
         except (OSError, subprocess.SubprocessError):
             continue
         # Confirmed, not assumed -- the same rule the workspace URL and Grafana both
@@ -3098,9 +3990,14 @@ def create_workspace(*, name: str, resolved, host_port: int, microservices: bool
     # failure modes, it does not help k3s at all, and choosing to spend that belongs
     # with somebody who asked for it rather than in a fix for a silence.
     if not had_cluster or plan.distribution != "kind":
-        info(emit, f"pulling images into the {plan.distribution} cluster's own store — "
-                   f"separate from Docker's, so a version already pulled for Compose "
-                   f"is fetched again (about 1.6 GB the first time)",
+        # STATED, NOT NARRATED. This used to read "pulling images into ...", which is
+        # a claim about what is happening now -- and nothing is pulling at this point.
+        # The pull happens inside the helm install, about five minutes later, so the
+        # log announced a step, fell silent, and then did it. Here it is a fact about
+        # the run; the install line says when it is actually under way.
+        info(emit, f"the {plan.distribution} cluster has its own image store, separate "
+                   f"from Docker's — a version already pulled for Compose is fetched "
+                   f"again here (about 1.6 GB the first time)",
              phase="provision", pct=6)
     ensure_repo(emit=emit)
     chart_version = resolve_chart_version(resolved.rc_version, emit=emit)
@@ -3108,7 +4005,7 @@ def create_workspace(*, name: str, resolved, host_port: int, microservices: bool
          phase="plan")
 
     pre = preflight(context)
-    blocked = storage_blocker(pre)
+    blocked = storage_blocker(pre) or architecture_blocker(pre, resolved.rc_version)
     if blocked:
         raise PreflightError(blocked)
 
@@ -3147,7 +4044,7 @@ def create_workspace(*, name: str, resolved, host_port: int, microservices: bool
             # version it was asked for rather than guessing a repository that is the
             # operator's to change.
             image = f"mongodb-community-server {operator_version(resolved.mongo_tag)} (operator's choice)"
-            ensure_operator(context=context, emit=emit)
+            ensure_operator(context=context, namespace=namespace, emit=emit)
             # Generated per workspace, never reused, never written to disk here:
             # the manifest goes to `kubectl apply` on stdin.
             app_password = secrets.token_urlsafe(24)
@@ -3194,8 +4091,10 @@ def create_workspace(*, name: str, resolved, host_port: int, microservices: bool
         # readiness; a Deployment that is still pulling is fine here.
         manifests = list(getattr(preset, "kubernetes_manifests", None) or [])
         if manifests:
-            info(emit, f"scenario {getattr(preset, 'scenario', '') or preset.name}: "
-                       f"{len(manifests)} resource(s)", phase="provision", pct=25)
+            count = len(manifests)
+            info(emit, f"applying the {getattr(preset, 'scenario', '') or preset.name} "
+                       f"scenario — {count} resource{'' if count == 1 else 's'}",
+                 phase="provision", pct=25)
             for i, manifest in enumerate(manifests):
                 body = render_scenario_manifest(manifest, name)
                 rendered[f"scenario-{i}" if i else "scenario"] = body
@@ -3237,7 +4136,11 @@ def create_workspace(*, name: str, resolved, host_port: int, microservices: bool
                 tls_host, ingress_class=ingress_class,
                 secret_name=tls_secret_for(name), issuer=spec.name))
         values.update(container_security_context(chart_version))
-        info(emit, f"installing {CHART} as {RELEASE}", phase="boot", pct=60)
+        # NAMED AS THE LONG ONE. This is where the image comes down and where a
+        # create spends most of its time, and a reader who is not told that reads the
+        # silence after it as a hang.
+        info(emit, f"installing {CHART} as {RELEASE} — the pods pull the image now, "
+                   f"which is the longest step of a create", phase="boot", pct=60)
         # `emit=emit`, so helm's own progress reaches both front ends. Without it
         # `install` emitted into `null_emit` and the GUI showed nothing for the
         # longest step of a create.
@@ -3287,7 +4190,12 @@ def create_workspace(*, name: str, resolved, host_port: int, microservices: bool
     # not alive, say so and hand over the command that establishes one.
     time.sleep(1.0)
     if forward_alive(pid, namespace=namespace, host_port=host_port):
-        info(emit, f"http://localhost:{host_port}", phase="boot", pct=90)
+        # A BARE URL WAS THE WHOLE LINE. It read as output rather than as an event,
+        # and it says nothing about what just succeeded -- which matters here,
+        # because what just succeeded is the port-forward and that is the thing
+        # that fails silently.
+        info(emit, f"port-forward established — http://localhost:{host_port}",
+             phase="boot", pct=90)
     else:
         pid = 0
         warn(emit, f"the port-forward did not stay up, so "
@@ -3599,7 +4507,7 @@ def log_process(name: str, *, context: str, tail: int = 200, follow: bool = True
         argv.append("-f")
     return subprocess.Popen(argv, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, bufsize=1,
-                            env=owned_env() if is_ours(context) else None)
+                            env=env_for(context))
 
 
 def container_env(name: str, *, context: str,
@@ -4254,7 +5162,90 @@ def operator_mongo_url(namespace: str, password: str, *, oplog: bool = False) ->
             f"{db}?replicaSet={MONGO_SERVICE}&authSource={MONGO_APP_DB}")
 
 
-def ensure_operator(*, context: str, emit: Emit = null_emit) -> None:
+#: The CRD that defines "MongoDBCommunity resources exist in this cluster". Presence
+#: is keyed on this and NOT on rc-repro's release name, for the reason
+#: `cert_manager_installed` gives about its own CRD: "the release can be named
+#: anything". An operator a platform team installed -- different namespace, different
+#: release, or plain manifests -- is invisible to a question asked about our release.
+MONGODB_CRD = "mongodbcommunity.mongodb.com"
+
+#: The env var the community operator reads to decide what it reconciles. Empty means
+#: its own namespace only; `*` means the whole cluster.
+WATCH_ENV = "WATCH_NAMESPACE"
+
+
+def operator_presence(context: str) -> Answer:
+    """Whether a MongoDB Community operator's CRD is here, whoever installed it.
+
+    THE ASYMMETRY THIS CLOSES: cert-manager is keyed on `certificates.cert-manager.io`
+    and ingress on any existing IngressClass, and both therefore ADOPT a foreign
+    install. The MongoDB operator was the one place that principle was not applied --
+    it asked whether rc-repro's own release existed in rc-repro's own namespace, so a
+    platform team's operator was invisible and `helm upgrade --install` ran anyway.
+
+    On a shared cluster that means a second cluster-scoped controller with
+    `watchNamespace=*` reconciling `MongoDBCommunity` resources belonging to workloads
+    rc-repro knows nothing about, and a chart-version difference reaching cluster-scoped
+    CRDs another install owns.
+    """
+    return ask_object("crd", MONGODB_CRD, context=context)
+
+
+def operator_is_ours(seen: Answer) -> bool:
+    """Whether the CRD in `seen` is managed by rc-repro's own helm release.
+
+    Helm stamps every resource it manages with `meta.helm.sh/release-name` and
+    `meta.helm.sh/release-namespace`, so the CRD itself says who owns it -- which is
+    the question that matters before running `upgrade --install` over it. A CRD with
+    no such annotations was applied by something other than helm and is nobody's
+    release; it is emphatically not ours.
+    """
+    meta = ((seen.doc or {}).get("metadata") or {})
+    ann = (meta.get("annotations") or {})
+    return (ann.get("meta.helm.sh/release-name") == OPERATOR_RELEASE
+            and ann.get("meta.helm.sh/release-namespace") == OPERATOR_NAMESPACE)
+
+
+def operator_watch_scope(context: str) -> tuple[str, str]:
+    """(what the operator on this cluster watches, why that could not be read).
+
+    An adopted operator is only useful if it reconciles the namespace the workspace
+    goes in. The community operator takes that from `WATCH_NAMESPACE`: unset means its
+    own namespace alone, `*` means the cluster.
+
+    BEST EFFORT, and the caller must treat a reason as "I could not ask" rather than
+    as "it does not watch us" -- the module's governing rule. Adopting is the action
+    that installs nothing, so it is the safe thing to do when the scope is unknown;
+    refusing on ignorance would break every cluster whose operator we simply could not
+    introspect.
+    """
+    found = ask_list("deployments", context=context, all_namespaces=True)
+    if found.refused:
+        return "", why(found.res, limit=120) if found.res else "could not be listed"
+    for dep in found.items:
+        spec = (((dep.get("spec") or {}).get("template") or {}).get("spec") or {})
+        for container in (spec.get("containers") or []):
+            for env in (container.get("env") or []):
+                if env.get("name") != WATCH_ENV:
+                    continue
+                # `valueFrom` (a fieldRef to the pod's own namespace) is the chart's
+                # single-namespace default. It is a real answer -- own namespace only --
+                # and not an unreadable one.
+                if "value" not in env:
+                    return ((dep.get("metadata") or {}).get("namespace") or ""), ""
+                return str(env.get("value") or ""), ""
+    return "", "no operator Deployment was found"
+
+
+def operator_watches(scope: str, namespace: str) -> bool:
+    """Whether `scope` covers `namespace`. `*` or empty-with-no-reason means all."""
+    if scope in ("*", ""):
+        return True
+    return namespace in [p.strip() for p in scope.split(",") if p.strip()]
+
+
+def ensure_operator(*, context: str, namespace: str = "",
+                    emit: Emit = null_emit) -> None:
     """Install the MongoDB operator once for the cluster, watching all namespaces.
 
     Cluster-scoped by necessity, not by preference: the chart manages CRDs, and CRDs
@@ -4264,7 +5255,48 @@ def ensure_operator(*, context: str, emit: Emit = null_emit) -> None:
 
     `upgrade --install` so a cluster that already has it is not an error, which is
     every workspace after the first.
+
+    AND IT ADOPTS RATHER THAN INSTALLS when the operator is somebody else's. See
+    `operator_presence` for why that question is asked of the CRD.
     """
+    # ASKED BEFORE ANYTHING IS WRITTEN, including the helm repo add. Nothing below this
+    # point should run on a cluster whose operator rc-repro does not own.
+    seen = operator_presence(context)
+    if seen.state == REFUSED:
+        # "I could not ask" is not "there is none", and the action on the other side of
+        # this question installs CLUSTER-SCOPED CRDs. Getting it wrong on a shared
+        # cluster reaches other people's databases, so this is the one place the
+        # module's rule has to produce a refusal rather than a best guess.
+        raise PreflightError(
+            "cannot tell whether this cluster already has a MongoDB operator: the "
+            f"{MONGODB_CRD} CRD could not be read ("
+            + (why(seen.res, limit=160) if seen.res else "no reason given") + "). "
+            "Installing one anyway would take ownership of cluster-scoped CRDs that "
+            "may belong to somebody else. Grant read on customresourcedefinitions, or "
+            "run without `--mongo-operator` to use the chart's own MongoDB.")
+    if seen.present and not operator_is_ours(seen):
+        scope, unreadable = operator_watch_scope(context)
+        # AGAINST THE NAMESPACE THIS WORKSPACE ACTUALLY GOES IN. rc-repro's namespaces
+        # are `rc-repro-<name>`, a prefix and not one fixed name, so an operator
+        # watching a list has to be checked against the real one. With no namespace to
+        # check -- a caller that has not chosen one yet -- the scope is not a question
+        # that can be answered, so it is not asked.
+        if namespace and not unreadable and not operator_watches(scope, namespace):
+            # A real answer, and it does not cover us. Said as a refusal rather than
+            # left to become a five-minute `wait_for_mongodb` timeout on a workspace
+            # whose database nothing was ever going to reconcile.
+            raise PreflightError(
+                f"this cluster has a MongoDB operator that rc-repro did not install, "
+                f"and it watches {scope!r} — which does not include {namespace!r}. "
+                f"Installing a second cluster-scoped operator beside it would have "
+                f"both reconcile the same resources. Ask whoever owns it to watch "
+                f"`*`, or run without `--mongo-operator`.")
+        adopted = ("watching " + (scope or "its own namespace") if not unreadable
+                   else "scope unread: " + unreadable)
+        info(emit, f"adopting the MongoDB operator already in this cluster ({adopted})"
+                   f" — rc-repro installs nothing and removes nothing",
+             phase="provision", pct=15)
+        return
     run(["helm", "repo", "add", OPERATOR_REPO, OPERATOR_REPO_URL, "--force-update"],
         timeout=APPLY_TIMEOUT, env=helm_env(context))
     run(["helm", "repo", "update", OPERATOR_REPO], timeout=APPLY_TIMEOUT,
@@ -4441,6 +5473,11 @@ def remove_operator(*, context: str, excluding: str = "",
     instantly. It is inert without the operator and the next `--mongo-operator` reuses
     it. Same for the namespace: `rc-repro-system` is shared with the monitoring stack.
     """
+    # OURS, DELIBERATELY, and this is the guard that makes adoption safe: an operator
+    # rc-repro adopted was never installed as our release, so this answers False for it
+    # and the uninstall below is never reached. rc-repro removes what rc-repro put
+    # there and nothing else -- the mirror of `ensure_operator` adopting rather than
+    # installing over somebody else's.
     if not operator_installed(context):
         return False
     # `excluding` for the same reason `remove_monitoring` takes it: the workspace being
@@ -4592,9 +5629,15 @@ INGRESS_CLASS_TRIES = 30
 INGRESS_CLASS_INTERVAL = 2.0
 
 
-def ensure_ingress(*, context: str, distribution: str = "",
-                   emit: Emit = null_emit, sleep=time.sleep) -> str:
+def ensure_ingress(*, context: str, distribution: str = "", invited: bool = False,
+                   prefer: str = "", emit: Emit = null_emit, sleep=time.sleep) -> str:
     """The IngressClass to use. Adopts one if the cluster has it, installs if not.
+
+    `invited=True` means a human asked for this cluster to be set up (`cluster
+    prepare`) rather than rc-repro reaching for an ingress on the way to booting a
+    workspace. Locality was standing in for consent in the guard below; installing a
+    LoadBalancer Service into somebody else's cluster uninvited is the thing to avoid,
+    and being asked to is not that.
 
     ADOPTING COMES FIRST, and not only to save work: the ingress controller is the
     component whose behaviour a support case is usually about, so a cluster that
@@ -4625,11 +5668,31 @@ def ensure_ingress(*, context: str, distribution: str = "",
             f"cannot tell whether it has an ingress controller. Check the credential "
             f"in your kubeconfig — refusing to guess, because 'I cannot ask' and "
             f"'there is none' are different answers.")
+    if seen and prefer:
+        # NAMED BY THE OPERATOR, and refused rather than silently ignored. Somebody who
+        # passes `--ingress-class alb` and gets nginx has been overruled without being
+        # told, which is worse than an error.
+        if prefer not in seen:
+            raise PreflightError(
+                f"cluster {context!r} has no IngressClass named {prefer!r}. It has: "
+                + (", ".join(seen) or "none") + ".")
+        info(emit, f"ingress: using {prefer!r} as asked", phase="tls")
+        return prefer
+    if len(seen) > 1:
+        # SAID OUT LOUD, because a choice among several is a decision and this is the
+        # only place it is visible. `ingress_classes` puts the cluster's own default
+        # first; where there is no default the order is by name, which is arbitrary but
+        # at least the same every time.
+        info(emit, f"ingress: adopting {seen[0]!r} — this cluster has "
+                   + ", ".join(seen)
+                   + ". `--ingress-class` names a different one.", phase="tls")
+        return seen[0]
     if seen:
         info(emit, f"ingress: adopting {seen[0]!r}, already in this cluster",
              phase="tls")
         return seen[0]
-    if not is_local_cluster(distribution or distribution_of(context)):
+    if not invited and not is_local_cluster(distribution
+                                            or distribution_of(context)):
         raise PreflightError(
             f"cluster {context!r} has no ingress controller, and it is not on this "
             f"machine, so rc-repro will not install one: the chart's Service is a "
@@ -4725,7 +5788,17 @@ CA_ISSUER = "rc-repro-ca"
 CA_ISSUER_SECRET = "rc-repro-ca"
 ISSUER_WAIT_TRIES = 20
 ISSUER_WAIT_INTERVAL = 2.0
-CERT_WAIT_TRIES = 45
+#: How long to wait for cert-manager to issue. 45 x 2s = 90 seconds was too tight for
+#: a FIRST issuance on a cold cluster: the ACME account has to be registered, the order
+#: placed, the http-01 challenge served and validated by Let's Encrypt from outside,
+#: and on a first workspace all of that starts only once the image pull has finished.
+#:
+#: OBSERVED through the GUI on a fresh EKS cluster -- the wait expired, the ingress
+#: answered with its own default certificate, and the certificate arrived about a
+#: minute later. The cost of waiting longer is bounded and only paid with `--domain`;
+#: the cost of giving up early is a create that ends by reporting a failure that is
+#: not one.
+CERT_WAIT_TRIES = 90
 CERT_WAIT_INTERVAL = 2.0
 
 
@@ -4777,6 +5850,7 @@ CERT_MANAGER_INTERVAL = 3.0
 
 
 def ensure_cert_manager(*, context: str, distribution: str = "",
+                        invited: bool = False,
                         emit: Emit = null_emit, sleep=time.sleep) -> None:
     """Adopt cert-manager if the cluster has it, install it if not.
 
@@ -4792,9 +5866,16 @@ def ensure_cert_manager(*, context: str, distribution: str = "",
     `crds.enabled`-versus-`installCRDs` trap has nowhere to happen. Verified against
     the real artefact: 6 CRDs, 3 Deployments, 1 Namespace, `grep -c Job` = 0.
 
-    **Only on a cluster that is on this machine.** Six CRDs and an admission webhook
-    are a change to what a cluster IS, for every workload in it -- not something to do
-    to somebody else's on the way to booting a repro. There it names the command.
+    **Only on a cluster that is on this machine, unless invited.** Six CRDs and an
+    admission webhook are a change to what a cluster IS, for every workload in it --
+    not something to do to somebody else's ON THE WAY TO BOOTING A REPRO. That last
+    clause is the whole of the rule, and locality was standing in for it: what makes
+    an implicit install wrong is that nobody asked, not where the cluster is.
+
+    `invited=True` is `cluster prepare` saying somebody did ask -- it is a verb a
+    human runs at a cluster on purpose, and for one rc-repro provisioned there is no
+    "somebody else" to be careful of. `up` never passes it, so the implicit path this
+    guard was written for is unchanged.
 
     **Never removed.** `kubectl delete -f` takes the CRDs, and removing the CRDs
     garbage-collects every Certificate and Issuer in the cluster -- the user's
@@ -4803,7 +5884,8 @@ def ensure_cert_manager(*, context: str, distribution: str = "",
     if cert_manager_installed(context):
         info(emit, "cert-manager: already in this cluster", phase="tls")
         return
-    if not is_local_cluster(distribution or distribution_of(context)):
+    if not invited and not is_local_cluster(distribution
+                                            or distribution_of(context)):
         raise PreflightError(
             f"cluster {context!r} has no cert-manager, and it is not on this machine, "
             f"so rc-repro will not install one: six CRDs and an admission webhook "
@@ -5545,7 +6627,7 @@ def grafana_forward(*, context: str, host_port: int, bind_host: str = "") -> int
     try:
         proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, start_new_session=True,
-                                env=owned_env() if is_ours(context) else None)
+                                env=env_for(context))
     except (OSError, subprocess.SubprocessError):
         return 0
     # Same rule as the workspace forward. This path has form: it is where "reported
@@ -5772,7 +6854,7 @@ def exec_to_file(name: str, argv: list[str], dest: Path, *, context: str,
         with dest.open("wb") as handle:
             proc = subprocess.run(argv_full, stdout=handle, stderr=subprocess.PIPE,
                                   timeout=timeout or INSTALL_TIMEOUT, check=False,
-                                  env=owned_env() if is_ours(context) else None)
+                                  env=env_for(context))
         return proc.returncode, (proc.stderr or b"").decode("utf-8", "replace")
     except (OSError, subprocess.SubprocessError) as exc:
         return 1, str(exc)
@@ -5793,7 +6875,7 @@ def exec_from_file(name: str, argv: list[str], src: Path, *, context: str,
             proc = subprocess.run(argv_full, stdin=handle,
                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                   timeout=timeout or INSTALL_TIMEOUT, check=False,
-                                  env=owned_env() if is_ours(context) else None)
+                                  env=env_for(context))
         return proc.returncode, (proc.stdout or b"").decode("utf-8", "replace")
     except (OSError, subprocess.SubprocessError) as exc:
         return 1, str(exc)

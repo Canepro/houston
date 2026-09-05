@@ -33,8 +33,8 @@ from starlette.routing import Match
 from rc_repro import config
 from rc_repro import presets as presets_mod
 from rc_repro import runner
-from rc_repro.errors import (NotReadyError, ReproError, ValidationError,
-                            as_payload as error_body)
+from rc_repro.errors import (ConflictError, NotReadyError, ReproError,
+                            ValidationError, as_payload as error_body)
 from rc_repro.services import data as datasvc
 from rc_repro.services import audit as auditsvc
 from rc_repro.services import lifecycle as lc
@@ -196,6 +196,30 @@ ROUTE_ROLES: dict[tuple[str, str], str] = {
     # own workspaces, but the box's shared front door is not theirs to edit.
     ("DELETE", "/api/edge/hosts/{host}"): _ADMIN,
     ("GET", "/api/kubernetes"): _READ,
+    # THE CLUSTER LEDGER. Reads, and readonly+ like every other read -- a report whose
+    # job is to stop a cluster being forgotten works better the more people can see it,
+    # and hiding the bill from everyone who is not an admin is how a bill runs.
+    ("GET", "/api/clusters"): _READ,
+    ("GET", "/api/clusters/status"): _READ,
+    ("GET", "/api/clusters/iam-policy"): _READ,
+    # The region sweep asks AWS rather than a cluster, and it only ever lists. It is a
+    # job because it is twenty seconds of round trips, not because it changes anything.
+    ("POST", "/api/clusters/sweep"): _READ,
+    # `prepare` CHANGES a cluster -- it installs a StorageClass, an ingress controller
+    # and cert-manager -- so it is a write like any other. It costs nothing and is
+    # idempotent, which is why it is not admin.
+    ("POST", "/api/clusters/prepare"): _WRITE,
+    # ADMIN, and neither of these is people-management. `create` spends real money for
+    # as long as nobody remembers to remove it, and `delete` destroys a cluster that
+    # may hold colleagues' work on boxes this one has never seen. The rule this repo
+    # already applies to the shared edge -- "a member can create and destroy their own
+    # workspaces, but the box's shared front door is not theirs to edit" -- is the same
+    # rule, and a cluster is a good deal more shared than the edge.
+    ("POST", "/api/clusters/create"): _ADMIN,
+    ("POST", "/api/clusters/delete"): _ADMIN,
+    # Clearing a kubeconfig entry destroys nothing, but it takes a name off this
+    # box and the write-vs-read line here is about changing state, not about risk.
+    ("POST", "/api/clusters/forget"): _WRITE,
     ("GET", "/api/machine"): _READ,
     ("GET", "/api/presets"): _READ,
     ("GET", "/api/settings"): _READ,
@@ -244,6 +268,28 @@ ROUTE_ROLES: dict[tuple[str, str], str] = {
     ("GET", "/setup"): _OPEN, ("GET", "/setup.js"): _OPEN,
     ("POST", "/api/session/first-run"): _OPEN,
 }
+
+
+def _kube_clusters() -> list[dict]:
+    """Clusters this server can offer the create form, with what each one IS.
+
+    Rows rather than bare names, because the form has to say which of them costs
+    money -- and deriving that in JavaScript would be a second copy of a rule the
+    service already owns. This dialog's own note makes the point about the refusal
+    registry: "a copy in JS would still be refusing --reg-token". The same applies to
+    "is this cluster billable", and `known_contexts()` is where that is decided.
+
+    Never raises and never distinguishes "none" from "could not ask" TO THE CALLER,
+    because the only consumer is a form that renders a list: an empty one falls back
+    to "decide for me", which is what an un-set `--context` means anyway. The refusal
+    that matters is at the create route, where `contexts()`'s second return value IS
+    honoured and an unreadable kubeconfig deliberately does not refuse.
+    """
+    try:
+        from rc_repro.services import cluster as clustersvc
+        return clustersvc.known_contexts()["contexts"]
+    except Exception:  # noqa: BLE001 - a form that cannot list clusters still renders
+        return []
 
 
 def route_requirement(method: str, template: str) -> str | None:
@@ -1410,6 +1456,163 @@ def create_app(allow_hosts: list[str] | None = None, *,
                 "can_provision": pre.can_provision, "nodes": pre.node_count,
                 "workspaces": len(pre.namespaces)}
 
+    # ---- the cluster ledger --------------------------------------------------------
+    # A peer of `edge`, and surfaced the same way: a cluster is not a workspace, so it
+    # never appears in the grid, and something holding your workspaces, your volumes
+    # and -- on a managed one -- your money has to be answerable somewhere.
+    #
+    # SPLIT INTO A CHEAP LIST AND A PROBE PER CLUSTER, deliberately. `status()` is six
+    # or more round trips and a refusing cluster spends the whole timeout on every one
+    # of them, so a single endpoint returning everything would make the page as slow as
+    # its worst cluster. The browser draws a card per context from the cheap list and
+    # fills each one in as its own request returns.
+
+    @app.get("/api/clusters")
+    def clusters_list():
+        """Which clusters this box could talk to. Probes nothing; see the note above."""
+        from rc_repro.services import cluster as clustersvc
+        return clustersvc.known_contexts()
+
+    @app.get("/api/clusters/status")
+    def cluster_status(context: str = ""):
+        """One cluster: what it holds and what it costs, or why that could not be read.
+
+        Never reports a zero it did not read -- the fields come back `None` and
+        `unreadable` names which, which is the whole discipline of the ledger and the
+        reason this is not just a table of numbers.
+        """
+        from rc_repro.services import cluster as clustersvc
+        return clustersvc.status(context)
+
+    @app.get("/api/clusters/iam-policy")
+    def cluster_iam_policy(name: str = ""):
+        """The permissions documents, so somebody with no shell can still hand them out."""
+        from rc_repro.services import eks as ekssvc
+        if name:
+            return {"documents": [{"name": name,
+                                   "filename": ekssvc.IAM_DOCUMENTS[name][0]
+                                   if name in ekssvc.IAM_DOCUMENTS else "",
+                                   "purpose": ekssvc.IAM_DOCUMENTS[name][1]
+                                   if name in ekssvc.IAM_DOCUMENTS else "",
+                                   "body": ekssvc.iam_document(name)}]}
+        return {"documents": [
+            {"name": key, "filename": fname, "purpose": purpose,
+             "body": ekssvc.iam_document(key)}
+            for key, (fname, purpose) in sorted(ekssvc.IAM_DOCUMENTS.items())]}
+
+    @app.post("/api/clusters/sweep")
+    def cluster_sweep(body: dict = Body(default={})):
+        """Ask AWS what exists, region by region. A JOB: it is ~20s of round trips."""
+        from rc_repro.services import eks as ekssvc
+        region = str((body or {}).get("region") or "").strip()
+        job = jobs.submit("cluster-sweep", ekssvc.sweep_clusters,
+                          [region] if region else None,
+                          owned_only=not bool((body or {}).get("all")),
+                          label=region or "all regions")
+        return {"job_id": job.id}
+
+    @app.post("/api/clusters/prepare")
+    def cluster_prepare(body: dict = Body(...)):
+        from rc_repro.services import eks as ekssvc
+        context = str((body or {}).get("context") or "").strip()
+        if not context:
+            raise ValidationError("`context` is required: which cluster to prepare.")
+        job = jobs.submit("cluster-prepare", ekssvc.prepare_cluster, context,
+                          label=context)
+        return {"job_id": job.id}
+
+    @app.post("/api/clusters/create")
+    def cluster_create(body: dict = Body(...)):
+        """Build a managed cluster. Twenty minutes, and billable from the first minute.
+
+        The GUI does not get a softer gate than the terminal: `create_cluster` refuses
+        unless the AWS account is approved on this box, and that refusal is not
+        reachable by any flag or field. What the web layer adds is that it is admin --
+        see ROUTE_ROLES.
+        """
+        from rc_repro.services import eks as ekssvc
+        name = str((body or {}).get("name") or "").strip()
+        if not name:
+            raise ValidationError("`name` is required, e.g. {\"name\": \"support\"}")
+        subnets = (body or {}).get("subnets") or {}
+        if subnets and not isinstance(subnets, dict):
+            raise ValidationError("`subnets` wants an object of {availability-zone: subnet-id}")
+        # `expires` ARRIVES THE WAY THE FLAG TAKES IT -- a number of days, or the word
+        # `never` -- and is turned into what the service wants here. Parsed rather than
+        # trusted: an unparseable value must not silently become "no expiry", because
+        # the expiry tag is the only thing that will later say this cluster was meant
+        # to be temporary.
+        want = str((body or {}).get("expires") or "").strip().lower()
+        if not want:
+            days: int | None = ekssvc.DEFAULT_EXPIRY_DAYS
+        elif want == "never":
+            days = None
+        else:
+            try:
+                days = int(want)
+            except ValueError:
+                raise ValidationError(
+                    f"`expires` wants a number of days or \"never\", got {want!r}") from None
+        try:
+            nodes = int((body or {}).get("nodes") or 0)
+        except (TypeError, ValueError):
+            raise ValidationError("`nodes` wants a whole number") from None
+        job = jobs.submit("cluster-create", ekssvc.create_cluster, name,
+                          region=str((body or {}).get("region") or "").strip(),
+                          nodes=nodes or ekssvc.DEFAULT_NODES,
+                          expires_days=days,
+                          subnets=subnets or None,
+                          label=name)
+        return {"job_id": job.id}
+
+    @app.post("/api/clusters/delete")
+    def cluster_delete(body: dict = Body(...)):
+        """Destroy a managed cluster. Every refusal the CLI has applies here too.
+
+        `force` is accepted and passed through rather than being quietly unavailable:
+        a cluster wedged badly enough to need it is exactly the case somebody with no
+        shell cannot otherwise get out of. It is admin-only and the six guards in
+        `delete_cluster` are what actually decide.
+        """
+        from rc_repro.services import eks as ekssvc
+        name = str((body or {}).get("name") or "").strip()
+        if not name:
+            raise ValidationError("`name` is required: which cluster to delete.")
+        job = jobs.submit("cluster-delete", ekssvc.delete_cluster, name,
+                          region=str((body or {}).get("region") or "").strip(),
+                          force=bool((body or {}).get("force")),
+                          label=name)
+        return {"job_id": job.id}
+
+    @app.post("/api/clusters/forget")
+    def cluster_forget(body: dict = Body(...)):
+        """Remove a kubeconfig entry for a cluster that is not there any more.
+
+        NOT a delete. `delete` takes the cluster away and tidies the entries it wrote;
+        this is for the entry left behind when the cluster went some other way — from
+        the console, or by a colleague. Those entries are unreachable for ever and a
+        card can only ever say "not answering" about them.
+
+        Synchronous: it is three local `kubectl config` calls, so a job id and an
+        Activity row would be more machinery than the work.
+        """
+        from rc_repro.services import k8s
+        context = str((body or {}).get("context") or "").strip()
+        if not context:
+            raise ValidationError("`context` is required: which entry to forget.")
+        if not (body or {}).get("force") and k8s.reach(context).ok:
+            raise ConflictError(
+                f"{context!r} is answering, so it is a cluster you can still use "
+                f"rather than a leftover entry. Delete the cluster to remove it.")
+        gone = k8s.forget_context(context)
+        if not gone:
+            # `kubectl config unset` succeeds whether or not there was anything to
+            # unset, so "it worked" is not evidence the entry is gone.
+            raise ConflictError(
+                f"{context} is still named by a kubeconfig on this machine. Remove it "
+                f"by hand: `kubectl config delete-context {context}`")
+        return {"context": context, "forgotten": True}
+
     @app.get("/api/edge")
     def edge_status():
         """The shared Traefik, and whether each name it serves is actually
@@ -1516,6 +1719,14 @@ def create_app(allow_hosts: list[str] | None = None, *,
                 "may_set_privileged": lc.may_set_privileged_fields(
                     getattr(request.state, "actor", "") or ""),
                 "privileged_fields": list(lc.PRIVILEGED_CREATE_FIELDS),
+                # The clusters this SERVER can see, so the dialog offers names
+                # that exist instead of a free-text box where an EKS context has
+                # to be typed from memory. Same rule as `runtimes` below: the
+                # list comes from the function the create itself validates
+                # against, so the form cannot offer one `plan_cluster` would
+                # refuse. Two local `kubectl config` reads, and only when the
+                # create dialog opens -- this endpoint has no other caller.
+                "kube_clusters": _kube_clusters(),
                 # The runtime/deployment axes, from the one table that defines them,
                 # so the dialog cannot offer a combination the service layer refuses.
                 # The same reasoning as `privileged_fields` directly above: two
@@ -1616,7 +1827,7 @@ def create_app(allow_hosts: list[str] | None = None, *,
             # says how to install it rather than reporting a confident zero.
             from rc_repro.services import k8s
             meta = runner.read_meta(target)
-            context = str((meta.extra or {}).get("context") or k8s.CONTEXT)
+            context = str((meta.extra or {}).get(config.EXTRA_CONTEXT) or k8s.CONTEXT)
             rows = k8s.pod_metrics(target, context=context)
             return {"cpu": round(sum(r["cpu_millicores"] for r in rows) / 10.0, 1),
                     "mem_mb": round(sum(r["mem_bytes"] for r in rows) / 1e6, 1)}
@@ -1748,7 +1959,7 @@ def create_app(allow_hosts: list[str] | None = None, *,
             _meta = runner.read_meta(target)
             proc = k8s.log_process(
                 target, tail=_clamp_tail(tail), follow=True,
-                context=str((_meta.extra or {}).get("context") or k8s.CONTEXT))
+                context=str((_meta.extra or {}).get(config.EXTRA_CONTEXT) or k8s.CONTEXT))
         else:
             proc = open_log_process(runner.workspace(target), _clamp_tail(tail))
 
@@ -1822,7 +2033,7 @@ def create_app(allow_hosts: list[str] | None = None, *,
         if topology.of_repro(target) == topology.KUBERNETES:
             from rc_repro.services import k8s
             meta = runner.read_meta(target)
-            context = str((meta.extra or {}).get("context") or k8s.CONTEXT)
+            context = str((meta.extra or {}).get(config.EXTRA_CONTEXT) or k8s.CONTEXT)
             proc = k8s.log_process(target, context=context,
                                    tail=_clamp_tail(tail), follow=False)
             try:
@@ -1849,11 +2060,12 @@ def create_app(allow_hosts: list[str] | None = None, *,
         # documented HTTP API rather than the GUI (which always sends the key).
         if not str(fields.get("version") or "").strip():
             raise ValidationError("`version` is required, e.g. {\"version\": \"8.5.1\"}")
-        # Three fields decide what CODE runs and where it listens, which is a
+        # Four fields decide what CODE runs and where it listens, which is a
         # different question from "make me a workspace". `rc_image` runs an
         # arbitrary image as the serve user; `reg_token` is an EE licence secret;
         # `bind` can publish a workspace with fixed admin/admin123 credentials to
-        # the whole network.
+        # the whole network; `context` picks the CLUSTER, so on a shared serve it can
+        # put a colleague's workspace somewhere they cannot see or reach it.
         #
         # `port` USED to be in this list and should not have been. The only harm it
         # could do was taking a privileged port -- squatting 80 or 443 out from
@@ -1883,6 +2095,22 @@ def create_app(allow_hosts: list[str] | None = None, *,
         # request was wrong on arrival. Found by driving this route live: the escape
         # WAS blocked -- the job failed with a ValidationError and nothing was created
         # -- but the answer arrived in the wrong place.
+        # Same rule, one line up the stack: a context that does not exist is pure
+        # argument validation and is answerable WITHOUT talking to any cluster, so it
+        # is refused here rather than failing the job. `contexts()` reads the two
+        # kubeconfigs and nothing else.
+        if creq.context:
+            from rc_repro.services import k8s
+            known, unreadable = k8s.contexts()
+            if known and creq.context not in known:
+                raise ValidationError(
+                    f"no kubeconfig context named {creq.context!r} on this server. "
+                    "It can see: " + ", ".join(repr(c) for c in known))
+            # An unreadable kubeconfig does NOT refuse here -- "I could not ask" is
+            # not "it is not there", and the create's own preflight probes the cluster
+            # for real. Refusing on it would make a transient kubectl failure look
+            # like a typo.
+            _ = unreadable
         if creq.preset:
             # Converted here rather than in `presets`: that module raises plain
             # ValueError throughout and `_create_repro_locked` translates it at the
@@ -2263,7 +2491,18 @@ def create_app(allow_hosts: list[str] | None = None, *,
                   if mode == tlsmod.MODE_LOCAL else None)
         # Dial THIS host with the domain as SNI: probing the public name lets a
         # proxy in front answer instead, and its certificate is not ours.
-        out = tlsmod.verify("127.0.0.1", port, cafile=cafile, sni=host)
+        #
+        # UNLESS TLS TERMINATES IN THE CLUSTER, where there is no "ours" on this host
+        # to be answered for -- the certificate is a Secret in the cluster and the
+        # cluster's own ingress holds :443. Loopback then reaches whatever else is
+        # listening here, which on a box running rc-repro's edge is a Traefik that has
+        # never heard of the name and answers with its placeholder. MEASURED against a
+        # live EKS workspace whose certificate `openssl` and `curl` both fetched
+        # correctly from this very box, while this endpoint called it not-yet-issued.
+        if str(meta.extra.get("tls_terminates") or "") == "cluster":
+            out = tlsmod.verify(host, port, cafile=cafile)
+        else:
+            out = tlsmod.verify("127.0.0.1", port, cafile=cafile, sni=host)
         out.update(mode=mode, public_url=meta.public_url, name=meta.name)
         if mode == tlsmod.MODE_ACME:
             pub = tlsmod.verify(host, 443)

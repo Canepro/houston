@@ -367,6 +367,7 @@ def up(
     runtime: str = typer.Option("", "--runtime", help="where it runs: docker (default) | kubernetes"),
     deployment: str = typer.Option("", "--deployment", help="how RC is arranged. docker: monolith (default) | multi-instance. kubernetes: microservices (default) | monolith"),
     replicas: int = typer.Option(0, "--replicas", help="Rocket.Chat instances (needs --deployment multi-instance on docker)"),
+    context: str = typer.Option("", "--context", help="which Kubernetes cluster — its own name (`support`) or the full context name. ADOPTS it; never creates one. Remembered after the first use (`rc-repro config set kubernetes.context`)"),
     mongo_operator: bool = typer.Option(False, "--mongo-operator", help="kubernetes: manage MongoDB with the official operator (adds SCRAM auth; needs MongoDB 6.0+)"),
     name: str = typer.Option("", "--name", "-n", help="repro name (default: derived)"),
     port: int = typer.Option(0, "--port", help="host port (default: first free >= 3000)"),
@@ -391,6 +392,7 @@ def up(
     email: str = typer.Option("", "--email", help="contact email for Let's Encrypt. Remembered after the first use (`rc-repro config set acme.email`)"),
     json_out: bool = typer.Option(False, "--json", help="NDJSON progress on stdout, then one final JSON envelope; prose moves to stderr"),
     https: bool = typer.Option(False, "--https", help="serve HTTPS with a local certificate instead — no domain needed (run `rc-repro trust-ca` once)"),
+    ingress_class: str = typer.Option("", "--ingress-class", help="Kubernetes only: which IngressClass to route through, when the cluster has more than one (e.g. `alb`, `nginx`). Defaults to the cluster's own default class"),
     env: list[str] = typer.Option(None, "--env", "-e", help="extra raw env var KEY=VALUE (repeatable). Persisted, so `up --force` keeps it; change it later with `rc-repro env`"),
     setting: list[str] = typer.Option(None, "--setting", help="Rocket.Chat SETTING Id=VALUE (repeatable) — adds the OVERWRITE_SETTING_ prefix a setting needs"),
 ) -> None:
@@ -420,9 +422,9 @@ def up(
         seed_profile=seed_profile, stats=stats, pin=pin,
         wait=(wait or seed), offline=offline, no_pull=no_pull, fresh=fresh,
         force=force, monitor=monitor, actor=_cli_actor(),
-        runtime=runtime, deployment=deployment, replicas=replicas,
+        runtime=runtime, deployment=deployment, replicas=replicas, context=context,
         mongo_operator=mongo_operator,
-        https=https, domain=domain, acme_email=email,
+        https=https, domain=domain, acme_email=email, ingress_class=ingress_class,
         env={**envsvc.parse_set(env or []), **envsvc.as_setting(setting or [])},
     )
     # In JSON mode the progress goes out as NDJSON `rc-repro.event.v1` lines rather
@@ -1105,6 +1107,15 @@ def info(
 _BOOL_CONFIG_KEYS = frozenset({"acme.staging"})
 
 _CONFIG_KEYS: dict[str, str] = {
+    # The default cluster for `--runtime kubernetes`, so a box that always works in
+    # one cluster says so once instead of on every `up`. `--context` still wins.
+    # Stored FLAT (`kubernetes_context`) -- see config.KUBE_CONTEXT_KEY for why that
+    # is mechanical rather than a style choice.
+    "kubernetes.context": config.KUBE_CONTEXT_KEY,
+    # Which AWS accounts `cluster create` may spend in. Comma separated; absent means
+    # none, and none means every create is gated. NOT overridable by `--force`, which
+    # is a reflex where this is a decision.
+    "cluster.approved_accounts": config.CLOUD_ACCOUNTS_KEY,
     "acme.email": "acme_email",
     # Not a flag on `up`, on purpose: HTTPS is meant to be --domain plus --email and
     # nothing else. It stays reachable here because Let's Encrypt allows only 5
@@ -1659,13 +1670,15 @@ _UNSET = object()
 @app.command(name="config")
 def config_cmd(
     action: str = typer.Argument("list", help="list | get | set | unset"),
-    key: str = typer.Argument("", help="e.g. acme.email"),
+    key: str = typer.Argument("", help="e.g. kubernetes.context"),
     value: str = typer.Argument("", help="the value, for `set`"),
 ) -> None:
     """Read or write remembered settings, so they need not be retyped every run.
 
-    Keys: acme.email, acme.staging, acme.dns_provider, bind_host,
-    gui.create_policy, gui.destroy_policy. Stored in ~/.rc-repro/config.yaml.
+    Keys: kubernetes.context, cluster.approved_accounts, acme.email, acme.staging,
+    acme.dns_provider,
+    bind_host, gui.create_policy, gui.destroy_policy. Stored in
+    ~/.rc-repro/config.yaml.
 
     \b
     Members may set --rc-image/--reg-token/--bind by default. Where an account is
@@ -1753,9 +1766,25 @@ def env_cmd(
             cur = envsvc.current(name)
         except errors.ReproError as exc:
             _fail(exc)
-        rows = [(e["key"], e["value"] + ("   <- yours" if e["override"] else ""))
+        # DRIFT IS MARKED, NOT FOLDED IN. A recorded value the container is not
+        # running was displayed as `<- yours`, which confirms a setting that is not in
+        # effect — on the exact question this command exists to answer.
+        rows = [(e["key"], e["value"]
+                 + ("   <- yours" if e["override"] else "")
+                 + ("   !! NOT IN THE RUNNING CONTAINER" if e.get("drift") else ""))
                 for e in cur["env"]]
         ui.panel(f"env: {cur['name']}", rows)
+        if cur.get("drift"):
+            ui.warn(f"  {len(cur['drift'])} recorded value(s) are NOT what the "
+                    f"container is running: " + ", ".join(cur["drift"]))
+            ui.warn("  Rocket.Chat is using the old value. `rc-repro env --set "
+                    f"{cur['drift'][0]}=<value> --name {cur['name']}` re-applies and "
+                    "recreates the container.")
+        elif not cur.get("live_read", True):
+            # SAID, because "no drift reported" and "drift could not be checked" are
+            # different, and only one of them is reassuring.
+            ui.hint("  the container could not be read, so this is the recorded "
+                    "configuration and not a statement about what is running.")
         if cur["overrides"]:
             ui.hint("  your overrides: " + ", ".join(cur["overrides"]))
         else:
@@ -1836,10 +1865,30 @@ def tls_status(name: str = typer.Option("", "--name", "-n")) -> None:
     #
     # The first answer that is not a fallback wins; if every family answers with a
     # placeholder then that IS the finding, and the last result carries it.
-    for _probe in ("127.0.0.1", "::1"):
-        r = tlsmod.verify(_probe, port, cafile=cafile, sni=host)
-        if r["serving"] and not r.get("fallback"):
-            break
+    #
+    # ALL OF THAT IS ABOUT A WORKSPACE THIS BOX TERMINATES TLS FOR. On Kubernetes it
+    # is not one: the certificate is a Secret in the cluster, the cluster's own
+    # ingress holds :443, and the create says so in as many words -- "this machine is
+    # not in the path". Probing loopback there reaches whatever ELSE is listening on
+    # this box's :443, which on a machine running rc-repro's own edge is a Traefik
+    # that has never heard of the name and answers with its placeholder.
+    #
+    # MEASURED against a live EKS workspace: `openssl s_client` and `curl` both got a
+    # real Let's Encrypt certificate for the name from this very box, `curl` reported
+    # `ssl_verify_result: 0`, and `tls-status` said "the ingress controller's built-in
+    # placeholder certificate ... the ACME order is stuck" -- a healthy workspace
+    # reported as broken, which is the failure this command exists to prevent.
+    #
+    # So the NAME is what gets probed when TLS terminates elsewhere. The proxy-in-front
+    # concern the loopback probe exists for does not apply: there is no "us" on this
+    # host to be answered for.
+    if str(m.extra.get("tls_terminates") or "") == "cluster":
+        r = tlsmod.verify(host, port, cafile=cafile)
+    else:
+        for _probe in ("127.0.0.1", "::1"):
+            r = tlsmod.verify(_probe, port, cafile=cafile, sni=host)
+            if r["serving"] and not r.get("fallback"):
+                break
 
     if not r["serving"]:
         ui.warn(f"  ✗ nothing is serving TLS on this host's port {port} - {r['error']}")
@@ -1855,9 +1904,16 @@ def tls_status(name: str = typer.Option("", "--name", "-n")) -> None:
     ui.panel(f"TLS: {m.name}", rows)
 
     if r["fallback"]:
-        # Traefik's own placeholder: it started, but never got a real certificate.
-        ui.warn("  ✗ this is Traefik's built-in placeholder certificate, which means "
-                "ACME never succeeded.")
+        # The ingress controller's own placeholder: it started, and has no certificate
+        # for this name YET. "ACME never succeeded" is a claim about the past that this
+        # check cannot make -- on a fresh cluster this is the ordinary state for the
+        # first minute or three, and reporting it as permanent sends somebody hunting a
+        # problem that resolves itself while they read the logs. The exit code stays
+        # non-zero: whatever the cause, this name is not serving a real certificate now.
+        ui.warn("  ✗ this is the ingress controller's built-in placeholder "
+                "certificate — cert-manager has not issued one for this name yet.")
+        ui.note("    On a fresh cluster that is normal for the first minute or three. "
+                "Run this again; if it persists, the ACME order is stuck.")
         _tls_troubleshoot(m, mode, host, port)
         raise typer.Exit(1)
 
@@ -1892,14 +1948,27 @@ def tls_status(name: str = typer.Option("", "--name", "-n")) -> None:
     if r["trusted"]:
         ui.ok("  ✓ serving HTTPS with a certificate this machine trusts.")
         return
-    # Untrusted is EXPECTED for staging.
-    if mode == tlsmod.MODE_ACME:
+    # THREE reasons an ACME certificate is untrusted, and they were all reported as
+    # the first one. Staging is expected and fine; a self-signed certificate means
+    # nothing has issued one yet, which on a cluster is the normal state for the first
+    # minutes and is not a failure either; anything else is a real surprise.
+    if mode == tlsmod.MODE_ACME and r.get("self_signed"):
+        ui.warn("  ✗ serving a self-signed certificate — nothing has issued one yet.")
+        ui.hint("  On Kubernetes the ingress serves its own until cert-manager "
+                "finishes, which is a minute or three after the workspace answers.")
+        ui.hint(f"  kubectl -n rc-repro-{m.name} describe certificate {m.name}-tls")
+    elif mode == tlsmod.MODE_ACME and r.get("staging"):
         ui.ok("  ✓ serving HTTPS with a real Let's Encrypt-issued certificate.")
         ui.hint("  Not trusted here, which is normal for --acme-staging: DNS and the "
                 "challenge both worked.")
         ui.hint("  For a trusted certificate, re-run the SAME command without "
                 "--acme-staging:")
         ui.hint("    " + _promote_command(m, host))
+    elif mode == tlsmod.MODE_ACME:
+        ui.warn(f"  ✗ serving a certificate this machine does not trust, from "
+                f"{r['issuer'] or 'an unnamed issuer'}.")
+        ui.hint("  That is neither staging nor a placeholder, so something else is "
+                "answering for this name — a proxy in front is the usual cause.")
     else:
         ui.ok("  ✓ serving HTTPS.")
         ui.hint("  This machine does not trust the issuer; that may be fine if the "
@@ -2347,8 +2416,17 @@ def upgrade_cmd(
         _fail(exc)
     ui.ok(f"✓ {res['name']!r} upgraded {res['from_version']} -> {res['to_version']} "
           f"in {res['boot_seconds']}s")
-    if res["running_version"]:
-        typer.echo(f"    Rocket.Chat reports {res['running_version']}")
+    # ONLY WHEN IT DISAGREES. `wait_ready` reads the UNAUTHENTICATED `/api/info`,
+    # which reports the minor alone -- so a successful upgrade to 8.5.3 printed
+    # "Rocket.Chat reports 8.5" directly under "upgraded 8.5.1 -> 8.5.3", which reads
+    # as a contradiction on the one command whose entire purpose is changing the
+    # version. Agreement is the expected case and saying it in a narrower form than
+    # the line above is worse than not saying it; disagreement is the fact worth
+    # printing, and the check is a prefix for the same truncation reason.
+    running = res["running_version"]
+    if running and running != "?" and not str(res["to_version"]).startswith(running):
+        ui.warn(f"    but Rocket.Chat reports {running} — the upgrade did not land "
+                f"the image you asked for")
     if res["migration_errors"]:
         ui.warn(f"  {len(res['migration_errors'])} migration error(s) in the boot log:")
         for line in res["migration_errors"]:
@@ -2373,7 +2451,7 @@ def stats(
         # ResourceMonitor samples docker and has nothing to sample, so this path is
         # its own rather than a translation of it.
         from rc_repro.services import k8s
-        context = str((m.extra or {}).get("context") or k8s.CONTEXT)
+        context = str((m.extra or {}).get(config.EXTRA_CONTEXT) or k8s.CONTEXT)
         # THE WHOLE NAMESPACE, not just the Rocket.Chat pods. Compose sums
         # `docker compose ps -q`, which is every container in the workspace --
         # MongoDB included, and on Kubernetes MongoDB is usually the largest single
@@ -3389,7 +3467,7 @@ def logs(
     if topology.of_repro(target) == topology.KUBERNETES:
         from rc_repro.services import k8s
         meta = runner.read_meta(target)
-        context = str((meta.extra or {}).get("context") or k8s.CONTEXT)
+        context = str((meta.extra or {}).get(config.EXTRA_CONTEXT) or k8s.CONTEXT)
         proc = k8s.log_process(target, context=context, tail=tail or 200,
                                follow=follow)
         try:
@@ -3579,12 +3657,13 @@ def skill_status(
 @app.command()
 def doctor(
     json_out: bool = typer.Option(False, "--json", help="print the report as one JSON envelope; exits 3 on any failing check"),
+    context: str = typer.Option("", "--context", help="report on this Kubernetes cluster by kubeconfig context name, as `up --context` would use it"),
 ) -> None:
     """Preflight: check Docker, Compose, disk, connectivity and ports."""
     from rc_repro.services import doctor as doctorsvc
     if json_out:
         jsonout.activate()
-    report = doctorsvc.run_checks()
+    report = doctorsvc.run_checks(context=context)
     if json_out:
         # `doctor --json` used to answer `{"ok": true, "warnings": [], "data":
         # {"verdict": "warn", "counts": {"warn": 6}}}`. Six warnings, and the field
@@ -3623,6 +3702,424 @@ def doctor(
         typer.secho("Usable, with warnings above.", fg=typer.colors.YELLOW)
     else:
         typer.secho("All good — rc-repro is ready.", fg=typer.colors.GREEN)
+
+
+#: What `rc-repro cluster` accepts. ONE tuple, because three things read it -- the
+#: refusal below, the argument's own help, and the test that checks the shipped EKS
+#: walkthrough still names commands that exist. A guide that tells somebody to run a
+#: renamed action is worse than no guide.
+CLUSTER_ACTIONS = ("status", "list", "guide", "iam-policy",
+                   "create", "prepare", "delete", "forget")
+
+
+@app.command(name="cluster")
+def cluster_cmd(
+    action: str = typer.Argument("status", help="status | list | guide | iam-policy | create | prepare | delete | forget"),  # noqa: E501 - mirrors CLUSTER_ACTIONS
+    name: str = typer.Argument("", help="the cluster's name, for `create` and `delete`; which document, for `iam-policy`"),
+    context: str = typer.Option("", "--context", help="which cluster — its own name (`support`) or the full context name (status). Defaults to `kubernetes.context`, then to the one `up` would use"),
+    region: str = typer.Option("", "--region", help="AWS region (create/delete; narrows `list` to one region). Defaults to the one `aws` resolves"),
+    nodes: int = typer.Option(0, "--nodes", help="how many nodes (create). Default 3; Launchpad sizes 5 for a production workspace"),
+    expires: str = typer.Option("", "--expires", help="days until you expect to be finished with this cluster, or `never` (create). Default 7. A REMINDER only — nothing deletes on it"),
+    subnet: list[str] = typer.Option(None, "--subnet", help="use an EXISTING VPC: `--subnet <az>=<subnet-id>`, repeatable. Without any, a new VPC is created"),
+    force: bool = typer.Option(False, "--force", help="delete without reading what the cluster holds; on `list`, show every cluster and not only rc-repro's"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="skip the confirmation prompt (delete)"),
+    path_only: bool = typer.Option(False, "--path", help="print where the shipped guide is on this machine, and nothing else (guide)"),
+    json_out: bool = typer.Option(False, "--json", help="print the ledger as one JSON envelope"),
+) -> None:
+    """What a Kubernetes cluster is holding, and what it is costing.
+
+    NEW TO THIS? `rc-repro cluster guide` prints the whole EKS walkthrough — what to
+    install, which permissions to grant, and the six commands from an empty AWS
+    account to a workspace on a real domain and back to nothing.
+
+    A peer of `edge`: the cluster is not a workspace, so it never appears in `list`
+    and `prune`/`down` cannot describe it — but something holding your workspaces,
+    your volumes and, on a managed cluster, your money should be answerable, and
+    this is where it answers.
+
+    `status` is read-only and free on every distribution — kind, an adopted k3s or a
+    managed one. `create` and `delete` are neither, and they are deliberately their
+    own verb: `up` can never build a cloud cluster, at any lifecycle, under any flag,
+    because it is the command you run per ticket and this one takes twenty minutes and
+    real money.
+
+    `create` makes a NEW VPC unless `--subnet <az>=<id>` names an existing one, and it
+    is gated on the AWS account having been approved on this box. `delete` removes only
+    a cluster rc-repro built, proved by a tag on the cluster itself rather than by its
+    name.
+
+    Nothing here reports a zero it did not read. A cluster that cannot be reached
+    shows `?` rather than "0 workspaces, nothing running" — a ledger whose job is to
+    stop a cluster being forgotten must not be the thing that says it is empty.
+    """
+    from rc_repro.services import cluster as clustersvc
+
+    if action not in CLUSTER_ACTIONS:
+        _fail(errors.ValidationError(
+            f"unknown action {action!r}. Want: " + " | ".join(CLUSTER_ACTIONS) + "."))
+    if json_out:
+        jsonout.activate()
+
+    if action == "guide":
+        from rc_repro.services import eks as ekssvc
+        if path_only:
+            found = ekssvc.guide_path()
+            typer.echo(str(found) if found else "")
+            return
+        try:
+            body = ekssvc.guide()
+        except errors.ReproError as exc:
+            _fail(exc)
+        if json_out:
+            jsonout.reply("cluster-guide", {"path": str(ekssvc.guide_path() or ""),
+                                            "body": body})
+            return
+        # STDOUT CARRIES THE DOCUMENT AND NOTHING ELSE, like `iam-policy`: the next
+        # thing that happens to it is a pipe into a pager or a file.
+        typer.echo(body.rstrip("\n"))
+        return
+
+    if action == "iam-policy":
+        from rc_repro.services import eks as ekssvc
+        if json_out:
+            jsonout.reply("cluster-iam-policy", {
+                "documents": [
+                    {"name": key, "filename": ekssvc.IAM_DOCUMENTS[key][0],
+                     "purpose": ekssvc.IAM_DOCUMENTS[key][1],
+                     "body": ekssvc.iam_document(key)}
+                    for key in (sorted(ekssvc.IAM_DOCUMENTS) if not name else [name])
+                ]})
+            return
+        if not name:
+            # THE MENU, only when no document was asked for. With one named, stdout
+            # carries the document and NOTHING else, because the next thing that
+            # happens to it is `> operator.json` or a pipe into `kubectl apply -f -`,
+            # and a helpful header is a syntax error in somebody's terminal.
+            ui.note("permissions documents rc-repro ships, each verified by using it:")
+            for key in sorted(ekssvc.IAM_DOCUMENTS):
+                fname, purpose = ekssvc.IAM_DOCUMENTS[key]
+                ui.note(f"  {key:<9} {fname}")
+                for line in textwrap.wrap(purpose, 74):
+                    ui.note(f"            {line}")
+            ui.note("")
+            ui.note("  rc-repro cluster iam-policy operator > operator-policy.json")
+            ui.note("  aws iam create-policy --policy-name rc-repro-cluster-operator \\")
+            ui.note("      --policy-document file://operator-policy.json")
+            ui.note("  rc-repro cluster iam-policy rbac | kubectl apply -f -")
+            return
+        try:
+            typer.echo(ekssvc.iam_document(name).rstrip("\n"))
+        except errors.ReproError as exc:
+            _fail(exc)
+        return
+
+    if action == "forget":
+        # THE KUBECONFIG ENTRY, NEVER THE CLUSTER. `delete` takes the cluster away and
+        # tidies the entries it wrote; this is for the entry left behind when the
+        # cluster went away some OTHER way -- deleted from the console, by a colleague,
+        # or by an eksctl run that predates rc-repro. Those entries are unreachable for
+        # ever and read on a card as "not answering", which is the alarming way to say
+        # "nothing is there".
+        #
+        # It refuses a cluster that answers, because at that point the name is a
+        # working cluster and forgetting it would be taking away access to something
+        # live rather than clearing litter. `--force` is the override.
+        from rc_repro.services import k8s
+        target = (name or context or "").strip()
+        if not target:
+            _fail(errors.ValidationError(
+                "which context should be forgotten? `rc-repro cluster forget "
+                "<context>`, or `rc-repro cluster list` to see what is there."))
+        # A DANGLING `current-context` IS THE LITTER, and it is the one shape of it
+        # that `assert_context_known` refuses -- the entry has already been removed and
+        # only the pointer at it is left, so the name is not in `contexts()` and the
+        # refusal reads "no kubeconfig context named ...", which is true and useless.
+        # That is exactly the state a delete used to leave behind, so the command that
+        # exists to clear it has to accept it.
+        if target == k8s.active_context():
+            known = target
+        else:
+            known, _unreadable = k8s.assert_context_known(target)
+        if not force and k8s.reach(known).ok:
+            _fail(errors.ConflictError(
+                f"{known!r} is answering, so it is a cluster you can still use rather "
+                f"than a leftover entry. `rc-repro cluster delete` takes a cluster "
+                f"away; `--force` forgets a working one anyway."))
+        gone = k8s.forget_context(known)
+        if json_out:
+            jsonout.reply("cluster-forget", {"context": known, "forgotten": gone})
+            return
+        if not gone:
+            # SAID, NOT SWALLOWED. `kubectl config unset` succeeds whether or not there
+            # was anything to unset, so "it worked" is not evidence the entry is gone.
+            _fail(errors.ConflictError(
+                f"{known} is still named by a kubeconfig — remove it by hand with "
+                f"`kubectl config delete-context {known}`"))
+        ui.ok(f"forgot {known} — the cluster itself was not touched")
+        return
+
+    if action == "list":
+        # THE ONLY COMMAND THAT LOOKS WHERE YOU ARE NOT ALREADY LOOKING. Every other
+        # reader here needs a context or a local pointer, so a cluster in a region
+        # nobody is thinking about is invisible to all of them — which is how one sat
+        # billing for 16.8 hours while that day's checks swept a single region.
+        from rc_repro.services import eks as ekssvc
+        found = ekssvc.sweep_clusters([region] if region else None,
+                                      owned_only=not force, emit=_cli_emit)
+        if json_out:
+            for bad in found["unreadable"]:
+                jsonout.warn_once(
+                    f"REGION_UNREADABLE_{bad['region'].upper().replace('-', '_')}",
+                    f"{bad['region']} could not be read ({bad['why']}); it is reported "
+                    f"as unknown rather than as holding nothing")
+            jsonout.reply("cluster-list", found)
+            return
+        rows = found["clusters"]
+        if rows:
+            ui.warn(f"{len(rows)} cluster(s) — every one of these is billing")
+            for row in rows:
+                mark = "rc-repro" if row["ours"] else "not rc-repro's"
+                when = (row["created"] or "")[:10]
+                due = f" · expires {row['expires']}" if row["expires"] else ""
+                ui.note(f"  {row['region']:<15} {row['name']:<24} "
+                        f"{row['status'] or '?':<9} {mark}  created {when or '?'}{due}")
+            ui.note("  `rc-repro cluster status --context <name>` prices one of them "
+                    "— the cluster's own name is enough.")
+        elif found["regions"]:
+            ui.ok(f"no {'rc-repro ' if not force else ''}clusters found in "
+                  f"{len(found['regions'])} region(s)")
+        # NO REASSURING LINE WHEN NOTHING WAS SWEPT. "no clusters found in 0 regions"
+        # is the sentence this whole command exists to stop being printed: it reads as
+        # "you are paying for nothing" and means "I did not look anywhere".
+        # SAID LAST AND SAID PLAINLY. "Nothing found" and "nothing found in the
+        # fourteen regions I could read" are different reports, and only the second
+        # one is honest when a sweep was partly refused.
+        if found["unreadable"]:
+            ui.warn(f"{len(found['unreadable'])} region(s) could NOT be read — this "
+                    f"report does not cover them:")
+            for bad in found["unreadable"]:
+                ui.note(f"  {bad['region']:<15} {bad['why']}")
+        if found["fallback"]:
+            ui.note(f"swept a built-in region list because the account could not be "
+                    f"asked which are enabled ({found['fallback']})")
+        return
+
+    if action == "prepare":
+        # By CONTEXT, not by name: prepare is kubectl work on a cluster that already
+        # exists, and the thing it needs is the way in rather than the way it was made.
+        # That also lets it run on a cluster rc-repro did not build.
+        from rc_repro.services import eks as ekssvc
+        ctx = context or config.default_kube_context()
+        if not ctx:
+            _fail(errors.ValidationError(
+                "`cluster prepare` needs --context <name>, or a default from "
+                "`rc-repro config set kubernetes.context <name>`."))
+        try:
+            out = ekssvc.prepare_cluster(ctx, emit=_cli_emit)
+        except errors.ReproError as exc:
+            _fail(exc)
+        if json_out:
+            jsonout.reply("cluster-prepare", out)
+            return
+        ui.ok(f"{ctx} is ready to serve a workspace")
+        ui.note(f"  storage   {out['storage_class']}")
+        ui.note(f"  ingress   {out['ingress_class']}")
+        ui.note("  certs     cert-manager installed")
+        if out["already"]:
+            ui.note(f"  adopted   {', '.join(out['already'])} — left as they were")
+        # THE ADDRESS ITSELF IS EMITTED by the service, so both front-ends show it in
+        # the same place and it is not said twice here. What stays is the next command,
+        # which only makes sense in a terminal.
+        if out["cname_target"]:
+            ui.note("  then: rc-repro up --version 8.5.1 --name t1 --runtime kubernetes "
+                    f"--context {ctx} --domain <your name>")
+        return
+
+    if action in ("create", "delete"):
+        from rc_repro.services import eks as ekssvc
+        if not name:
+            _fail(errors.ValidationError(
+                f"`cluster {action}` needs the cluster's name, e.g. "
+                f"`rc-repro cluster {action} support`."))
+        try:
+            if action == "create":
+                pairs: dict[str, str] = {}
+                for item in (subnet or []):
+                    if "=" not in item:
+                        _fail(errors.ValidationError(
+                            f"--subnet wants `<az>=<subnet-id>`, got {item!r}"))
+                    az, sid = item.split("=", 1)
+                    pairs[az.strip()] = sid.strip()
+                want = (expires or "").strip().lower()
+                if want in ("never", "none", "0"):
+                    days: int | None = None
+                elif not want:
+                    days = ekssvc.DEFAULT_EXPIRY_DAYS
+                else:
+                    try:
+                        days = int(want)
+                    except ValueError:
+                        _fail(errors.ValidationError(
+                            f"--expires wants a number of days or `never`, "
+                            f"got {expires!r}"))
+                out = ekssvc.create_cluster(
+                    name, region=region, nodes=nodes or ekssvc.DEFAULT_NODES,
+                    subnets=pairs or None, expires_days=days, emit=_cli_emit)
+                if json_out:
+                    jsonout.reply("cluster-create", out)
+                    return
+                ui.ok(f"cluster {name!r} is up in {out['region']}")
+                if out.get("expires"):
+                    ui.note(f"  tagged as wanted until {out['expires']} — "
+                            f"`rc-repro doctor` says so once that passes")
+                else:
+                    ui.warn("  no expiry set — nothing will remind you this is running")
+                # THE LINE PEOPLE COPY. It printed the full ARN and `--runtime
+                # kubernetes` beside a `--context` that already implies Kubernetes, so
+                # the command it taught was the two most awkward forms of itself.
+                ui.note(f"  point a workspace at it: rc-repro up --version 8.5.1 "
+                        f"--name TICKET-1234 --context {name} --domain <your name>")
+                return
+
+            # READ BEFORE ASKING. The prompt used to be the first thing that
+            # happened, so `rc-repro cluster delete default` -- a LOCAL k3s context,
+            # not an EKS cluster -- asked "Delete EKS cluster 'default'? This destroys
+            # the cluster, its nodes and its volumes", and only refused afterwards.
+            # Asking somebody to consent to destroying something that is not there is
+            # how people learn to type `y` at a prompt that means nothing, and this
+            # file already holds the rule elsewhere: every read-only refusal comes
+            # first.
+            #
+            # ONLY A DEFINITE ABSENCE short-circuits. REFUSED is "I could not ask" --
+            # and the six guards inside `delete_cluster` are the real gate either way,
+            # so an unreadable answer still goes through the prompt and into them.
+            from rc_repro.services import k8s as k8smod
+            seen = ekssvc.describe_cluster(name, region or ekssvc.preflight().region)
+            if seen.state == k8smod.ABSENT:
+                if json_out:
+                    jsonout.reply("cluster-delete", {"name": name, "deleted": False})
+                    return
+                ui.note(f"no EKS cluster named {name!r}"
+                        + (f" in {region}" if region else "")
+                        + " — nothing to delete."
+                        + (" That name is a kubeconfig context on this machine; "
+                           f"`rc-repro cluster forget {name}` clears the entry, and "
+                           "only a cluster rc-repro built in AWS can be deleted here."
+                           if name in (k8smod.contexts()[0] or []) else ""))
+                return
+
+            # delete. The prompt is not the gate -- the TAG is -- but a 15-minute
+            # destructive operation on somebody's AWS account still asks.
+            if not yes and not jsonout.active():
+                typer.confirm(
+                    f"Delete EKS cluster {name!r}"
+                    + (f" in {region}" if region else "")
+                    + "? This destroys the cluster, its nodes and its volumes.",
+                    abort=True)
+            gone = ekssvc.delete_cluster(name, region=region, force=force,
+                                         emit=_cli_emit)
+            if json_out:
+                jsonout.reply("cluster-delete", {"name": name, "deleted": gone})
+                return
+            if gone:
+                ui.ok(f"cluster {name!r} is gone")
+            else:
+                ui.note(f"no cluster named {name!r} to delete")
+            return
+        except errors.ReproError as exc:
+            _fail(exc)
+    # WRAPPED, like the other 26 service calls in this file. `status()` refuses an
+    # unknown context with a ValidationError, and an unwrapped raise leaves `--json`
+    # with an empty stdout and a non-zero exit -- the exact break
+    # `test_every_json_command_answers_with_exactly_one_envelope` exists to catch, and
+    # it caught it here.
+    try:
+        report = clustersvc.status(context=context)
+    except errors.ReproError as exc:
+        _fail(exc)
+    # ONE verdict for both front ends. `doctor` sets the precedent and the reason is
+    # the same: a command that exits 1 for a human and 0 for `--json` is one command
+    # answering two ways, and the caller most likely to be scripting it is the one
+    # least able to notice. PreflightError's code rather than a bare 1, because "that
+    # cluster is not answering" is a different fact from "rc-repro broke".
+    unusable = not report["context"] or not report["reachable"]
+
+    if json_out:
+        for missing in report["unreadable"]:
+            jsonout.warn_once(f"CLUSTER_UNREADABLE_{missing.upper()}",
+                              f"{missing} could not be read; it is reported as "
+                              f"unknown rather than as none")
+        jsonout.reply("cluster", report)
+        if unusable:
+            raise typer.Exit(errors.PreflightError.exit_code)
+        return
+
+    def q(value, suffix: str = "") -> str:
+        """`?` for anything that could not be read. Never a zero."""
+        return "?" if value is None else f"{value}{suffix}"
+
+    ui.note(f"cluster   {report['context'] or '(none)'}")
+    if not report["context"]:
+        ui.fail("No cluster configured. `rc-repro config set kubernetes.context <name>`, "
+                "or point kubectl at one.")
+        raise typer.Exit(errors.PreflightError.exit_code)
+    if not report["reachable"]:
+        # WHICH KIND OF UNREACHABLE. "is not answering" was printed for a cluster that
+        # was ACTIVE and answering and merely refusing the caller's credential, which
+        # sent the reader to check the one thing that was fine. The two sentences after
+        # it stay: whatever the cause, the counts below are unknown rather than zero.
+        ui.fail(f"{report['context']!r} cannot be read: "
+                f"{report['reach_why'] or 'it is not answering'}. Nothing below could "
+                f"be read — this is NOT a report that the cluster is empty.")
+        if report["reach_advice"]:
+            ui.note(report["reach_advice"].strip())
+        raise typer.Exit(errors.PreflightError.exit_code)
+
+    owned = "rc-repro's own" if report["ours"] else "yours"
+    ui.ok(f"{report['distribution'] or 'unknown'} · {owned} · "
+          f"{q(report['nodes'])} node(s)")
+    if report["age_hours"] is not None:
+        days, hours = divmod(int(report["age_hours"]), 24)
+        ui.note(f"up for    {days}d {hours}h")
+    if report["instance_types"]:
+        shape = ", ".join(f"{n}x {t or 'unlabelled'}"
+                          for t, n in sorted(report["instance_types"].items()))
+        ui.note(f"nodes     {shape}")
+
+    rows = report["workspaces"]
+    if rows is None:
+        ui.warn("workspaces could not be listed — not the same as none")
+    else:
+        ui.note(f"holding   {len(rows)} workspace(s), {q(report['pvcs'])} volume(s)")
+        for row in rows:
+            who = row["owner"] if row["owner_readable"] else "owner unreadable"
+            ui.note(f"            {row['name']}  ({who or 'unowned'}, "
+                    f"{row['pvcs']} volume(s))")
+    ui.note(f"services  {q(report['loadbalancers'])} LoadBalancer(s)"
+            + ("   — each one is billed on a managed cluster"
+               if report["cost"] else ""))
+    if report.get("manageable") is False and report.get("unmanageable_why"):
+        ui.warn(f"stuck     {report['unmanageable_why']}")
+    shared = [n for n, on in (("operator", report["operator"]),
+                              ("monitoring", report["monitoring"])) if on]
+    ui.note(f"shared    {', '.join(shared) if shared else 'none installed'}")
+
+    cost = report["cost"]
+    if cost:
+        ui.warn(f"cost      ~${cost['usd_hr']}/hr  (~${round(cost['usd_hr'] * 24, 2)}/day)"
+                f"  ESTIMATE — {cost['basis']}")
+        if cost["unpriced"]:
+            ui.warn("          plus " + ", ".join(
+                f"{n}x {t or 'unlabelled'}" for t, n in cost["unpriced"].items())
+                + " which this build cannot price — the figure above is LOW")
+        if cost.get("incomplete"):
+            # A read that FAILED, not a gap in the price table. Said differently
+            # because only one of them is fixed by adding a row to a dict.
+            ui.warn("          and " + ", ".join(cost["incomplete"])
+                    + " could not be counted — the figure above is INCOMPLETE, not"
+                      " merely approximate")
+    for missing in report["unreadable"]:
+        ui.warn(f"unread    {missing}")
 
 
 @app.command()

@@ -25,7 +25,7 @@ from pathlib import Path
 
 from packaging.version import InvalidVersion, Version
 
-from rc_repro import compose, rcapi, runner, versions
+from rc_repro import compose, config, rcapi, runner, versions
 from rc_repro.errors import (ConflictError, DockerError, NotReadyError,
                              ReproError, ValidationError)
 from rc_repro.services import audit as auditsvc
@@ -70,7 +70,7 @@ def require_running(name: str) -> runner.Metadata:
         # have helped either.
         from rc_repro.services import k8s
         meta = runner.read_meta(target)
-        context = str((meta.extra or {}).get("context") or k8s.CONTEXT)
+        context = str((meta.extra or {}).get(config.EXTRA_CONTEXT) or k8s.CONTEXT)
         if k8s.workload_exists(target, context=context):
             return meta
         raise NotReadyError(
@@ -314,7 +314,7 @@ def _run_locked(target: str, to_version: str, *, offline: bool, force: bool,
         elif runner.up(target) != 0:
             raise DockerError("`docker compose up` failed applying the new image")
         info(emit, "waiting for Rocket.Chat to run its migrations", phase="wait", pct=60)
-        lifecycle.wait_and_finalize(runner.read_meta(target), emit)
+        lifecycle.wait_and_finalize(runner.read_meta(target), emit, final=False)
     except Exception as exc:  # noqa: BLE001 - any failure past this point is rollback-worthy
         if rollback_on_failure and bundle:
             warn(emit, f"upgrade failed ({exc}); rolling back to {p['from_version']}",
@@ -361,7 +361,7 @@ def _kube_target(target: str):
     from rc_repro.services import k8s
     meta = runner.read_meta(target)
     extra = meta.extra if isinstance(meta.extra, dict) else {}
-    return (k8s, str(extra.get("context") or k8s.CONTEXT),
+    return (k8s, str(extra.get(config.EXTRA_CONTEXT) or k8s.CONTEXT),
             str(extra.get("namespace") or k8s.namespace_for(target)))
 
 
@@ -442,7 +442,7 @@ def _migration_errors(name: str, tail: int = 400) -> list[str]:
         if topology.of_repro(name) == topology.KUBERNETES:
             from rc_repro.services import k8s
             meta = runner.read_meta(name)
-            context = str((meta.extra or {}).get("context") or k8s.CONTEXT)
+            context = str((meta.extra or {}).get(config.EXTRA_CONTEXT) or k8s.CONTEXT)
             proc = k8s.log_process(name, context=context, tail=tail, follow=False)
             try:
                 text = "".join(proc.stdout or [])

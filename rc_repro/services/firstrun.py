@@ -16,8 +16,13 @@ This is the narrow replacement:
   request, so there is never an anonymous privileged session -- not even briefly.
 * Only the sha256 reaches disk, like every other credential here.
 
-A second `serve` reports the outstanding key rather than minting another, so the
-URL printed in a scrollback stays the one that works.
+EVERY `serve` MINTS A FRESH KEY, and that supersedes any URL printed earlier. The
+design proposed reporting an outstanding key instead, so a URL sitting in a
+scrollback would keep working -- and that cannot be done here, because only the
+sha256 reaches disk. A key that cannot be read back cannot be reprinted. Minting
+again is the honest version: the URL just printed is always the one that works, and
+the consequence to know is that restarting `serve` invalidates the previous
+`/setup#k=...` link. `cli.py` records the same reasoning at the call site.
 """
 
 from __future__ import annotations
@@ -53,12 +58,6 @@ def _read() -> tuple[str, int] | None:
     except (OSError, ValueError):
         return None
     return None
-
-
-def outstanding() -> bool:
-    """Whether an unexpired key is already waiting to be used."""
-    found = _read()
-    return bool(found and found[1] > time.time())
 
 
 def mint() -> str:

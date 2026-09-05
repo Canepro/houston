@@ -10,6 +10,8 @@ docs/design/team-server.md §11.
 from __future__ import annotations
 
 import pytest
+
+from conftest import source_index, source_of
 import yaml
 
 from rc_repro import config
@@ -1064,13 +1066,12 @@ def test_the_edge_attaches_after_the_workspace_is_up_not_before(tmp_path, monkey
     Registering during the build wrote a correct route to a backend the edge
     could not resolve, so the name answered 502 -- and a 502 is not an error
     anyone sees, it just looks like a broken workspace."""
-    import inspect
 
     from rc_repro.services import lifecycle as lc
 
-    src = inspect.getsource(lc._create_repro_locked)
-    up_at = src.index("rc = _up(repro_name")
-    attach_at = src.index("edgesvc.attach(repro_name)")
+    src = source_of(lc._create_repro_locked)
+    up_at = source_index(src, "rc = _up(repro_name")
+    attach_at = source_index(src, "edgesvc.attach(repro_name)")
     assert attach_at > up_at, "attach must come after the workspace is up"
 
 

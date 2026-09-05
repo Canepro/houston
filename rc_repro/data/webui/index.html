@@ -17,6 +17,11 @@
          look like a status label. What each engine is doing moved to the footer. -->
     <button id="doctor-badge" class="chip" title="Run the environment check">doctor</button>
     <button id="edge-badge" class="chip" title="The shared Traefik serving every https name" hidden></button>
+    <!-- The cluster ledger's at-a-glance half. Hidden when this box knows of no
+         cluster at all; amber when one is past its date or would not answer, which
+         is what amber MEANS here. Never red: red is for destroying something, and a
+         cluster that is merely expensive is not that. -->
+    <button id="cluster-badge" class="chip" title="Clusters, and what they are costing" hidden></button>
     <div class="topbar-actions">
       <!-- ONE set of links, in a wrapper the narrow layout turns into a popover. A
            second copy behind a hamburger is two things to keep in step, and they
@@ -24,6 +29,7 @@
       <div id="toplinks" class="toplinks">
         <button id="btn-home" class="toplink">Home</button>
         <button id="btn-jobs" class="toplink">Activity</button>
+        <button id="btn-clusters" class="toplink">Clusters</button>
         <button id="btn-scenarios" class="toplink">Scenarios</button>
         <button id="btn-refresh" class="toplink">Refresh</button>
       </div>
@@ -146,7 +152,53 @@
         <div class="seg" id="deployment-seg" role="group" aria-label="Arrangement"></div>
         <input type="hidden" name="deployment" id="deployment-value">
         <p id="runtime-hint" class="hint seg-note"></p>
+        <!-- WHICH cluster is part of "where it runs", so it belongs in this section
+             and not in Advanced. Advanced is for fields whose default is right until
+             you have a reason to change it; on a managed cluster this one's default
+             is "whatever this box was last pointed at", which may be a colleague's
+             cluster or one that bills by the hour. A SELECT, not a text box: the
+             server already knows which clusters it can see, and an EKS context name
+             is long and not memorable. Blank means "decide for me", which is what an
+             un-set --context means. -->
+        <label id="context-row" hidden>Cluster
+          <select name="context" id="context-select"></select></label>
+        <p id="context-hint" class="hint" hidden>Which cluster this workspace is created
+          in. On the command line this is <code>--context</code>.</p>
+        <!-- What choosing THAT cluster means, said where the choice is made. Filled
+             by syncClusterNote from the same rows the picker is built from. -->
+        <p id="cluster-note" class="banner warn" hidden></p>
         <div class="checks" id="runtime-extra"></div>
+        <!-- HTTPS SITS IN SECTION 2 because "how it is reached" is part of
+             "where it runs", and because on a managed cluster the domain is
+             not an advanced nicety -- without it the workspace answers only on
+             a port-forward, which is the one outcome that wastes a cluster you
+             are paying for. It was the LAST thing inside Advanced: two clicks
+             and a scroll from the decision it belongs to. -->
+        <!-- Still a flag rather than a preset: --preset is single-valued, so a tls
+             preset would exclude oidc/saml/livechat, which are the ones that need it. -->
+        <div class="fgroup" id="create-https-block">
+          <span class="fgroup-t">HTTPS</span>
+          <label>Certificate
+            <select name="https_mode" id="https-mode">
+              <option value="">Off — plain http://localhost:PORT</option>
+              <option value="acme">Let's Encrypt — a domain that already points here</option>
+              <option value="local">Local certificate — offline, no domain (run rc-repro trust-ca once)</option>
+            </select>
+          </label>
+          <p class="hint" id="https-mode-hint"></p>
+          <label class="https-acme" hidden>Domain
+            <input name="domain" placeholder="rc1.example.com"></label>
+          <label class="https-acme" hidden>Contact email for Let's Encrypt
+            <input name="acme_email" type="email" placeholder="you@example.com"></label>
+          <p class="hint https-acme" hidden>The same two values the official
+            Rocket.Chat compose asks for (<code>DOMAIN</code> and
+            <code>LETSENCRYPT_EMAIL</code>). Traefik requests the certificate in the
+            background; check it with <b>Check TLS</b> once the workspace is up.<br>
+            The domain has to resolve to this host with port 443 reachable — Let's
+            Encrypt validates by connecting to it. Add an A or CNAME record for the
+            name at your DNS provider before you create the workspace; on a managed
+            cluster, point it at the load balancer <b>Prepare</b> reports.</p>
+        </div>
       </section>
 
       <section class="sec">
@@ -205,32 +257,6 @@
           <label><input type="checkbox" name="no_pull"> Don't pull images first</label>
         </div>
 
-        <!-- HTTPS lives here rather than in a disclosure of its own. It is one more
-             thing about how the workspace is built, and two sibling twisties made
-             the form look like it had two Advanced sections. A flag, not a preset:
-             --preset is single-valued, so a tls preset would exclude oidc/saml/
-             livechat, which are the ones that need it. -->
-        <div class="fgroup" id="create-https-block">
-          <span class="fgroup-t">HTTPS</span>
-          <label>Certificate
-            <select name="https_mode" id="https-mode">
-              <option value="">Off — plain http://localhost:PORT</option>
-              <option value="acme">Let's Encrypt — a domain that already points here</option>
-              <option value="local">Local certificate — offline, no domain (run `rc-repro trust-ca` once)</option>
-            </select>
-          </label>
-          <p class="hint" id="https-mode-hint"></p>
-          <label class="https-acme" hidden>Domain
-            <input name="domain" placeholder="rc1.example.com"></label>
-          <label class="https-acme" hidden>Contact email for Let's Encrypt
-            <input name="acme_email" type="email" placeholder="you@example.com"></label>
-          <p class="hint https-acme" hidden>The same two values the official
-            Rocket.Chat compose asks for (<code>DOMAIN</code> and
-            <code>LETSENCRYPT_EMAIL</code>). Traefik requests the certificate in the
-            background; check it with <b>Check TLS</b> once the workspace is up.<br>
-            The domain has to resolve to this host with port 443 reachable — Let's
-            Encrypt validates by connecting to it. How you arrange that is up to you.</p>
-        </div>
       </details>
       <menu>
         <button value="cancel" type="button" id="create-cancel" class="btn">Cancel</button>
@@ -438,6 +464,56 @@
     <menu>
       <button type="button" id="edge-close" class="btn primary">Close</button>
     </menu>
+  </dialog>
+
+  <!-- Building a managed cluster: twenty minutes and billable from the first
+       minute, so the dialog leads with what it will cost rather than burying it.
+       Not the three-section create dialog's shape: that one's numbering exists
+       because choosing a runtime re-shapes the form, and nothing here does. -->
+  <dialog id="cluster-create-dialog">
+    <form id="cluster-create-form" method="dialog">
+      <h2>New cluster</h2>
+      <p class="hint">A managed cluster takes about twenty minutes to build and
+        <b>costs money for as long as it exists</b>, whether or not anything is running
+        in it. It is not removed by <code>down</code>, <code>prune</code> or by any
+        expiry date — only by deleting it.</p>
+      <p id="cluster-create-cost" class="banner warn"></p>
+      <label>Name <input name="name" placeholder="support" required></label>
+      <label>Region <input name="region" placeholder="us-east-1"></label>
+      <div class="row2">
+        <label>Nodes <input name="nodes" type="number" min="1" max="20" placeholder="3"></label>
+        <label>Expires <input name="expires" placeholder="7"
+          title="Days until you expect to be finished, or `never`. A REMINDER only — nothing deletes on it"></label>
+      </div>
+      <p class="hint">Expiry is a reminder and nothing more: removing a cloud cluster is
+        minutes of destructive work on a shared account, and a timer is the worst
+        possible thing to have decided it.</p>
+      <menu>
+        <button type="button" id="cluster-create-cancel" class="btn">Cancel</button>
+        <button type="submit" class="btn solid">Build it — this starts charging</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <!-- Destroying one. The name has to be typed: every other destructive control in
+       this GUI acts on something you can see on screen, and this one acts on a thing
+       that may be holding colleagues' work on machines this box has never seen. -->
+  <dialog id="cluster-delete-dialog">
+    <form id="cluster-delete-form" method="dialog">
+      <h2>Delete cluster</h2>
+      <p id="cluster-delete-what" class="banner bad"></p>
+      <div id="cluster-delete-holds" class="plan"></div>
+      <label>Type the cluster's name to confirm
+        <input name="confirm" autocomplete="off" spellcheck="false"></label>
+      <label class="toggle"><input type="checkbox" name="force">
+        Delete without reading what it holds (<code>--force</code>)</label>
+      <p class="hint">Release its load balancers first, or the VPC delete will hang:
+        <code>kubectl delete svc -A --field-selector spec.type=LoadBalancer</code></p>
+      <menu>
+        <button type="button" id="cluster-delete-cancel" class="btn">Cancel</button>
+        <button type="submit" id="cluster-delete-go" class="btn danger" disabled>Delete it</button>
+      </menu>
+    </form>
   </dialog>
 
   <!-- Activity: running + recent jobs, reopenable -->
