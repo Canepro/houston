@@ -3,8 +3,8 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "rc-repro"
-version = "0.78.0"
+name = "houston"
+version = "1.0.0"
 description = "Launch version-matched Rocket.Chat reproduction environments"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -24,13 +24,13 @@ gui = ["fastapi>=0.110", "uvicorn>=0.29", "python-multipart>=0.0.9", "websockets
 browser = ["playwright>=1.44"]
 
 [project.scripts]
-rc-repro = "rc_repro.cli:main"
+houston = "houston.cli:main"
 
 [tool.setuptools]
-packages = ["rc_repro", "rc_repro.presets", "rc_repro.perf", "rc_repro.services", "rc_repro.web"]
+packages = ["houston", "houston.presets", "houston.perf", "houston.services", "houston.web"]
 
 [tool.setuptools.package-data]
-rc_repro = ["data/*.yaml", "data/presets/*.yaml", "data/monitoring/*.json", "data/loadtest/*.js", "data/webui/*", "data/skill/*.md", "data/iam/*.json", "data/iam/*.yaml", "data/docs/*.md"]
+houston = ["data/*.yaml", "data/presets/*.yaml", "data/monitoring/*.json", "data/loadtest/*.js", "data/webui/*", "data/skill/*.md", "data/iam/*.json", "data/iam/*.yaml", "data/docs/*.md"]
 
 [tool.ruff]
 line-length = 110

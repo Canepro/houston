@@ -16,9 +16,9 @@ import pytest
 
 from conftest import source_index, source_of
 
-from rc_repro import errors, runner
-from rc_repro.services import backup as bk
-from rc_repro.services import upgrade as up
+from houston import errors, runner
+from houston.services import backup as bk
+from houston.services import upgrade as up
 
 
 # --- helpers -------------------------------------------------------------------
@@ -27,7 +27,7 @@ def make_meta(name="rc8-5-1", rc_version="8.5.1", mongo_tag="8.0", preset="defau
               **extra_fields):
     fields = {f.name for f in dataclasses.fields(runner.Metadata)}
     base = {n: "" for n in fields}
-    base.update(name=name, project=f"rcrepro-{name}", rc_version=rc_version,
+    base.update(name=name, project=f"houston-{name}", rc_version=rc_version,
                 rc_image="registry.rocket.chat/rocketchat/rocket.chat",
                 mongo_tag=mongo_tag, mongo_flavor="official", preset=preset,
                 root_url="http://localhost:3000", host_port=3000,
@@ -121,7 +121,7 @@ def test_bundle_without_a_manifest_is_refused(tmp_path):
     other.write_text("hi")
     with tarfile.open(b, "w:gz") as tar:
         tar.add(other, arcname="hello.txt")
-    with pytest.raises(errors.ValidationError, match="rc-repro backup"):
+    with pytest.raises(errors.ValidationError, match="houston backup"):
         bk.read_manifest(b)
 
 
@@ -446,7 +446,7 @@ def test_restore_new_rebuilds_the_preset_the_bundle_came_from(fake_docker, monke
     Two things made it hard to notice. The progress line already printed
     "(preset ldap)" before discarding it, and `compatibility()` then warned that the
     dump came from a different preset -- which reads as a mismatch to be aware of
-    rather than something rc-repro had just done itself.
+    rather than something houston had just done itself.
 
     The test above this one passes either way: its bundle's preset IS "default".
     """
@@ -523,11 +523,11 @@ def test_upgrade_is_offered_only_for_a_running_workspace(monkeypatch):
     monkeypatch.setattr(runner, "container_details", lambda n: [{"service": "mongodb"}])
     state = up.can_upgrade("rc8-5-1")
     assert not state["can_upgrade"]
-    assert "rc-repro start" in state["reason"] and "down" not in state["reason"]
+    assert "houston start" in state["reason"] and "down" not in state["reason"]
 
     monkeypatch.setattr(runner, "container_details", lambda n: [])
     state = up.can_upgrade("rc8-5-1")
-    assert not state["can_upgrade"] and "rc-repro up" in state["reason"]
+    assert not state["can_upgrade"] and "houston up" in state["reason"]
 
 
 def test_can_upgrade_never_raises_for_a_missing_repro(monkeypatch):
@@ -540,14 +540,14 @@ def test_require_running_raises_not_ready_when_stopped(monkeypatch):
     write_repro("rc8-5-1")
     monkeypatch.setattr(runner, "rc_state", lambda n: "absent")
     monkeypatch.setattr(runner, "container_details", lambda n: [{"service": "mongodb"}])
-    with pytest.raises(errors.NotReadyError, match="rc-repro start"):
+    with pytest.raises(errors.NotReadyError, match="houston start"):
         up.require_running("rc8-5-1")
 
 
 # --- upgrade: planning --------------------------------------------------------------------
 
 def _resolved(rc="8.6.1", mongo="8.0", oplog=False):
-    from rc_repro import versions
+    from houston import versions
     return versions.Resolved(rc_version=rc, rc_image="img", mongo_tag=mongo,
                              mongo_flavor="official", mongo_shell="mongosh",
                              oplog=oplog, source="map", note="")
@@ -647,7 +647,7 @@ def test_repro_lock_excludes_another_thread():
     import threading
     started, blocked = threading.Event(), []
 
-    from rc_repro.errors import ConflictError, ReproError
+    from houston.errors import ConflictError, ReproError
 
     def contender():
         try:
@@ -730,7 +730,7 @@ def test_a_failed_drop_warns_rather_than_aborting(fake_docker, monkeypatch):
 
 from typer.testing import CliRunner   # noqa: E402
 
-from rc_repro.cli import app          # noqa: E402
+from houston.cli import app          # noqa: E402
 
 runner_cli = CliRunner()
 
@@ -839,14 +839,14 @@ def test_cli_upgrade_rollback_calls_the_service(monkeypatch):
 # asks for 64000 and warns about it on every boot.
 
 def test_mongo_services_raise_the_open_file_limit():
-    from rc_repro import compose, versions
+    from houston import compose, versions
     for tag, flavor in (("8.0", "official"), ("7.0", "bitnami-legacy")):
         spec = compose.Spec.from_resolved(
             versions.Resolved(rc_version="8.5.1", rc_image="img", mongo_tag=tag,
                               mongo_flavor=flavor, mongo_shell="mongosh", oplog=False,
                               source="map", note=""),
             project_name="p", root_url="http://localhost:3000", host_port=3000,
-            reg_token=None, preset=__import__("rc_repro.presets", fromlist=["x"]).load("default"))
+            reg_token=None, preset=__import__("houston.presets", fromlist=["x"]).load("default"))
         doc = compose.build(spec)
         ulimits = doc["services"]["mongodb"].get("ulimits") or {}
         assert ulimits.get("nofile", {}).get("soft") == 64000, flavor
@@ -940,7 +940,7 @@ def test_delete_rejects_traversal_but_allows_a_symlinked_bundle(tmp_path):
 def test_repro_names_are_length_capped():
     """Unbounded, the name passed validation and then raised ENAMETOOLONG from the
     filesystem -- a 500 from the web API and a raw traceback from the CLI."""
-    from rc_repro.services import lifecycle as lc
+    from houston.services import lifecycle as lc
     lc._require_valid_name("a" * lc.NAME_MAX)          # at the limit: fine
     with pytest.raises(errors.ValidationError, match="limit is"):
         lc._require_valid_name("a" * (lc.NAME_MAX + 1))
@@ -992,10 +992,10 @@ def test_a_failed_rollback_names_both_failures(upgradable, monkeypatch):
 
 def test_every_mutating_service_operation_takes_the_repro_lock():
     """Each of these does read-compose -> write-compose -> `docker compose up`."""
-    from rc_repro.services import data as datasvc
-    from rc_repro.services import envvars as envsvc
-    from rc_repro.services import lifecycle as lcsvc
-    from rc_repro.services import monitor as monsvc
+    from houston.services import data as datasvc
+    from houston.services import envvars as envsvc
+    from houston.services import lifecycle as lcsvc
+    from houston.services import monitor as monsvc
 
     for fn in (envsvc.set_env, monsvc.attach, monsvc.detach, datasvc.run_scale,
                lcsvc.create_repro, bk.create, bk.restore, up.run):
@@ -1006,7 +1006,7 @@ def test_every_mutating_service_operation_takes_the_repro_lock():
 def test_create_repro_derives_the_same_name_it_locks():
     """The wrapper computes the name to lock; if it drifted from the one the body
     derives, the lock would guard a different repro than the one being written."""
-    from rc_repro.services import lifecycle as lcsvc
+    from houston.services import lifecycle as lcsvc
     for req in (lcsvc.CreateReq(version="8.5.1"),
                 lcsvc.CreateReq(version="8.5.1", preset="ldap"),
                 lcsvc.CreateReq(version="8.5.1", name="My Repro!")):
@@ -1026,11 +1026,11 @@ def test_backup_uses_kubectl_for_a_kubernetes_workspace_and_compose_for_a_compos
     The alternative was a second copy of a 699-line module, which is how the admin
     environment ended up drifting between compose.py and the Kubernetes values.
     """
-    from rc_repro.services import backup as bk
-    from rc_repro.services import k8s, topology
+    from houston.services import backup as bk
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    m = bk.runner.Metadata(name="k", project="rc-repro-k", rc_version="8.5.1",
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    m = bk.runner.Metadata(name="k", project="houston-k", rc_version="8.5.1",
                            rc_image="i", mongo_tag="8.0", mongo_flavor="official",
                            preset="default", root_url="u", host_port=3000,
                            version_source="t")
@@ -1047,7 +1047,7 @@ def test_backup_uses_kubectl_for_a_kubernetes_workspace_and_compose_for_a_compos
     assert seen == [["true"]], seen
 
     # A Compose workspace must still go the other way -- this is a fork, not a swap.
-    c = bk.runner.Metadata(name="c", project="rcrepro-c", rc_version="8.5.1",
+    c = bk.runner.Metadata(name="c", project="houston-c", rc_version="8.5.1",
                            rc_image="i", mongo_tag="8.0", mongo_flavor="official",
                            preset="default", root_url="u", host_port=3001,
                            version_source="t")
@@ -1067,7 +1067,7 @@ def test_quiescing_a_kubernetes_workspace_leaves_mongodb_running():
     Rocket.Chat deployments by label and nothing else.
     """
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     src = source_of(k8s.scale_rocketchat)
     assert "app.kubernetes.io/name=rocketchat" in src, \
@@ -1077,7 +1077,7 @@ def test_quiescing_a_kubernetes_workspace_leaves_mongodb_running():
     # The CALL, not the prose: the comment in _Quiesced names `stop_workspace` to
     # explain why it is the wrong one, so a substring check passes on the comment
     # and proves nothing about the code.
-    from rc_repro.services import backup as bk
+    from houston.services import backup as bk
     quiesce = source_of(bk._Quiesced)
     assert "k8s.scale_rocketchat(" in quiesce, quiesce
     assert "k8s.stop_workspace(" not in quiesce, "MongoDB must keep running for a dump"
@@ -1088,7 +1088,7 @@ def test_a_bundle_from_an_earlier_workspace_of_the_same_name_is_marked(
     """Bundles outlive their workspace, and are matched to one by NAME.
 
     `down --volumes` deliberately does not delete backups -- surviving the thing
-    they backed up is the point. But rc-repro DERIVES names from the version, so
+    they backed up is the point. But houston DERIVES names from the version, so
     `up -v 8.5.1` produces `<user>-rc8-5-1` every time, and a freshly created
     workspace immediately shows the destroyed one's bundles as its own.
 
@@ -1102,7 +1102,7 @@ def test_a_bundle_from_an_earlier_workspace_of_the_same_name_is_marked(
     """
     import datetime as _dt
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     # Both the bundle FILENAME and its manifest carry a timestamp. Stepping a fake
     # clock is what lets two bundles straddle the workspace's creation without the
     # test depending on the real one.
@@ -1152,7 +1152,7 @@ def test_a_failed_kubernetes_upgrade_leaves_the_record_where_the_cluster_is(
     call failed the workspace kept serving the OLD release while `list`, `info` and
     the GUI card all reported the new one. Reported from real use: the helm release
     was still at revision 1 -- nothing had been applied at all -- and the only thing
-    wrong with the workspace was the note rc-repro had written about it.
+    wrong with the workspace was the note houston had written about it.
 
     A record that has to be corrected by hand is worse than an upgrade that simply
     did not happen, so the cluster changes first and the record follows.
@@ -1160,10 +1160,10 @@ def test_a_failed_kubernetes_upgrade_leaves_the_record_where_the_cluster_is(
     import json as _json
     from dataclasses import asdict
 
-    from rc_repro.services import k8s, topology
-    from rc_repro.services import upgrade as up
+    from houston.services import k8s, topology
+    from houston.services import upgrade as up
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     m = bk.runner.Metadata(name="k", project="p", rc_version="8.5.1",
                            rc_image="registry.rocket.chat/rocketchat/rocket.chat",
                            mongo_tag="8.0", mongo_flavor="official", preset="default",
@@ -1186,7 +1186,7 @@ def test_a_failed_kubernetes_upgrade_leaves_the_record_where_the_cluster_is(
 
     # The exact failure that was hit: helm is never reached.
     def boom(**kw):
-        raise AttributeError("module 'rc_repro.services.k8s' has no attribute "
+        raise AttributeError("module 'houston.services.k8s' has no attribute "
                              "'upgrade_image'")
     monkeypatch.setattr(k8s, "upgrade_image", boom)
     # Rolling back cannot help when the apply never happened; it must not mask the
@@ -1214,10 +1214,10 @@ def test_explicit_rollback_works_on_kubernetes(monkeypatch, tmp_path):
     import json as _json
     from dataclasses import asdict
 
-    from rc_repro.services import k8s, topology
-    from rc_repro.services import upgrade as up
+    from houston.services import k8s, topology
+    from houston.services import upgrade as up
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     bundle = tmp_path / "pre.rcbak"
     bundle.write_bytes(b"x")
 
@@ -1278,17 +1278,17 @@ def test_upgrade_runs_on_kubernetes_with_the_chart_pinned(monkeypatch, tmp_path)
     import json as _json
     from dataclasses import asdict
 
-    from rc_repro.services import k8s, topology
-    from rc_repro.services import upgrade as up
+    from houston.services import k8s, topology
+    from houston.services import upgrade as up
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     m = bk.runner.Metadata(name="k", project="p", rc_version="7.9.3", rc_image="i",
                            mongo_tag="7.0", mongo_flavor="official", preset="default",
                            root_url="http://localhost:3000", host_port=3000,
                            version_source="t")
     topology.stamp(m.extra, topology.KUBERNETES)
     m.extra["context"] = k8s.CONTEXT
-    m.extra["namespace"] = "rc-repro-k"
+    m.extra["namespace"] = "houston-k"
     ws = bk.runner.workspace("k")
     ws.mkdir(parents=True, exist_ok=True)
     (ws / "repro.json").write_text(_json.dumps(asdict(m)), encoding="utf-8")
@@ -1323,7 +1323,7 @@ def test_upgrade_runs_on_kubernetes_with_the_chart_pinned(monkeypatch, tmp_path)
     out = up.run("k", "8.5.1")
     assert out["to_version"] == "8.5.1"
     assert seen["chart_version"] == "7.0.0", "the chart moves WITH the app, pinned"
-    assert seen["tag"] == "8.5.1" and seen["namespace"] == "rc-repro-k"
+    assert seen["tag"] == "8.5.1" and seen["namespace"] == "houston-k"
     assert seen["oplog"] is False, \
         "Rocket.Chat 8 dropped oplog and chart 7.0.0 removed the key"
     # The record moved on even though there is no compose file to rewrite.
@@ -1344,10 +1344,10 @@ def test_the_database_tools_authenticate_when_the_operator_manages_mongodb(
     generated at create time and deliberately kept off disk, which another test
     pins by scanning `repros/<n>/kubernetes/`.
     """
-    from rc_repro.services import backup as bk
-    from rc_repro.services import k8s, topology
+    from houston.services import backup as bk
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
 
     def workspace(name, managed_by):
         m = bk.runner.Metadata(name=name, project=f"p-{name}", rc_version="8.5.1",
@@ -1408,16 +1408,16 @@ def test_backup_leaves_a_kubernetes_workspace_reachable_on_its_own_port(
     left the workspace RUNNING but unreachable at its own URL: the new pod was
     healthy and answered in-cluster, while the published port timed out. Nothing in
     the failure pointed at the backup, which was the one part that had worked --
-    `rc-repro start` then "fixed" it, because start ends in `ready`.
+    `houston start` then "fixed" it, because start ends in `ready`.
 
     `restore` never had this bug because it finishes with wait_and_finalize. This
     asserts the CALL happens on the Kubernetes path, and that Compose -- where
     start_services rebinds the published port itself -- does not pay for it.
     """
-    from rc_repro.services import backup as bk
-    from rc_repro.services import k8s, topology
+    from houston.services import backup as bk
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
 
     def workspace(name, runtime):
         m = bk.runner.Metadata(name=name, project=f"p-{name}", rc_version="8.5.1",
@@ -1492,11 +1492,11 @@ def test_restoring_into_a_kubernetes_workspace_does_not_require_docker(
     """`require_docker` at the top of `restore` refused a Kubernetes target on a box
     with no Docker at all -- a check for the wrong runtime, in the one place the
     target is already known."""
-    from rc_repro.services import backup as bk
-    from rc_repro.services import k8s, lifecycle, topology
+    from houston.services import backup as bk
+    from houston.services import k8s, lifecycle, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    m = bk.runner.Metadata(name="k", project="rc-repro-k", rc_version="8.5.1",
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    m = bk.runner.Metadata(name="k", project="houston-k", rc_version="8.5.1",
                            rc_image="i", mongo_tag="8.0", mongo_flavor="official",
                            preset="default", root_url="u", host_port=3000,
                            version_source="t")
@@ -1529,7 +1529,7 @@ def test_the_restore_records_the_window_where_the_database_is_empty(monkeypatch,
     `restore` command finishes it.
     """
 
-    from rc_repro.services import backup, journal
+    from houston.services import backup, journal
 
     assert journal.DATABASE_DROPPED in journal.KINDS
     assert journal.DATABASE_DROPPED in journal.ADVISORY, (
@@ -1560,7 +1560,7 @@ def test_a_forced_mongo_major_upgrade_says_what_it_actually_does(monkeypatch, tm
     all.
     """
 
-    from rc_repro.services import upgrade as upsvc
+    from houston.services import upgrade as upsvc
 
     src = source_of(upsvc._run_locked)
     # The refusal now names --force AND what it would really do.
@@ -1632,9 +1632,9 @@ def test_no_backup_clears_the_previous_upgrades_recorded_bundle(monkeypatch, tmp
     import json as _json
     from dataclasses import asdict
 
-    from rc_repro.services import upgrade as up
+    from houston.services import upgrade as up
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     stale = tmp_path / "from-7-0.rcbak"
     stale.write_bytes(b"x")
 

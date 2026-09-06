@@ -1,0 +1,170 @@
+"""Data-population services shared by the CLI and web API: bulk `--scale`
+prefill, clear-scale, and config-import (dry-run plan + apply).
+
+Extracted from cli.py so the web GUI runs the identical logic. Functions raise
+`houston.errors` and report progress via `emit`.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from houston import configimport, runner, scaleseed
+from houston.errors import DockerError, NotReadyError, ValidationError
+from houston.services import lifecycle, topology
+from houston.services.events import Emit, info, null_emit, warn
+
+
+# --- scale --------------------------------------------------------------------
+
+def _scale_result(out: str) -> dict | None:
+    """Last JSON line from a scaleseed mongosh run (banners may precede it)."""
+    for line in reversed((out or "").strip().splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                return json.loads(line)
+            except ValueError:
+                continue
+    return None
+
+
+def _scale_ok(rc: int, out: str, what: str, *, hint: str = "") -> dict:
+    """Validate a scaleseed result: non-zero exit / no JSON => hard fail (Docker);
+    a JS-level {error} payload (e.g. room-not-found) => a user error."""
+    res = _scale_result(out)
+    if rc != 0 or not res:
+        raise DockerError(f"{what} failed (is mongodb up?): {(out or '').strip()[:200]}")
+    if res.get("error"):
+        raise ValidationError(f"{what} failed: {res['error']}" + (f" - {hint}" if hint else ""))
+    return res
+
+
+def run_scale(name: str, spec_str: str, emit: Emit = null_emit) -> dict:
+    """Bulk-insert users/messages per a `--scale` spec (users=N,messages=N@room)."""
+    target = lifecycle.resolve_name(name)
+    # COMPOSE ONLY, said here rather than discovered two layers down. `scaleseed`
+    # bulk-inserts through `compose_exec_capture`, so on a Kubernetes workspace this
+    # reached for a compose project that is not there and answered "no configuration
+    # file provided: not found" -- docker's words for something the reader cannot
+    # act on. The REST seed above it is runtime-agnostic; only the bulk path is not.
+    topology.require_compose(
+        target, "--scale prefill",
+        instead="Seed over REST instead (`houston seed --name %s`), which works on "
+                "both runtimes." % target)
+    # Bulk prefill writes straight into Mongo; running it while a backup is dumping
+    # would put half of it in the archive.
+    with runner.repro_lock(target):
+        return _run_scale_locked(target, spec_str, emit)
+
+
+def _run_scale_locked(target: str, spec_str: str, emit: Emit = null_emit) -> dict:
+    try:
+        spec = scaleseed.parse_scale(spec_str)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+    if not spec:
+        raise ValidationError("scale had nothing to do (want users=N and/or messages=N@room)")
+    warn(emit, "bulk Mongo prefill: users are credential-less and messages fire no "
+               "app hooks - for scale/perf repros, not feature testing.", phase="seed")
+    result: dict = {}
+    if "users" in spec:
+        info(emit, f"inserting {spec['users']:,} users", phase="seed")
+        res = _scale_ok(*scaleseed.bulk_users(target, spec["users"]), "user prefill")
+        result["users"] = res.get("inserted", 0)
+        info(emit, f"inserted {result['users']:,} users", phase="seed")
+    if "messages" in spec:
+        n, room = spec["messages"]
+        info(emit, f"inserting {n:,} messages into {room!r}", phase="seed")
+        res = _scale_ok(*scaleseed.bulk_messages(target, n, room), "message prefill",
+                        hint="create the room first (REST seed, or use `general`)")
+        result["messages"] = res.get("inserted", 0)
+        result["room"] = room
+        info(emit, f"inserted {result['messages']:,} messages into {room!r}", phase="seed")
+    return result
+
+
+def clear_scale(name: str, emit: Emit = null_emit) -> dict:
+    """Remove everything a prior --scale added and restore affected rooms."""
+    target = lifecycle.resolve_name(name)
+    # COMPOSE ONLY, said here rather than discovered two layers down. `scaleseed`
+    # bulk-inserts through `compose_exec_capture`, so on a Kubernetes workspace this
+    # reached for a compose project that is not there and answered "no configuration
+    # file provided: not found" -- docker's words for something the reader cannot
+    # act on. The REST seed above it is runtime-agnostic; only the bulk path is not.
+    topology.require_compose(
+        target, "--scale prefill",
+        instead="Seed over REST instead (`houston seed --name %s`), which works on "
+                "both runtimes." % target)
+    # Locked like run_scale, which it undoes. Without it the two could interleave
+    # on one workspace -- a clear deleting the users a concurrent prefill is still
+    # inserting, leaving a count that matches neither.
+    with runner.repro_lock(target, timeout=lifecycle._INTERACTIVE_LOCK_WAIT):
+        res = _scale_ok(*scaleseed.clear(target), "clear")
+    out = {"users": res.get("users", 0), "messages": res.get("messages", 0),
+           "rooms": res.get("rooms", 0)}
+    info(emit, f"removed {out['users']:,} scale users and {out['messages']:,} scale messages",
+         phase="done")
+    return out
+
+
+# --- config-import ------------------------------------------------------------
+
+def _build_plan(settings_path: str, only: set[str] | None):
+    try:
+        return configimport.build_plan(Path(settings_path), only=only)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise ValidationError(f"couldn't read settings file: {exc}") from exc
+
+
+def _repr(value) -> str:
+    s = repr(value)
+    return s if len(s) <= 80 else s[:80] + "..."
+
+
+def import_plan(name: str, settings_path: str, only: set[str] | None = None) -> dict:
+    """Dry-run: parse a support-dump *-settings.json into an import plan summary."""
+    lifecycle.resolve_name(name)
+    plan = _build_plan(settings_path, only)
+    return {
+        "apply": [{"id": sid, "value": _repr(v)} for sid, v in plan.apply],
+        "redacted": plan.redacted,
+        "denied": plan.denied,
+        "oauth_services": plan.oauth_services,
+        "counts": {"apply": len(plan.apply), "redacted": len(plan.redacted),
+                   "denied": len(plan.denied)},
+    }
+
+
+def import_apply(name: str, settings_path: str, only: set[str] | None = None,
+                 emit: Emit = null_emit) -> dict:
+    """Apply the plan built from `settings_path` to the repro's live settings."""
+    target = lifecycle.resolve_name(name)
+    # LOCKED, like `run_scale` and the REST seed. This is the other data-mutating
+    # operation and it had neither a lock nor a job pool: two imports on one workspace
+    # could interleave setting by setting, and one running into a backup's `_Quiesced`
+    # -- which STOPS Rocket.Chat for the dump -- fails half-applied, leaving settings
+    # that match neither the dump nor the workspace. `seed` was fixed for exactly this
+    # and this was missed beside it.
+    #
+    # Reentrant per thread (see runner.repro_lock), so a caller that already holds it
+    # is unaffected -- nothing does today, and this stays safe if something does.
+    with runner.repro_lock(target, timeout=lifecycle._INTERACTIVE_LOCK_WAIT):
+        return _import_apply_locked(target, settings_path, only, emit)
+
+
+def _import_apply_locked(name: str, settings_path: str, only: set[str] | None = None,
+                         emit: Emit = null_emit) -> dict:
+    m = runner.read_meta(lifecycle.resolve_name(name))
+    plan = _build_plan(settings_path, only)
+    try:
+        auth = lifecycle.login(m)
+    except Exception as exc:  # noqa: BLE001
+        raise NotReadyError(f"can't import - repro not ready: {exc}") from exc
+    res = configimport.apply(m.root_url, auth, plan, workspace=m.name,
+                             admin_password=m.admin_pass,
+                             log=lambda s: info(emit, s.strip(), phase="config"))
+    info(emit, f"imported {res['applied']} setting(s), skipped {res['skipped']}"
+               + (f"; {res['failed']} rejected" if res["failed"] else ""), phase="done")
+    return res

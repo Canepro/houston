@@ -27,9 +27,9 @@ import pytest
 pytest.importorskip("fastapi")
 sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
 
-from rc_repro.services import firstrun as frsvc  # noqa: E402
-from rc_repro.services import users as usersvc  # noqa: E402
-from rc_repro.web.app import create_app  # noqa: E402
+from houston.services import firstrun as frsvc  # noqa: E402
+from houston.services import users as usersvc  # noqa: E402
+from houston.web.app import create_app  # noqa: E402
 
 PASSWORD = "alice-good-password"
 
@@ -99,9 +99,9 @@ def serve(tmp_path, monkeypatch):
     depend on a live cluster. The two tests that care about the footer's contents set
     the value in the page instead.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "preflight", lambda *a, **k: k8s.Preflight())
 
     def _start(**kw):
@@ -126,7 +126,7 @@ def test_a_signed_out_browser_lands_on_the_sign_in_page(serve, page):
         page.goto(s.url)
         page.wait_for_url("**/signin**")
         assert page.is_visible("#u") and page.is_visible("#p")
-        assert "rc-repro" in page.title()
+        assert "houston" in page.title()
         assert page.errors == []
 
 
@@ -328,7 +328,7 @@ def _fake_detail(name="t1234", state="running", **over):
 
 
 def _stub_lifecycle(monkeypatch, detail=None):
-    from rc_repro.services import lifecycle as lc
+    from houston.services import lifecycle as lc
     d = detail or _fake_detail()
     monkeypatch.setattr(lc, "list_repros", lambda: [dict(d)])
     monkeypatch.setattr(lc, "detail", lambda name: dict(d))
@@ -396,8 +396,8 @@ def test_the_log_viewer_streams_container_output(serve, page, monkeypatch):
     tripping it through a browser needs 3000+ lines and a reader slow enough to
     fall behind, which is a flake generator, not a test.
     """
-    from rc_repro import runner
-    from rc_repro.web import app as webapp
+    from houston import runner
+    from houston.web import app as webapp
 
     _stub_lifecycle(monkeypatch)
     usersvc.add("alice", PASSWORD, role="admin")
@@ -414,7 +414,7 @@ def test_the_log_viewer_streams_container_output(serve, page, monkeypatch):
         def __exit__(self, *exc): return False
 
         def __init__(self, *a, **kw):
-            lines = [f'rcrepro-t1234-rocketchat-1  | {{"level":30,"msg":"line {i}"}}'
+            lines = [f'houston-t1234-rocketchat-1  | {{"level":30,"msg":"line {i}"}}'
                      for i in range(5)]
             self.stdout = iter(line + "\n" for line in lines)
             self.returncode = 0
@@ -446,7 +446,7 @@ def test_the_backups_tab_lists_what_is_there(serve, page, monkeypatch):
     """The tab fetches AFTER it renders, so it opens showing "loading…". Asserting
     on the container rather than on its content would pass whether or not
     /api/backups works — that mistake was made once already in this file."""
-    from rc_repro.services import backup as backupsvc
+    from houston.services import backup as backupsvc
 
     _stub_lifecycle(monkeypatch)
     usersvc.add("alice", PASSWORD, role="admin")
@@ -491,7 +491,7 @@ def test_the_load_test_dialog_opens_from_the_panel(serve, page, monkeypatch):
 
 def test_the_doctor_dialog_renders_its_checks(serve, page, monkeypatch):
     """The badge could only ever say up/down. This is the panel that says WHY."""
-    from rc_repro.services import doctor as doctorsvc
+    from houston.services import doctor as doctorsvc
 
     _stub_lifecycle(monkeypatch)
     usersvc.add("alice", PASSWORD, role="admin")
@@ -521,7 +521,7 @@ def test_the_doctor_dialog_renders_its_checks(serve, page, monkeypatch):
             "a row the header already carries was restated in the diagnostic"
         assert "no workspace" in body, \
             "a WARNING was dropped along with the fact it shares a subject with"
-        # `rc-repro doctor` prints a repro tally because a terminal has nowhere
+        # `houston doctor` prints a repro tally because a terminal has nowhere
         # else to say it. The rail lists them by name, behind this dialog.
         assert "1 total, 1 running" not in body
         page.click("#doctor-close")
@@ -537,16 +537,16 @@ def test_the_edge_badge_surfaces_an_unreachable_route(serve, page, monkeypatch):
     edge is installed, so "No edge yet" is unreachable from it and a test clicking
     there would only ever have proved the badge was hidden.
     """
-    from rc_repro.services import edge as edgesvc
+    from houston.services import edge as edgesvc
 
     _stub_lifecycle(monkeypatch)
     usersvc.add("alice", PASSWORD, role="admin")
     monkeypatch.setattr(edgesvc, "status", lambda: {
         "installed": True, "running": True, "routes": ["t1234", "t9999"],
-        "attached": ["rcrepro-t1234_default"]})
+        "attached": ["houston-t1234_default"]})
     monkeypatch.setattr(edgesvc, "served_domain", lambda: "support.example.com")
     monkeypatch.setattr(edgesvc, "workspace_network",
-                        lambda n: f"rcrepro-{n}_default")
+                        lambda n: f"houston-{n}_default")
 
     with serve() as s:
         _sign_in(page, s.url)
@@ -570,7 +570,7 @@ def _seed_stale_cert(host="old-ticket-991.kestron.org"):
     """
     import json
 
-    from rc_repro import tls
+    from houston import tls
     tls.acme_dir().mkdir(parents=True, exist_ok=True)
     (tls.acme_dir() / tls.ACME_FILE).write_text(json.dumps({"le": {
         "Account": {"Email": "ops@example.com"},
@@ -584,7 +584,7 @@ def test_an_admin_can_delete_a_certificate_nothing_points_at(serve, page, monkey
     a name nobody serves stays on the box. An operator handed `serve` and no shell
     had no way to see that, let alone remove it.
     """
-    from rc_repro.services import edge as edgesvc
+    from houston.services import edge as edgesvc
 
     _stub_lifecycle(monkeypatch)
     usersvc.add("alice", PASSWORD, role="admin")
@@ -622,7 +622,7 @@ def test_a_member_is_not_offered_the_delete_at_all(serve, page, monkeypatch):
     They still SEE the row: knowing the box is holding a stray private key is not
     privileged, and a member who can see it can ask someone who can remove it.
     """
-    from rc_repro.services import edge as edgesvc
+    from houston.services import edge as edgesvc
 
     _stub_lifecycle(monkeypatch)
     usersvc.add("alice", PASSWORD, role="admin")
@@ -690,8 +690,8 @@ def test_the_create_dialog_follows_the_box_policy_not_the_role(serve, page,
     `port` is deliberately always offered: it is not privileged any more, because
     the privileged-port range it might have guarded is refused for everyone anyway.
     """
-    from rc_repro import config as cfgmod
-    from rc_repro.services import lifecycle as lcmod
+    from houston import config as cfgmod
+    from houston.services import lifecycle as lcmod
 
     _stub_lifecycle(monkeypatch)
     usersvc.add("alice", PASSWORD, role="admin")
@@ -835,7 +835,7 @@ def test_the_home_page_leads_with_capacity(serve, page, monkeypatch):
     doctor, here). A home page saying "room for 2 more" while the create is refused
     is worse than one saying nothing.
     """
-    from rc_repro.services import lifecycle as lcmod
+    from houston.services import lifecycle as lcmod
 
     _stub_lifecycle(monkeypatch)
     monkeypatch.setattr(lcmod, "capacity", lambda: {
@@ -1134,7 +1134,7 @@ def test_scrolling_up_in_the_logs_offers_one_press_back_to_the_latest(serve, pag
 def test_a_running_workspace_on_home_offers_both_places_it_could_mean(serve, page,
                                                                       monkeypatch):
     """Two destinations live in this row and they are genuinely different: the row
-    opens the WORKSPACE (rc-repro's page about it) and Open goes to Rocket.Chat
+    opens the WORKSPACE (houston's page about it) and Open goes to Rocket.Chat
     itself. The old row only did the first, which made reaching the actual chat
     server — the thing everybody is here for — a two-step.
     """
@@ -1156,7 +1156,7 @@ def test_a_running_workspace_on_home_offers_both_places_it_could_mean(serve, pag
         assert opener.get_attribute("href") == "http://localhost:3001", \
             opener.get_attribute("href")
 
-        # and the row itself stays inside rc-repro
+        # and the row itself stays inside houston
         row.locator(".wsrow-main").click()
         page.wait_for_selector("#d-body")
         assert "t1234" in page.text_content(".d-head")
@@ -1326,13 +1326,13 @@ def test_the_scenarios_page_shows_the_setup_step_a_preset_needs(serve, page):
         # The line that names WHERE the console is is not prose — it is a place,
         # and the two facts on it are the url and the password. As a paragraph
         # ("Keycloak admin console: http://keycloak:8085  (admin/admin, realm
-        # 'rcrepro').") both were buried mid-sentence in grey text.
+        # 'houston').") both were buried mid-sentence in grey text.
         # by url, because `saml` names its own Keycloak console on the same page
         row = page.locator(".linkrow:has(.l-u:text-is('http://keycloak:8085'))")
         assert row.count() == 1, "the console line did not become a row"
         assert "Keycloak admin console" in row.locator(".l-n").inner_text()
         assert row.locator(".l-c").inner_text() == "admin/admin", "credentials not lifted out"
-        assert "rcrepro" in row.locator(".l-sub").inner_text(), "the realm was dropped"
+        assert "houston" in row.locator(".l-sub").inner_text(), "the realm was dropped"
         assert row.first.get_attribute("href") == "http://keycloak:8085"
         assert page.errors == [], page.errors
 
@@ -1473,7 +1473,7 @@ def test_preset_notes_are_read_as_points_not_as_lines(serve, page):
 # plain http is not trustworthy, so the browser omits `Sec-Fetch-*` entirely, and
 # the cross-site guard falls through to `Origin`.
 
-PUBLIC_NAME = "rcrepro.support.example.com"
+PUBLIC_NAME = "houston.support.example.com"
 
 
 @pytest.fixture
@@ -1503,7 +1503,7 @@ def public_page(public_browser):
 @pytest.fixture
 def serve_public(tmp_path, monkeypatch):
     """As `serve`, but answering to the public name as well as the loopback one."""
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
 
     def _start(**kw):
         app = create_app(allow_hosts=["127.0.0.1", PUBLIC_NAME], **kw)
@@ -1518,7 +1518,7 @@ def test_signing_in_works_over_plain_http_on_a_real_hostname(serve_public, publi
     """The defect a support engineer hit on a shared AWS box, and the reason the
     GUI could not be used there at all.
 
-    `rc-repro serve --bind 0.0.0.0 --allow-host <name> --insecure` serves the login
+    `houston serve --bind 0.0.0.0 --allow-host <name> --insecure` serves the login
     over plain http on a public name. A browser attaches `Sec-Fetch-*` only to a
     potentially trustworthy URL, which that is not -- so the guard fell through to
     `Origin`, and the page's own `Referrer-Policy: no-referrer` had already nulled
@@ -1645,7 +1645,7 @@ def test_the_workspace_row_says_kubernetes_and_stays_quiet_about_docker(
     NOT the default: Compose is the overwhelming majority, so labelling every row
     "docker" would be noise on the common case and make the rare one HARDER to spot.
     """
-    from rc_repro.services import lifecycle as lc
+    from houston.services import lifecycle as lc
 
     rows = [dict(_fake_detail(name="kube-one"), runtime="kubernetes"),
             dict(_fake_detail(name="compose-one"), runtime="docker")]
@@ -1740,7 +1740,7 @@ def test_the_create_dialog_offers_a_runtime_and_follows_it(serve, page, monkeypa
         assert "domain" not in gone, gone
         assert "DELETE data" in gone, gone
         # BOTH certificate modes are offered, because both are built: `--https` from a
-        # `ca` ClusterIssuer holding rc-repro's CA, `--domain` from an ACME one.
+        # `ca` ClusterIssuer holding houston's CA, `--domain` from an ACME one.
         modes = page.eval_on_selector_all(
             "#https-mode option", "es => es.map(e => e.value)")
         assert "local" in modes and "acme" in modes, modes
@@ -1862,7 +1862,7 @@ def test_the_panel_says_that_localhost_means_the_readers_own_machine(
         serve_public, public_page, monkeypatch):
     """And says how to fix it -- without touching the URL it is talking about.
 
-    ROOT_URL is Rocket.Chat's own advertised address and rc-repro's 71 internal API
+    ROOT_URL is Rocket.Chat's own advertised address and houston's 71 internal API
     calls go through it, so the notice is ADDITIVE: the URL row must still read
     exactly what the workspace was built with.
     """
@@ -1975,7 +1975,7 @@ def test_the_create_dialog_stays_quiet_on_a_laptop(serve, page, monkeypatch):
 def _kube_detail(name="t1234", **over):
     over.setdefault("containers", [])
     return _fake_detail(name, runtime="kubernetes", deployment="microservices",
-                        namespace=f"rc-repro-{name}", **over)
+                        namespace=f"houston-{name}", **over)
 
 
 def test_the_env_tab_renders_on_kubernetes_where_it_used_to_be_blank(
@@ -1984,7 +1984,7 @@ def test_the_env_tab_renders_on_kubernetes_where_it_used_to_be_blank(
     so the tab rendered an empty table and a hint, on a workspace whose environment
     the CLI could print. It fetches /env now, which is the one seam both front-ends
     share."""
-    from rc_repro.services import envvars as envsvc
+    from houston.services import envvars as envsvc
 
     _stub_lifecycle(monkeypatch, _kube_detail())
     monkeypatch.setattr(envsvc, "current", lambda name: {
@@ -2008,12 +2008,12 @@ def test_the_env_tab_renders_on_kubernetes_where_it_used_to_be_blank(
         # is given instead.
         assert page.query_selector("#d-body button.danger") is None
         assert "Set + restart" not in body
-        assert "helm -n rc-repro-t1234 upgrade" in body, body
+        assert "helm -n houston-t1234 upgrade" in body, body
         assert page.errors == [], page.errors
 
 
 def test_the_env_tab_still_offers_the_controls_on_compose(serve, page, monkeypatch):
-    from rc_repro.services import envvars as envsvc
+    from houston.services import envvars as envsvc
 
     _stub_lifecycle(monkeypatch)
     monkeypatch.setattr(envsvc, "current", lambda name: {
@@ -2038,11 +2038,11 @@ def test_the_env_tab_shows_the_refusal_rather_than_an_empty_table(
     """A stopped Kubernetes workspace has no container to read the environment out
     of, and the server says so. That message is the answer -- rendering an empty
     table instead would look like a workspace with no environment."""
-    from rc_repro import errors as errs
-    from rc_repro.services import envvars as envsvc
+    from houston import errors as errs
+    from houston.services import envvars as envsvc
 
     def refuse(name):
-        raise errs.NotReadyError("no Rocket.Chat pod in rc-repro-t1234 to read the "
+        raise errs.NotReadyError("no Rocket.Chat pod in houston-t1234 to read the "
                                  "environment from — is 't1234' running?")
 
     _stub_lifecycle(monkeypatch, _kube_detail(state="stopped"))
@@ -2095,8 +2095,8 @@ def test_the_live_chart_stops_asking_when_the_answer_is_a_refusal(
     "live", throwing away the server's own instructions for fixing it."""
     import json as _json
 
-    from rc_repro import errors as errs
-    from rc_repro.services import k8s as k8ssvc
+    from houston import errors as errs
+    from houston.services import k8s as k8ssvc
 
     (tmp_path / "repros" / "t1234").mkdir(parents=True)
     (tmp_path / "repros" / "t1234" / "repro.json").write_text(_json.dumps({
@@ -2135,11 +2135,11 @@ def test_fake_detail_matches_the_real_payload(monkeypatch, tmp_path):
     """
     import json as _json
 
-    from rc_repro import runner
-    from rc_repro.services import k8s as k8ssvc
-    from rc_repro.services import lifecycle as lcsvc
+    from houston import runner
+    from houston.services import k8s as k8ssvc
+    from houston.services import lifecycle as lcsvc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     (tmp_path / "repros" / "cmp").mkdir(parents=True)
     (tmp_path / "repros" / "cmp" / "repro.json").write_text(_json.dumps({
         "name": "cmp", "project": "p", "rc_version": "7.4.1", "rc_image": "i",
@@ -2155,7 +2155,7 @@ def test_fake_detail_matches_the_real_payload(monkeypatch, tmp_path):
         "mongo_tag": "7.0", "mongo_flavor": "official", "preset": "default",
         "root_url": "http://localhost:3002", "host_port": 3002,
         "version_source": "x",
-        "extra": {"runtime": "kubernetes", "namespace": "rc-repro-kub"}}))
+        "extra": {"runtime": "kubernetes", "namespace": "houston-kub"}}))
     # A MULTI-INSTANCE workspace, because `instances`/`instance_urls` are only added
     # when the record carries a count -- and with `extra: {}` this walk could not see
     # them. Its own panel is the one nothing else covers.
@@ -2208,7 +2208,7 @@ def test_a_credential_note_is_not_labelled_a_sudo_setup_step(serve, page, monkey
     sentence that is not true of anything. `stopped`, so the live chart's /stats poll
     stays out of a test about text.
     """
-    from rc_repro import presets as presets_mod
+    from houston import presets as presets_mod
 
     notes = list(presets_mod.load("ldap").notes or [])
     assert any(n.startswith("    ") for n in notes), \
@@ -2232,7 +2232,7 @@ def test_the_one_preset_with_a_real_setup_step_keeps_it(serve, page, monkeypatch
     """`oidc` cannot log anyone in until `127.0.0.1  keycloak` is in /etc/hosts, and
     the introducing sentence says exactly that -- which is what now qualifies a note
     as a setup step."""
-    from rc_repro import presets as presets_mod
+    from houston import presets as presets_mod
 
     usersvc.add("alice", PASSWORD, role="admin")
     _stub_lifecycle(monkeypatch, _fake_detail(
@@ -2255,7 +2255,7 @@ def test_the_seed_job_shows_what_it_made_and_whether_it_was_confirmed(
     then nothing, while the CLI printed a table. The readback verdict is the part
     worth showing -- it is the difference between "the seeder says it made 283
     messages" and "283 messages are in there"."""
-    from rc_repro.services import lifecycle as lcsvc
+    from houston.services import lifecycle as lcsvc
 
     _stub_lifecycle(monkeypatch)
     usersvc.add("alice", PASSWORD, role="admin")
@@ -2345,8 +2345,8 @@ def test_the_runtime_card_names_no_cluster_because_it_cannot_know_which(
     The fact moved rather than vanished: the picker names the cluster that will
     actually be used, including when there is none and one will be built.
     """
-    from rc_repro.services import cluster as clustersvc
-    from rc_repro.services import k8s, users as usersvc
+    from houston.services import cluster as clustersvc
+    from houston.services import k8s, users as usersvc
 
     usersvc.add("alice", PASSWORD, role="admin")
 
@@ -2472,7 +2472,7 @@ def test_a_note_that_ends_in_a_name_is_not_glued_to_the_next_one(serve, page, mo
     were written for an 80-column terminal, not as separate points.
 
     "Ends in any lowercase word" was too broad, and the Kubernetes notes proved it:
-    "monolith on kind-rc-repro-local — about 5 pods, namespace rc-repro-x" is a
+    "monolith on kind-houston-local — about 5 pods, namespace houston-x" is a
     complete point that happens to end in an identifier, and it was being glued to
     the MongoDB note after it — two unrelated facts in one bullet, in the notes a
     reader consults to find out what their workspace actually is.
@@ -2482,7 +2482,7 @@ def test_a_note_that_ends_in_a_name_is_not_glued_to_the_next_one(serve, page, mo
     test directly after this one.
     """
     kube_notes = [
-        "monolith on kind-rc-repro-local — about 5 pods, namespace rc-repro-x",
+        "monolith on kind-houston-local — about 5 pods, namespace houston-x",
         "MongoDB 8.0 as a plain StatefulSet — mongo:8.0, NO authentication.",
         "reachable on this box at http://localhost:3000",
     ]
@@ -2496,7 +2496,7 @@ def test_a_note_that_ends_in_a_name_is_not_glued_to_the_next_one(serve, page, mo
         paras = page.eval_on_selector_all(
             "#d-body .note-p", "es => es.map(e => e.textContent.trim())")
         assert len(paras) == 3, paras
-        assert paras[0].endswith("rc-repro-x"), paras[0]
+        assert paras[0].endswith("houston-x"), paras[0]
         assert "StatefulSet" not in paras[0], "two notes were glued into one bullet"
         assert page.errors == [], page.errors
 
@@ -2505,7 +2505,7 @@ def test_a_genuinely_wrapped_note_still_joins_the_line_after_it(serve, page, mon
     """The other side of the same rule, and the reason narrowing it was risky:
     `oidc`'s real notes trail off in "…can reach Keycloak at the", which is what
     wrapping actually looks like, and those two lines are one point."""
-    from rc_repro import presets as presets_mod
+    from houston import presets as presets_mod
 
     oidc = list(presets_mod.load("oidc").notes or [])
     assert oidc[0].rstrip().endswith("the"), \
@@ -2537,7 +2537,7 @@ def test_a_long_line_in_a_note_scrolls_instead_of_being_clipped_away(
     that was already there never engages.
     """
     long_path = "/tmp/pytest-of-someone/a-very-long-isolated-home-0/clients/kubernetes/config"
-    notes = ["rc-repro keeps its own kubeconfig; a bare kubectl will not see this:",
+    notes = ["houston keeps its own kubeconfig; a bare kubectl will not see this:",
              f"    export KUBECONFIG={long_path}"]
     _stub_lifecycle(monkeypatch, _fake_detail(state="stopped", notes=notes))
     usersvc.add("alice", PASSWORD, role="admin")
@@ -2578,13 +2578,13 @@ def test_a_grouped_note_gets_its_own_card_with_a_fact_table_and_a_copy_button(
     """
     groups = [
         {"title": "Kubernetes",
-         "rows": [["Cluster", "kind-rc-repro-local"], ["Namespace", "rc-repro-t1234"],
+         "rows": [["Cluster", "kind-houston-local"], ["Namespace", "houston-t1234"],
                   ["Arrangement", "microservices"]],
          "body": [], "commands": []},
         {"title": "Port forward",
          "rows": [],
          "body": ["The port-forward dies with the pod. Start it again:"],
-         "commands": ["kubectl -n rc-repro-t1234 port-forward deployment/rc 3001:3000"]},
+         "commands": ["kubectl -n houston-t1234 port-forward deployment/rc 3001:3000"]},
     ]
     _stub_lifecycle(monkeypatch, _kube_detail(note_groups=groups,
                                               notes=["Kubernetes:", "    Cluster  x"]))
@@ -2609,11 +2609,11 @@ def test_a_grouped_note_gets_its_own_card_with_a_fact_table_and_a_copy_button(
                   // the facts must NOT also be a bullet in the old flat dump
                   flatDump: cards.some(c => c.textContent.includes('Cluster  x'))};
         }""")
-        assert m["rows"] == [["Cluster", "kind-rc-repro-local"],
-                             ["Namespace", "rc-repro-t1234"],
+        assert m["rows"] == [["Cluster", "kind-houston-local"],
+                             ["Namespace", "houston-t1234"],
                              ["Arrangement", "microservices"]], m["rows"]
         assert m["fwdCmd"] == \
-            "kubectl -n rc-repro-t1234 port-forward deployment/rc 3001:3000"
+            "kubectl -n houston-t1234 port-forward deployment/rc 3001:3000"
         assert m["fwdCopy"], "a command you have to paste needs its Copy button"
         assert m["fwdProse"], "the group's own prose has to survive next to it"
         assert not m["flatDump"], \
@@ -2872,7 +2872,7 @@ def test_a_pod_that_cannot_start_is_named_in_the_panel(serve, page, monkeypatch)
 
 def _stub_list(monkeypatch, rows):
     """Several workspaces in the rail, with the panel answering for whichever is asked."""
-    from rc_repro.services import lifecycle as lc
+    from houston.services import lifecycle as lc
     by_name = {r["name"]: r for r in rows}
     monkeypatch.setattr(lc, "list_repros", lambda: [dict(r) for r in rows])
     monkeypatch.setattr(lc, "detail", lambda name: dict(by_name[name]))
@@ -3254,11 +3254,11 @@ def test_a_note_paragraph_is_as_wide_as_the_card_it_is_in(serve, page, monkeypat
     reads as a broken layout, not as a measure.
     """
     groups = [{"title": "1 · Point kubectl and helm at this cluster", "rows": [],
-               "body": ["rc-repro keeps its own kubeconfig so creating a cluster cannot "
+               "body": ["houston keeps its own kubeconfig so creating a cluster cannot "
                         "move the context you were using. A bare `kubectl` will not see "
                         "this workspace until it is pointed here, and every command "
                         "below assumes it:"],
-               "commands": ["export KUBECONFIG=/home/you/.rc-repro/clients/kubernetes/config"]}]
+               "commands": ["export KUBECONFIG=/home/you/.houston/clients/kubernetes/config"]}]
     _stub_lifecycle(monkeypatch, _kube_detail(note_groups=groups))
     usersvc.add("alice", PASSWORD, role="admin")
     with serve() as s:
@@ -3385,17 +3385,17 @@ def test_the_restart_count_on_kubernetes_is_rocket_chats_own_pod(monkeypatch, tm
     """
     import json as _json
 
-    from rc_repro import runner
-    from rc_repro.services import k8s as k8ssvc
-    from rc_repro.services import lifecycle as lcsvc
+    from houston import runner
+    from houston.services import k8s as k8ssvc
+    from houston.services import lifecycle as lcsvc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     (tmp_path / "repros" / "kub").mkdir(parents=True)
     (tmp_path / "repros" / "kub" / "repro.json").write_text(_json.dumps({
         "name": "kub", "project": "p", "rc_version": "8.5.1", "rc_image": "i",
         "mongo_tag": "8.0", "mongo_flavor": "official", "preset": "default",
         "root_url": "http://localhost:3131", "host_port": 3131, "version_source": "x",
-        "extra": {"runtime": "kubernetes", "namespace": "rc-repro-kub",
+        "extra": {"runtime": "kubernetes", "namespace": "houston-kub",
                   "release": "rocketchat"}}))
     monkeypatch.setattr(runner, "docker_available", lambda **_k: False)
     monkeypatch.setattr(lcsvc, "kubernetes_state", lambda name, meta: "running")
@@ -3517,7 +3517,7 @@ def test_the_gui_has_exactly_one_jobActive_and_the_page_parses(serve, page, monk
     import pathlib
 
     src = (pathlib.Path(__file__).resolve().parent.parent
-           / "rc_repro" / "data" / "webui" / "app.js").read_text()
+           / "houston" / "data" / "webui" / "app.js").read_text()
     assert src.count("const jobActive") == 1, "duplicate module-scope declaration"
 
     _stub_lifecycle(monkeypatch, _fake_detail())
@@ -3582,7 +3582,7 @@ def _fake_cluster_status(context="", emit=None):
 
 
 def _stub_clusters(monkeypatch):
-    from rc_repro.services import cluster as clustersvc
+    from houston.services import cluster as clustersvc
     monkeypatch.setattr(clustersvc, "known_contexts", lambda: {"contexts": [
         {"context": _CL_ARN, "ours": False, "provider": "eks",
          "billable": True, "is_default": True},
@@ -3599,7 +3599,7 @@ def test_the_clusters_view_never_shows_a_zero_it_did_not_read(serve, page, monke
     nothing costing you money" is the sentence that lets a bill run, and it is the one
     thing this screen must never print about a cluster it could not reach.
     """
-    from rc_repro.services import users as usersvc
+    from houston.services import users as usersvc
 
     usersvc.add("alice", PASSWORD, role="admin")
     _stub_clusters(monkeypatch)
@@ -3631,7 +3631,7 @@ def test_the_cluster_chip_wants_you_in_amber_and_is_never_red(serve, page, monke
     non-green chip that existed -- is red. Painting the ledger with it would have said
     "destruction" about a running cluster somebody is deliberately paying for.
     """
-    from rc_repro.services import users as usersvc
+    from houston.services import users as usersvc
 
     usersvc.add("alice", PASSWORD, role="admin")
     _stub_clusters(monkeypatch)
@@ -3654,7 +3654,7 @@ def test_only_an_admin_is_offered_the_controls_that_spend_or_destroy(serve, page
     arrives on the four-second poll and drawing first produced an admin's cards with a
     readonly user's buttons, differently on each run.
     """
-    from rc_repro.services import users as usersvc
+    from houston.services import users as usersvc
 
     usersvc.add("alice", PASSWORD, role="admin")
     usersvc.add("ronly", "read-only-password", role="readonly")
@@ -3684,7 +3684,7 @@ def test_the_delete_dialog_will_not_arm_until_the_name_is_typed(serve, page, mon
     box has never seen, so the name has to be typed -- and the dialog says what it is
     holding before asking.
     """
-    from rc_repro.services import users as usersvc
+    from houston.services import users as usersvc
 
     usersvc.add("alice", PASSWORD, role="admin")
     _stub_clusters(monkeypatch)
@@ -3716,10 +3716,10 @@ def test_the_fake_cluster_status_matches_the_real_payload(monkeypatch, tmp_path)
     production with the file green -- which is exactly how three keys drifted on the
     workspace panel before the equivalent test existed.
     """
-    from rc_repro.services import cluster as clustersvc
-    from rc_repro.services import k8s as k8ssvc
+    from houston.services import cluster as clustersvc
+    from houston.services import k8s as k8ssvc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8ssvc, "contexts", lambda: ([_CL_ARN], ""))
     monkeypatch.setattr(k8ssvc, "is_ours", lambda c: False)
     monkeypatch.setattr(k8ssvc, "reach", lambda *a, **k: k8ssvc.Reach(status=k8ssvc.REACH_DENIED))
@@ -3745,7 +3745,7 @@ def test_the_cluster_action_pane_survives_the_four_second_poll(serve, page, monk
 
     The wait is what this test IS. Do not shorten it.
     """
-    from rc_repro.services import users as usersvc
+    from houston.services import users as usersvc
 
     usersvc.add("alice", PASSWORD, role="admin")
     _stub_clusters(monkeypatch)
@@ -3777,14 +3777,14 @@ def test_the_create_form_says_what_a_managed_cluster_commits_you_to(serve, page,
 
     The domain field is NOT duplicated into section 2. One field, made findable.
     """
-    from rc_repro.services import cluster as clustersvc
-    from rc_repro.services import users as usersvc
+    from houston.services import cluster as clustersvc
+    from houston.services import users as usersvc
 
     usersvc.add("alice", PASSWORD, role="admin")
     monkeypatch.setattr(clustersvc, "known_contexts", lambda: {"contexts": [
         {"context": _CL_ARN, "ours": False, "provider": "eks",
          "billable": True, "is_default": True},
-        {"context": "kind-rc-repro-local", "ours": True, "provider": "",
+        {"context": "kind-houston-local", "ours": True, "provider": "",
          "billable": False, "is_default": False},
     ], "unreadable": "", "default": _CL_ARN})
 
@@ -3863,7 +3863,7 @@ def test_the_create_form_says_what_a_managed_cluster_commits_you_to(serve, page,
             "the cost is still true whether or not a domain was given"
 
         # A free cluster is not nagged about at all.
-        page.select_option("#context-select", "kind-rc-repro-local")
+        page.select_option("#context-select", "kind-houston-local")
         page.wait_for_timeout(300)
         assert page.is_hidden("#cluster-note")
         assert page.errors == []
@@ -3878,17 +3878,17 @@ def test_section_two_does_not_quote_this_laptops_memory_for_a_cluster_in_aws(
     more" is not merely irrelevant there, it is false: the capacity that decides is the
     cluster's, which this dialog does not have and `cluster status` reports instead.
 
-    It still shows for Compose and for the local cluster rc-repro builds, which are the
+    It still shows for Compose and for the local cluster houston builds, which are the
     cases where it is the right number and where `up` really does refuse without it.
     """
-    from rc_repro.services import cluster as clustersvc
-    from rc_repro.services import users as usersvc
+    from houston.services import cluster as clustersvc
+    from houston.services import users as usersvc
 
     usersvc.add("alice", PASSWORD, role="admin")
     monkeypatch.setattr(clustersvc, "known_contexts", lambda: {"contexts": [
         {"context": _CL_ARN, "ours": False, "provider": "eks",
          "billable": True, "is_default": False},
-        {"context": "kind-rc-repro-local", "ours": True, "provider": "",
+        {"context": "kind-houston-local", "ours": True, "provider": "",
          "billable": False, "is_default": False},
     ], "unreadable": "", "default": ""})
 
@@ -3905,10 +3905,10 @@ def test_section_two_does_not_quote_this_laptops_memory_for_a_cluster_in_aws(
 
         page.click("#runtime-forks >> text=Kubernetes")
         page.wait_for_timeout(600)
-        page.select_option("#context-select", "kind-rc-repro-local")
+        page.select_option("#context-select", "kind-houston-local")
         page.wait_for_timeout(400)
         assert "free" in page.inner_text("#create-room"), \
-            "rc-repro's own cluster runs on this machine too"
+            "houston's own cluster runs on this machine too"
 
         page.select_option("#context-select", _CL_ARN)
         page.wait_for_timeout(400)
@@ -3930,7 +3930,7 @@ def test_the_clusters_view_speaks_english_and_explains_its_own_numbers(
     disagree permanently, since a colleague's workspace is in the cluster and will
     never be in your rail. Nothing said so.
     """
-    from rc_repro.services import users as usersvc
+    from houston.services import users as usersvc
 
     usersvc.add("alice", PASSWORD, role="admin")
     _stub_clusters(monkeypatch)
@@ -3969,8 +3969,8 @@ def test_a_cluster_aws_says_is_gone_does_not_read_as_one_that_is_down(serve, pag
     worked -- the cluster kept appearing, and the card made it look like a cluster
     that was still there and merely unwell.
     """
-    from rc_repro.services import cluster as clustersvc
-    from rc_repro.services import users as usersvc
+    from houston.services import cluster as clustersvc
+    from houston.services import users as usersvc
 
     usersvc.add("alice", PASSWORD, role="admin")
 
@@ -3980,7 +3980,7 @@ def test_a_cluster_aws_says_is_gone_does_not_read_as_one_that_is_down(serve, pag
             row.update({"gone": True, "reach_advice":
                         "AWS says this cluster no longer exists, so it is not costing "
                         "anything. The kubeconfig entry naming it is left over — "
-                        "`rc-repro cluster forget perf` removes it."})
+                        "`houston cluster forget perf` removes it."})
         return row
 
     _stub_clusters(monkeypatch)
@@ -4012,8 +4012,8 @@ def test_a_gone_cluster_offers_only_controls_that_can_work(serve, page, monkeypa
     actually wanted is the leftover kubeconfig entry cleared, so that is the control
     offered instead — and it is not red, because it destroys nothing.
     """
-    from rc_repro.services import cluster as clustersvc
-    from rc_repro.services import users as usersvc
+    from houston.services import cluster as clustersvc
+    from houston.services import users as usersvc
 
     usersvc.add("alice", PASSWORD, role="admin")
 
@@ -4053,7 +4053,7 @@ def test_a_gone_cluster_offers_only_controls_that_can_work(serve, page, monkeypa
 
 def test_the_local_certificate_option_goes_when_the_cluster_is_not_on_this_machine(
         serve, page, monkeypatch):
-    """"Local certificate" would copy rc-repro's CA PRIVATE KEY into a Secret in a
+    """"Local certificate" would copy houston's CA PRIVATE KEY into a Secret in a
     cluster that is not this machine's, and that key can mint a certificate for any
     name this box trusts. `_kubernetes_tls_plan` refuses it as an authority gate.
 
@@ -4062,18 +4062,18 @@ def test_the_local_certificate_option_goes_when_the_cluster_is_not_on_this_machi
     that such fields are ABSENT, not disabled.
 
     ONLY WHEN WE POSITIVELY KNOW. Compose, an unknown cluster and the local one
-    rc-repro would build all keep the option; only a cluster the server says is
+    houston would build all keep the option; only a cluster the server says is
     billable takes it away. Removing a working choice on a guess is the worse of the
     two mistakes.
     """
-    from rc_repro.services import cluster as clustersvc
-    from rc_repro.services import users as usersvc
+    from houston.services import cluster as clustersvc
+    from houston.services import users as usersvc
 
     usersvc.add("alice", PASSWORD, role="admin")
     monkeypatch.setattr(clustersvc, "known_contexts", lambda: {"contexts": [
         {"context": _CL_ARN, "ours": False, "provider": "eks",
          "billable": True, "is_default": True},
-        {"context": "kind-rc-repro-local", "ours": True, "provider": "",
+        {"context": "kind-houston-local", "ours": True, "provider": "",
          "billable": False, "is_default": False},
     ], "unreadable": "", "default": _CL_ARN})
 
@@ -4098,10 +4098,10 @@ def test_the_local_certificate_option_goes_when_the_cluster_is_not_on_this_machi
 
         # Choosing the local cluster brings it back: this is about where the cluster
         # is, not about the runtime.
-        page.select_option("#context-select", "kind-rc-repro-local")
+        page.select_option("#context-select", "kind-houston-local")
         page.wait_for_timeout(700)
         assert "local" in page.evaluate(modes), \
-            "a cluster on this machine can hold rc-repro's own CA"
+            "a cluster on this machine can hold houston's own CA"
 
         # And selecting it, then moving back to the managed cluster, must not leave
         # the form carrying a mode that has just been removed.
@@ -4127,15 +4127,15 @@ def test_the_cluster_picker_shows_a_name_not_sixty_characters_of_arn(serve, page
     THE VALUE IS UNTOUCHED. Shortening what is SENT would send a name the server
     cannot resolve, which is the one way this change could do damage.
     """
-    from rc_repro.services import cluster as clustersvc
-    from rc_repro.services import users as usersvc
+    from houston.services import cluster as clustersvc
+    from houston.services import users as usersvc
 
     arn = "arn:aws:eks:us-east-1:533674205877:cluster/chatrepo"
     usersvc.add("alice", PASSWORD, role="admin")
     monkeypatch.setattr(clustersvc, "known_contexts", lambda: {"contexts": [
         {"context": arn, "short": "chatrepo", "region": "us-east-1", "ours": False,
          "provider": "eks", "billable": True, "is_default": True},
-        {"context": "kind-rc-repro-local", "short": "kind-rc-repro-local",
+        {"context": "kind-houston-local", "short": "kind-houston-local",
          "region": "", "ours": True, "provider": "", "billable": False,
          "is_default": False},
     ], "unreadable": "", "default": arn})
@@ -4163,7 +4163,7 @@ def test_the_cluster_picker_shows_a_name_not_sixty_characters_of_arn(serve, page
 
         # AND WHAT IS SENT IS UNCHANGED. This is the invariant that matters.
         assert managed["v"] == arn
-        assert any(o["v"] == "kind-rc-repro-local" for o in opts)
+        assert any(o["v"] == "kind-houston-local" for o in opts)
         # "Decide for me" names the cluster it would pick, and shortly.
         decide = next(o for o in opts if o["v"] == "")
         assert "chatrepo" in decide["t"] and arn not in decide["t"], decide

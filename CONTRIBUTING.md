@@ -1,6 +1,6 @@
-# Contributing to rc-repro
+# Contributing to houston
 
-Short guide for teammates working on the tool itself. For *using* rc-repro, see
+Short guide for teammates working on the tool itself. For *using* houston, see
 [README.md](README.md).
 
 ## Dev setup
@@ -21,33 +21,33 @@ Python 3.11 and 3.12 (see `.github/workflows/ci.yml`).
 
 | Module | Responsibility |
 |--------|----------------|
-| `rc_repro/cli.py` | Typer commands: option parsing, terminal rendering, CLI-only `loadtest`/`capacity`/`benchmark` |
-| `rc_repro/services/` | the shared "brain" both front-ends run: `lifecycle` (create/ready/teardown/prune), `perf` (GUI loadtest/capacity/benchmark), `data` (scale prefill, config-import), `monitor` (attach/detach), `postready` (preset self-config actions), `diagnose` (opaque `up` failures), `events` (the progress `Event`/`Emit` contract) |
-| `rc_repro/web/` | the `serve` GUI: `app.py` (FastAPI routes, token + Host guard, SSE/WS) and `jobs.py` (background job registry). Imported lazily — the core CLI never depends on it |
-| `rc_repro/errors.py` | `ReproError` hierarchy with `http_status`; the failure contract between services and both front-ends |
-| `rc_repro/configimport.py` | parse a support-dump `*-settings.json` into an apply/skip plan, and apply it |
-| `rc_repro/scaleseed.py` | bulk `--scale` MongoDB prefill (and its tagged undo) |
-| `rc_repro/versions.py` | RC version → MongoDB pairing (live lookup + fallback map) |
-| `rc_repro/presets/` | preset package: `__init__.py` holds the `Preset` dataclass + loader |
-| `rc_repro/presets/_common.py` | shared `--set` param helpers (`truthy_param`/`int_param`/`str_param`) |
-| `rc_repro/presets/_keycloak.py` | shared Keycloak scaffolding reused by `saml` + `oidc` |
-| `rc_repro/presets/ldap.py`, `saml.py`, `oidc.py`, `email.py`, `s3_minio.py`, `livechat.py` | generate the LDAP / Keycloak (SAML & OIDC) / Mailpit / MinIO / Omnichannel scenarios |
-| `rc_repro/presets/multi_instance.py` | generate the multi-instance (Traefik + NATS) scenario |
-| `rc_repro/compose.py` | build the docker-compose document (incl. cloning RC into N instances, port binding) |
-| `rc_repro/runner.py` | on-disk state, `docker compose` invocations, host-port allocation |
-| `rc_repro/rcapi.py` | minimal Rocket.Chat REST client (readiness, auth, 2FA/OTP, settings) |
-| `rc_repro/seed.py` | populate a repro with sample users/channels/messages via REST |
-| `rc_repro/monitoring.py` | `--monitor` add-on: Prometheus + Grafana services/config, attachable to any repro |
-| `rc_repro/perf/` | performance tooling: `timings` (latency percentiles), `resources` (docker-stats sampler), `k6` (load-test runner), `slo` (SLO gate parse/evaluate), `baseline` (saved runs + before/after compare), `constrain` (customer-sized CPU/RAM caps), `rcmetrics` (RC /metrics sampler: event-loop lag), `mongoprof` (Mongo slow-query capture), `timeline` (latency-over-time + spike recovery), `verdict` (rule-based diagnosis), `report` (benchmark/loadtest/capacity markdown) |
-| `rc_repro/ui.py` | terminal output helpers (`ok`/`warn`/`fail`/`note`/`die`) |
-| `rc_repro/config.py` | paths, constants, `PRESET_PORTS` registry, env-var overrides, persisted config |
-| `rc_repro/__init__.py` | `__version__` (single-sourced from `pyproject.toml` via `importlib.metadata`) |
-| `rc_repro/data/` | shipped version map, static preset YAML, monitoring dashboard JSON, k6 load-test scripts (`data/loadtest/`), GUI assets (`data/webui/`) |
+| `houston/cli.py` | Typer commands: option parsing, terminal rendering, CLI-only `loadtest`/`capacity`/`benchmark` |
+| `houston/services/` | the shared "brain" both front-ends run: `lifecycle` (create/ready/teardown/prune), `perf` (GUI loadtest/capacity/benchmark), `data` (scale prefill, config-import), `monitor` (attach/detach), `postready` (preset self-config actions), `diagnose` (opaque `up` failures), `events` (the progress `Event`/`Emit` contract) |
+| `houston/web/` | the `serve` GUI: `app.py` (FastAPI routes, token + Host guard, SSE/WS) and `jobs.py` (background job registry). Imported lazily — the core CLI never depends on it |
+| `houston/errors.py` | `ReproError` hierarchy with `http_status`; the failure contract between services and both front-ends |
+| `houston/configimport.py` | parse a support-dump `*-settings.json` into an apply/skip plan, and apply it |
+| `houston/scaleseed.py` | bulk `--scale` MongoDB prefill (and its tagged undo) |
+| `houston/versions.py` | RC version → MongoDB pairing (live lookup + fallback map) |
+| `houston/presets/` | preset package: `__init__.py` holds the `Preset` dataclass + loader |
+| `houston/presets/_common.py` | shared `--set` param helpers (`truthy_param`/`int_param`/`str_param`) |
+| `houston/presets/_keycloak.py` | shared Keycloak scaffolding reused by `saml` + `oidc` |
+| `houston/presets/ldap.py`, `saml.py`, `oidc.py`, `email.py`, `s3_minio.py`, `livechat.py` | generate the LDAP / Keycloak (SAML & OIDC) / Mailpit / MinIO / Omnichannel scenarios |
+| `houston/presets/multi_instance.py` | generate the multi-instance (Traefik + NATS) scenario |
+| `houston/compose.py` | build the docker-compose document (incl. cloning RC into N instances, port binding) |
+| `houston/runner.py` | on-disk state, `docker compose` invocations, host-port allocation |
+| `houston/rcapi.py` | minimal Rocket.Chat REST client (readiness, auth, 2FA/OTP, settings) |
+| `houston/seed.py` | populate a repro with sample users/channels/messages via REST |
+| `houston/monitoring.py` | `--monitor` add-on: Prometheus + Grafana services/config, attachable to any repro |
+| `houston/perf/` | performance tooling: `timings` (latency percentiles), `resources` (docker-stats sampler), `k6` (load-test runner), `slo` (SLO gate parse/evaluate), `baseline` (saved runs + before/after compare), `constrain` (customer-sized CPU/RAM caps), `rcmetrics` (RC /metrics sampler: event-loop lag), `mongoprof` (Mongo slow-query capture), `timeline` (latency-over-time + spike recovery), `verdict` (rule-based diagnosis), `report` (benchmark/loadtest/capacity markdown) |
+| `houston/ui.py` | terminal output helpers (`ok`/`warn`/`fail`/`note`/`die`) |
+| `houston/config.py` | paths, constants, `PRESET_PORTS` registry, env-var overrides, persisted config |
+| `houston/__init__.py` | `__version__` (single-sourced from `pyproject.toml` via `importlib.metadata`) |
+| `houston/data/` | shipped version map, static preset YAML, monitoring dashboard JSON, k6 load-test scripts (`data/loadtest/`), GUI assets (`data/webui/`) |
 
 ## Adding a preset
 
 **Static preset** (env / extra services only) — add a YAML file to
-`rc_repro/data/presets/<name>.yaml`:
+`houston/data/presets/<name>.yaml`:
 
 ```yaml
 name: my-scenario
@@ -61,8 +61,8 @@ depends_on: [my-sidecar]
 
 **Dynamic preset** (needs generated files, params, or post-boot steps — like
 `ldap`/`saml`) — write a `build(params) -> Preset` function in a new
-`rc_repro/presets/<name>.py` and register it in
-`presets._dynamic_builders()` (in `rc_repro/presets/__init__.py`).
+`houston/presets/<name>.py` and register it in
+`presets._dynamic_builders()` (in `houston/presets/__init__.py`).
 
 - Read `--set` params via `_common.truthy_param` / `int_param` / `str_param` so
   bad values raise a clean error instead of a traceback.
@@ -70,7 +70,7 @@ depends_on: [my-sidecar]
 
 Useful `Preset` fields:
 - `files` — generated files written to the workspace (e.g. an LDIF or realm JSON).
-- `params_help` — one line per `--set` key, shown by `rc-repro presets`.
+- `params_help` — one line per `--set` key, shown by `houston presets`.
 - `post_ready` — actions run once RC is serving; add a handler in
   `services/postready.py`'s `_POST_READY_ACTIONS` and key it by the action's
   `"action"` string. Nothing checks that coupling automatically, so a typo'd
@@ -89,7 +89,7 @@ rejected up front) and picks a port that doesn't clash with other presets. All
 published ports are bound to `127.0.0.1` automatically — don't hard-code a bind
 host in the service.
 
-Anyone can also drop a preset in `~/.rc-repro/presets/<name>.yaml` locally — a
+Anyone can also drop a preset in `~/.houston/presets/<name>.yaml` locally — a
 user file overrides a built-in or dynamic preset of the same name. Static YAML
 supports `env`, `services`, `rocketchat`, `depends_on`, `notes`, `params_help`,
 `instances`, `entry_service`, `extra`, `volumes`, `ports` (but not `files` /
@@ -102,7 +102,7 @@ supports `env`, `services`, `rocketchat`, `depends_on`, `notes`, `params_help`,
   `tests/test_services.py` (the `services/` layer and `web/jobs.py`),
   `tests/test_web.py` (the HTTP API — needs the `gui` extra),
   `tests/test_diagnose.py` (failure-signature matching). All run without Docker;
-  each test gets an isolated `RC_REPRO_HOME` via `tests/conftest.py`.
+  each test gets an isolated `HOUSTON_HOME` via `tests/conftest.py`.
 - `test_core.py`/`test_diagnose.py` use `try/except/else` for expected errors;
   `test_services.py`/`test_web.py` use `pytest.raises`. Match the file you're in.
 - Keep Docker interaction in `runner.py` and REST interaction in `rcapi.py`.
@@ -115,4 +115,4 @@ supports `env`, `services`, `rocketchat`, `depends_on`, `notes`, `params_help`,
 ## Maintainer
 
 Maintained by the Rocket.Chat support team.
-Issues and requests: https://github.com/klovekesh37/rc-repro/issues
+Issues and requests: https://github.com/klovekesh37/houston/issues

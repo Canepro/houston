@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 
 from conftest import source_of
-from rc_repro import compose, config, configimport, presets, rcapi, runner, scaleseed, seed, versions
+from houston import compose, config, configimport, presets, rcapi, runner, scaleseed, seed, versions
 
 
 # --- version resolution (offline / fallback map) ------------------------------
@@ -142,7 +142,7 @@ def test_saml_preset_realm_scales_with_users():
 
 
 def test_param_helpers():
-    from rc_repro.presets import _common
+    from houston.presets import _common
     assert _common.truthy_param({"x": "YES"}, "x") is True
     assert _common.truthy_param({"x": "0"}, "x") is False
     assert _common.truthy_param({}, "x", default=True) is True
@@ -154,7 +154,7 @@ def test_param_helpers():
 
 
 def test_keycloak_shared_scaffolding():
-    from rc_repro.presets import _keycloak
+    from houston.presets import _keycloak
     us = _keycloak.users(2)
     assert [u["username"] for u in us] == ["user1", "user2"]
     # saml shape: publish host port -> Keycloak's default 8080
@@ -166,7 +166,7 @@ def test_keycloak_shared_scaffolding():
     assert svc2["ports"] == ["8085:8085"]
     assert svc2["environment"]["KC_HTTP_PORT"] == "8085"
     realm = json.loads(_keycloak.realm_json([{"clientId": "c"}], 2))
-    assert realm["realm"] == "rcrepro" and len(realm["users"]) == 2
+    assert realm["realm"] == "houston" and len(realm["users"]) == 2
 
 
 def test_keycloak_believes_a_proxys_forwarded_scheme():
@@ -189,7 +189,7 @@ def test_keycloak_believes_a_proxys_forwarded_scheme():
 
     Both IdP presets share this scaffolding, so both get it.
     """
-    from rc_repro.presets import _keycloak
+    from houston.presets import _keycloak
     for kwargs in ({}, {"http_port": 8085}):
         env = _keycloak.service("./x/realm.json", 8081, **kwargs)["environment"]
         # KC_PROXY_HEADERS, not KC_PROXY: `proxy` was deprecated in Keycloak 24 and
@@ -233,7 +233,7 @@ def test_email_preset_shape():
     # until verified manually), so plain admin login keeps working.
     assert p.env["OVERWRITE_SETTING_Accounts_TwoFactorAuthentication_By_Email_Enabled"] == "true"
     assert p.post_ready == []
-    # rcapi.login needs Mailpit's URL to fetch codes for rc-repro's own calls
+    # rcapi.login needs Mailpit's URL to fetch codes for houston's own calls
     # whenever a login is 2FA-gated.
     assert p.extra["mailpit_url"] == "http://localhost:8025"
     # verification is opt-in
@@ -285,7 +285,7 @@ def test_s3_minio_creates_its_bucket_on_both_runtimes():
     """
     import yaml
 
-    from rc_repro.services import topology
+    from houston.services import topology
 
     # Compose: the one-shot service, running the idempotent mc mb.
     d = presets.resolve("s3_minio", topology.DOCKER, {"bucket": "tickets"})
@@ -308,7 +308,7 @@ def test_s3_minio_creates_its_bucket_on_both_runtimes():
     assert spec["restartPolicy"] == "OnFailure"
     assert jobs[0]["spec"]["backoffLimit"] >= 1, "the first attempt races MinIO starting"
     assert (jobs[0]["metadata"]["labels"]["app.kubernetes.io/managed-by"]
-            == "rc-repro"), "teardown and ownership select on this"
+            == "houston"), "teardown and ownership select on this"
 
 
 def test_s3_minio_presigned_mode_and_bucket():
@@ -318,8 +318,8 @@ def test_s3_minio_presigned_mode_and_bucket():
     # The ENDPOINT, with no bucket on it. Bucket is passed separately and
     # ForcePathStyle makes the client build {endpoint}/{bucket}/{key}, so a bucket
     # here is repeated as a key prefix. Measured on 7.13.6 by uploading a file:
-    # with it, objects landed under rcrepro-uploads/rcrepro-uploads/...; without
-    # it, rcrepro-uploads/... . docs.rocket.chat/docs/minio prescribes the bucket
+    # with it, objects landed under houston-uploads/houston-uploads/...; without
+    # it, houston-uploads/... . docs.rocket.chat/docs/minio prescribes the bucket
     # in the URL and is wrong about it -- the upload succeeds either way, which is
     # why it went unnoticed.
     assert p.env["OVERWRITE_SETTING_FileUpload_S3_BucketURL"] == "http://minio:9000"
@@ -363,7 +363,7 @@ def test_livechat_preset_shape():
 
 def test_unknown_set_param_rejected():
     # `--set agent=5` (typo for `agents`) was silently ignored before.
-    from rc_repro.services import lifecycle as lc
+    from houston.services import lifecycle as lc
     p = presets.load("livechat")
     assert lc._unknown_params({"agent": "5"}, p) == ["agent"]      # typo caught
     assert lc._unknown_params({"agents": "5"}, p) == []            # correct key accepted
@@ -371,10 +371,10 @@ def test_unknown_set_param_rejected():
 
 
 def test_root_url_substitution(tmp_path, monkeypatch):
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    from rc_repro import runner
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    from houston import runner
     meta = runner.Metadata(
-        name="lc", project="rcrepro-lc", rc_version="8.5.1", rc_image="i",
+        name="lc", project="houston-lc", rc_version="8.5.1", rc_image="i",
         mongo_tag="8.0", mongo_flavor="official", preset="livechat",
         root_url="http://localhost:4321", host_port=4321, version_source="map",
     )
@@ -397,7 +397,7 @@ def _spec(version: str, preset_name: str = "default", params: dict | None = None
     r = versions.resolve(version, offline=True)
     pre = presets.load(preset_name, params or {})
     return compose.Spec.from_resolved(
-        r, project_name="rcrepro-t", root_url="http://localhost:3000",
+        r, project_name="houston-t", root_url="http://localhost:3000",
         host_port=3000, reg_token=None, preset=pre, monitoring=monitoring_flag,
     )
 
@@ -424,7 +424,7 @@ def test_compose_yaml_is_valid():
     doc = compose.build(_spec("8.4.1"))
     text = compose.to_yaml(doc)
     parsed = yaml.safe_load(text)
-    assert parsed["name"] == "rcrepro-t"
+    assert parsed["name"] == "houston-t"
 
 
 def test_compose_multi_instance_clones_and_meshes():
@@ -480,7 +480,7 @@ def test_s3_bucket_name_validated():
 
 
 def test_int_param_bad_value_is_actionable():
-    from rc_repro.presets import _common
+    from houston.presets import _common
     try:
         _common.int_param({"users": "many"}, "users", 5)
     except ValueError as exc:
@@ -652,11 +652,39 @@ def test_parse_scale_messages_without_room_raises():
             raise AssertionError(f"expected ValueError for {bad!r}")
 
 
+def test_clearing_a_bulk_seed_also_removes_what_rc_repro_seeded():
+    """The scale tag is stamped into the WORKSPACE's own MongoDB, which is the one
+    leftover a rename cannot reach by moving a directory.
+
+    Documents inserted before the rename carry `rcrepro_scale` for as long as that
+    database exists. Matching only the new tag would leave a bulk seed permanently
+    unremovable -- the single thing `--clear` exists to do -- and it would fail
+    silently, reporting zero deletions with nothing to say why. Pre-fix the generated
+    script names only `houston_scale`.
+    """
+    import inspect
+
+    from houston import scaleseed
+
+    js = inspect.getsource(scaleseed.clear)
+    # The behavioural claim FIRST, so this fails on the behaviour against the pre-fix
+    # code rather than on a constant that did not exist yet.
+    assert "_LEGACY_SCALE_TAG" in js, (
+        "`clear` names only the current tag, so anything seeded before the rename "
+        "cannot be removed by the command that exists to remove it")
+    assert "rcrepro_scale" in scaleseed._LEGACY_SCALE_TAG
+    # every destructive statement uses the combined match, not the bare new tag
+    for stmt in ("db['users'].deleteMany(", "db['rocketchat_message'].deleteMany("):
+        at = js.index(stmt)
+        rest = js[at + len(stmt):]
+        assert rest.startswith("{match_either}"), f"{stmt} still matches one tag: {rest[:40]}"
+
+
 def test_parse_scale_room_ref_cannot_reach_the_js_unquoted(monkeypatch):
     # This used to assert on the stdlib's repr() and never touch scaleseed at all,
     # so the guard it was named for had no coverage. Exercise both layers: the
     # _SPEC_RE whitelist (the real guard) and the quoted interpolation.
-    from rc_repro import scaleseed
+    from houston import scaleseed
     captured = {}
     monkeypatch.setattr(scaleseed, "_eval",
                         lambda name, js: captured.setdefault("js", js) or (0, '{"inserted": 1}'))
@@ -671,7 +699,7 @@ def test_parse_scale_room_ref_cannot_reach_the_js_unquoted(monkeypatch):
 
 
 def test_yaml_preset_notes_parsed(tmp_path, monkeypatch):
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     pdir = tmp_path / "presets"
     pdir.mkdir(parents=True)
     (pdir / "team.yaml").write_text(
@@ -685,7 +713,7 @@ def test_yaml_preset_notes_parsed(tmp_path, monkeypatch):
 def test_sanitize_can_produce_empty_name():
     # create_repro guards this: an all-symbols name would otherwise write into
     # the repros root itself.
-    from rc_repro.services.lifecycle import sanitize
+    from houston.services.lifecycle import sanitize
     assert sanitize("!!!") == ""
 
 
@@ -713,7 +741,7 @@ def test_preset_ports_match_registry_on_every_runtime():
     therefore got no refusal and its forward silently failed to bind, where Compose
     refuses up front and names the workspace already holding the port.
     """
-    from rc_repro.services import topology
+    from houston.services import topology
 
     for name, expected in config.PRESET_PORTS.items():
         for runtime in (topology.DOCKER, topology.KUBERNETES):
@@ -725,9 +753,9 @@ def test_preset_ports_match_registry_on_every_runtime():
 
 
 def test_used_ports_includes_sidecars_and_monitoring(tmp_path, monkeypatch):
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     meta = runner.Metadata(
-        name="x", project="rcrepro-x", rc_version="8.5.1", rc_image="i",
+        name="x", project="houston-x", rc_version="8.5.1", rc_image="i",
         mongo_tag="8.0", mongo_flavor="official", preset="saml",
         root_url="http://localhost:3000", host_port=3000, version_source="map",
         extra={"sidecar_ports": [8081], "monitoring_ports": [9090, 5050]},
@@ -739,8 +767,8 @@ def test_used_ports_includes_sidecars_and_monitoring(tmp_path, monkeypatch):
 
 
 def test_config_env_overrides(tmp_path, monkeypatch):
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    monkeypatch.setenv("RC_REPRO_REG_TOKEN", "tok-from-env")
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_REG_TOKEN", "tok-from-env")
     cfg = config.load_config()
     assert cfg["reg_token"] == "tok-from-env"
     # env wins over the file
@@ -748,11 +776,47 @@ def test_config_env_overrides(tmp_path, monkeypatch):
     assert config.load_config()["reg_token"] == "tok-from-env"
 
 
+def test_the_pre_rename_environment_variable_still_says_where_state_lives(
+        tmp_path, monkeypatch):
+    """Renaming RC_REPRO_* to HOUSTON_* without reading the old spelling would not
+    have failed -- it would have gone quiet.
+
+    An RC_REPRO_HOME sitting in a shell profile or a CI job would simply stop being
+    consulted, and the tool would resolve state to ~/.houston while every workspace
+    that box owns is somewhere else: `list` empty, `up` cheerfully making a second
+    copy. Pre-fix `home()` returns the default; the legacy path is the finding.
+    """
+    monkeypatch.delenv("HOUSTON_HOME", raising=False)
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path / "legacy"))
+    assert config.home() == tmp_path / "legacy"
+    assert "RC_REPRO_HOME" in config.legacy_env_used(), "doctor has to be able to name it"
+
+
+def test_the_new_environment_variable_wins_over_the_pre_rename_one(tmp_path,
+                                                                  monkeypatch):
+    """Both set is the normal state of a box part-way through the migration, and it
+    has to behave as the NEW name says or the alias would pin people to the old one.
+    """
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path / "new"))
+    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path / "legacy"))
+    assert config.home() == tmp_path / "new"
+
+
+def test_a_pre_rename_override_still_reaches_the_config_layer(tmp_path, monkeypatch):
+    """The alias belongs in `config.env`, not just in `home()` -- every one of the
+    twelve variables had the same silent-default failure, not only HOUSTON_HOME.
+    """
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    monkeypatch.delenv("HOUSTON_REG_TOKEN", raising=False)
+    monkeypatch.setenv("RC_REPRO_REG_TOKEN", "tok-from-legacy-env")
+    assert config.load_config()["reg_token"] == "tok-from-legacy-env"
+
+
 def test_env_values_never_persisted_to_config_file(tmp_path, monkeypatch):
     # Regression: read-modify-write flows (up --pin / use) must not bake
     # ephemeral env values (secrets!) into config.yaml.
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    monkeypatch.setenv("RC_REPRO_REG_TOKEN", "SECRET")
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_REG_TOKEN", "SECRET")
     raw = config.load_config(with_env=False)   # what save paths must use
     assert "reg_token" not in raw
     raw["default_repro"] = "x"
@@ -763,16 +827,16 @@ def test_env_values_never_persisted_to_config_file(tmp_path, monkeypatch):
 
 
 def test_version_single_source():
-    import rc_repro
+    import houston
     # resolved from package metadata (pyproject), never a hardcoded literal
-    assert rc_repro.__version__ and rc_repro.__version__ != "0.0.0-dev"
+    assert houston.__version__ and houston.__version__ != "0.0.0-dev"
 
 
 # --- monitoring (--monitor add-on) --------------------------------------------
 
 
 def test_monitoring_added_to_any_preset():
-    from rc_repro import monitoring
+    from houston import monitoring
     # attaches to a plain repro: prometheus + grafana + exporters, RC metrics on,
     # loopback-bound ports, its own volumes.
     doc = compose.build(_spec("8.4.1", monitoring_flag=True))
@@ -791,13 +855,13 @@ def test_monitoring_scrapes_all_multi_instances():
     # the whole point of the flag: Prometheus targets follow the RC topology.
     assert compose.rc_service_names(1) == ["rocketchat"]
     assert compose.rc_service_names(3) == ["rocketchat-1", "rocketchat-2", "rocketchat-3"]
-    from rc_repro import monitoring
+    from houston import monitoring
     sd = dict(monitoring.files(["rocketchat-1", "rocketchat-2"]))["monitoring/file_sd_configs/rocketchat.yml"]
     assert "rocketchat-1:9458" in sd and "rocketchat-2:9458" in sd
 
 
 def test_monitoring_ships_full_dashboards_and_exporter_targets():
-    from rc_repro import monitoring
+    from houston import monitoring
     files = dict(monitoring.files(["rocketchat"]))
     dash = json.loads(files["monitoring/grafana/dashboards/rocketchat-metrics.json"])
     assert dash["title"] == "Rocket.Chat Metrics" and len(dash["panels"]) > 30
@@ -812,7 +876,7 @@ def test_monitoring_ships_full_dashboards_and_exporter_targets():
 def test_monitoring_ships_k6_loadtest_dashboard():
     # loadtest --live streams k6_* metrics via remote-write; a dashboard must be
     # provisioned to actually SEE them (Explore alone is easy to miss).
-    from rc_repro import monitoring
+    from houston import monitoring
     files = dict(monitoring.files(["rocketchat"]))
     raw = files.get("monitoring/grafana/dashboards/k6-loadtest.json")
     assert raw, "k6 load-test dashboard not shipped"
@@ -833,22 +897,22 @@ def test_no_monitoring_by_default():
 def test_monitoring_ships_logs_stack():
     # Loki + OTel collector, mirroring RocketChat/rocketchat-compose; the
     # collector must be SCOPED to this repro's project so it never tails others.
-    from rc_repro import monitoring
+    from houston import monitoring
     svcs = monitoring.services()
     assert "loki" in svcs and "opentelemetry-logs-collector" in svcs
     assert "loki_data" in monitoring.VOLUMES
-    fs = dict(monitoring.files(["rocketchat"], project="rcrepro-demo"))
+    fs = dict(monitoring.files(["rocketchat"], project="houston-demo"))
     assert "monitoring/loki/config.yaml" in fs
     assert "monitoring/grafana/provisioning/datasources/loki.yml" in fs
     otel = fs["monitoring/otel/config.yaml"]
     assert "http://loki:3100/otlp" in otel              # exports to Loki
-    assert 'com.docker.compose.project"] == "rcrepro-demo"' in otel  # scoped to this repro
+    assert 'com.docker.compose.project"] == "houston-demo"' in otel  # scoped to this repro
 
 
 def test_monitoring_bind_ports_handles_portless_exporters():
     # Regression: the attach path binds ports over ALL monitoring services;
     # node-exporter/mongodb-exporter have no 'ports' key -> must not KeyError.
-    from rc_repro import monitoring
+    from houston import monitoring
     bound = monitoring.bind_ports(monitoring.services(), "127.0.0.1")
     assert bound["prometheus"]["ports"] == ["127.0.0.1:9090:9090"]
     assert bound["grafana"]["ports"] == ["127.0.0.1:5050:3000"]
@@ -860,7 +924,7 @@ def test_monitoring_bind_ports_handles_portless_exporters():
 
 
 def test_timings_percentiles_and_histogram():
-    from rc_repro.perf import Timings
+    from houston.perf import Timings
     t = Timings()
     for v in range(1, 101):        # 1..100 ms
         t.add(float(v))
@@ -874,26 +938,26 @@ def test_timings_percentiles_and_histogram():
 
 
 def test_timings_empty_is_safe():
-    from rc_repro.perf import Timings
+    from houston.perf import Timings
     t = Timings()
     assert t.summary() == {"count": 0}
     assert t.pct(95) == 0.0 and t.histogram() == ""
 
 
 def test_fmt_ms():
-    from rc_repro.perf.timings import fmt_ms
+    from houston.perf.timings import fmt_ms
     assert fmt_ms(42) == "42ms" and fmt_ms(1500) == "1.50s"
 
 
 def test_resources_parsers():
-    from rc_repro.perf import resources as R
+    from houston.perf import resources as R
     assert R._parse_cpu("78.34%") == 78.34
     used, limit = R._parse_mem("540MiB / 2GiB")
     assert round(used) == 540 * 1024**2 and round(limit) == 2 * 1024**3
 
 
 def test_resource_report_windows_and_peaks():
-    from rc_repro.perf.resources import ResourceMonitor
+    from houston.perf.resources import ResourceMonitor
     mon = ResourceMonitor("x")
     # inject a synthetic series: (t, cpu, mem_used, mem_limit)
     mon._series = {"rc": [(0.0, 4, 100, 2000), (1.0, 80, 500, 2000), (2.0, 30, 300, 2000)]}
@@ -907,7 +971,7 @@ def test_resource_report_windows_and_peaks():
 def test_seed_returns_durations_and_latency(monkeypatch):
     # drive the seed body with a mock poster; no server needed.
     from unittest.mock import MagicMock
-    from rc_repro import seed, rcapi
+    from houston import seed, rcapi
     # The mock has to answer a room CREATE as well as a message post: messages go
     # by `rid` now, because a discussion's name is a server-generated slug and
     # `#name` cannot reach one.
@@ -945,7 +1009,7 @@ def _bench_row(version, seed_s, p95, ok=True):
 
 
 def test_benchmark_flags_regression():
-    from rc_repro.perf import report
+    from houston.perf import report
     a = _bench_row("8.5.1", 5.0, 100)
     b = _bench_row("8.6.0", 9.0, 340)     # +80% seed, +240% p95 vs a
     assert report.regression_flag(b, a, 25.0)          # flagged
@@ -955,7 +1019,7 @@ def test_benchmark_flags_regression():
 
 
 def test_benchmark_table_and_markdown_render():
-    from rc_repro.perf import report
+    from houston.perf import report
     results = [_bench_row("8.5.1", 5.0, 100), _bench_row("8.6.0", 9.0, 340),
                {"version": "9.9.9", "ok": False, "error": "no such version"}]
     headers, rows, flags = report.table_rows(results, 25.0)
@@ -963,7 +1027,7 @@ def test_benchmark_table_and_markdown_render():
     host = {"os": "test", "cpu": 8, "docker": "27.0", "compose": "2.30"}
     md = report.benchmark_markdown(results, "standard", 25.0, host)
     # summary + workload explanation + per-version detail all present
-    assert "rc-repro benchmark report" in md and "8.6.0" in md and "FAILED" in md
+    assert "houston benchmark report" in md and "8.6.0" in md and "FAILED" in md
     assert "What the workload did" in md and "Per-version detail" in md
     assert "Message latency" in md and "Resource peaks during seed" in md
 
@@ -972,7 +1036,7 @@ def test_benchmark_table_and_markdown_render():
 
 
 def test_slo_parse_units_and_ops():
-    from rc_repro.perf import slo
+    from houston.perf import slo
     rules = slo.parse("p95=300ms,error=1%,rps=100,avg=1.5s")
     by = {r[0]: r for r in rules}
     assert by["p95"] == ("p95", "<=", 300.0, "300ms")
@@ -982,7 +1046,7 @@ def test_slo_parse_units_and_ops():
 
 
 def test_slo_rejects_unknown_metric():
-    from rc_repro.perf import slo
+    from houston.perf import slo
     for bad in ("throughput=100", "p95"):         # unknown metric / missing '='
         try:
             slo.parse(bad)
@@ -992,7 +1056,7 @@ def test_slo_rejects_unknown_metric():
 
 
 def test_slo_evaluate_pass_and_fail():
-    from rc_repro.perf import slo
+    from houston.perf import slo
     summary = {"p95": 250.0, "error_rate": 0.005, "rps": 120.0}
     rules = slo.parse("p95=300ms,error=1%,rps=100")
     res = {r["key"]: r for r in slo.evaluate(rules, summary)}
@@ -1005,37 +1069,37 @@ def test_slo_evaluate_pass_and_fail():
 
 def test_slo_absent_metric_fails_not_measured():
     # A metric missing from the summary must FAIL (not silently PASS at 0.0).
-    from rc_repro.perf import slo
+    from houston.perf import slo
     res = slo.evaluate(slo.parse("p99=300ms"), summary={"p95": 100.0})[0]
     assert res["measured"] is False and res["ok"] is False
 
 
 def test_loadtest_target_detection():
-    from rc_repro import cli
+    from houston import cli
     assert cli._loadtest_target({"services": {"rocketchat": {}, "mongodb": {}}}) == "http://rocketchat:3000"
     assert cli._loadtest_target({"services": {"traefik": {}, "rocketchat-1": {}}}) == "http://traefik:80"
     assert cli._loadtest_target({"services": {"rocketchat-1": {}, "rocketchat-2": {}}}) == "http://rocketchat-1:3000"
 
 
 def test_loadtest_markdown_renders():
-    from rc_repro.perf import report
+    from houston.perf import report
     ctx = {"name": "acme", "version": "8.5.1", "scenario": "messages", "vus": 50,
            "duration": "60s", "ramp": "", "target": "http://rocketchat:3000"}
     summary = {"count": 3000, "rps": 50.0, "p50": 40, "p90": 90, "p95": 120,
                "p99": 200, "avg": 55, "min": 10, "max": 400,
                "error_rate": 0.004, "checks_rate": 0.996}
-    from rc_repro.perf import slo
+    from houston.perf import slo
     slo_res = slo.evaluate(slo.parse("p95=300ms,error=1%"), summary)
     host = {"os": "test", "cpu": 8, "docker": "27.0", "compose": "2.30"}
     md = report.loadtest_markdown(ctx, summary, slo_res, None, host)
-    assert "rc-repro load-test report" in md and "messages" in md
+    assert "houston load-test report" in md and "messages" in md
     assert "SLO gate" in md and "throughput" in md and "50.0 req/s" in md
 
 
 def test_loadtest_scenarios_and_scripts_present():
     from importlib import resources
-    from rc_repro.perf import k6
-    d = resources.files("rc_repro").joinpath("data", "loadtest")
+    from houston.perf import k6
+    d = resources.files("houston").joinpath("data", "loadtest")
     assert "custom" in k6.SCENARIOS
     for name in k6.SCENARIOS:
         assert d.joinpath(f"{name}.js").is_file()
@@ -1043,7 +1107,7 @@ def test_loadtest_scenarios_and_scripts_present():
 
 
 def test_parse_endpoint():
-    from rc_repro import cli
+    from houston import cli
     assert cli._parse_endpoint("GET /api/v1/channels.list") == ("GET", "/api/v1/channels.list")
     assert cli._parse_endpoint("post /api/v1/chat.postMessage") == ("POST", "/api/v1/chat.postMessage")
     assert cli._parse_endpoint("/api/v1/me") == ("GET", "/api/v1/me")   # bare path defaults to GET
@@ -1057,7 +1121,7 @@ def test_parse_endpoint():
 
 
 def test_parse_endpoint_unsupported_method():
-    from rc_repro import cli
+    from houston import cli
     assert cli._parse_endpoint("PATCH /api/v1/x") == ("PATCH", "/api/v1/x")
     try:
         cli._parse_endpoint("HEAD /api/v1/me")
@@ -1068,7 +1132,7 @@ def test_parse_endpoint_unsupported_method():
 
 
 def test_parse_ramp():
-    from rc_repro import cli
+    from houston import cli
     assert cli._parse_ramp("10:200") == (10, 200)
     for bad in ("10", "a:b", "5:0", "1:2:3"):
         try:
@@ -1080,16 +1144,16 @@ def test_parse_ramp():
 
 def test_short_res_map_keeps_multi_instance_index():
     # Multi-instance rocketchat-1/-2 must not collapse to one key (report data loss).
-    from rc_repro import cli
-    res = {"rcrepro-x-rocketchat-1": 1, "rcrepro-x-rocketchat-2": 2, "rcrepro-x-mongodb-1": 3}
+    from houston import cli
+    res = {"houston-x-rocketchat-1": 1, "houston-x-rocketchat-2": 2, "houston-x-mongodb-1": 3}
     assert sorted(cli._short_res_map(res, "x")) == ["mongodb", "rocketchat-1", "rocketchat-2"]
     # Single instance still collapses to the clean base name.
-    single = {"rcrepro-y-rocketchat-1": 1, "rcrepro-y-mongodb-1": 2}
+    single = {"houston-y-rocketchat-1": 1, "houston-y-mongodb-1": 2}
     assert sorted(cli._short_res_map(single, "y")) == ["mongodb", "rocketchat"]
 
 
 def test_bind_ports_no_double_prefix_on_ip_qualified():
-    from rc_repro import compose
+    from houston import compose
     doc = {"services": {
         "a": {"ports": ["8025:8025"]},            # bare -> prefixed
         "b": {"ports": ["127.0.0.1:9000:9000"]},  # already IP -> untouched
@@ -1100,8 +1164,8 @@ def test_bind_ports_no_double_prefix_on_ip_qualified():
 
 
 def test_baseline_label_and_roundtrip(tmp_path, monkeypatch):
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    from rc_repro.perf import baseline
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    from houston.perf import baseline
     assert baseline.sanitize_label("Before Fix!") == "before-fix"
     for bad in ("", "///", "!!!"):
         try:
@@ -1122,7 +1186,7 @@ def test_baseline_label_and_roundtrip(tmp_path, monkeypatch):
 
 
 def test_baseline_compare_flags_regressions():
-    from rc_repro.perf import baseline
+    from houston.perf import baseline
     base = {"summary": {"rps": 100.0, "p50": 40.0, "p95": 100.0, "p99": 150.0,
                         "error_rate": 0.001,
                         "steps": {"login": {"p95": 100.0}, "post": {"p95": 50.0}}}}
@@ -1138,16 +1202,16 @@ def test_baseline_compare_flags_regressions():
 
 
 def test_baseline_step_order_canonical():
-    from rc_repro.perf import baseline
+    from houston.perf import baseline
     steps = {"post": {}, "zeta": {}, "login": {}, "open": {}}
     assert baseline.step_order(steps) == ["login", "open", "post", "zeta"]
 
 
 def test_loadtest_journey_scenario_registered():
     from importlib import resources
-    from rc_repro.perf import k6
+    from houston.perf import k6
     assert "journey" in k6.SCENARIOS
-    d = resources.files("rc_repro").joinpath("data", "loadtest")
+    d = resources.files("houston").joinpath("data", "loadtest")
     assert d.joinpath("journey.js").is_file()
     # journey + mixed emit per-step trends; common.js collects them into `steps`
     assert "step_" in d.joinpath("journey.js").read_text(encoding="utf-8")
@@ -1156,7 +1220,7 @@ def test_loadtest_journey_scenario_registered():
 
 
 def test_loadtest_report_renders_steps_snapshot_compare():
-    from rc_repro.perf import report
+    from houston.perf import report
     ctx = {"name": "acme", "version": "8.5.1", "scenario": "journey", "vus": 20,
            "duration": "30s", "ramp": "", "target": "http://rocketchat:3000",
            "users": 5, "label": "journey"}
@@ -1178,7 +1242,7 @@ def test_loadtest_report_renders_steps_snapshot_compare():
 
 
 def test_constrain_parse():
-    from rc_repro.perf import constrain
+    from houston.perf import constrain
     c = constrain.parse("rc=2cpu/2g,mongo=0.5cpu/512m")
     assert c["rc"] == {"cpus": 2.0, "mem": "2g"}
     assert c["mongo"] == {"cpus": 0.5, "mem": "512m"}
@@ -1193,7 +1257,7 @@ def test_constrain_parse():
 
 
 def test_constrain_resolve_aliases():
-    from rc_repro.perf import constrain
+    from houston.perf import constrain
     lim = {"cpus": 1.0, "mem": "1g"}
     # single-instance: rc -> rocketchat; mongo -> mongodb
     services = ["rocketchat", "mongodb", "mongo-init"]
@@ -1214,7 +1278,7 @@ def test_constrain_resolve_aliases():
 
 
 def test_constrain_human():
-    from rc_repro.perf import constrain
+    from houston.perf import constrain
     assert constrain.human({"rc": {"cpus": 2.0, "mem": "2g"},
                             "mongo": {"cpus": 0.5, "mem": None}}) == "rc=2cpu/2g, mongo=0.5cpu"
 
@@ -1233,7 +1297,7 @@ def test_constrain_restore_only_touches_capped_dimensions(monkeypatch):
     # A CPU-only --constrain must not make restore() impose a memory limit on a
     # container that had none (which, with --memory-swap == --memory, would also
     # disable swap) — restore only puts back what apply() actually changed.
-    from rc_repro.perf import constrain
+    from houston.perf import constrain
     calls = []
     monkeypatch.setattr(constrain.subprocess, "run", _fake_run(calls))
     monkeypatch.setattr(constrain.runner, "docker_capacity", lambda: (8.0, 8_000_000_000))
@@ -1247,7 +1311,7 @@ def test_constrain_restore_reports_partial_failure(monkeypatch):
     # the memory dimension can't be resolved. That must be REPORTED — it used to
     # be silent whenever the built command was non-empty, so the test's memory
     # cap stayed applied and the caller printed no warning.
-    from rc_repro.perf import constrain
+    from houston.perf import constrain
     calls = []
     monkeypatch.setattr(constrain.subprocess, "run", _fake_run(calls))
     monkeypatch.setattr(constrain.runner, "docker_capacity", lambda: None)
@@ -1262,7 +1326,7 @@ def test_constrain_restore_reproduces_implicit_swap_default(monkeypatch):
     # MemorySwap == 0 next to a real Memory limit is docker's "twice memory"
     # default, not "unknown". Restoring swap == memory would hand back a
     # STRICTER config (no swap) than the container started with.
-    from rc_repro.perf import constrain
+    from houston.perf import constrain
     calls = []
     monkeypatch.setattr(constrain.subprocess, "run", _fake_run(calls))
     monkeypatch.setattr(constrain.runner, "docker_capacity", lambda: (8.0, 8_000_000_000))
@@ -1282,7 +1346,7 @@ def test_constrain_restore_never_raises(monkeypatch):
     # restore() runs inside the callers' finally; an OSError escaping it would
     # skip their remaining cleanup (deleting the seeded-user token file) and mask
     # whatever error triggered the finally. Report it, don't raise.
-    from rc_repro.perf import constrain
+    from houston.perf import constrain
 
     def boom(*_a, **_k):
         raise FileNotFoundError("docker")
@@ -1297,7 +1361,7 @@ def test_constrain_restore_never_raises(monkeypatch):
 def test_constrain_inspect_limits_bad_output_is_runtime_error(monkeypatch):
     # Every call site catches RuntimeError; a ValueError from int() would escape
     # as a raw traceback (CLI) or an InternalError job (GUI).
-    from rc_repro.perf import constrain
+    from houston.perf import constrain
     monkeypatch.setattr(constrain.subprocess, "run", _fake_run([], stdout="<no value>\n"))
     try:
         constrain._inspect_limits("cid1")
@@ -1308,7 +1372,7 @@ def test_constrain_inspect_limits_bad_output_is_runtime_error(monkeypatch):
 
 
 def test_rcmetrics_prom_parser():
-    from rc_repro.perf import rcmetrics
+    from houston.perf import rcmetrics
     text = (
         "# HELP nodejs_eventloop_lag_seconds Lag of event loop in seconds.\n"
         "# TYPE nodejs_eventloop_lag_seconds gauge\n"
@@ -1332,7 +1396,7 @@ def test_rcmetrics_prom_parser():
 
 def test_timeline_bucketing(tmp_path):
     import json as _json
-    from rc_repro.perf import timeline
+    from houston.perf import timeline
     # Synthetic k6 point stream: 60s of requests, latency degrading, errors late.
     # k6 emits compact JSON (no spaces) — the parser's prefilter relies on that.
     compact = {"separators": (",", ":")}
@@ -1356,7 +1420,7 @@ def test_timeline_bucketing(tmp_path):
 
 
 def test_verdict_rules():
-    from rc_repro.perf import verdict
+    from houston.perf import verdict
     base = {"p95": 120.0, "rps": 50.0, "error_rate": 0.0}
     # saturated event loop -> named finding
     v = verdict.analyze(base, rcmetrics={"rocketchat": {
@@ -1384,7 +1448,7 @@ def test_verdict_rules():
 
 
 def test_spike_recovery_math():
-    from rc_repro.perf import timeline
+    from houston.perf import timeline
     # 90s run, 1s buckets: calm first third, spiked middle, recovering tail.
     def bucket(t, p95):
         return {"t0": t, "reqs": 10, "p50": p95 * 0.6, "p95": p95, "max": p95 * 2, "errors": 0}
@@ -1403,20 +1467,20 @@ def test_spike_recovery_math():
 
 
 def test_mem_slopes_requires_span():
-    from rc_repro.perf.resources import ResourceMonitor
+    from houston.perf.resources import ResourceMonitor
     mon = ResourceMonitor("x")
     # 20 minutes of samples, RAM growing 1MB/min -> 60MB/h
-    mon._series["rcrepro-x-rocketchat-1"] = [
+    mon._series["houston-x-rocketchat-1"] = [
         (t * 60.0, 50.0, 1e9 + t * 1e6, 8e9) for t in range(21)]
     # only 2 minutes -> too short to say anything
-    mon._series["rcrepro-x-mongodb-1"] = [(0.0, 10.0, 2e8, 8e9), (120.0, 10.0, 3e8, 8e9)]
+    mon._series["houston-x-mongodb-1"] = [(0.0, 10.0, 2e8, 8e9), (120.0, 10.0, 3e8, 8e9)]
     slopes = mon.mem_slopes()
-    assert round(slopes["rcrepro-x-rocketchat-1"] / 1e6) == 60
-    assert "rcrepro-x-mongodb-1" not in slopes
+    assert round(slopes["houston-x-rocketchat-1"] / 1e6) == 60
+    assert "houston-x-mongodb-1" not in slopes
 
 
 def test_verdict_refuses_to_judge_an_unmeasured_run():
-    from rc_repro.perf import verdict
+    from houston.perf import verdict
     # A run that issued no requests emits no latency keys at all (handleSummary
     # drops undefined values). It used to render as a measured 0ms and end in
     # "the workspace has headroom at this load" -- a health claim from no data.
@@ -1430,7 +1494,7 @@ def test_verdict_refuses_to_judge_an_unmeasured_run():
 
 
 def test_loadtest_markdown_marks_unmeasured_metrics():
-    from rc_repro.perf import report
+    from houston.perf import report
     zero = {"rps": 0, "count": 0, "error_rate": 0, "checks_rate": None}
     ctx = {"name": "r", "version": "8.5.1", "scenario": "messages", "vus": 10,
            "duration": "30s", "ramp": "", "target": "http://rocketchat:3000", "users": 0}
@@ -1448,7 +1512,7 @@ def test_loadtest_markdown_marks_unmeasured_metrics():
 
 
 def test_loadtest_markdown_labels_a_spike_run_as_a_spike():
-    from rc_repro.perf import report
+    from houston.perf import report
     # ctx["vus"] is the value the CLI told the user it was IGNORING under --spike,
     # so reporting it described a load shape that never ran.
     ctx = {"name": "r", "version": "8.5.1", "scenario": "messages", "vus": 10,
@@ -1465,7 +1529,7 @@ def test_loadtest_script_budgets_spike_ramps_and_parses_compound_durations():
     # timeline.spike_recovery's exact-thirds windows), seconds() understands k6's
     # compound durations (1m30s), and an unrun check set reports null.
     from importlib import resources
-    js = resources.files("rc_repro").joinpath("data", "loadtest", "common.js").read_text(
+    js = resources.files("houston").joinpath("data", "loadtest", "common.js").read_text(
         encoding="utf-8")
     assert "ms|s|m|h" in js
     assert "const body = total - 2;" in js
@@ -1473,7 +1537,7 @@ def test_loadtest_script_budgets_spike_ramps_and_parses_compound_durations():
 
 
 def test_verdict_spike_and_soak_rules():
-    from rc_repro.perf import verdict
+    from houston.perf import verdict
     base = {"p95": 120.0, "rps": 50.0, "error_rate": 0.0}
     v = verdict.analyze(base, spike={"baseline_p95": 100.0, "spike_p95": 900.0,
                                      "recovered_after_s": None})
@@ -1487,17 +1551,17 @@ def test_verdict_spike_and_soak_rules():
 
 def test_new_scenarios_registered():
     from importlib import resources
-    from rc_repro.perf import k6
-    d = resources.files("rc_repro").joinpath("data", "loadtest")
+    from houston.perf import k6
+    d = resources.files("houston").joinpath("data", "loadtest")
     for s in ("webhook", "badbot"):
         assert s in k6.SCENARIOS and d.joinpath(f"{s}.js").is_file()
     assert "SPIKE" in d.joinpath("common.js").read_text(encoding="utf-8")
 
 
 def test_capacity_report_renders(tmp_path, monkeypatch):
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     from pathlib import Path
-    from rc_repro.perf import report
+    from houston.perf import report
     ctx = {"name": "acme", "version": "8.5.1", "scenario": "journey", "slo": "p95=500ms",
            "users": 5, "step_duration": "20s", "target": "http://rocketchat:3000",
            "constrained": "rocketchat=2cpu"}
@@ -1517,15 +1581,15 @@ def test_capacity_report_renders(tmp_path, monkeypatch):
 
 
 def test_mongoprof_last_json():
-    from rc_repro.perf import mongoprof
+    from houston.perf import mongoprof
     out = "some banner\nWarning: x\n{\"was\": 0, \"slowms\": 100}\n"
     assert mongoprof._last_json(out) == {"was": 0, "slowms": 100}
     assert mongoprof._last_json("no json here") is None
 
 
 def test_status_breakdown_non_zero_only():
-    from rc_repro import cli
-    from rc_repro.perf import report
+    from houston import cli
+    from houston.perf import report
     summary = {"status": {"2xx": 1158, "429": 61, "4xx": 0, "5xx": 41, "other": 0}}
     assert cli._status_breakdown(summary) == "2xx 1158 · 429 61 · 5xx 41"
     assert report._status_breakdown(summary) == "2xx 1158 · 429 61 · 5xx 41"
@@ -1610,7 +1674,7 @@ def test_seed_does_not_count_failed_dms():
 
 
 def test_scaleseed_does_not_rerun_a_partially_applied_script(monkeypatch):
-    from rc_repro import scaleseed
+    from houston import scaleseed
     shells = []
 
     def killed_midway(_name, _service, args, **_kw):
@@ -1635,7 +1699,7 @@ def test_scaleseed_does_not_rerun_a_partially_applied_script(monkeypatch):
 
 
 def test_parse_scale_rejects_ambiguous_and_oversized_specs():
-    from rc_repro import scaleseed
+    from houston import scaleseed
     for bad in ("users=10@team-chat",             # a room means nothing for users
                 "messages=10@a,messages=20@b",    # silently last-wins before
                 "users=1,users=2",
@@ -1650,7 +1714,7 @@ def test_parse_scale_rejects_ambiguous_and_oversized_specs():
 
 
 def test_configimport_redaction_requires_a_single_mask_alphabet():
-    from rc_repro import configimport
+    from houston import configimport
     for masked in ("XXXXXXXX", "xxxx", "****", "######", "●●●●●●", "····"):
         assert configimport._is_redacted(masked), masked
     # A character class matched any MIXTURE, and "." inside [...] is a literal
@@ -1662,7 +1726,7 @@ def test_configimport_redaction_requires_a_single_mask_alphabet():
 
 
 def test_login_refuses_an_unfiltered_otp_poll(monkeypatch):
-    from rc_repro import rcapi
+    from houston import rcapi
 
     class _R:
         status_code, ok = 401, False
@@ -1683,7 +1747,7 @@ def test_login_refuses_an_unfiltered_otp_poll(monkeypatch):
 
 
 def test_login_rejects_a_non_200_success_status(monkeypatch):
-    from rc_repro import rcapi
+    from houston import rcapi
 
     class _R:
         status_code, ok = 302, True             # proxy redirect to HTTPS
@@ -1708,12 +1772,12 @@ def _spec_for(pre):
     """A Spec around a hand-built Preset (the shared _spec() takes a preset NAME)."""
     r = versions.resolve("8.4.1", offline=True)
     return compose.Spec.from_resolved(
-        r, project_name="rcrepro-t", root_url="http://localhost:3000",
+        r, project_name="houston-t", root_url="http://localhost:3000",
         host_port=3000, reg_token=None, preset=pre)
 
 
 def test_compose_entry_service_must_exist():
-    from rc_repro.presets import Preset
+    from houston.presets import Preset
     # Silently skipping a bad entry_service meant NOTHING published the host port:
     # the repro booted unreachable at its own advertised root_url.
     pre = Preset(name="broken", entry_service="nope", services={"real": {"image": "x"}})
@@ -1726,7 +1790,7 @@ def test_compose_entry_service_must_exist():
 
 
 def test_compose_entry_service_takes_the_host_port_from_rc():
-    from rc_repro.presets import Preset
+    from houston.presets import Preset
     # A single-instance preset with an entry_service: RC must give up the published
     # host port, or it is bound twice and `up` fails "port is already allocated".
     pre = Preset(name="lb", entry_service="proxy", services={"proxy": {"image": "x"}})
@@ -1760,28 +1824,28 @@ def test_bind_ports_handles_a_bare_container_port():
 
 
 def test_read_meta_tolerates_a_field_from_a_newer_version(tmp_path, monkeypatch):
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     ws = tmp_path / "repros" / "r"
     ws.mkdir(parents=True)
-    (ws / "docker-compose.yml").write_text("name: rcrepro-r\n", encoding="utf-8")
+    (ws / "docker-compose.yml").write_text("name: houston-r\n", encoding="utf-8")
     blob = {
-        "name": "r", "project": "rcrepro-r", "rc_version": "8.5.1", "rc_image": "i",
+        "name": "r", "project": "houston-r", "rc_version": "8.5.1", "rc_image": "i",
         "mongo_tag": "8.0", "mongo_flavor": "official", "preset": "default",
         "root_url": "http://localhost:3000", "host_port": 3000,
         "version_source": "map (fallback)",
-        "a_field_from_the_future": {"nested": True},   # written by a newer rc-repro
+        "a_field_from_the_future": {"nested": True},   # written by a newer houston
     }
     (ws / "repro.json").write_text(json.dumps(blob), encoding="utf-8")
     # Metadata(**blob) used to TypeError, and list_meta swallows that -- silently
-    # dropping the repro from `rc-repro list`.
+    # dropping the repro from `houston list`.
     m = runner.read_meta("r")
     assert m.name == "r" and m.host_port == 3000
     assert [x.name for x in runner.list_meta()] == ["r"]
 
 
 def test_update_config_is_a_locked_read_modify_write(tmp_path, monkeypatch):
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    monkeypatch.setenv("RC_REPRO_REG_TOKEN", "ephemeral-secret")
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_REG_TOKEN", "ephemeral-secret")
     config.update_config(lambda cfg: cfg.__setitem__("default_repro", "a"))
     config.update_config(lambda cfg: cfg.__setitem__("other", 1))
     raw = config.config_file().read_text(encoding="utf-8")
@@ -1792,9 +1856,9 @@ def test_update_config_is_a_locked_read_modify_write(tmp_path, monkeypatch):
 
 
 def test_resolve_name_rejects_a_name_that_is_not_a_repro(tmp_path, monkeypatch):
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    from rc_repro import errors
-    from rc_repro.services import lifecycle as lcsvc
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    from houston import errors
+    from houston.services import lifecycle as lcsvc
     # The name becomes a filesystem path and a compose project name, so nothing
     # unsafe may come back. Resolution now SANITIZES rather than validating --
     # creation always did, and the two disagreeing is what stopped `--name` round
@@ -1812,8 +1876,8 @@ def test_resolve_name_rejects_a_name_that_is_not_a_repro(tmp_path, monkeypatch):
 def test_resolve_name_never_returns_a_path_that_escapes_the_repro_dir(tmp_path, monkeypatch):
     """The candidates are either already-legal names or sanitize() output, so a
     traversal cannot survive to become runner.workspace()."""
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    from rc_repro.services import lifecycle as lcsvc
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    from houston.services import lifecycle as lcsvc
 
     for bad in ("../../etc", "a/b", "..", "./x", "x/../../y"):
         for cand in lcsvc.name_candidates(bad, actor="alice"):
@@ -1826,9 +1890,9 @@ def test_a_name_round_trips_through_create_and_resolve(tmp_path, monkeypatch):
     import dataclasses
     import json
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    from rc_repro import runner
-    from rc_repro.services import lifecycle as lcsvc
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    from houston import runner
+    from houston.services import lifecycle as lcsvc
 
     for typed, actor in (("TICKET-1234", ""), ("test", "alice"), ("TICKET-1234", "alice")):
         req = lcsvc.CreateReq(version="8.5.1", name=typed, actor=actor)
@@ -1836,7 +1900,7 @@ def test_a_name_round_trips_through_create_and_resolve(tmp_path, monkeypatch):
         ws = runner.workspace(made)
         ws.mkdir(parents=True, exist_ok=True)
         f = {x.name: "" for x in dataclasses.fields(runner.Metadata)}
-        f.update(name=made, project="rcrepro-" + made, rc_version="8.5.1",
+        f.update(name=made, project="houston-" + made, rc_version="8.5.1",
                  mongo_tag="8.0", host_port=3000, preset="default",
                  root_url="http://localhost:3000", extra={})
         (ws / "repro.json").write_text(json.dumps(dataclasses.asdict(runner.Metadata(**f))))
@@ -1847,7 +1911,7 @@ def test_a_name_round_trips_through_create_and_resolve(tmp_path, monkeypatch):
 
 
 def test_detail_redacts_secret_env_values():
-    from rc_repro.services import lifecycle as lcsvc
+    from houston.services import lifecycle as lcsvc
     # The env tab is served to any client holding the session token and used to
     # carry these verbatim.
     for key in ("REG_TOKEN", "ADMIN_PASS",
@@ -1876,8 +1940,8 @@ def test_a_credential_inside_a_url_is_redacted_even_though_the_key_is_innocent()
     Only the userinfo goes. The host, database, replicaSet and authSource in the rest
     of that string are what somebody is reading it FOR.
     """
-    from rc_repro.services import lifecycle as lcsvc
-    url = ("mongodb://rocketchat:SuP3rS3cret@mongodb-0.mongodb-svc.rc-repro-k.svc"
+    from houston.services import lifecycle as lcsvc
+    url = ("mongodb://rocketchat:SuP3rS3cret@mongodb-0.mongodb-svc.houston-k.svc"
            ".cluster.local:27017/rocketchat?replicaSet=mongodb&authSource=rocketchat")
     shown = lcsvc.redact_env("MONGO_URL", url)
     assert "SuP3rS3cret" not in shown
@@ -1897,8 +1961,8 @@ def test_a_credential_inside_a_url_is_redacted_even_though_the_key_is_innocent()
 
 def test_k6_keeps_secrets_out_of_the_argv(tmp_path, monkeypatch):
     import types
-    from rc_repro.perf import k6
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from houston.perf import k6
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     ws = tmp_path / "repros" / "r"
     ws.mkdir(parents=True)
     captured = {}
@@ -1935,7 +1999,7 @@ def test_webui_hidden_toggles_actually_hide():
     """
     import re
     from importlib import resources
-    webui = resources.files("rc_repro").joinpath("data", "webui")
+    webui = resources.files("houston").joinpath("data", "webui")
     css = webui.joinpath("app.css").read_text(encoding="utf-8")
     js = webui.joinpath("app.js").read_text(encoding="utf-8")
     html = webui.joinpath("index.html").read_text(encoding="utf-8")
@@ -1963,7 +2027,7 @@ def test_webui_log_service_filter_is_refreshed_by_the_stream():
     errors you are hunting when you set the filter to error+.
     """
     from importlib import resources
-    js = resources.files("rc_repro").joinpath("data", "webui", "app.js").read_text(
+    js = resources.files("houston").joinpath("data", "webui", "app.js").read_text(
         encoding="utf-8")
 
     assert "function refreshServiceOptions(" in js, \
@@ -2006,7 +2070,7 @@ def test_webui_busy_state_is_styled_and_labelled():
     """
     import re
     from importlib import resources
-    webui = resources.files("rc_repro").joinpath("data", "webui")
+    webui = resources.files("houston").joinpath("data", "webui")
     css = webui.joinpath("app.css").read_text(encoding="utf-8")
     js = webui.joinpath("app.js").read_text(encoding="utf-8")
 
@@ -2044,8 +2108,8 @@ def test_webui_handles_every_state_the_backend_can_report():
     """
     import re
     from importlib import resources
-    from rc_repro.services import lifecycle as lc
-    webui = resources.files("rc_repro").joinpath("data", "webui")
+    from houston.services import lifecycle as lc
+    webui = resources.files("houston").joinpath("data", "webui")
     css = webui.joinpath("app.css").read_text(encoding="utf-8")
     html = webui.joinpath("index.html").read_text(encoding="utf-8")
 
@@ -2066,8 +2130,8 @@ def test_webui_handles_every_state_the_backend_can_report():
 
 
 def _tls_spec(**kw):
-    from rc_repro import tls
-    base = dict(mode=tls.MODE_LOCAL, host="x.rcrepro.localhost", port=8443)
+    from houston import tls
+    base = dict(mode=tls.MODE_LOCAL, host="x.houston.localhost", port=8443)
     base.update(kw)
     return tls.TlsSpec(**base)
 
@@ -2078,8 +2142,8 @@ def test_tls_root_url_omits_an_implicit_443():
     RC advertises ROOT_URL verbatim; "https://host:443" in an OAuth callback or a
     mobile workspace URL is a mismatch against the same host without the port.
     """
-    from rc_repro import tls
-    assert _tls_spec(port=8443).root_url == "https://x.rcrepro.localhost:8443"
+    from houston import tls
+    assert _tls_spec(port=8443).root_url == "https://x.houston.localhost:8443"
     assert _tls_spec(mode=tls.MODE_ACME, host="rc1.example.com", port=443).root_url \
         == "https://rc1.example.com"
 
@@ -2091,8 +2155,8 @@ def test_local_ca_is_created_once_and_leaf_carries_the_right_sans(monkeypatch, t
     rejected outright (ERR_CERT_COMMON_NAME_INVALID).
     """
     import subprocess
-    from rc_repro import tls_local
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from houston import tls_local
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     key, crt = tls_local.ensure_ca()
     assert key.exists() and crt.exists()
     assert oct(key.stat().st_mode)[-3:] == "600", "the CA key must not be world-readable"
@@ -2100,13 +2164,13 @@ def test_local_ca_is_created_once_and_leaf_carries_the_right_sans(monkeypatch, t
     assert tls_local.ensure_ca() == (key, crt)
     assert crt.read_bytes() == before, "ensure_ca must not regenerate an existing CA"
 
-    cert_pem, key_pem = tls_local.issue_leaf("x.rcrepro.localhost")
+    cert_pem, key_pem = tls_local.issue_leaf("x.houston.localhost")
     assert "BEGIN CERTIFICATE" in cert_pem and "PRIVATE KEY" in key_pem
     leaf = tmp_path / "leaf.crt"
     leaf.write_text(cert_pem, encoding="utf-8")
     text = subprocess.run(["openssl", "x509", "-in", str(leaf), "-noout", "-text"],
                           capture_output=True, text=True).stdout
-    assert "DNS:x.rcrepro.localhost" in text
+    assert "DNS:x.houston.localhost" in text
     assert "DNS:localhost" in text            # keeps the existing http habits working
     assert "IP Address:127.0.0.1" in text
     # And it must actually chain to the CA, not merely parse.
@@ -2117,18 +2181,18 @@ def test_local_ca_is_created_once_and_leaf_carries_the_right_sans(monkeypatch, t
 
 def test_metadata_external_url_prefers_https_and_survives_an_old_repro_json(tmp_path, monkeypatch):
     """public_url is additive: a repro.json written before it must still load."""
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     m = runner.Metadata(
-        name="x", project="rcrepro-x", rc_version="8.6.1", rc_image="i", mongo_tag="8.0",
+        name="x", project="houston-x", rc_version="8.6.1", rc_image="i", mongo_tag="8.0",
         mongo_flavor="official", preset="default", root_url="http://localhost:3000",
         host_port=3000, version_source="map")
     assert m.external_url == "http://localhost:3000"       # no TLS -> unchanged
-    m.public_url = "https://x.rcrepro.localhost:8443"
-    assert m.external_url == "https://x.rcrepro.localhost:8443"
+    m.public_url = "https://x.houston.localhost:8443"
+    assert m.external_url == "https://x.houston.localhost:8443"
 
     runner.write("x", "services: {}\n", m)
     (runner.workspace("x") / "repro.json").write_text(
-        json.dumps({"name": "x", "project": "rcrepro-x", "rc_version": "8.6.1",
+        json.dumps({"name": "x", "project": "houston-x", "rc_version": "8.6.1",
                     "rc_image": "i", "mongo_tag": "8.0", "mongo_flavor": "official",
                     "preset": "default", "root_url": "http://localhost:3000",
                     "host_port": 3000, "version_source": "map"}), encoding="utf-8")
@@ -2145,7 +2209,7 @@ def test_privileged_port_is_not_reported_busy_just_because_we_cannot_bind_it(mon
     listening on it at all.
     """
     import socket
-    from rc_repro import runner
+    from houston import runner
 
     real_socket = socket.socket
 
@@ -2187,7 +2251,7 @@ def test_staging_notes_never_claim_the_certificate_is_trusted():
     install" for staging too, which sent people hunting for a broken workspace when
     the browser warning was the correct, expected outcome.
     """
-    from rc_repro import tls
+    from houston import tls
     spec = tls.TlsSpec(mode=tls.MODE_ACME, host="rc1.example.com", port=443,
                        acme_email="a@b.c", acme_staging=True)
     text = " ".join(tls.notes(spec, "rc1")).lower()
@@ -2218,10 +2282,10 @@ def test_verify_reads_a_real_endpoint_and_separates_the_two_trust_questions(tmp_
     import socket as _socket
     import ssl
     import threading
-    from rc_repro import tls
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from houston import tls
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
 
-    from rc_repro import tls_local
+    from houston import tls_local
     _, ca_crt = tls_local.ensure_ca()
     cert_pem, key_pem = tls_local.issue_leaf("localhost")
     cf, kf = tmp_path / "s.crt", tmp_path / "s.key"
@@ -2257,7 +2321,7 @@ def test_verify_reads_a_real_endpoint_and_separates_the_two_trust_questions(tmp_
     try:
         r = tls.verify("localhost", port, timeout=5, cafile=str(ca_crt))
         assert r["serving"] is True and not r["error"]
-        assert "rc-repro local CA" in r["issuer"]
+        assert "houston local CA" in r["issuer"]
         assert "localhost" in r["subject"]
         assert r["fallback"] is False
         assert r["trusted_via_ca"] is True, "must chain to the CA it was handed"
@@ -2280,7 +2344,7 @@ def test_verify_can_present_a_different_sni_than_the_address_it_dials():
     our own Traefik had none.
     """
     import inspect
-    from rc_repro import tls
+    from houston import tls
     sig = inspect.signature(tls.verify)
     assert "sni" in sig.parameters
     src = source_of(tls.verify)
@@ -2288,7 +2352,7 @@ def test_verify_can_present_a_different_sni_than_the_address_it_dials():
     assert "server_hostname=host" not in src, "every handshake must honour sni"
 
 
-# --- env var overrides (up --env / rc-repro env) -------------------------------
+# --- env var overrides (up --env / houston env) -------------------------------
 
 
 def test_env_overrides_beat_the_preset_and_can_remove_a_base_key():
@@ -2335,8 +2399,8 @@ def test_env_var_names_are_validated_before_reaching_compose():
     """An invalid name produces a compose file docker rejects, so refuse it here."""
     import pytest
 
-    from rc_repro.errors import ValidationError
-    from rc_repro.services import envvars
+    from houston.errors import ValidationError
+    from houston.services import envvars
 
     assert envvars.parse_set(["A=1", "B_2=x=y"]) == {"A": "1", "B_2": "x=y"}
     assert envvars.parse_set([]) == {}
@@ -2356,7 +2420,7 @@ def test_env_rows_mark_which_keys_the_user_set():
     deletes it from the workspace. The panel can only say which if detail() marks
     them.
     """
-    from rc_repro.services import lifecycle as lc
+    from houston.services import lifecycle as lc
     doc = {"services": {"rocketchat": {"environment": {
         "MY_VAR": "v", "ADMIN_PASS": "secret", "PORT": "3000"}}}}
     rows = {r["key"]: r for r in lc._env_rows(doc, {"MY_VAR": "v"})}
@@ -2379,7 +2443,7 @@ def test_setting_expansion_and_the_bare_setting_id_trap():
     `False`. The bare form is accepted by docker and silently does nothing, which is
     why --setting exists and why a bare setting id is warned about.
     """
-    from rc_repro.services import envvars
+    from houston.services import envvars
     assert envvars.SETTING_PREFIX == "OVERWRITE_SETTING_"
     assert envvars.as_setting(["Message_AllowEditing=false"]) == {
         "OVERWRITE_SETTING_Message_AllowEditing": "false"}
@@ -2388,7 +2452,7 @@ def test_setting_expansion_and_the_bare_setting_id_trap():
     assert envvars.as_setting([]) == {}
     # It reuses the same name validation as --set.
     import pytest
-    from rc_repro.errors import ValidationError
+    from houston.errors import ValidationError
     with pytest.raises(ValidationError, match="not KEY=VALUE"):
         envvars.as_setting(["Message_AllowEditing"])
 
@@ -2399,8 +2463,8 @@ def test_bare_setting_warning_asks_the_workspace_and_stays_quiet_when_it_cannot(
     And it is only a warning path: an unreachable workspace must not block an env
     change, since setting env on a repro that is not serving is legitimate.
     """
-    from rc_repro import rcapi
-    from rc_repro.services import envvars
+    from houston import rcapi
+    from houston.services import envvars
     # `admin_pass` because a workspace's admin password is per workspace now, and
     # everything that logs in reads it off the record. A stub without it raises
     # AttributeError inside a `try` and the warning silently never fires -- which is
@@ -2442,8 +2506,8 @@ def test_a_workspace_is_not_readable_by_other_local_users(tmp_path, monkeypatch)
     -- fine on a laptop, not on the shared box this is for."""
     import stat
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    from rc_repro import runner
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    from houston import runner
 
     runner.write("x", "services: {}\n",
                  runner.Metadata(name="x", project="p", rc_version="8.5.1",
@@ -2477,7 +2541,7 @@ def test_a_workspace_is_not_readable_by_other_local_users(tmp_path, monkeypatch)
 # seconds on the shared box.
 
 def test_repeated_dashboard_polls_do_not_respawn_docker(monkeypatch):
-    from rc_repro import runner
+    from houston import runner
 
     runner.invalidate_docker_queries()
     calls = []
@@ -2490,19 +2554,19 @@ def test_repeated_dashboard_polls_do_not_respawn_docker(monkeypatch):
 def test_a_state_change_is_never_served_from_the_memo(monkeypatch):
     """A dashboard still showing "running" two seconds after a Stop is a cache the
     user can notice -- worse than the spawns it saves."""
-    from rc_repro import runner
+    from houston import runner
 
     runner.invalidate_docker_queries()
     state = {"status": "running(1)"}
     monkeypatch.setattr(runner, "_compose_ls",
-                        lambda: [{"Name": "rcrepro-x", "Status": state["status"]}])
-    assert runner.project_states()["rcrepro-x"] == "running(1)"
+                        lambda: [{"Name": "houston-x", "Status": state["status"]}])
+    assert runner.project_states()["houston-x"] == "running(1)"
 
     # Stop it: the compose call is faked, but the invalidation is the real one.
     monkeypatch.setattr(runner, "_compose", lambda name, *a, **k: type("P", (), {"returncode": 0})())
     state["status"] = "exited(1)"
     runner.stop("x")
-    assert runner.project_states()["rcrepro-x"] == "exited(1)", "stale after a stop"
+    assert runner.project_states()["houston-x"] == "exited(1)", "stale after a stop"
 
 
 def test_docker_available_is_memoised_but_forcible(monkeypatch):
@@ -2514,10 +2578,10 @@ def test_docker_available_is_memoised_but_forcible(monkeypatch):
     """
     import subprocess
 
-    from rc_repro import runner
+    from houston import runner
 
     monkeypatch.undo()                  # drop the autouse stub, keep the fixture's home
-    monkeypatch.setenv("RC_REPRO_HOME", "/tmp/rc-repro-memo-test")
+    monkeypatch.setenv("HOUSTON_HOME", "/tmp/houston-memo-test")
     runner.invalidate_docker_queries()
     calls = []
 
@@ -2540,12 +2604,12 @@ def test_multi_instance_and_https_no_longer_conflict(tmp_path, monkeypatch):
     edge routes to the instances directly, with the sticky cookie DDP needs -- so
     the combination just works.
     """
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    from rc_repro import compose, presets, tls
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    from houston import compose, presets, tls
 
     pre = presets.load("multi-instance", {"instances": "3"})
     spec = compose.Spec(
-        project_name="rcrepro-w", rc_image="rc", rc_tag="8.5.1", mongo_tag="8.0",
+        project_name="houston-w", rc_image="rc", rc_tag="8.5.1", mongo_tag="8.0",
         mongo_flavor="official", mongo_shell="mongosh", oplog=True,
         root_url="http://localhost:3000", host_port=3000, reg_token=None,
         preset=pre,
@@ -2565,10 +2629,10 @@ def test_a_domain_failure_exits_with_its_own_code_not_a_flat_one(monkeypatch, tm
     """
     from typer.testing import CliRunner
 
-    from rc_repro import cli, errors
-    from rc_repro.services import lifecycle as lc
+    from houston import cli, errors
+    from houston.services import lifecycle as lc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     cli_runner = CliRunner()
 
     cases = [
@@ -2593,7 +2657,7 @@ def test_a_domain_failure_exits_with_its_own_code_not_a_flat_one(monkeypatch, tm
     assert errors.EXIT_CODES[0] == "ok"
     assert errors.NotFoundError.exit_code == 4
     # ui.die keeps its old default, so every non-domain caller is unchanged.
-    from rc_repro import ui
+    from houston import ui
     import inspect
     assert inspect.signature(ui.die).parameters["exit_code"].default == 1
 
@@ -2601,7 +2665,7 @@ def test_a_domain_failure_exits_with_its_own_code_not_a_flat_one(monkeypatch, tm
 def test_the_cli_reports_a_down_engine_as_preflight_not_as_a_bug(monkeypatch, tmp_path):
     """Eleven commands call `_require_docker()`, and it used to `_err()` directly —
     so the single most common failure in the tool exited 1, the one value the
-    README defines as "a bug in rc-repro".
+    README defines as "a bug in houston".
 
     It delegates to the service now, so the class decides. The service test covers
     the class; this covers the delegation, which is the behaviour a script sees.
@@ -2616,9 +2680,9 @@ def test_the_cli_reports_a_down_engine_as_preflight_not_as_a_bug(monkeypatch, tm
 
     from typer.testing import CliRunner
 
-    from rc_repro import cli, runner as runner_mod
+    from houston import cli, runner as runner_mod
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     ws = tmp_path / "repros" / "w"
     ws.mkdir(parents=True)
     (ws / "repro.json").write_text(_json.dumps({
@@ -2688,7 +2752,7 @@ def test_a_compose_only_command_refuses_cleanly_rather_than_traceback(monkeypatc
     handler was wired when the taxonomy landed, but `stats` had never needed one.
     The guard therefore escaped as a rich traceback and exit 1: a stack dump where
     the user should see one red line, and the one exit code the README defines as
-    "a bug in rc-repro" for a condition that is entirely expected.
+    "a bug in houston" for a condition that is entirely expected.
 
     This is the shape the whole taxonomy exists to prevent, so it is pinned at the
     process boundary where a script would see it.
@@ -2700,10 +2764,10 @@ def test_a_compose_only_command_refuses_cleanly_rather_than_traceback(monkeypatc
     """
     from typer.testing import CliRunner
 
-    from rc_repro import cli, runner as runner_mod
-    from rc_repro.services import topology
+    from houston import cli, runner as runner_mod
+    from houston.services import topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     m = runner_mod.Metadata(name="k", project="p", rc_version="8.6.1", rc_image="i",
                             mongo_tag="8.0", mongo_flavor="official", preset="default",
                             root_url="u", host_port=3010, version_source="t")
@@ -2729,15 +2793,15 @@ def test_both_spellings_of_multi_instance_build_the_same_compose_file():
     which is exactly the failure nobody would notice until a ticket reproduced
     differently under the new flag.
     """
-    from rc_repro import compose, presets, versions
-    from rc_repro.services import topology as T
+    from houston import compose, presets, versions
+    from houston.services import topology as T
 
     def built(**kwargs) -> str:
         axes = T.resolve_axes(**kwargs)
         pre = presets.load(axes.preset, axes.params)
         resolved = versions.resolve("8.5.1", offline=True)
         spec = compose.Spec.from_resolved(
-            resolved, project_name="rcrepro-x", root_url="http://localhost:3000",
+            resolved, project_name="houston-x", root_url="http://localhost:3000",
             host_port=3000, reg_token=None, preset=pre, bind_host="127.0.0.1")
         return compose.to_yaml(compose.build(spec))
 
@@ -2774,8 +2838,8 @@ def test_preset_and_topology_agree_on_what_the_runtimes_are_called():
     `presets` is the LOWER layer and must not import `services`, so the constant is
     spelled out there and this test is what an import would have guaranteed.
     """
-    from rc_repro import presets
-    from rc_repro.services import topology
+    from houston import presets
+    from houston.services import topology
 
     assert presets._RUNTIME_DEFAULT == topology.DOCKER
     ldap = presets._scenario_definitions()["ldap"]
@@ -2792,8 +2856,8 @@ def test_one_ldap_intent_renders_for_both_runtimes():
     manifests on the other. That is what makes a preset a single thing rather than
     two implementations that drift.
     """
-    from rc_repro import presets
-    from rc_repro.services import topology
+    from houston import presets
+    from houston.services import topology
 
     params = {"users": "7", "domain": "example.org"}
     compose = presets.resolve("ldap", topology.DOCKER, params)
@@ -2818,8 +2882,8 @@ def test_deployments_are_not_presets_on_this_branch():
     Keeping both would have given two answers to "what runs where" -- and the one
     that infers would have quietly won, because it needs no flag.
     """
-    from rc_repro import presets
-    from rc_repro.services import topology
+    from houston import presets
+    from houston.services import topology
 
     assert not hasattr(presets, "resolve_selection")
     assert not hasattr(presets, "DEPLOYMENT_PRESETS")
@@ -2845,8 +2909,8 @@ def test_a_scenario_ui_is_published_on_the_same_port_on_both_runtimes():
     """
     import yaml
 
-    from rc_repro import config, presets
-    from rc_repro.services import k8s, topology
+    from houston import config, presets
+    from houston.services import k8s, topology
 
     want = config.PRESET_PORTS["ldap"][0]
 
@@ -2864,7 +2928,7 @@ def test_a_scenario_ui_is_published_on_the_same_port_on_both_runtimes():
 
     # The label the lifecycle looks for and the label the adapter writes are the
     # same constant, not two strings that happen to match today.
-    from rc_repro.presets import ldap as ldap_mod
+    from houston.presets import ldap as ldap_mod
     assert ldap_mod.UI_PORT_LABEL == k8s.UI_PORT_LABEL
 
 
@@ -2875,8 +2939,8 @@ def test_the_ldap_directory_can_be_looked_at_on_both_runtimes():
     itself -- a UI that reaches nothing is not worth the megabytes."""
     import yaml
 
-    from rc_repro import presets
-    from rc_repro.services import topology
+    from houston import presets
+    from houston.services import topology
 
     compose = presets.resolve("ldap", topology.DOCKER, {})
     assert set(compose.services) == {"openldap", "phpldapadmin"}, sorted(compose.services)
@@ -2902,8 +2966,8 @@ def test_keycloak_carries_both_renderings_on_one_preset():
     """
     import yaml
 
-    from rc_repro import config, presets
-    from rc_repro.presets import _keycloak
+    from houston import config, presets
+    from houston.presets import _keycloak
 
     for name in ("saml", "oidc"):
         p = presets.load(name, {"users": "3"})
@@ -2915,7 +2979,7 @@ def test_keycloak_carries_both_renderings_on_one_preset():
         # The realm the two renderings ship must be the SAME bytes, or a ticket
         # reproduced on one runtime is not the ticket reproduced on the other.
         compose_realm = dict(p.files)[f"{name}/keycloak-realm.json"]
-        assert kinds["ConfigMap"]["data"]["rcrepro-realm.json"] == compose_realm
+        assert kinds["ConfigMap"]["data"]["houston-realm.json"] == compose_realm
 
         # `keycloak` on both, because RC's backend and the browser must resolve the
         # same hostname -- OIDC uses one URL for the authorize redirect AND the
@@ -2933,14 +2997,14 @@ def test_the_realm_lands_as_a_file_not_a_directory():
     the failure is silent -- the container starts happily with an empty realm."""
     import yaml
 
-    from rc_repro import presets
+    from houston import presets
 
     docs = [d for d in yaml.safe_load_all(
         presets.load("oidc", {}).kubernetes_manifests[0]) if d]
     dep = [d for d in docs if d["kind"] == "Deployment"][0]
     mount = dep["spec"]["template"]["spec"]["containers"][0]["volumeMounts"][0]
-    assert mount["subPath"] == "rcrepro-realm.json", mount
-    assert mount["mountPath"].endswith("/import/rcrepro-realm.json"), mount
+    assert mount["subPath"] == "houston-realm.json", mount
+    assert mount["mountPath"].endswith("/import/houston-realm.json"), mount
 
 
 def test_every_scenario_workload_declares_when_it_is_ready():
@@ -2958,8 +3022,8 @@ def test_every_scenario_workload_declares_when_it_is_ready():
     """
     import yaml
 
-    from rc_repro import presets
-    from rc_repro.services import topology
+    from houston import presets
+    from houston.services import topology
 
     for name in ("ldap", "saml", "oidc", "email", "s3_minio", "livechat"):
         # resolve(..., KUBERNETES): `ldap` is a Scenario whose two adapters return
@@ -3000,8 +3064,8 @@ def test_a_service_exposes_every_port_its_workload_listens_on():
     """
     import yaml
 
-    from rc_repro import presets
-    from rc_repro.services import topology
+    from houston import presets
+    from houston.services import topology
 
     def services(name):
         docs = yaml.safe_load_all(
@@ -3019,7 +3083,7 @@ def test_a_service_exposes_every_port_its_workload_listens_on():
     minio = services("s3_minio")
     assert {p["port"] for p in minio["minio"]["spec"]["ports"]} == {9000, 9001}
     assert minio["minio-console"]["metadata"]["labels"][
-        "rc-repro.io/ui-deployment"] == "minio"
+        "houston.io/ui-deployment"] == "minio"
 
 
 def test_every_port_a_preset_configures_rocket_chat_to_use_is_reachable():
@@ -3033,8 +3097,8 @@ def test_every_port_a_preset_configures_rocket_chat_to_use_is_reachable():
 
     import yaml
 
-    from rc_repro import presets
-    from rc_repro.services import topology
+    from houston import presets
+    from houston.services import topology
 
     for name in ("email", "s3_minio", "ldap", "oidc"):
         kube = presets.resolve(name, topology.KUBERNETES, {})
@@ -3200,7 +3264,7 @@ def test_a_clean_seed_verifies_clean():
 def test_more_content_than_planned_is_not_a_fault():
     """Seeding only ever ADDS, so a room holding more than this run planned cannot
     be evidence that this run lost anything: it had content already, which is what a
-    second `rc-repro seed`, a preset that posts on boot, or a restored backup all
+    second `houston seed`, a preset that posts on boot, or a restored backup all
     look like.
 
     Gating on exact equality is precisely what made an earlier version of this idea
@@ -3353,15 +3417,15 @@ def test_the_idp_presets_send_the_browser_to_a_host_it_can_reach():
     mismatch with `invalid_authn_request` / `invalid_destination` -- measured against
     a live workspace by changing nothing but the hostname. So one knob moves both.
     """
-    from rc_repro import presets
+    from houston import presets
 
     saml = presets.load("saml", {"idp_host": "rc.example.com"})
     entry = saml.env["OVERWRITE_SETTING_SAML_Custom_Default_entry_point"]
-    assert entry == "http://rc.example.com:8081/realms/rcrepro/protocol/saml", entry
+    assert entry == "http://rc.example.com:8081/realms/houston/protocol/saml", entry
     slo = saml.env["OVERWRITE_SETTING_SAML_Custom_Default_idp_slo_redirect_url"]
     assert slo == entry, "SSO and SLO are the same endpoint; they must move together"
 
-    # The DESCRIPTOR is fetched by rc-repro itself, not the browser, so it stays on
+    # The DESCRIPTOR is fetched by houston itself, not the browser, so it stays on
     # loopback -- otherwise `--set idp_host=<public name>` breaks its own cert fetch
     # on a workspace whose ports are bound to 127.0.0.1.
     cert = [a for a in saml.post_ready if a["action"] == "saml_idp_cert"][0]
@@ -3370,7 +3434,7 @@ def test_the_idp_presets_send_the_browser_to_a_host_it_can_reach():
     oidc = presets.load("oidc", {"idp_host": "rc.example.com"})
     prov = [a for a in oidc.post_ready if a["action"] == "create_oauth_provider"][0]
     url = prov["settings"]["Accounts_OAuth_Custom-Keycloak-url"]
-    assert url == "http://rc.example.com:8085/realms/rcrepro", url
+    assert url == "http://rc.example.com:8085/realms/houston", url
 
     # Default unchanged: a laptop workspace keeps working exactly as before.
     assert "localhost:8081" in presets.load("saml", {}).env[
@@ -3392,7 +3456,7 @@ def test_the_oidc_realm_accepts_the_callback_of_an_https_workspace():
     """
     import json
 
-    from rc_repro import presets
+    from houston import presets
 
     realm = json.loads(presets.load("oidc", {}).files[0][1])
     uris = realm["clients"][0]["redirectUris"]
@@ -3403,17 +3467,17 @@ def test_the_oidc_realm_accepts_the_callback_of_an_https_workspace():
 def test_a_generated_page_for_the_browser_gets_the_advertised_url(tmp_path, monkeypatch):
     """`{{ROOT_URL}}` substituted the loopback URL even when the caller gave a real one.
 
-    `meta.root_url` is deliberately `http://localhost:<port>` -- the address rc-repro's
+    `meta.root_url` is deliberately `http://localhost:<port>` -- the address houston's
     own API calls use -- and `public_url` is set only by TLS, so `--root-url
     http://box:3007` reached the compose ROOT_URL and nothing else. The livechat
     preset's demo page uses this placeholder to load Rocket.Chat's widget script, so
     on any machine but the docker host it fetched that script from the visitor's own
     localhost and the widget silently never appeared.
     """
-    from rc_repro import runner
+    from houston import runner
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    meta = runner.Metadata(name="w", project="rcrepro-w", rc_version="8.5.1",
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    meta = runner.Metadata(name="w", project="houston-w", rc_version="8.5.1",
                            rc_image="i", mongo_tag="8.0", mongo_flavor="official",
                            preset="livechat", root_url="http://localhost:3007",
                            host_port=3007, version_source="t")
@@ -3425,7 +3489,7 @@ def test_a_generated_page_for_the_browser_gets_the_advertised_url(tmp_path, monk
     assert "localhost" not in page, page
 
     # With nothing advertised the loopback URL is still right, and still used.
-    plain = runner.Metadata(name="p", project="rcrepro-p", rc_version="8.5.1",
+    plain = runner.Metadata(name="p", project="houston-p", rc_version="8.5.1",
                             rc_image="i", mongo_tag="8.0", mongo_flavor="official",
                             preset="livechat", root_url="http://localhost:3008",
                             host_port=3008, version_source="t")
@@ -3446,7 +3510,7 @@ def test_presigned_minio_can_be_addressed_by_the_browser_without_a_hosts_entry()
     browser never contacts MinIO at all, so `minio:9000` over the compose network is
     the more reliable answer and stays the default.
     """
-    from rc_repro import presets
+    from houston import presets
 
     key = "OVERWRITE_SETTING_FileUpload_S3_BucketURL"
     assert presets.load("s3_minio", {}).env[key] == "http://minio:9000"
@@ -3466,7 +3530,7 @@ def test_presigned_minio_can_be_addressed_by_the_browser_without_a_hosts_entry()
 
 def test_two_processes_updating_config_do_not_lose_each_others_keys(tmp_path):
     """`_CONFIG_LOCK` is a `threading.Lock`, which says nothing about a second
-    process — and two are the normal case: `rc-repro serve` runs continuously while
+    process — and two are the normal case: `houston serve` runs continuously while
     somebody uses the CLI on the same box. Both read config.yaml, each mutates a
     different key, both write, and the later `os.replace` silently wins.
 
@@ -3480,10 +3544,10 @@ def test_two_processes_updating_config_do_not_lose_each_others_keys(tmp_path):
 
     import yaml
 
-    env = {**os.environ, "RC_REPRO_HOME": str(tmp_path)}
+    env = {**os.environ, "HOUSTON_HOME": str(tmp_path)}
     prog = (
         "import time\n"
-        "from rc_repro import config\n"
+        "from houston import config\n"
         "def mutate(cfg):\n"
         "    time.sleep(0.5)\n"
         "    cfg[%r] = 1\n"
@@ -3510,17 +3574,17 @@ def test_the_state_directory_and_config_do_not_depend_on_the_umask(tmp_path):
     import os
     import stat
 
-    from rc_repro import config
+    from houston import config
 
     home = tmp_path / "fresh"
-    os.environ["RC_REPRO_HOME"] = str(home)
+    os.environ["HOUSTON_HOME"] = str(home)
     try:
         config.save_config({"bind_host": "127.0.0.1"})
         assert stat.S_IMODE(home.stat().st_mode) == 0o700, oct(home.stat().st_mode)
         mode = stat.S_IMODE((home / "config.yaml").stat().st_mode)
         assert mode == 0o600, oct(mode)
     finally:
-        os.environ.pop("RC_REPRO_HOME", None)
+        os.environ.pop("HOUSTON_HOME", None)
 
 
 def test_capacity_says_which_runtime_its_room_is_denominated_in():
@@ -3534,8 +3598,8 @@ def test_capacity_says_which_runtime_its_room_is_denominated_in():
     free to use" -- exactly the disagreement `capacity()`'s own docstring says the one
     formula exists to prevent.
     """
-    from rc_repro import runner
-    from rc_repro.services import lifecycle as lc
+    from houston import runner
+    from houston.services import lifecycle as lc
 
     real = runner.host_memory
     try:
@@ -3563,7 +3627,7 @@ def test_a_never_released_version_is_not_resolved_silently():
     not exist. `8.5.1-rc.1` did the same. A caller who gets that then spends ten
     minutes on a failing image pull.
     """
-    from rc_repro import versions
+    from houston import versions
 
     res = versions.resolve("99.99.99")
     assert res.mongo_tag, "no pairing at all would be a different bug"
@@ -3587,7 +3651,7 @@ def test_the_compatible_mongo_note_says_which_end_it_took():
     end is CHOSEN is unchanged, because changing it would repair one class of
     reproduction and break another.
     """
-    from rc_repro import versions
+    from houston import versions
 
     assert versions._lowest(["3.6", "4.0", "4.4", "5.0"]) == "3.6"
     assert versions._highest(["3.6", "4.0", "4.4", "5.0"]) == "5.0"
@@ -3608,8 +3672,8 @@ def test_a_mongo_override_must_be_an_image_tag():
 
     import pytest
 
-    from rc_repro import versions
-    from rc_repro.errors import ValidationError
+    from houston import versions
+    from houston.errors import ValidationError
 
     fields = {f.name: (f.default if f.default is not dataclasses.MISSING else "")
               for f in dataclasses.fields(versions.Resolved)}
@@ -3647,9 +3711,9 @@ def test_a_preset_name_cannot_be_a_path(tmp_path, monkeypatch):
     of yours, and the three distinguishable errors made the create dialog a filesystem
     oracle.
     """
-    from rc_repro import config, presets
+    from houston import config, presets
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     outside = tmp_path.parent / "escape-probe.yaml"
     outside.write_text("name: escaped\nservices:\n  evil: {image: alpine:3}\n")
 
@@ -3681,15 +3745,15 @@ def test_a_preset_name_cannot_be_a_path(tmp_path, monkeypatch):
 def test_one_unreadable_preset_file_does_not_empty_the_catalog(tmp_path, monkeypatch):
     """`raw.get("name")` on a list or scalar is an AttributeError, not a ReproError.
 
-    So one malformed file in the presets directory took out `rc-repro presets`,
+    So one malformed file in the presets directory took out `houston presets`,
     `/api/presets` and the create dialog -- and made `capabilities` report ZERO
     presets, because it guards its own call with a bare `except Exception` and the
     failure became silence. A file somebody is halfway through writing must not do
     that.
     """
-    from rc_repro import presets
+    from houston import presets
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     (tmp_path / "presets").mkdir(parents=True)
     (tmp_path / "presets" / "broken.yaml").write_text("- a\n- b\n")
     (tmp_path / "presets" / "scalar.yaml").write_text("just-a-string\n")
@@ -3727,8 +3791,8 @@ def test_every_published_port_shape_is_bound_and_the_unknown_is_refused():
     Reachable through the custom presets the README documents. No built-in preset uses
     either shape today, which is why it was latent rather than reported.
     """
-    from rc_repro import compose
-    from rc_repro.errors import ValidationError
+    from houston import compose
+    from houston.errors import ValidationError
 
     doc = {"services": {
         "range": {"ports": ["8000-8005:8000-8005"]},
@@ -3773,9 +3837,9 @@ def test_scale_and_the_profiler_use_the_workspace_s_own_database():
     reported removing them, so the round trip was internally consistent and externally
     wrong. Same for `--diag`'s slow-query capture.
     """
-    from rc_repro import scaleseed
-    from rc_repro.perf import mongoprof
-    from rc_repro.services import backup as bk
+    from houston import scaleseed
+    from houston.perf import mongoprof
+    from houston.services import backup as bk
 
     for mod in (scaleseed, mongoprof):
         assert hasattr(mod, "_db_of"), f"{mod.__name__} still hardcodes its database"
@@ -3799,9 +3863,9 @@ def test_prune_acts_only_on_what_the_prompt_showed(monkeypatch, tmp_path):
     because with the default `owner` policy an admin passes for everybody. README says
     "`prune` lists what it will delete".
     """
-    from rc_repro.services import lifecycle as lc
+    from houston.services import lifecycle as lc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     # `a` was shown; `b` appeared afterwards.
     monkeypatch.setattr(lc, "prunable", lambda: ["a", "b"])
     monkeypatch.setattr(lc, "orphan_namespaces", lambda *a, **k: [])
@@ -3837,8 +3901,8 @@ def test_the_optional_extras_are_present_when_ci_says_they_must_be():
 
     import pytest as _pytest
 
-    if os.environ.get("RC_REPRO_REQUIRE_EXTRAS") != "1":
-        _pytest.skip("set RC_REPRO_REQUIRE_EXTRAS=1 to require the extras (CI does)")
+    if os.environ.get("HOUSTON_REQUIRE_EXTRAS") != "1":
+        _pytest.skip("set HOUSTON_REQUIRE_EXTRAS=1 to require the extras (CI does)")
 
     missing = []
     try:
@@ -3861,7 +3925,7 @@ def test_the_optional_extras_are_present_when_ci_says_they_must_be():
             missing.append(f"chromium binary: {str(exc).splitlines()[0][:120]}")
 
     assert not missing, (
-        "RC_REPRO_REQUIRE_EXTRAS=1 but the suite would have skipped whole layers:\n  "
+        "HOUSTON_REQUIRE_EXTRAS=1 but the suite would have skipped whole layers:\n  "
         + "\n  ".join(missing))
 
 
@@ -3891,7 +3955,7 @@ def _shared_password_readers() -> list[str]:
     import ast
     import pathlib
 
-    from rc_repro import config as cfgmod
+    from houston import config as cfgmod
 
     root = pathlib.Path(cfgmod.__file__).parent
     found = []
@@ -3955,7 +4019,7 @@ def test_every_k8s_run_stub_accepts_what_the_real_one_takes():
     import inspect
     import pathlib
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     # Everything the real `run` accepts by keyword, minus the positional argv.
     real = {n for n, p in inspect.signature(k8s.run).parameters.items()

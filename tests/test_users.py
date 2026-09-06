@@ -12,13 +12,13 @@ import time
 
 import pytest
 
-from rc_repro import errors
-from rc_repro.services import users
+from houston import errors
+from houston.services import users
 
 
 @pytest.fixture(autouse=True)
 def _fresh(tmp_path, monkeypatch):
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     yield
 
 
@@ -135,7 +135,7 @@ def test_the_normalisation_is_the_one_repro_names_already_use():
     below lifecycle and importing it would drag compose, runner and the version
     index in. This is what stops the copy drifting; if it fails, the two rules have
     diverged and an account name no longer survives becoming a workspace name."""
-    from rc_repro.services.lifecycle import sanitize
+    from houston.services.lifecycle import sanitize
     for raw in ("lucy.felix", "Lucy.Felix", "lovekesh.kumar", "al_ice", "-alice-",
                 "a..b", "a  b", "TICKET-1234", "alice", "ålice", "a.b_c d"):
         assert users.normalize_name(raw) == sanitize(raw), raw
@@ -290,7 +290,7 @@ def test_a_failed_sign_in_is_recorded():
     `attempt`, not `session`: the name on a failed sign-in is whatever the caller
     typed and belongs to nobody, so the log must not read as "alice did something".
     """
-    from rc_repro.services import audit as auditsvc
+    from houston.services import audit as auditsvc
 
     users.add("alice", GOOD)
     users.verify("alice", "wrong-password-x", source="203.0.113.9")
@@ -308,7 +308,7 @@ def test_a_failed_sign_in_is_recorded():
 def test_a_successful_sign_in_records_nothing():
     """Only failures. A line per successful verify would double every sign-in and
     bury the ones worth seeing."""
-    from rc_repro.services import audit as auditsvc
+    from houston.services import audit as auditsvc
 
     users.add("alice", GOOD)
     users.verify("alice", GOOD, source="10.0.0.4")
@@ -320,7 +320,7 @@ def test_a_hostile_user_name_cannot_forge_an_audit_line():
     invalid name is exactly the traffic worth seeing. So the FIELD has to be safe:
     a tab forges a column and a newline forges a whole line, in the one file whose
     entire job is to say who did what."""
-    from rc_repro.services import audit as auditsvc
+    from houston.services import audit as auditsvc
 
     users.verify("evil\tadmin\tuser-add\tbackdoor\tsession\tok\nnext-line",
                  "wrong-password-x", source="203.0.113.9")
@@ -371,16 +371,16 @@ def test_a_corrupt_hash_verifies_false_rather_than_raising():
 
 def _other_process_edits(mutate) -> None:
     """Edit the users file the way a SEPARATE process would."""
-    from rc_repro.services import users as usersvc
+    from houston.services import users as usersvc
     rows = usersvc._read()
     mutate(rows)
     usersvc._write(rows)
 
 
 def test_removing_a_user_takes_effect_immediately_in_a_running_server(tmp_path, monkeypatch):
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    from rc_repro.services import sessions as sessionsvc
-    from rc_repro.services import users as usersvc
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    from houston.services import sessions as sessionsvc
+    from houston.services import users as usersvc
 
     usersvc.add("alice", "correct-horse-battery")
     assert usersvc.verify("alice", "correct-horse-battery") is True
@@ -397,8 +397,8 @@ def test_removing_a_user_takes_effect_immediately_in_a_running_server(tmp_path, 
 
 
 def test_a_changed_password_invalidates_the_old_one_immediately(tmp_path, monkeypatch):
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    from rc_repro.services import users as usersvc
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    from houston.services import users as usersvc
 
     usersvc.add("alice", "correct-horse-battery")
     assert usersvc.verify("alice", "correct-horse-battery") is True
@@ -481,7 +481,7 @@ def test_a_second_process_cannot_clobber_an_account(tmp_path):
     """The same race across PROCESSES, which is the one that actually happens.
 
     `serve` writes this file from its worker threads while somebody runs
-    `rc-repro users add` in a terminal, and a thread lock says nothing about that.
+    `houston users add` in a terminal, and a thread lock says nothing about that.
     Measured before the flock existed: eight concurrent `users add` left TWO
     accounts, and the other six were reported created.
 
@@ -493,8 +493,8 @@ def test_a_second_process_cannot_clobber_an_account(tmp_path):
 
     prog = (
         "import os, sys;"
-        "os.environ['RC_REPRO_HOME'] = sys.argv[1];"
-        "from rc_repro.services import users;"
+        "os.environ['HOUSTON_HOME'] = sys.argv[1];"
+        "from houston.services import users;"
         "users.add(sys.argv[2], 'correct-horse-battery', role='member')")
     procs = [subprocess.Popen([sys.executable, "-c", prog, str(tmp_path), f"proc{i}"],
                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -509,7 +509,7 @@ def test_a_second_process_cannot_clobber_an_account(tmp_path):
 
 def test_a_new_account_never_becomes_an_implicit_admin():
     """Blank-means-admin is the MIGRATION for accounts that predate roles. If it
-    were also the behaviour for new ones, `rc-repro users add bob` would silently
+    were also the behaviour for new ones, `houston users add bob` would silently
     hand bob the ability to delete everybody's data."""
     first = users.add("alice", GOOD)
     assert first.role == "admin", "the first account must be able to promote others"
@@ -531,7 +531,7 @@ def test_the_flush_map_shrinks_with_the_sessions_file():
     """
     import time as _t
 
-    from rc_repro.services import sessions as sessionsvc
+    from houston.services import sessions as sessionsvc
 
     for i in range(30):
         token = sessionsvc.create("alice", label=f"tab-{i}")
@@ -564,7 +564,7 @@ def test_listing_sessions_survives_the_cache_being_rebuilt_underneath(monkeypatc
     raises when the size differs from when the iteration began, so a same-size
     rebuild slips past the very guard this is about.
     """
-    from rc_repro.services import sessions as sessionsvc
+    from houston.services import sessions as sessionsvc
 
     for i in range(20):
         sessionsvc.create("alice", label=f"tab-{i}")
@@ -593,7 +593,7 @@ def test_the_service_ends_sessions_when_a_CREDENTIAL_is_invalidated():
     breaks, and the thing it protects is "a replaced or deleted credential must not
     keep working through a session that outlived it".
     """
-    from rc_repro.services import sessions as sessionsvc
+    from houston.services import sessions as sessionsvc
 
     users.add("alice", GOOD, role="admin")
     users.add("bob", GOOD, role="member")
@@ -620,7 +620,7 @@ def test_a_role_change_is_NOT_a_credential_change():
     service must guarantee. Bundling it here would make `users role` end sessions
     from the CLI too, which is a different decision than the one being made.
     """
-    from rc_repro.services import sessions as sessionsvc
+    from houston.services import sessions as sessionsvc
 
     users.add("alice", GOOD, role="admin")
     users.add("bob", GOOD, role="member")

@@ -1,4 +1,4 @@
-# rc-repro
+# houston
 
 **Reproduce a customer's Rocket.Chat issue on their exact version, in minutes.**
 One command boots that version paired with a compatible MongoDB — on Docker Compose
@@ -6,11 +6,11 @@ or on Kubernetes — with optional backing services (LDAP, SAML/OIDC, email, S3,
 multi-instance) and realistic sample data.
 
 ```bash
-rc-repro up --version 8.5.1 --name TICKET-1234 --wait   # boot it
-rc-repro down --name TICKET-1234 --volumes              # bin it when done
+houston up --version 8.5.1 --name TICKET-1234 --wait   # boot it
+houston down --name TICKET-1234 --volumes              # bin it when done
 ```
 
-Prefer a browser? [`rc-repro serve`](#13-web-gui) does everything the CLI does.
+Prefer a browser? [`houston serve`](#13-web-gui) does everything the CLI does.
 
 ---
 
@@ -30,7 +30,7 @@ Prefer a browser? [`rc-repro serve`](#13-web-gui) does everything the CLI does.
 
 **[Reference](#reference)** — commands, exit codes, version pairing, state, development
 
-**How it is built** — [`rc_repro/data/docs/ARCHITECTURE.md`](rc_repro/data/docs/ARCHITECTURE.md)
+**How it is built** — [`houston/data/docs/ARCHITECTURE.md`](houston/data/docs/ARCHITECTURE.md)
 
 Every command has `--help`, and it is written to be read: this file is the map.
 
@@ -40,44 +40,88 @@ Every command has `--help`, and it is written to be read: this file is the map.
 
 **You need:** Docker with `docker compose` v2, running · Python 3.11+ · internet, for
 image pulls and version lookup. For `--runtime kubernetes` you also need `kubectl` and
-`helm` on `PATH`, plus **either** [kind](https://kind.sigs.k8s.io/) — so rc-repro can
+`helm` on `PATH`, plus **either** [kind](https://kind.sigs.k8s.io/) — so houston can
 create its own cluster — **or** a cluster `kubectl` already points at, such as
 [k3s](https://k3s.io/). See [§3](#3-where-it-runs) for which one gets used.
 
 ### A. As a tool you use (recommended)
 
 ```bash
-pipx install 'rc-repro[gui] @ git+https://github.com/klovekesh37/rc-repro'
-rc-repro doctor
+pipx install 'houston[gui] @ git+https://github.com/klovekesh37/houston'
+houston doctor
 ```
 
 ### B. In a virtualenv
 
 ```bash
-git clone https://github.com/klovekesh37/rc-repro.git && cd rc-repro
+git clone https://github.com/klovekesh37/houston.git && cd houston
 python3 -m venv .venv & source .venv/bin/activate
 .venv/bin/pip install -e ".[gui]"
-.venv/bin/rc-repro doctor
+.venv/bin/houston doctor
 ```
 
-Run it as `.venv/bin/rc-repro …`, or `source .venv/bin/activate` first. A bare
+Run it as `.venv/bin/houston …`, or `source .venv/bin/activate` first. A bare
 `python`/`pytest` resolves outside the venv and will not be this build.
 
 **Extras:** `[gui]` adds what [`serve`](#13-web-gui) needs (FastAPI, uvicorn) — drop it
 for a CLI-only install. `[dev]` adds pytest and ruff, `[browser]` adds Playwright; for
 development install `".[dev,gui,browser]"`.
 
-`rc-repro doctor` is the preflight and names anything that would fail a boot: Docker,
+`houston doctor` is the preflight and names anything that would fail a boot: Docker,
 Compose, kernel, Hub auth, disk, memory, ports.
 
 ### Updating
 
 ```bash
-pipx reinstall rc-repro                 # tool install
+pipx reinstall houston                 # tool install
 git pull && .venv/bin/pip install -e .  # checkout
 ```
 
-`rc-repro --version` reports the **installed** distribution, so in a checkout `git
+**Upgrading from `rc-repro`? `pipx reinstall` will not do it.** pipx keys its venv
+and its shim on the distribution name, so `rc-repro` and `houston` are two separate
+installs and the old one stays on your `PATH` until you remove it. Uninstall, then
+install:
+
+```bash
+pipx uninstall rc-repro
+pipx install 'houston[gui] @ git+https://github.com/klovekesh37/houston'
+```
+
+Then run any houston command once — it migrates your state by itself. See
+[Coming from `rc-repro`](#coming-from-rc-repro) for exactly what it moves.
+
+### Coming from `rc-repro`
+
+This tool used to be called **rc-repro**. The distribution name changed, so pipx
+cannot upgrade across it — `pipx reinstall rc-repro` keys on the old name and will
+never become houston:
+
+```bash
+pipx uninstall rc-repro
+pipx install 'houston[gui] @ git+https://github.com/klovekesh37/houston'
+```
+
+**Everything else moves itself, on the first houston command you run.** There is
+nothing to tear down first and no order to follow:
+
+| | |
+|---|---|
+| `~/.rc-repro` | moved to `~/.houston` |
+| your workspaces | **adopted, not recreated** — the containers, volume, namespace and URL a repro already has are kept, because those names are read from what it wrote down rather than derived from a prefix |
+| the shared edge | stopped and restarted under its new project, holding :80 and :443 again, with your Let's Encrypt account intact |
+| agent skills | `~/.claude/skills/rc-repro/` and `~/.agents/skills/rc-repro/` replaced, so agents stop being told to run a command that no longer exists |
+| `RC_REPRO_*` | still read as deprecated aliases for `HOUSTON_*`, with a warning |
+| `--json` | still carries `rc_repro_version` and the old schema string beside the new ones, so existing scripts keep working |
+| `seed --scale --clear` | still removes rows seeded before the rename |
+
+Your **local CA is reused, not regenerated** — the anchor already in your system
+trust store keeps working, and every certificate it signed stays valid.
+
+The one thing left by hand is a `rc-repro.service` systemd unit, if you made one:
+that needs `sudo`, so **`houston doctor` names it with the command** rather than
+running it for you. Doctor stays silent on a box that never ran the old name.
+
+`houston --version` reports the **installed** distribution, so in a checkout `git
 pull` alone does not move it — re-run `pip install -e .` or the version keeps naming
 the release you had before. On a remote box that one command is how you tell whether
 a deploy landed.
@@ -104,9 +148,9 @@ amd64-only and runs emulated, so those boots are slower. Everything else is nati
 ## 2. Your first workspace
 
 ```bash
-rc-repro up --version 8.5.1 --name test --wait
-rc-repro info --name test          # URL, login, links, what is in it
-rc-repro down --name test --volumes
+houston up --version 8.5.1 --name test --wait
+houston info --name test          # URL, login, links, what is in it
+houston down --name test --volumes
 ```
 
 - `--wait` blocks until Rocket.Chat answers and skips the setup wizard. First boot
@@ -123,14 +167,14 @@ rc-repro down --name test --volumes
 
 ## 3. Where it runs
 
-Two runtimes, and the choice decides what the other flags mean. `rc-repro
+Two runtimes, and the choice decides what the other flags mean. `houston
 capabilities` lists the legal combinations for your build.
 
 ```bash
-rc-repro up -v 8.5.1 --name t1                                     # Docker, monolith
-rc-repro up -v 8.5.1 --name t2 --deployment multi-instance --replicas 3
-rc-repro up -v 8.5.1 --name t3 --runtime kubernetes                # microservices
-rc-repro up -v 8.5.1 --name t4 --runtime kubernetes --deployment monolith
+houston up -v 8.5.1 --name t1                                     # Docker, monolith
+houston up -v 8.5.1 --name t2 --deployment multi-instance --replicas 3
+houston up -v 8.5.1 --name t3 --runtime kubernetes                # microservices
+houston up -v 8.5.1 --name t4 --runtime kubernetes --deployment monolith
 ```
 
 | `--runtime` | `--deployment` | What you get |
@@ -140,9 +184,9 @@ rc-repro up -v 8.5.1 --name t4 --runtime kubernetes --deployment monolith
 | `kubernetes` | `microservices` (default) | Helm chart, ~9 pods, real service split |
 | `kubernetes` | `monolith` | Helm chart, ~5 pods |
 
-**Every Kubernetes workspace is a namespace** (`rc-repro-<name>`) in a cluster shared
+**Every Kubernetes workspace is a namespace** (`houston-<name>`) in a cluster shared
 by all of them, reached on `http://localhost:<port>` through a `kubectl port-forward`
-that rc-repro starts. rc-repro keeps **its own kubeconfig** under `RC_REPRO_HOME`, so
+that houston starts. houston keeps **its own kubeconfig** under `HOUSTON_HOME`, so
 nothing it does can move the context you were using.
 
 `--mongo-operator` manages MongoDB with the official community operator (adds SCRAM
@@ -150,19 +194,19 @@ auth, needs MongoDB 6.0+); without it MongoDB is a plain StatefulSet with no aut
 
 **Which cluster.** `--context <name>` picks one explicitly and always ADOPTS it —
 naming a cluster never creates one, which is what keeps a routine `up` from ever
-building something billable. `rc-repro config set kubernetes.context <name>` makes that
+building something billable. `houston config set kubernetes.context <name>` makes that
 choice the default for this box.
 
-Without one: if `kind` is installed rc-repro creates and manages its own
-(`rc-repro-local`, ~600 MB, and `rc-repro prune` gives it back); if it is not, rc-repro
+Without one: if `kind` is installed houston creates and manages its own
+(`houston-local`, ~600 MB, and `houston prune` gives it back); if it is not, houston
 uses the cluster `kubectl` already points at — k3s, minikube, Docker Desktop — creating
 namespaces there and never touching the cluster itself. With both present, kind wins,
 which is exactly why `--context` exists: on a box with `kind` installed, a healthy
 cluster elsewhere is otherwise passed over.
 Provisioning is the only step that differs; everything after it is the same code.
-`rc-repro doctor` names the cluster it will use and what that cluster provides
+`houston doctor` names the cluster it will use and what that cluster provides
 (storage, ingress, load balancer, metrics — a stock k3s has all four, a stock kind has
-storage only, which is why `rc-repro stats` works on one and refuses on the other).
+storage only, which is why `houston stats` works on one and refuses on the other).
 
 **What Kubernetes refuses, and why** — each refusal names the reason and the alternative:
 
@@ -173,15 +217,15 @@ storage only, which is why `rc-repro stats` works on one and refuses on the othe
 | `env --set` | an environment variable is a helm value there; the refusal hands over the `helm upgrade` that changes one |
 
 `--domain` **works** on Kubernetes — the chart's own Ingress serves it and cert-manager
-issues the certificate, so TLS terminates in the cluster. `--https` (rc-repro's local
+issues the certificate, so TLS terminates in the cluster. `--https` (houston's local
 CA) is refused on a cluster that is not on this machine: that key can mint a
 certificate for any name this box trusts, so it does not leave. `stats` is not refused
 either — it needs metrics-server in the cluster and says so if it is missing.
 
 `logs`, `env` (read), `upgrade`, `backup`, `restore`, `seed`, `monitor`, `api`, `pat`
 and `token` all work on both, and on either cluster. `down` leaves the shared cluster
-running on purpose. `rc-repro prune` reclaims it **if rc-repro created it**, and
-refuses while any rc-repro namespace remains; a cluster you supplied is never deleted.
+running on purpose. `houston prune` reclaims it **if houston created it**, and
+refuses while any houston namespace remains; a cluster you supplied is never deleted.
 
 `down --volumes` means *delete everything*, so it also removes the shared MongoDB
 operator and the shared Prometheus/Grafana stack — but only once no other workspace
@@ -198,15 +242,15 @@ somebody has to make the cluster, it costs money by the hour, and taking it away
 destructive — so **creating one is its own verb at its own lifecycle**, and `up` can
 never reach it, at any lifecycle, under any flag.
 
-**The full walkthrough is [`rc_repro/data/docs/eks.md`](rc_repro/data/docs/eks.md)** —
+**The full walkthrough is [`houston/data/docs/eks.md`](houston/data/docs/eks.md)** —
 prerequisites, the two IAM identities and the Kubernetes RBAC gate that IAM alone does
 not open, building the cluster, the one DNS record, a workspace on it, both removals in
 the order that works, what it costs, and the failures people actually hit. It ships
-with the package, so it is on any machine rc-repro is installed on:
+with the package, so it is on any machine houston is installed on:
 
 ```bash
-rc-repro cluster guide           # print it
-rc-repro cluster guide --path    # where it is on this machine
+houston cluster guide           # print it
+houston cluster guide --path    # where it is on this machine
 ```
 
 It lives in one file rather than being repeated here, because a 190-line procedure kept
@@ -215,28 +259,28 @@ in two places is a procedure that will disagree with itself.
 The shape of it, so you know what you are committing to:
 
 ```bash
-rc-repro config set cluster.approved_accounts <aws-account-id>   # the spend gate
-rc-repro cluster create support --region us-east-1 --nodes 2     # ~20 min, billable
+houston config set cluster.approved_accounts <aws-account-id>   # the spend gate
+houston cluster create support --region us-east-1 --nodes 2     # ~20 min, billable
 # point a CNAME at the address it prints, then per ticket:
-rc-repro up -v 8.5.1 --name TICKET-1234 --context <arn> --domain t1234.rc.you.com --wait
-rc-repro down --name TICKET-1234 --volumes --yes
+houston up -v 8.5.1 --name TICKET-1234 --context <arn> --domain t1234.rc.you.com --wait
+houston down --name TICKET-1234 --volumes --yes
 kubectl delete svc -A --field-selector spec.type=LoadBalancer    # release the ELBs
-rc-repro cluster delete support --region us-east-1 --yes         # this stops the bill
+houston cluster delete support --region us-east-1 --yes         # this stops the bill
 ```
 
 A two-node cluster is about **$0.35/hr — $8.46/day** — for as long as it exists,
-whether or not anything is running in it. `rc-repro cluster status` prices the one you
-point it at; `rc-repro cluster list` sweeps every region for ones you have forgotten.
+whether or not anything is running in it. `houston cluster status` prices the one you
+point it at; `houston cluster list` sweeps every region for ones you have forgotten.
 
 ---
 
 ## 4. Everyday lifecycle
 
 ```bash
-rc-repro list                     # version, MongoDB, where it runs, port, state, URL
-rc-repro info   --name test       # URL, credentials, links, notes, pods
-rc-repro logs   --name test -f    # tail (pods on Kubernetes, containers on Compose)
-rc-repro ready  --name test       # block until serving
+houston list                     # version, MongoDB, where it runs, port, state, URL
+houston info   --name test       # URL, credentials, links, notes, pods
+houston logs   --name test -f    # tail (pods on Kubernetes, containers on Compose)
+houston ready  --name test       # block until serving
 ```
 
 A workspace is long-lived — pause and resume rather than recreating:
@@ -252,8 +296,8 @@ A workspace is long-lived — pause and resume rather than recreating:
 Both data-deleting commands prompt and `prune` lists what it will delete; `--yes`
 skips the prompt in scripts.
 
-**A daily driver:** `rc-repro up -v 8.5.1 --name main --pin` once, then `start` /
-`stop`. Commands with no `--name` act on the pinned workspace, or whatever `rc-repro
+**A daily driver:** `houston up -v 8.5.1 --name main --pin` once, then `start` /
+`stop`. Commands with no `--name` act on the pinned workspace, or whatever `houston
 use <name>` last set.
 
 > **Tear down by default.** A Compose workspace costs about 1.1 GB and a Kubernetes
@@ -267,8 +311,8 @@ use <name>` last set.
 A preset turns a bare Rocket.Chat into a scenario. All of them work on both runtimes.
 
 ```bash
-rc-repro presets                              # what exists, and what each reproduces
-rc-repro up -v 8.5.1 --preset ldap --wait
+houston presets                              # what exists, and what each reproduces
+houston up -v 8.5.1 --preset ldap --wait
 ```
 
 | Preset | Brings up | Reproduces |
@@ -286,9 +330,9 @@ rc-repro up -v 8.5.1 --preset ldap --wait
 For `ldap`, `saml` and `oidc`, log in as **`user1` / `user1`**.
 
 ```bash
-rc-repro up -v 8.5.1 --preset ldap --set users=130000        # scale a directory
-rc-repro up -v 8.5.1 --preset email --seed --wait            # verified users + Mailpit
-rc-repro up -v 8.5.1 --preset s3_minio --set presigned=true
+houston up -v 8.5.1 --preset ldap --set users=130000        # scale a directory
+houston up -v 8.5.1 --preset email --seed --wait            # verified users + Mailpit
+houston up -v 8.5.1 --preset s3_minio --set presigned=true
 ```
 
 **`oidc` needs one host entry** — `127.0.0.1  keycloak` in `/etc/hosts`, because the
@@ -299,7 +343,7 @@ else a preset needs — consoles, credentials, realms — is in its notes.
 <details>
 <summary><b>Custom presets and Enterprise licences</b></summary>
 
-Drop a YAML file in `~/.rc-repro/presets/<name>.yaml`; it overrides a built-in of the
+Drop a YAML file in `~/.houston/presets/<name>.yaml`; it overrides a built-in of the
 same name. **Treat preset files as code** — they can run arbitrary containers and
 mount files.
 
@@ -318,10 +362,10 @@ on first boot and Rocket.Chat Cloud syncs the licence down. On Kubernetes it is
 delivered through a Secret referenced by `valueFrom`, never as a values literal.
 
 ```bash
-rc-repro up -v 8.5.1 --reg-token <token> --wait
+houston up -v 8.5.1 --reg-token <token> --wait
 ```
 
-Put `reg_token:` in `~/.rc-repro/config.yaml` or export `RC_REPRO_REG_TOKEN` to stop
+Put `reg_token:` in `~/.houston/config.yaml` or export `HOUSTON_REG_TOKEN` to stop
 retyping it. **A registration token is a real licence** — do not paste one into a
 support case.
 </details>
@@ -334,9 +378,9 @@ A fresh workspace is empty. `--seed` plans a manifest, creates it over REST, the
 **reads it back and checks it against the plan**.
 
 ```bash
-rc-repro up -v 8.5.1 --name test --seed --seed-profile standard --verify-seed
-rc-repro seed --name test --profile large
-rc-repro seed --name test --users 30 --channels 10 --messages 40
+houston up -v 8.5.1 --name test --seed --seed-profile standard --verify-seed
+houston seed --name test --profile large
+houston seed --name test --users 30 --channels 10 --messages 40
 ```
 
 | Profile | Users | Rooms | Messages | Contains |
@@ -363,8 +407,8 @@ planned are reported separately and are not faults: seeding only ever adds.
 `--scale`, which bulk-inserts straight into MongoDB:
 
 ```bash
-rc-repro seed --name test --scale users=50000,messages=800000@general
-rc-repro seed --name test --clear-scale        # removes exactly what --scale added
+houston seed --name test --scale users=50000,messages=800000@general
+houston seed --name test --clear-scale        # removes exactly what --scale added
 ```
 
 Bulk documents bypass RC's hooks: bulk users are credential-less and messages fire no
@@ -374,8 +418,8 @@ behaviour.
 **A customer's settings**, from a support dump:
 
 ```bash
-rc-repro config-import ./8.5.0-settings.json --name test --dry-run
-rc-repro config-import ./8.5.0-settings.json --name test --only Livechat,LDAP
+houston config-import ./8.5.0-settings.json --name test --dry-run
+houston config-import ./8.5.0-settings.json --name test --only Livechat,LDAP
 ```
 
 It skips **redacted secrets** (listing them so you can set them by hand) and
@@ -387,10 +431,10 @@ It skips **redacted secrets** (listing them so you can set them by hand) and
 ## 7. Settings and env vars
 
 ```bash
-rc-repro env                                        # effective env, secrets masked
-rc-repro env --setting Message_AllowEditing=false   # a Rocket.Chat SETTING
-rc-repro env --set MY_FLAG=true                     # a raw env var
-rc-repro env --unset ALLOW_UNSAFE_QUERY_AND_FIELDS_API_PARAMS
+houston env                                        # effective env, secrets masked
+houston env --setting Message_AllowEditing=false   # a Rocket.Chat SETTING
+houston env --set MY_FLAG=true                     # a raw env var
+houston env --unset ALLOW_UNSAFE_QUERY_AND_FIELDS_API_PARAMS
 ```
 
 Most Rocket.Chat configuration is a **setting** — what you would change in the admin
@@ -403,7 +447,7 @@ UI — and a setting only takes effect from the environment with the
 | `OVERWRITE_SETTING_Accounts_ShowFormLogin=false` | applied |
 
 `--setting Id=value` adds the prefix for you; `--set` is for real env vars. Use a
-setting's name with `--set` and rc-repro asks the running workspace, then hands you
+setting's name with `--set` and houston asks the running workspace, then hands you
 the prefixed form.
 
 `OVERWRITE_SETTING_*` is **asserted at every boot, not locked**: the API and admin UI
@@ -421,11 +465,11 @@ point — but each prints what it will break.
 ## 8. Backup, restore, upgrade
 
 ```bash
-rc-repro backup  --name test --label "before upgrade"   # → ~/.rc-repro/backups/*.rcbak
-rc-repro backups                                        # what exists
-rc-repro restore <bundle> --new                         # rebuild a whole workspace
-rc-repro upgrade --name test --to 8.6.1                 # backs up first
-rc-repro upgrade --name test --rollback
+houston backup  --name test --label "before upgrade"   # → ~/.houston/backups/*.rcbak
+houston backups                                        # what exists
+houston restore <bundle> --new                         # rebuild a whole workspace
+houston upgrade --name test --to 8.6.1                 # backs up first
+houston upgrade --name test --rollback
 ```
 
 A backup is a **bundle**, not a bare dump: the database plus the version, preset and
@@ -451,24 +495,24 @@ attempted: majors have to be stepped one at a time with a
 differently: the chart's own Ingress serves the name and cert-manager obtains the
 certificate, so **TLS terminates inside the cluster** rather than at the edge. The edge
 still holds `:80` and `:443` on this machine and matches the name by SNI, but forwards
-raw TCP without decrypting it — so `rc-repro edge logs` will not mention that name, and
+raw TCP without decrypting it — so `houston edge logs` will not mention that name, and
 the failure modes a customer actually hits (a wrong `secretName`, an expired
 Certificate, an annotation naming a missing issuer) are the real ones there.
 
-`--https`, which uses rc-repro's own certificate authority, is refused on any cluster
+`--https`, which uses houston's own certificate authority, is refused on any cluster
 that is not on this machine: that private key can mint a certificate for any name this
 box trusts, so it does not leave. Use `--domain` for a publicly-trusted certificate, or
 reach the workspace on its port-forward.
 
 On a cluster with more than one ingress controller — an EKS cluster carrying both `alb`
-and `nginx`, say — rc-repro adopts the one the cluster itself marks as default and says
+and `nginx`, say — houston adopts the one the cluster itself marks as default and says
 which it picked. `--ingress-class nginx` names one outright, and a class the cluster
 does not have is refused rather than quietly ignored.
 
 ```bash
-rc-repro up -v 8.5.1 --name t1 --runtime kubernetes \
+houston up -v 8.5.1 --name t1 --runtime kubernetes \
   --domain rc.yourcompany.com --email you@company.com
-kubectl -n rc-repro-t1 describe certificate t1-tls   # what cert-manager did
+kubectl -n houston-t1 describe certificate t1-tls   # what cert-manager did
 ```
 
 **A Compose workspace never terminates TLS.** One Traefik — the **edge** — holds `:80` and
@@ -477,20 +521,20 @@ that needs one.
 
 ```bash
 # A real name, with a Let's Encrypt certificate
-rc-repro up -v 8.5.1 --domain t1234.example.com --email you@example.com
+houston up -v 8.5.1 --domain t1234.example.com --email you@example.com
 
-# No domain, no internet: rc-repro's own CA
-rc-repro trust-ca                       # once, per machine
-rc-repro up -v 8.5.1 --https            # https://<name>.rcrepro.localhost
+# No domain, no internet: houston's own CA
+houston trust-ca                       # once, per machine
+houston up -v 8.5.1 --https            # https://<name>.houston.localhost
 ```
 
-The email is remembered (`rc-repro config set acme.email …`). Rocket.Chat's
+The email is remembered (`houston config set acme.email …`). Rocket.Chat's
 `ROOT_URL` becomes the https URL, which is what makes OAuth and SAML redirects work.
 
 ```bash
-rc-repro edge status     # running? which names? can it reach each one?
-rc-repro edge stop       # frees :80 and :443
-rc-repro tls-status --name test
+houston edge status     # running? which names? can it reach each one?
+houston edge stop       # frees :80 and :443
+houston tls-status --name test
 ```
 
 **Shared fate is real:** while the edge is down every https name on the box is
@@ -502,13 +546,13 @@ tell you.
 <details>
 <summary><b>dns-01, and what unlocks a wildcard</b></summary>
 
-Not a flag. Put your provider's credentials in `~/.rc-repro/acme/dns.env` and
-rc-repro uses dns-01 automatically:
+Not a flag. Put your provider's credentials in `~/.houston/acme/dns.env` and
+houston uses dns-01 automatically:
 
 ```bash
-mkdir -p ~/.rc-repro/acme && chmod 700 ~/.rc-repro/acme
-printf 'CF_DNS_API_TOKEN=%s\n' "$TOKEN" > ~/.rc-repro/acme/dns.env
-chmod 600 ~/.rc-repro/acme/dns.env
+mkdir -p ~/.houston/acme && chmod 700 ~/.houston/acme
+printf 'CF_DNS_API_TOKEN=%s\n' "$TOKEN" > ~/.houston/acme/dns.env
+chmod 600 ~/.houston/acme/dns.env
 ```
 </details>
 
@@ -519,9 +563,9 @@ chmod 600 ~/.rc-repro/acme/dns.env
 Prometheus + Grafana + Loki on top of *any* workspace — an add-on, not a preset:
 
 ```bash
-rc-repro up -v 8.5.1 --monitor
-rc-repro monitor --name test           # or attach later, without restarting RC
-rc-repro monitor --name test --off
+houston up -v 8.5.1 --monitor
+houston monitor --name test           # or attach later, without restarting RC
+houston monitor --name test --off
 ```
 
 **Grafana** on `http://localhost:5050` (`admin`/`admin`, anonymous view on) with the
@@ -530,7 +574,7 @@ official *Rocket.Chat Metrics*, MongoDB and Node Exporter dashboards provisioned
 *Rocket.Chat Logs* dashboard.
 
 On Compose the log collector is scoped to that workspace's project, so it never
-ingests your others. On Kubernetes one stack lives in `rc-repro-system` and is shared
+ingests your others. On Kubernetes one stack lives in `houston-system` and is shared
 by the cluster; `--off` leaves it up while any other workspace still wants it.
 
 ---
@@ -541,12 +585,12 @@ by the cluster; `--off` leaves it up while any other workspace still wants it.
 wrong rather than missing.
 
 ```bash
-rc-repro loadtest --name test --scenario journey --vus 50 --duration 60s
-rc-repro loadtest --name test --scenario custom --endpoint "GET /api/v1/channels.list?count=100"
-rc-repro loadtest --name test --scenario journey --save before-fix
-rc-repro loadtest --name test --scenario journey --compare before-fix
-rc-repro capacity --name test --slo "p95=300ms,error=2%"
-rc-repro benchmark --versions 8.4.1,8.5.1,8.6.0 --report
+houston loadtest --name test --scenario journey --vus 50 --duration 60s
+houston loadtest --name test --scenario custom --endpoint "GET /api/v1/channels.list?count=100"
+houston loadtest --name test --scenario journey --save before-fix
+houston loadtest --name test --scenario journey --compare before-fix
+houston capacity --name test --slo "p95=300ms,error=2%"
+houston benchmark --versions 8.4.1,8.5.1,8.6.0 --report
 ```
 
 Real concurrent load through [k6](https://k6.io), run as a throwaway container on the
@@ -576,11 +620,11 @@ prints the deltas — the regression check only a version-matched tool can do.
 ## 12. REST API
 
 ```bash
-rc-repro token --name test                     # -H auth headers
-rc-repro api   --name test GET /api/v1/me
-rc-repro api   --name test --pat POST /api/v1/users.update -d '{"userId":"ID","data":{"name":"X"}}'
-rc-repro api   --name test --2fa POST /api/v1/settings/<id> -d '{"value":true}'
-rc-repro pat   --name test                     # mint a Personal Access Token
+houston token --name test                     # -H auth headers
+houston api   --name test GET /api/v1/me
+houston api   --name test --pat POST /api/v1/users.update -d '{"userId":"ID","data":{"name":"X"}}'
+houston api   --name test --2fa POST /api/v1/settings/<id> -d '{"value":true}'
+houston pat   --name test                     # mint a Personal Access Token
 ```
 
 `--pat` mirrors a customer's Personal Access Token (with "Ignore 2FA"); `--2fa` gets
@@ -591,11 +635,11 @@ response pretty-printed.
 
 ## 13. Web GUI
 
-`rc-repro serve` is the same service layer as the CLI with a browser in front — for
+`houston serve` is the same service layer as the CLI with a browser in front — for
 when you would rather click than type, and the way a team shares one box.
 
 ```bash
-rc-repro serve                    # http://localhost:7070/
+houston serve                    # http://localhost:7070/
 ```
 
 It binds **loopback only**: the GUI can create and delete workspaces and their
@@ -611,18 +655,18 @@ http://localhost:7070/setup#k=Xf9…
 
 Open the **whole** URL including the part after `#` — a fragment never reaches the
 server, so the key cannot appear in an access log, a proxy log or a `Referer` header.
-The page creates the first **admin**. Prefer the terminal? `rc-repro users add
+The page creates the first **admin**. Prefer the terminal? `houston users add
 <name>` first, and `serve` shows a normal sign-in page.
 
 ### Accounts and roles
 
 ```bash
-rc-repro users                    # who exists, roles, dates — never hashes
-rc-repro users add alice          # GENERATES the password, prints it once
-rc-repro users add alice --ask-password
-rc-repro users role alice admin   # admin | member | readonly
-rc-repro users passwd alice       # new password, ends alice's sessions
-rc-repro users remove alice       # and every session it minted
+houston users                    # who exists, roles, dates — never hashes
+houston users add alice          # GENERATES the password, prints it once
+houston users add alice --ask-password
+houston users role alice admin   # admin | member | readonly
+houston users passwd alice       # new password, ends alice's sessions
+houston users remove alice       # and every session it minted
 ```
 
 | Role | May |
@@ -644,14 +688,14 @@ not.
 **Roles govern the web GUI, and only the web GUI.** The table above is enforced by
 `ROUTE_ROLES` in the HTTP layer. The CLI is not role-aware: anyone with a shell on the
 box is already in the `docker` group, so a role check there would be a formality, and
-`RC_REPRO_USER` is an attribution label rather than a credential — the audit log records
+`HOUSTON_USER` is an attribution label rather than a credential — the audit log records
 whether an actor was `asserted` (the environment variable) or came from a `session`
 precisely because those are not the same claim. A `readonly` account bounds what someone
 can do **through the browser**; it does not bound someone with SSH.
 
 The first account is an admin; every one after it is a `member` until you say
 otherwise. Passwords are generated (~96 bits) unless `--ask-password`, which enforces
-a 12-character minimum; stored in `~/.rc-repro/users`, mode `0600`, hashed with
+a 12-character minimum; stored in `~/.houston/users`, mode `0600`, hashed with
 `hashlib.scrypt`. Sessions are server-side and revocable, so sign-out ends one and
 changing or removing an account ends every session it minted.
 
@@ -660,14 +704,14 @@ A name is **folded into a DNS label**, because it becomes part of a workspace na
 made. Sign-in, `passwd`, `role` and `remove` accept either spelling.
 
 ```bash
-rc-repro config set gui.create_policy admin      # only admins may set --rc-image/--reg-token/--bind
-rc-repro config set gui.destroy_policy anyone    # members may delete anyone's workspace
-rc-repro config set bind_host 0.0.0.0            # one decision instead of per-create
-rc-repro audit                                   # who did what
-rc-repro chown <name> --to bob                   # hand a workspace over
+houston config set gui.create_policy admin      # only admins may set --rc-image/--reg-token/--bind
+houston config set gui.destroy_policy anyone    # members may delete anyone's workspace
+houston config set bind_host 0.0.0.0            # one decision instead of per-create
+houston audit                                   # who did what
+houston chown <name> --to bob                   # hand a workspace over
 ```
 
-Every action is recorded against the account that took it in `~/.rc-repro/audit.log`.
+Every action is recorded against the account that took it in `~/.houston/audit.log`.
 With accounts, derived names are namespaced by owner, so two people can run the same
 version side by side.
 
@@ -680,10 +724,10 @@ TLS actually ends:
 
 | Where TLS ends | Command |
 |---|---|
-| Nowhere — just you, on this machine | `rc-repro serve` |
-| rc-repro does it, on a name that points here | `rc-repro serve --domain rc.example.com --email you@example.com` |
-| A TLS proxy on **this** box | `rc-repro serve --bind 127.0.0.1 --allow-host rc.example.com` |
-| A proxy **elsewhere** — a lab, Codespaces, ngrok, an LB | `rc-repro serve --bind 0.0.0.0 --allow-host rc.example.com --trust-proxy 10.0.0.1` |
+| Nowhere — just you, on this machine | `houston serve` |
+| houston does it, on a name that points here | `houston serve --domain rc.example.com --email you@example.com` |
+| A TLS proxy on **this** box | `houston serve --bind 127.0.0.1 --allow-host rc.example.com` |
+| A proxy **elsewhere** — a lab, Codespaces, ngrok, an LB | `houston serve --bind 0.0.0.0 --allow-host rc.example.com --trust-proxy 10.0.0.1` |
 | Nothing, and you accept it | add `--insecure` |
 
 - **`--allow-host`** is a DNS-rebinding guard: whatever is in the address bar has to
@@ -699,7 +743,7 @@ TLS actually ends:
 ### Keeping it running
 
 ```bash
-rc-repro serve --domain rc.example.com --email you@example.com --print-service
+houston serve --domain rc.example.com --email you@example.com --print-service
 ```
 
 Prints a **systemd unit** and how to install it, plus a `nohup` fallback, and writes
@@ -715,18 +759,18 @@ nothing so you can read it first.
 take `--json`; `capabilities` is JSON already. Every reply is one envelope:
 
 ```json
-{"schema":"rc-repro.info.v1","contract":1,"rc_repro_version":"0.68.1",
+{"schema":"houston.info.v1","contract":1,"houston_version":"0.68.1",
  "generated_at":"…","ok":true,"data":{…},"warnings":[],"error":null}
 ```
 
-`up` and `ready` **stream**: NDJSON `rc-repro.event.v1` progress lines first, then
+`up` and `ready` **stream**: NDJSON `houston.event.v1` progress lines first, then
 exactly one envelope as the **last line** — so read to end of stream and parse the
 last line. stdout carries JSON and nothing else; human prose moves to stderr.
 
 `contract` is the wire generation; if you do not recognise it, refuse rather than
 guess. New keys may appear in `data` and `warnings` — ignore ones you do not know.
 
-### `rc-repro capabilities`
+### `houston capabilities`
 
 JSON, needs no container engine, and is the authority for **your build** on which
 commands exist, which take `--json`, which stream, the runtime combinations, the seed
@@ -736,8 +780,8 @@ exists because it did in another version.
 ### For coding agents
 
 ```bash
-rc-repro skill install        # writes the agent skill file
-rc-repro skill status
+houston skill install        # writes the agent skill file
+houston skill status
 ```
 
 Installs a skill describing this build's contract for an agent to follow, and
@@ -762,7 +806,7 @@ Installs a skill describing this build's contract for an agent to follow, and
 | HTTPS | `edge` `trust-ca` `tls-status` |
 | other | `monitor` `presets` `versions` `doctor` `capabilities` `skill` |
 
-`rc-repro <command> --help` for flags.
+`houston <command> --help` for flags.
 
 ### Exit codes
 
@@ -794,7 +838,7 @@ branch on this table, and `doctor` is the one command that does not fit it.
 
 ### How version → MongoDB resolution works
 
-`rc-repro up --version X` (and `rc-repro versions X`) queries
+`houston up --version X` (and `houston versions X`) queries
 `releases.rocket.chat/<version>/info` — Rocket.Chat's own per-release compatibility
 data — and picks the highest supported MongoDB. Offline, or for a release predating
 that data, it falls back to the shipped `versions.yaml`; `--offline` forces the
@@ -808,7 +852,7 @@ is emitted only for RC < 8.
 ### Where state lives
 
 ```
-~/.rc-repro/                  # override with RC_REPRO_HOME
+~/.houston/                  # override with HOUSTON_HOME
 ├── config.yaml               # default workspace, reg_token, bind_host, gui policies
 ├── users                     # GUI accounts — 0600, scrypt
 ├── sessions                  # server-side sessions — 0600
@@ -817,8 +861,8 @@ is emitted only for RC < 8.
 ├── backups/  reports/  loadtests/
 ├── acme/                     # ACME state; dns.env, issued.json
 ├── edge/                     # the shared edge and one file per route
-├── clients/kubernetes/       # rc-repro's own kubeconfig — never your ~/.kube/config
-├── clusters/<name>/          # one cloud cluster rc-repro built
+├── clients/kubernetes/       # houston's own kubeconfig — never your ~/.kube/config
+├── clusters/<name>/          # one cloud cluster houston built
 │   ├── cluster.json          # name, region, account, expiry — what `doctor` reads
 │   ├── cluster.yaml          # the exact config eksctl was handed
 │   └── storageclass.yaml     # what `cluster prepare` applied
@@ -828,19 +872,19 @@ is emitted only for RC < 8.
 ```
 
 A cloud cluster's authority is a **tag on the cluster itself**, not `cluster.json` — a
-lost `RC_REPRO_HOME` must not leave something billable that rc-repro can no longer
+lost `HOUSTON_HOME` must not leave something billable that houston can no longer
 prove is its own. The local files are a convenience: they let `doctor` say "you are
 still paying for this" without an AWS round trip, and they keep a record of what was
 built after the cluster is gone.
 
 Config can also come from the environment, which wins over `config.yaml`:
-`RC_REPRO_HOME`, `RC_REPRO_REG_TOKEN`, `RC_REPRO_RC_IMAGE`, `RC_REPRO_BIND_HOST` (the
-`--bind` flag wins over both), `RC_REPRO_KUBE_CONTEXT`.
+`HOUSTON_HOME`, `HOUSTON_REG_TOKEN`, `HOUSTON_RC_IMAGE`, `HOUSTON_BIND_HOST` (the
+`--bind` flag wins over both), `HOUSTON_KUBE_CONTEXT`.
 
 ### Development
 
 ```bash
-git clone https://github.com/klovekesh37/rc-repro.git && cd rc-repro
+git clone https://github.com/klovekesh37/houston.git && cd houston
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev,gui,browser]"
 .venv/bin/playwright install chromium
@@ -853,7 +897,7 @@ and without `[browser]` plus chromium the browser tests do too — both report g
 while testing nothing, which is how a broken form POST once shipped past 570 passing
 HTTP tests.
 
-See [`rc_repro/data/docs/ARCHITECTURE.md`](rc_repro/data/docs/ARCHITECTURE.md) for how the
+See [`houston/data/docs/ARCHITECTURE.md`](houston/data/docs/ARCHITECTURE.md) for how the
 tool is built and why —
 the seams, the contracts, and what breaking each one costs.
 [`CONTRIBUTING.md`](CONTRIBUTING.md) covers preset authoring.

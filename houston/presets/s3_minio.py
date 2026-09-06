@@ -1,0 +1,254 @@
+"""Dynamic `s3_minio` preset: a MinIO S3-compatible object store wired to
+Rocket.Chat's file upload storage.
+
+Reproduces external-object-storage tickets: uploads failing, broken previews,
+bucket/path-style/signature misconfigurations and — the classic — presigned URLs
+the browser can't reach.
+
+THE GOTCHA (same class as the oidc preset): the S3 endpoint URL is used by RC's
+backend (uploads) AND, in presigned mode, by the browser (downloads). The
+default mode sidesteps it by proxying downloads through RC
+(FileUpload_S3_Proxy_*=true) — zero setup, works out of the box.
+`--set presigned=true` switches to real presigned MinIO URLs, which needs the
+hosts entry `127.0.0.1  minio` (printed on `up`) — and IS the faithful repro
+for presigned-URL tickets: remove the hosts line and previews break exactly
+like the customer's.
+
+Uploaded objects live in the `minio_data` named volume (via Preset.volumes), so
+files survive `down`/`up` just like Mongo data — no dangling attachment cards
+whose objects vanished.
+
+Parameters (via `--set`):
+  presigned   serve downloads via presigned MinIO URLs instead of proxying
+              through RC (default false; needs the /etc/hosts line).
+  bucket      bucket name (default houston-uploads).
+"""
+
+from __future__ import annotations
+
+import re
+
+from houston import config
+from houston.presets import Preset, _common
+
+# S3 bucket naming rules (also keeps the name shell-safe in minio-init).
+_BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
+
+# S3 API — same inside and published, so presigned URLs are valid from the
+# browser (via /etc/hosts) and RC alike. Console is the second registry port.
+_S3_PORT, _CONSOLE_PORT = config.PRESET_PORTS["s3_minio"]
+_USER = "houston"
+_PASSWORD = "houston-secret"   # MinIO requires >= 8 chars; throwaway repro creds
+# Pinned multi-arch (amd64/arm64) tags — verified via docker manifest inspect.
+_MINIO_TAG = "RELEASE.2025-09-07T16-13-09Z"
+_MC_TAG = "RELEASE.2025-08-13T08-35-41Z"
+
+
+def _bucket_job(bucket: str, workspace: str = "__HOUSTON_NAME__") -> str:
+    """The Kubernetes twin of the compose `minio-init` service.
+
+    It had no twin, and nothing said so. On Compose a one-shot container waits for
+    MinIO and runs `mc mb -p`; the Kubernetes adapter rendered only the MinIO
+    Deployment, so the bucket was NEVER created -- while the workspace's own notes
+    said "bucket '<name>' is created automatically; watch uploads land in it". MinIO
+    does not create buckets on demand and neither does Rocket.Chat, so every upload
+    on that runtime had nowhere to go.
+
+    A Job rather than an init container: an init container runs BEFORE its pod's main
+    container, so it would wait for a MinIO that cannot start until it finishes.
+    Same image, same idempotent `mc mb -p`, same wait loop as Compose.
+    """
+    import yaml
+
+    app = "houston-minio-init"
+    labels = {"app": app, "app.kubernetes.io/managed-by": "houston",
+              "houston.io/component": "minio-init",
+              "houston.io/repro": workspace}
+    return yaml.safe_dump({
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {"name": "minio-init", "labels": labels},
+        "spec": {
+            # Retries rather than one attempt: the Job is applied at the same time as
+            # the Deployment, so its first run legitimately races MinIO starting.
+            "backoffLimit": 10,
+            "template": {
+                "metadata": {"labels": labels},
+                "spec": {
+                    "restartPolicy": "OnFailure",
+                    "containers": [{
+                        "name": "minio-init",
+                        "image": f"docker.io/minio/mc:{_MC_TAG}",
+                        "command": [
+                            "sh", "-c",
+                            f"until mc alias set local http://minio:{_S3_PORT} "
+                            f"{_USER} {_PASSWORD}; do sleep 2; done; "
+                            f"mc mb -p local/{bucket}",
+                        ],
+                    }],
+                },
+            },
+        },
+    }, sort_keys=False)
+
+
+def build(params: dict) -> Preset:
+    presigned = _common.truthy_param(params, "presigned")
+    # THE BROWSER'S ADDRESS FOR MINIO, in presigned mode only. A presigned URL is
+    # followed by the browser, and `minio` resolves for it solely through the
+    # `127.0.0.1 minio` hosts line below -- which names whichever machine the browser
+    # is on. Right on a laptop; wrong on the shared install this tool now runs on,
+    # where the same silent shape broke the saml and oidc buttons. Setting this to the
+    # host's own address satisfies the browser AND RC (which reaches it over the
+    # bridge) and needs no hosts entry, exactly as `idp_host` does for the IdP presets.
+    #
+    # Proxy mode is unaffected: there the browser never touches MinIO at all, which is
+    # why this default stays `minio` and nothing about the ordinary case changes.
+    s3_host = _common.str_param(params, "s3_host", "minio")
+    bucket = _common.str_param(params, "bucket", "houston-uploads")
+    if not _BUCKET_RE.match(bucket):
+        raise ValueError(
+            f"--set bucket={bucket!r} is not a valid S3 bucket name "
+            "(3-63 chars: lowercase letters, digits, dots, hyphens)"
+        )
+
+    services = {
+        "minio": {
+            "image": f"docker.io/minio/minio:{_MINIO_TAG}",
+            "restart": "unless-stopped",
+            "command": ["server", "/data", "--console-address", f":{_CONSOLE_PORT}"],
+            "environment": {
+                "MINIO_ROOT_USER": _USER,
+                "MINIO_ROOT_PASSWORD": _PASSWORD,
+            },
+            "volumes": ["minio_data:/data"],
+            "ports": [f"{_S3_PORT}:{_S3_PORT}", f"{_CONSOLE_PORT}:{_CONSOLE_PORT}"],
+        },
+        # One-shot: wait for MinIO to accept connections, then create the
+        # bucket. `mc mb -p` is idempotent (no error if it already exists).
+        "minio-init": {
+            "image": f"docker.io/minio/mc:{_MC_TAG}",
+            "restart": "no",
+            "depends_on": ["minio"],
+            "entrypoint": [
+                "sh", "-c",
+                f"until mc alias set local http://minio:{_S3_PORT} {_USER} {_PASSWORD}; "
+                f"do sleep 1; done; mc mb -p local/{bucket}",
+            ],
+        },
+    }
+
+    env = {
+        "OVERWRITE_SETTING_FileUpload_Storage_Type": "AmazonS3",
+        "OVERWRITE_SETTING_FileUpload_S3_Bucket": bucket,
+        # The ENDPOINT, with no bucket on it, even though docs.rocket.chat/docs/minio
+        # spells the format as `http://[your.minio.domain/bucketname]`. Bucket is
+        # already passed separately, and with ForcePathStyle the client builds
+        # {endpoint}/{bucket}/{key} -- so a bucket in the endpoint is repeated as a
+        # key prefix. Measured on 7.13.6 by uploading a file and reading MinIO's own
+        # layout:
+        #
+        #   with the bucket   -> houston-uploads/houston-uploads/<instance>/uploads/...
+        #   without it        -> houston-uploads/<instance>/uploads/...
+        #
+        # Both upload successfully -- MinIO is happy to treat it as a prefix -- which
+        # is why this went unnoticed. It is still every object nested one level
+        # deeper than it should be, under a directory named after its own bucket.
+        "OVERWRITE_SETTING_FileUpload_S3_BucketURL": f"http://{s3_host}:{_S3_PORT}",
+        "OVERWRITE_SETTING_FileUpload_S3_AWSAccessKeyId": _USER,
+        "OVERWRITE_SETTING_FileUpload_S3_AWSSecretAccessKey": _PASSWORD,
+        "OVERWRITE_SETTING_FileUpload_S3_Region": "us-east-1",   # MinIO default
+        "OVERWRITE_SETTING_FileUpload_S3_ForcePathStyle": "true",  # mandatory for MinIO
+        # v2, which is what docs.rocket.chat/docs/minio prescribes -- and NOT a
+        # cosmetic choice. RC 7.13.x bundles aws-sdk v2 (there is no @aws-sdk
+        # directory in the image at all), which honours this setting; asking it for
+        # v4 makes the very first upload-store call raise
+        #
+        #   Non-file stream objects are not supported with SigV4
+        #
+        # during startup, and Rocket.Chat then never finishes booting. Measured on
+        # 7.13.6 + s3_minio: with v4 it never served in 300s and /api/info refused
+        # the connection; with v2 it answered 200 in ~35s and the error was gone.
+        #
+        # Newer releases moved to @aws-sdk/client-s3, which always signs SigV4 and
+        # ignores this setting -- so v2 is correct on old images and inert on new
+        # ones, which is why 8.5.1 never showed the fault.
+        "OVERWRITE_SETTING_FileUpload_S3_SignatureVersion": "v2",
+        # Default: stream files through RC so the browser never needs to reach
+        # MinIO. Presigned mode: real presigned URLs (the faithful flow).
+        "OVERWRITE_SETTING_FileUpload_S3_Proxy_Uploads": "false" if presigned else "true",
+        "OVERWRITE_SETTING_FileUpload_S3_Proxy_Avatars": "false" if presigned else "true",
+    }
+
+    notes = [
+        f"MinIO console: http://localhost:{_CONSOLE_PORT}  ({_USER} / {_PASSWORD})",
+        f"  — bucket '{bucket}' is created automatically; watch uploads land in it.",
+        "Upload any file/image in RC; it goes to MinIO instead of GridFS.",
+    ]
+    if presigned and s3_host == "minio":
+        notes += [
+            "PRESIGNED MODE: the browser fetches files straight from MinIO, so add",
+            "this line to /etc/hosts (needs sudo):",
+            "    127.0.0.1  minio",
+            "  That entry points at THIS machine, so the browser has to be on it. From",
+            "  another machine, re-create with:  --bind 0.0.0.0 --set s3_host=<this host>",
+            "Remove the line to reproduce the classic 'presigned URL unreachable'",
+            "ticket symptom (uploads work, previews/downloads break).",
+        ]
+    elif presigned:
+        notes += [
+            f"PRESIGNED MODE: the browser fetches files straight from "
+            f"http://{s3_host}:{_S3_PORT}, so no hosts entry is needed — but that",
+            "  address must be reachable from the browser (`--bind 0.0.0.0`).",
+            "Point s3_host somewhere unreachable to reproduce the classic 'presigned",
+            "  URL unreachable' ticket symptom (uploads work, previews break).",
+        ]
+    else:
+        notes += [
+            "Downloads are proxied through RC (no hosts entry needed). For real",
+            "presigned-URL behaviour: --set presigned=true (reproduces that ticket class).",
+        ]
+
+    kube = _common._k8s_manifests(
+        name="minio", image=f"docker.io/minio/minio:{_MINIO_TAG}",
+        ports=[(_S3_PORT, _S3_PORT), (_CONSOLE_PORT, _CONSOLE_PORT)],
+        env={"MINIO_ROOT_USER": _USER, "MINIO_ROOT_PASSWORD": _PASSWORD},
+        args=["server", "/data", "--console-address", f":{_CONSOLE_PORT}"],
+        # TWO Services, one Deployment: MinIO serves the S3 API and the console from
+        # the same process, and a Kubernetes label value cannot contain a comma --
+        # so each Service names the workload through `houston.io/ui-deployment`
+        # instead of carrying a list of ports it is not allowed to spell.
+        readiness={"httpGet": {"path": "/minio/health/ready",
+                               "port": _S3_PORT},
+                   "initialDelaySeconds": 3, "periodSeconds": 3,
+                   "failureThreshold": 40},
+        ui={"minio": (_S3_PORT, _S3_PORT),
+            "minio-console": (_CONSOLE_PORT, _CONSOLE_PORT)})
+    bucket_job = _bucket_job(bucket)
+    return Preset(
+        name="s3_minio",
+        description=(
+            f"MinIO S3-compatible storage wired as RC's file upload backend "
+            f"(bucket '{bucket}', console :{_CONSOLE_PORT}). Default proxies "
+            "downloads through RC; --set presigned=true for real presigned URLs."
+        ),
+        env=env,
+        services=services,
+        depends_on=["minio"],
+        requires_license=False,
+        source="built-in (dynamic)",
+        params_help={
+            "presigned": "browser fetches presigned MinIO URLs (default false; needs /etc/hosts line)",
+            "bucket": "bucket name (default houston-uploads)",
+            "s3_host": ("hostname the BROWSER reaches MinIO on in presigned mode "
+                        "(default 'minio', which needs a hosts entry and only works "
+                        "on this machine)"),
+        },
+        volumes={"minio_data": {"driver": "local"}},
+        ports=list(config.PRESET_PORTS["s3_minio"]),
+        # Both: the Deployment/Services for MinIO, and the Job that creates the
+        # bucket. Without the second, `up` succeeded, MinIO ran, and every upload had
+        # nowhere to land -- see _bucket_job.
+        kubernetes_manifests=[kube, bucket_job],
+        notes=notes,
+    )

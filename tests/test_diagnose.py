@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from rc_repro.services import diagnose
+from houston.services import diagnose
 
 
 def test_match_hub_rate_limit():

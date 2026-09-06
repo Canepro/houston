@@ -14,9 +14,9 @@ from conftest import source_of
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
-from rc_repro import errors  # noqa: E402
-from rc_repro.services import lifecycle as lc  # noqa: E402
-from rc_repro.web.app import create_app  # noqa: E402
+from houston import errors  # noqa: E402
+from houston.services import lifecycle as lc  # noqa: E402
+from houston.web.app import create_app  # noqa: E402
 
 #: Every request now carries a session cookie, so `H` is just the Host header the
 #: allow-list wants. Kept under its old name so the ~90 call sites did not have to
@@ -26,11 +26,11 @@ PASSWORD = "correct-horse-battery"
 
 
 def _fresh_auth_state():
-    from rc_repro.services import sessions as sessionsvc
+    from houston.services import sessions as sessionsvc
     sessionsvc._cache.clear()
     sessionsvc._stamp = (-1, -1)
     sessionsvc._flushed.clear()
-    from rc_repro.web import app as webapp
+    from houston.web import app as webapp
     webapp._signin_fails.clear()
 
 
@@ -40,7 +40,7 @@ def client(host="http://localhost", *, sign_in=True, role=""):
     There is no token mode any more: a session is the only way in, so the default
     client holds one. `sign_in=False` gives the signed-out view.
     """
-    from rc_repro.services import users as usersvc
+    from houston.services import users as usersvc
     _fresh_auth_state()
     if not usersvc.any_users():
         usersvc.add("alice", PASSWORD, role=role or "admin")
@@ -154,7 +154,7 @@ def test_create_returns_job_id(monkeypatch):
 
 
 def test_scale_and_clear_endpoints_are_jobs(monkeypatch):
-    from rc_repro.services import data
+    from houston.services import data
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
     monkeypatch.setattr(data, "run_scale", lambda name, spec, emit=None: {"users": 5})
     monkeypatch.setattr(data, "clear_scale", lambda name, emit=None: {"users": 0})
@@ -166,7 +166,7 @@ def test_scale_and_clear_endpoints_are_jobs(monkeypatch):
 
 
 def test_config_import_plan_upload(monkeypatch, tmp_path):
-    from rc_repro.services import data
+    from houston.services import data
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
     monkeypatch.setattr(lc.runner, "workspace", lambda n: tmp_path)
     monkeypatch.setattr(data, "import_plan",
@@ -184,7 +184,7 @@ def test_config_import_plan_upload(monkeypatch, tmp_path):
 
 
 def test_config_import_uploads_do_not_collide(monkeypatch, tmp_path):
-    from rc_repro.services import data
+    from houston.services import data
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
     monkeypatch.setattr(lc.runner, "workspace", lambda n: tmp_path)
     seen = []
@@ -215,7 +215,7 @@ def test_config_import_apply_requires_prior_upload(monkeypatch, tmp_path):
 
 
 def test_loadtest_endpoint_is_a_job(monkeypatch):
-    from rc_repro.services import perf
+    from houston.services import perf
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
     seen = {}
     monkeypatch.setattr(perf, "run_loadtest",
@@ -230,7 +230,7 @@ def test_loadtest_endpoint_is_a_job(monkeypatch):
 
 
 def test_capacity_and_benchmark_endpoints(monkeypatch):
-    from rc_repro.services import perf
+    from houston.services import perf
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
     monkeypatch.setattr(perf, "run_capacity", lambda req, emit=None: {"capacity_vus": 40})
     monkeypatch.setattr(perf, "run_benchmark", lambda vers, *a, emit=None: {"results": []})
@@ -248,7 +248,7 @@ def test_detail_and_stats_endpoints(monkeypatch):
     assert r.status_code == 200 and r.json()["uptime"] == "2 hours"
     # stats parses docker stats rocketchat rows into cpu + mem_mb
     monkeypatch.setattr(lc.runner, "container_ids", lambda n: ["c1"])
-    monkeypatch.setattr(lc.runner, "docker_stats", lambda ids: "rcrepro-x-rocketchat-1\t120.0%\t900MiB / 8GiB")
+    monkeypatch.setattr(lc.runner, "docker_stats", lambda ids: "houston-x-rocketchat-1\t120.0%\t900MiB / 8GiB")
     r = client().get("/api/repros/x/stats", headers=H)
     j = r.json()
     assert r.status_code == 200 and j["cpu"] == 120.0 and j["mem_mb"] > 900
@@ -265,10 +265,10 @@ def test_stats_answers_a_kubernetes_workspace_over_http(monkeypatch, tmp_path):
 
     Docker must not be reached for it: that was the original defect.
     """
-    from rc_repro import runner as R
-    from rc_repro.services import k8s, topology
+    from houston import runner as R
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     m = R.Metadata(name="k", project="p", rc_version="8.6.1", rc_image="i",
                    mongo_tag="8.0", mongo_flavor="official", preset="default",
                    root_url="u", host_port=3010, version_source="t")
@@ -299,7 +299,7 @@ def test_reading_env_over_http_answers_for_a_kubernetes_workspace(
     A path in a stack trace, for a request that was merely unsupported, while
     `stats` on the same workspace answered cleanly. It then refused with 400, and now
     answers -- read out of the running container, which shows variables the chart
-    contributes that no document rc-repro writes would ever list.
+    contributes that no document houston writes would ever list.
 
     Asserted through real HTTP because 500 versus 400 versus 200 is the whole
     history of this endpoint.
@@ -307,10 +307,10 @@ def test_reading_env_over_http_answers_for_a_kubernetes_workspace(
     import json as _json
     from dataclasses import asdict
 
-    from rc_repro import runner as R
-    from rc_repro.services import k8s, topology
+    from houston import runner as R
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     m = R.Metadata(name="k", project="p", rc_version="8.6.1", rc_image="i",
                    mongo_tag="8.0", mongo_flavor="official", preset="default",
                    root_url="u", host_port=3010, version_source="t")
@@ -343,7 +343,7 @@ def test_an_error_payload_carries_the_stable_code_not_just_the_class_name(monkey
     Asserted through real HTTP for every class in the taxonomy, because the value
     that matters is the one a client actually receives.
     """
-    from rc_repro import errors
+    from houston import errors
 
     cases = [
         (errors.NotFoundError("gone"), 404, "NOT_FOUND"),
@@ -370,12 +370,12 @@ def test_a_gate_tells_the_caller_what_a_human_must_run(monkeypatch):
     a human to run, which is the entire point of a gate -- never left the process.
     A caller could see 403 and had no way to learn what would clear it.
     """
-    from rc_repro import errors
+    from houston import errors
 
     def boom(*_a, **_kw):
         raise errors.AuthorityGateError(
             "the target cluster is not an approved one", kind="cluster",
-            subject="kind-rc-repro", approve_with="rc-repro doctor --approve-cluster kind-rc-repro",
+            subject="kind-houston", approve_with="houston doctor --approve-cluster kind-houston",
             code="GATE_UNAPPROVED_CLUSTER")
     monkeypatch.setattr(lc, "detail", boom)
     r = client().get("/api/repros/x/detail", headers=H)
@@ -383,8 +383,8 @@ def test_a_gate_tells_the_caller_what_a_human_must_run(monkeypatch):
     body = r.json()
     assert body["code"] == "GATE_UNAPPROVED_CLUSTER"
     assert body["code"] in errors.GATE_CODES, "gates are declared, not invented at the call site"
-    assert body["gate"]["approve_with"] == "rc-repro doctor --approve-cluster kind-rc-repro"
-    assert body["gate"]["subject"] == "kind-rc-repro"
+    assert body["gate"]["approve_with"] == "houston doctor --approve-cluster kind-houston"
+    assert body["gate"]["subject"] == "kind-houston"
 
 
 def test_create_only_accepts_known_fields(monkeypatch):
@@ -422,7 +422,7 @@ def test_the_referrer_policy_does_not_null_this_pages_own_origin():
 
     That is survivable while `Sec-Fetch-Site` is present to answer first -- but a
     browser omits `Sec-Fetch-*` for any URL that is not potentially trustworthy,
-    and `rc-repro serve --insecure` on a real hostname is exactly that. The guard
+    and `houston serve --insecure` on a real hostname is exactly that. The guard
     then saw a bare `Origin: null`, could not match it against the allow-list, and
     refused every sign-in and every SPA write as cross-site.
 
@@ -464,7 +464,7 @@ def test_up_endpoint_recreates_a_downed_repro_from_stored_metadata(monkeypatch):
 
 
 def test_config_import_apply_uses_the_previewed_filter(monkeypatch, tmp_path):
-    from rc_repro.services import data
+    from houston.services import data
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
     monkeypatch.setattr(lc.runner, "workspace", lambda n: tmp_path)
     seen = {}
@@ -490,7 +490,7 @@ def test_config_import_apply_uses_the_previewed_filter(monkeypatch, tmp_path):
 
 
 def test_config_import_prunes_stale_uploads(monkeypatch, tmp_path):
-    from rc_repro.services import data
+    from houston.services import data
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
     monkeypatch.setattr(lc.runner, "workspace", lambda n: tmp_path)
     monkeypatch.setattr(data, "import_plan", lambda name, path, only=None: {
@@ -528,7 +528,7 @@ def test_version_preview_warns_about_the_mongo8_kernel_trap(monkeypatch):
 
 
 def test_monitor_endpoint_toggles(monkeypatch):
-    from rc_repro.services import monitor as monitorsvc
+    from houston.services import monitor as monitorsvc
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
     seen = []
     monkeypatch.setattr(monitorsvc, "attach", lambda n, emit=None: seen.append(("attach", n)) or {})
@@ -547,7 +547,7 @@ def test_monitor_endpoint_toggles(monkeypatch):
 def test_jobs_list_carries_label_and_survives_the_dialog(monkeypatch):
     """The activity list is the only way back to a job whose dialog was closed."""
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
-    from rc_repro.services import data
+    from houston.services import data
     monkeypatch.setattr(data, "run_scale", lambda name, spec, emit=None: {"users": 5})
     c = client()
     job_id = c.post("/api/repros/rc8-5-1/scale", headers=H,
@@ -569,7 +569,7 @@ def test_jobs_list_needs_a_session():
 
 
 def test_doctor_endpoint_returns_the_same_report_the_cli_renders(monkeypatch):
-    from rc_repro.services import doctor as doctorsvc
+    from houston.services import doctor as doctorsvc
     monkeypatch.setattr(doctorsvc, "run_checks", lambda **_k: {
         "checks": [{"status": "fail", "message": "Docker daemon not running"}],
         "counts": {"ok": 0, "warn": 0, "fail": 1}, "verdict": "fail", "repros": None})
@@ -587,10 +587,10 @@ def test_the_browser_report_drops_what_the_browser_already_shows(monkeypatch):
     browser those made a diagnostic mostly a summary of the window around it.
 
     The CLI keeps them: a terminal has no chip, no user list and no rail, so
-    `rc-repro doctor` is the only place they are ever said. That asymmetry is the
+    `houston doctor` is the only place they are ever said. That asymmetry is the
     whole point, so it is asserted from both ends.
     """
-    from rc_repro.services import doctor as doctorsvc
+    from houston.services import doctor as doctorsvc
     full = {
         "checks": [
             {"status": "ok", "message": "Docker daemon running"},
@@ -613,8 +613,8 @@ def test_the_browser_report_drops_what_the_browser_already_shows(monkeypatch):
 def test_the_cli_report_keeps_every_row(monkeypatch, capsys):
     from typer.testing import CliRunner
 
-    from rc_repro import cli
-    from rc_repro.services import doctor as doctorsvc
+    from houston import cli
+    from houston.services import doctor as doctorsvc
     monkeypatch.setattr(doctorsvc, "run_checks", lambda **_k: {
         "checks": [{"status": "ok", "message": "3 GUI account(s), admin: lovekesh",
                     "elsewhere": "the People page"}],
@@ -628,16 +628,16 @@ def test_doctor_endpoint_needs_a_session():
 
 
 def test_set_default_endpoint(monkeypatch, tmp_path):
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
     r = client().post("/api/repros/rc8-5-1/default", headers=H)
     assert r.status_code == 200 and r.json()["default"] == "rc8-5-1"
-    from rc_repro import config
+    from houston import config
     assert config.load_config()["default_repro"] == "rc8-5-1"
 
 
 def test_pat_endpoint_maps_a_failure_to_not_ready(monkeypatch):
-    from rc_repro import rcapi, runner as runner_mod
+    from houston import rcapi, runner as runner_mod
     monkeypatch.setattr(lc, "require_docker", lambda: None)
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
     monkeypatch.setattr(runner_mod, "read_meta",
@@ -656,7 +656,7 @@ def test_pat_endpoint_maps_a_failure_to_not_ready(monkeypatch):
 
 def _stub_call_target(monkeypatch):
     """Wire up /call's dependencies except rcapi.call, which each test sets."""
-    from rc_repro import runner as runner_mod
+    from houston import runner as runner_mod
     monkeypatch.setattr(lc, "require_docker", lambda: None)
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
     monkeypatch.setattr(runner_mod, "read_meta",
@@ -666,7 +666,7 @@ def _stub_call_target(monkeypatch):
 
 
 def test_api_call_endpoint_relays_the_response(monkeypatch):
-    from rc_repro import rcapi
+    from houston import rcapi
     _stub_call_target(monkeypatch)
     seen = {}
 
@@ -695,7 +695,7 @@ def test_api_call_reports_a_rocketchat_error_as_a_result_not_a_failure(monkeypat
     Mapping it onto the endpoint's own status would have surfaced it as a red
     toast with no body -- exactly the detail needed to see WHY it was refused.
     """
-    from rc_repro import rcapi
+    from houston import rcapi
     _stub_call_target(monkeypatch)
     monkeypatch.setattr(rcapi, "call",
                         lambda *a, **k: (403, '{"error":"unauthorized"}'))
@@ -705,7 +705,7 @@ def test_api_call_reports_a_rocketchat_error_as_a_result_not_a_failure(monkeypat
 
 
 def test_api_call_uses_a_pat_and_the_2fa_header_when_asked(monkeypatch):
-    from rc_repro import rcapi
+    from houston import rcapi
     _stub_call_target(monkeypatch)
     monkeypatch.setattr(rcapi, "generate_pat", lambda *a, **k: "pat_xyz")
     seen = {}
@@ -724,7 +724,7 @@ def test_api_call_uses_a_pat_and_the_2fa_header_when_asked(monkeypatch):
 
 
 def test_api_call_rejects_bad_input_before_touching_the_workspace(monkeypatch):
-    from rc_repro import rcapi
+    from houston import rcapi
     _stub_call_target(monkeypatch)
     monkeypatch.setattr(rcapi, "call", lambda *a, **k: pytest.fail("should not have been called"))
     post = lambda body: client().post("/api/repros/x/call", headers=H, json=body)  # noqa: E731
@@ -744,7 +744,7 @@ def test_api_call_cannot_be_pointed_at_another_host(monkeypatch):
     """
     from urllib.parse import urlparse
 
-    from rc_repro import rcapi
+    from houston import rcapi
     _stub_call_target(monkeypatch)
     seen = []
     monkeypatch.setattr(rcapi, "call",
@@ -763,7 +763,7 @@ def test_api_call_cannot_be_pointed_at_another_host(monkeypatch):
 def test_api_call_maps_a_dead_workspace_to_not_ready(monkeypatch):
     import requests
 
-    from rc_repro import rcapi
+    from houston import rcapi
     _stub_call_target(monkeypatch)
 
     def boom(*a, **k):
@@ -785,8 +785,8 @@ def test_tls_endpoint_probes_this_host_not_the_public_name(monkeypatch):
     repro's own while its Traefik had none. It dials 127.0.0.1 with the domain as
     SNI, and reports the public name separately.
     """
-    from rc_repro import runner as runner_mod
-    from rc_repro import tls as tlsmod
+    from houston import runner as runner_mod
+    from houston import tls as tlsmod
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
     meta = runner_mod.Metadata(
         name="t", project="p", rc_version="8.4.2", rc_image="i", mongo_tag="8.0",
@@ -821,7 +821,7 @@ def test_tls_endpoint_probes_this_host_not_the_public_name(monkeypatch):
 
 
 def test_tls_endpoint_refuses_a_repro_without_https(monkeypatch):
-    from rc_repro import runner as runner_mod
+    from houston import runner as runner_mod
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
     monkeypatch.setattr(runner_mod, "read_meta", lambda n: runner_mod.Metadata(
         name="t", project="p", rc_version="8.4.2", rc_image="i", mongo_tag="8.0",
@@ -837,7 +837,7 @@ def test_tls_endpoint_needs_a_session():
 
 def test_env_endpoints(monkeypatch):
     """GET reports the effective env; POST is a job because the recreate is slow."""
-    from rc_repro.services import envvars as envsvc
+    from houston.services import envvars as envsvc
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
     monkeypatch.setattr(envsvc, "current", lambda n: {
         "name": n, "overrides": ["MY"],
@@ -881,7 +881,7 @@ def test_env_post_keeps_settings_and_plain_vars_apart(monkeypatch):
     OVERWRITE_SETTING_, a plain env var only works without it — so the rule lives in
     one place and every front-end gets it.
     """
-    from rc_repro.services import envvars as envsvc
+    from houston.services import envvars as envsvc
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
     seen = {}
     monkeypatch.setattr(envsvc, "set_env",
@@ -912,7 +912,7 @@ def test_static_assets_must_revalidate_so_an_upgrade_is_not_masked():
     """StaticFiles sends ETag/Last-Modified but no Cache-Control.
 
     With no freshness directive a browser may reuse a cached copy WITHOUT
-    revalidating (heuristic freshness, RFC 9111 4.2.2), so after upgrading rc-repro
+    revalidating (heuristic freshness, RFC 9111 4.2.2), so after upgrading houston
     the old app.js keeps running and new UI simply is not there — which looks
     exactly like a missing feature. `no-cache` means "revalidate first", not
     "don't store", so the ETag still answers 304.
@@ -941,7 +941,7 @@ def test_static_assets_must_revalidate_so_an_upgrade_is_not_masked():
 
 def test_backup_is_a_job_and_passes_its_note_through(monkeypatch):
     """`label` is JobManager's own keyword, so the note travels as `note`."""
-    from rc_repro.services import backup as bk
+    from houston.services import backup as bk
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
     seen = {}
     monkeypatch.setattr(bk, "create",
@@ -956,7 +956,7 @@ def test_backup_is_a_job_and_passes_its_note_through(monkeypatch):
 
 
 def test_backups_list_and_delete(monkeypatch):
-    from rc_repro.services import backup as bk
+    from houston.services import backup as bk
     monkeypatch.setattr(bk, "list_backups", lambda name="": [{"path": "/a.rcbak"}])
     r = client().get("/api/backups", headers=H)
     assert r.status_code == 200 and r.json()["backups"] == [{"path": "/a.rcbak"}]
@@ -969,13 +969,13 @@ def test_backups_list_and_delete(monkeypatch):
 def test_compatibility_is_answerable_before_committing(monkeypatch):
     """The restore dialog enables its button from this, so a downgrade is refused
     while the user is still choosing rather than after a job has started."""
-    from rc_repro.services import backup as bk
+    from houston.services import backup as bk
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
     monkeypatch.setattr(bk, "read_manifest", lambda b: {"rc_version": "8.5.1"})
     monkeypatch.setattr(bk, "compatibility",
                         lambda m, meta: {"allowed": False,
                                          "blocked_reason": "downgrade"})
-    import rc_repro.web.app as appmod
+    import houston.web.app as appmod
     monkeypatch.setattr(appmod.runner, "read_meta", lambda n: object())
     # A bundle NAME, resolved inside the managed directory -- which is what the GUI
     # sends. `/a.rcbak` used to work here and is now refused: the read side of the
@@ -1006,7 +1006,7 @@ def test_the_rollback_route_confines_its_bundle_like_the_other_two(monkeypatch):
     helper's own docstring describes, readable back from `GET /api/jobs/{id}` at
     readonly+.
     """
-    import rc_repro.web.app as appmod
+    import houston.web.app as appmod
 
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
     r = client().post("/api/repros/x/upgrade/rollback", headers=H,
@@ -1033,7 +1033,7 @@ def test_one_members_job_output_is_not_readable_by_another(monkeypatch):
     `logs`, `env`, `pat` and `api` is credentials."""
     import time as _time
 
-    from rc_repro.services import users as usersvc
+    from houston.services import users as usersvc
 
     _fresh_auth_state()
     usersvc.add("alice", PASSWORD, role="admin")
@@ -1080,7 +1080,7 @@ def test_compatibility_and_restore_need_a_bundle():
 
 
 def test_restore_is_a_job_carrying_its_flags(monkeypatch):
-    from rc_repro.services import backup as bk
+    from houston.services import backup as bk
     seen = {}
     monkeypatch.setattr(bk, "restore",
                         lambda bundle, name="", new=False, allow_upgrade=False,
@@ -1102,7 +1102,7 @@ def test_restore_is_a_job_carrying_its_flags(monkeypatch):
 def test_upgrade_gate_is_a_server_decision(monkeypatch):
     """A stopped workspace reports can_upgrade=false with the reason, so the GUI
     can hide the action instead of offering one that would fail."""
-    from rc_repro.services import upgrade as upsvc
+    from houston.services import upgrade as upsvc
     monkeypatch.setattr(upsvc, "can_upgrade",
                         lambda n: {"can_upgrade": False, "reason": "'x' is exited",
                                    "current": ""})
@@ -1113,7 +1113,7 @@ def test_upgrade_gate_is_a_server_decision(monkeypatch):
 
 
 def test_upgrade_plan_is_only_resolved_for_a_running_repro(monkeypatch):
-    from rc_repro.services import upgrade as upsvc
+    from houston.services import upgrade as upsvc
     monkeypatch.setattr(upsvc, "can_upgrade",
                         lambda n: {"can_upgrade": True, "reason": "", "current": "8.5.1"})
     monkeypatch.setattr(upsvc, "plan",
@@ -1129,7 +1129,7 @@ def test_upgrade_post_requires_a_target_version(monkeypatch):
 
 
 def test_upgrade_and_rollback_are_jobs(monkeypatch):
-    from rc_repro.services import upgrade as upsvc
+    from houston.services import upgrade as upsvc
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
     seen = {}
     monkeypatch.setattr(upsvc, "run",
@@ -1179,7 +1179,7 @@ def test_benchmark_rejects_versions_that_are_not_strings():
 
 
 def test_benchmark_still_accepts_a_list_or_a_csv_string(monkeypatch):
-    from rc_repro.services import perf as perfsvc
+    from houston.services import perf as perfsvc
     seen = []
     monkeypatch.setattr(perfsvc, "run_benchmark",
                         lambda v, p, o, np, emit=None: seen.append(list(v)) or {})
@@ -1203,12 +1203,12 @@ def test_settings_says_whether_an_email_is_remembered_without_leaking_it(monkeyp
     """The create dialog's email field is optional only if one is remembered.
 
     The placeholder used to say "leave blank, it is remembered" -- true for someone
-    who ran `rc-repro config set acme.email`, false for everyone else, and the GUI
+    who ran `houston config set acme.email`, false for everyone else, and the GUI
     has no way to set it. A blank field then produced a job that failed on a value
     the form had called optional.
     """
-    from rc_repro import config as cfgmod
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from houston import config as cfgmod
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     c = client()
     body = c.get("/api/settings", headers=H).json()
     # The point of this test is the ABSENCE of the address, so assert that rather
@@ -1237,8 +1237,8 @@ def test_settings_reports_the_boxs_default_bind_host(monkeypatch, tmp_path):
 
     An interface, not a credential -- `up` prints it on every create.
     """
-    from rc_repro import config as cfgmod
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from houston import config as cfgmod
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     c = client()
     assert c.get("/api/settings", headers=H).json()["default_bind_host"] == "127.0.0.1"
     cfgmod.update_config(lambda cfg: cfg.__setitem__("bind_host", "0.0.0.0"))
@@ -1268,19 +1268,19 @@ def _auth(user=None, password=None):
 
 
 def _reset_auth_state():
-    from rc_repro.services import sessions as sessionsvc
+    from houston.services import sessions as sessionsvc
     sessionsvc._cache.clear()
     sessionsvc._stamp = (-1, -1)
     sessionsvc._flushed.clear()
-    from rc_repro.web import app as webapp
+    from houston.web import app as webapp
     webapp._signin_fails.clear()
 
 
 @pytest.fixture
 def anon_client(tmp_path, monkeypatch):
     """An accounts-mode app with nobody signed in."""
-    from rc_repro.services import users as usersvc
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from houston.services import users as usersvc
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     _reset_auth_state()
     usersvc.add("alice", "correct-horse-battery")
     yield TestClient(create_app(), base_url="http://localhost")
@@ -1338,19 +1338,19 @@ def test_the_sign_in_page_is_rendered_in_the_theme_the_browser_is_using(anon_cli
     h = {"Host": "localhost"}
     assert "data-theme" not in anon_client.get("/signin", headers=h).text
 
-    anon_client.cookies.set("rc_repro_theme", "dark")
+    anon_client.cookies.set("houston_theme", "dark")
     assert '<html lang="en" data-theme="dark">' in anon_client.get("/signin", headers=h).text
-    anon_client.cookies.set("rc_repro_theme", "light")
+    anon_client.cookies.set("houston_theme", "light")
     assert '<html lang="en" data-theme="light">' in anon_client.get("/signin", headers=h).text
 
     # The value lands in the document, and a cookie is attacker-settable. Anything
     # that is not one of the two literals yields no attribute at all.
     for junk in ('dark"><script>alert(1)</script>', "DARK", "", "; --bg: red"):
-        anon_client.cookies.set("rc_repro_theme", junk)
+        anon_client.cookies.set("houston_theme", junk)
         body = anon_client.get("/signin", headers=h).text
         assert "data-theme" not in body, junk
         assert "<script>" not in body, junk
-    anon_client.cookies.delete("rc_repro_theme")
+    anon_client.cookies.delete("houston_theme")
 
 
 def test_signing_in_sets_a_session_cookie_and_admits(anon_client, monkeypatch):
@@ -1359,7 +1359,7 @@ def test_signing_in_sets_a_session_cookie_and_admits(anon_client, monkeypatch):
                          data={"user": "alice", "password": "correct-horse-battery"})
     assert r.status_code == 303 and r.headers["location"] == "/"
     cookie = r.headers["set-cookie"]
-    assert "rc_repro_session=" in cookie
+    assert "houston_session=" in cookie
     assert "HttpOnly" in cookie and "SameSite=lax" in cookie.replace("samesite", "SameSite")
     assert anon_client.get("/api/repros", headers=_auth()).status_code == 200
 
@@ -1367,8 +1367,8 @@ def test_signing_in_sets_a_session_cookie_and_admits(anon_client, monkeypatch):
 def test_the_cookie_is_host_prefixed_and_secure_only_when_the_browser_hop_is_https(tmp_path, monkeypatch):
     """__Host- requires Secure, and http://localhost cannot have it -- so the name
     is decided by the transport, and exactly one name is live per scheme."""
-    from rc_repro.services import users as usersvc
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from houston.services import users as usersvc
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     _reset_auth_state()
     usersvc.add("alice", "correct-horse-battery")
     c = TestClient(create_app(public_https=True),
@@ -1376,7 +1376,7 @@ def test_the_cookie_is_host_prefixed_and_secure_only_when_the_browser_hop_is_htt
     r = c.post("/signin", follow_redirects=False,
                data={"user": "alice", "password": "correct-horse-battery"})
     assert r.status_code == 303
-    assert "__Host-rc_repro_session=" in r.headers["set-cookie"]
+    assert "__Host-houston_session=" in r.headers["set-cookie"]
     assert "Secure" in r.headers["set-cookie"]
     _reset_auth_state()
 
@@ -1434,7 +1434,7 @@ def test_your_sessions_can_be_listed_and_revoked_individually(basic_client):
 
 def test_a_malformed_session_cookie_does_not_crash(anon_client):
     for bad in ("", "!!!", "x" * 5000, "a.b.c"):
-        anon_client.cookies.set("rc_repro_session", bad)
+        anon_client.cookies.set("houston_session", bad)
         r = anon_client.get("/api/repros", headers={"Host": "localhost"})
         assert r.status_code == 401, bad
     anon_client.cookies.clear()
@@ -1443,8 +1443,8 @@ def test_a_malformed_session_cookie_does_not_crash(anon_client):
 def test_a_password_change_ends_every_session_it_minted(basic_client, monkeypatch):
     """Changing a compromised password must not leave the intruder signed in for
     the next seven days."""
-    from rc_repro.services import sessions as sessionsvc
-    from rc_repro.services import users as usersvc
+    from houston.services import sessions as sessionsvc
+    from houston.services import users as usersvc
     monkeypatch.setattr(lc, "list_repros", lambda: [])
     assert basic_client.get("/api/repros", headers=_auth()).status_code == 200
     # set_password does the revoking ITSELF now. This used to read
@@ -1468,7 +1468,7 @@ def test_the_sign_in_endpoint_is_throttled_per_address(anon_client, monkeypatch)
     refusing correct passwords too (that was B2), but a login endpoint can decline
     to spend the CPU at all. Keyed on the ADDRESS, so nobody can throttle a
     colleague by guessing at their name."""
-    from rc_repro.web import app as webapp
+    from houston.web import app as webapp
     for _ in range(webapp.SIGNIN_MAX_FAILURES):
         anon_client.post("/signin", data={"user": "alice", "password": "nope-nope-nope"},
                          follow_redirects=False)
@@ -1504,7 +1504,7 @@ def test_the_audit_log_survives_a_restart(basic_client, monkeypatch, tmp_path):
                         lambda req, emit, stream_output=False: {"name": "x"})
     basic_client.post("/api/repros", headers=_auth("alice", "correct-horse-battery"),
                       json={"version": "8.5.1"})
-    from rc_repro.web.jobs import AUDIT_FILE
+    from houston.web.jobs import AUDIT_FILE
     # Account changes are audited too now, so pick the line under test rather
     # than assuming the file has exactly one.
     lines = [ln for ln in (tmp_path / AUDIT_FILE).read_text().splitlines()
@@ -1520,8 +1520,8 @@ def test_the_audit_log_survives_a_restart(basic_client, monkeypatch, tmp_path):
 
 
 def test_an_unwritable_audit_log_does_not_break_the_job(monkeypatch):
-    from rc_repro import config as cfgmod
-    from rc_repro.web import jobs as jobs_mod
+    from houston import config as cfgmod
+    from houston.web import jobs as jobs_mod
     # audit() imports config lazily, so patch the source module, not jobs.
     monkeypatch.setattr(cfgmod, "home",
                         lambda: Path("/proc/definitely-not-writable"))
@@ -1677,7 +1677,7 @@ def test_a_backup_cannot_be_written_outside_the_managed_directory(basic_client, 
 
 
 def test_a_backup_inside_the_managed_directory_is_allowed(basic_client, monkeypatch, tmp_path):
-    from rc_repro.services import backup as backupsvc
+    from houston.services import backup as backupsvc
 
     creds = _auth("alice", "correct-horse-battery")
     monkeypatch.setattr(lc, "resolve_name", lambda n, actor="": n)
@@ -1700,7 +1700,7 @@ def test_shutdown_waits_for_a_running_job():
     skip every `finally`, and `Restart=always` makes that routine."""
     import time as _t
 
-    from rc_repro.web.jobs import JobManager
+    from houston.web.jobs import JobManager
 
     jobs = JobManager()
     cleaned = []
@@ -1725,7 +1725,7 @@ def test_shutdown_is_bounded_and_names_what_it_abandoned():
     import threading
     import time as _t
 
-    from rc_repro.web.jobs import JobManager
+    from houston.web.jobs import JobManager
 
     jobs = JobManager()
     release = threading.Event()
@@ -1737,8 +1737,8 @@ def test_shutdown_is_bounded_and_names_what_it_abandoned():
 
 
 def test_new_work_is_refused_once_shutting_down():
-    from rc_repro.errors import ConflictError
-    from rc_repro.web.jobs import JobManager
+    from houston.errors import ConflictError
+    from houston.web.jobs import JobManager
 
     jobs = JobManager()
     jobs.drain(timeout=0)
@@ -1771,7 +1771,7 @@ def test_edge_endpoint_reports_each_route_and_whether_it_is_reachable(
         basic_client, monkeypatch):
     """A route the edge cannot reach answers 502 rather than erroring -- the one
     failure nothing else in the UI would surface."""
-    from rc_repro.services import edge as edgesvc
+    from houston.services import edge as edgesvc
 
     edgesvc.write(edgesvc.Edge(domain="gui.example.com", acme_email="o@e.com"))
     monkeypatch.setattr(edgesvc, "_docker", lambda *a, **k: type(
@@ -1805,7 +1805,7 @@ def test_a_passthrough_route_is_not_reported_unreachable(basic_client, monkeypat
     detail panel said "The edge cannot reach this workspace ... the edge is not on
     this workspace's network" -- about a name that worked.
     """
-    from rc_repro.services import edge as edgesvc
+    from houston.services import edge as edgesvc
 
     edgesvc.write(edgesvc.Edge(domain="gui.example.com", acme_email="o@e.com"))
     monkeypatch.setattr(edgesvc, "_docker", lambda *a, **k: type(
@@ -1860,7 +1860,7 @@ def test_every_api_route_declares_a_minimum_role():
     gap -- added in one place, not registered in the other -- so it fails the
     build rather than waiting to be noticed.
     """
-    from rc_repro.web import app as webapp
+    from houston.web import app as webapp
     app = create_app()
     missing = []
     for route in app.routes:
@@ -1884,7 +1884,7 @@ def test_allow_host_star_does_not_also_trust_every_origin():
     docstring records a forged `Origin: https://evil.example` streaming a workspace's
     container log, LDAP bind passwords included.
     """
-    from rc_repro.services import users as usersvc
+    from houston.services import users as usersvc
 
     _fresh_auth_state()
     usersvc.add("alice", PASSWORD, role="admin")
@@ -1923,7 +1923,7 @@ def test_the_throttle_key_is_the_rightmost_untrusted_hop():
     LEFT of the list is attacker-written. Taking `[0]` gave every request its own
     rate-limit key, and the sign-in throttle -- the only thing bounding password
     guessing, because scrypt is spent at the endpoint -- never tripped."""
-    from rc_repro.web import app as webapp
+    from houston.web import app as webapp
 
     trusted = webapp.parse_trusted(["10.0.0.0/8"])
     # client -> proxy(10.0.0.5) -> us. The client's own claim is on the left.
@@ -1943,7 +1943,7 @@ def test_the_signin_throttle_is_not_reset_wholesale_by_a_flood():
     """It `.clear()`ed the whole map past 4096 keys, so a flood from throwaway
     addresses erased the counter it was tripping -- including the failures bounding
     a real attempt against a real account."""
-    from rc_repro.web import app as webapp
+    from houston.web import app as webapp
 
     webapp._signin_fails.clear()
     # The flood comes first, so the victim is NEWER than most of it. Under `.clear()`
@@ -1980,7 +1980,7 @@ def test_every_websocket_handler_actually_enforces_its_table_entry():
 
     from starlette.routing import WebSocketRoute
 
-    from rc_repro.web import app as webapp
+    from houston.web import app as webapp
 
     app = create_app()
     unenforced, checked = [], 0
@@ -2006,7 +2006,7 @@ def test_every_websocket_handler_actually_enforces_its_table_entry():
 
 
 def test_a_readonly_user_may_look_but_not_touch(basic_client, monkeypatch):
-    from rc_repro.services import users as usersvc
+    from houston.services import users as usersvc
     monkeypatch.setattr(lc, "list_repros", lambda: [])
     usersvc.add("ronly", "read-only-password", role="readonly")
     _as(basic_client, "ronly", "read-only-password")
@@ -2022,7 +2022,7 @@ def test_a_readonly_user_may_look_but_not_touch(basic_client, monkeypatch):
 def test_a_readonly_user_cannot_read_logs_or_env(basic_client, monkeypatch):
     """Not an oversight. A workspace log carries LDAP bind passwords and OAuth
     client secrets, so "read-only" cannot mean "may read those"."""
-    from rc_repro.services import users as usersvc
+    from houston.services import users as usersvc
     usersvc.add("ronly", "read-only-password", role="readonly")
     _as(basic_client, "ronly", "read-only-password")
     assert basic_client.get("/api/repros/x/logs", headers=_auth()).status_code == 403
@@ -2032,7 +2032,7 @@ def test_a_readonly_user_cannot_read_logs_or_env(basic_client, monkeypatch):
 def test_a_member_cannot_delete_a_name_from_the_shared_edge(basic_client):
     """A member creates and destroys their OWN workspaces; the box's shared front
     door is not theirs to edit -- and this one deletes a private key."""
-    from rc_repro.services import users as usersvc
+    from houston.services import users as usersvc
     usersvc.add("bob", "bobs-good-password", role="member")
     _as(basic_client, "bob", "bobs-good-password")
     r = basic_client.delete("/api/edge/hosts/x.example.org?confirm=true",
@@ -2044,7 +2044,7 @@ def test_deleting_an_edge_name_without_confirm_is_a_400_not_a_deletion(basic_cli
                                                                       tmp_path):
     """`confirm` is a parameter, not an assumption. A request that forgets it must
     get told what it would have destroyed, not have it destroyed."""
-    from rc_repro.services import edge as edgesvc
+    from houston.services import edge as edgesvc
     edgesvc.write(edgesvc.Edge(acme_email="ops@xyz.com"))
     edgesvc.register("x", "x.example.org", local=True)
     edgesvc.issue_local_cert("x.example.org")
@@ -2063,7 +2063,7 @@ def test_deleting_an_edge_name_without_confirm_is_a_400_not_a_deletion(basic_cli
 
 def test_a_refusal_from_the_edge_delete_becomes_its_status(basic_client):
     """The `ReproError` -> http_status contract, on the newest route."""
-    from rc_repro.services import edge as edgesvc
+    from houston.services import edge as edgesvc
     edgesvc.write(edgesvc.Edge(domain="support.xyz.com", acme_email="ops@xyz.com"))
     r = basic_client.delete("/api/edge/hosts/support.xyz.com?confirm=true",
                             headers=_auth())
@@ -2076,8 +2076,8 @@ def test_the_edge_payload_names_certificates_with_no_route(basic_client):
     operator handed `serve` and no shell has no other way to see it."""
     import json as _json
 
-    from rc_repro import tls
-    from rc_repro.services import edge as edgesvc
+    from houston import tls
+    from houston.services import edge as edgesvc
     edgesvc.write(edgesvc.Edge(acme_email="ops@xyz.com"))
     edgesvc.register("live", "live.example.org", local=True)
     tls.acme_dir().mkdir(parents=True, exist_ok=True)
@@ -2091,7 +2091,7 @@ def test_the_edge_payload_names_certificates_with_no_route(basic_client):
 
 
 def test_a_member_cannot_manage_people(basic_client, monkeypatch):
-    from rc_repro.services import users as usersvc
+    from houston.services import users as usersvc
     usersvc.add("bob", "bobs-good-password", role="member")
     _as(basic_client, "bob", "bobs-good-password")
     assert basic_client.get("/api/users", headers=_auth()).status_code == 403
@@ -2127,7 +2127,7 @@ def test_a_blank_role_resolves_to_admin_over_http(basic_client):
     """The upgrade path: every account created before roles existed has a blank
     column. If blank did not mean admin, an install whose only account predates
     this would have zero admins and no way to make one."""
-    from rc_repro.services import users as usersvc
+    from houston.services import users as usersvc
     # A line written the way a version before roles did it: no role column.
     stored = usersvc._read()
     stored["legacy"] = (usersvc.hash_password("legacy-password-here"), "2026-01-01", "")
@@ -2139,8 +2139,8 @@ def test_a_blank_role_resolves_to_admin_over_http(basic_client):
 
 
 def test_changing_a_role_ends_that_users_sessions(basic_client):
-    from rc_repro.services import sessions as sessionsvc
-    from rc_repro.services import users as usersvc
+    from houston.services import sessions as sessionsvc
+    from houston.services import users as usersvc
     usersvc.add("bob", "bobs-good-password", role="member")
     token = sessionsvc.create("bob")
     assert sessionsvc.verify(token) is not None
@@ -2162,8 +2162,8 @@ def test_only_an_admin_may_choose_the_image_or_the_interface(basic_client, monke
     narrowed `gui.create_policy`, which is what this sets up. See
     test_a_member_may_set_the_image_and_bind_by_default.
     """
-    from rc_repro import config as cfgmod
-    from rc_repro.services import users as usersvc
+    from houston import config as cfgmod
+    from houston.services import users as usersvc
     monkeypatch.setattr(lc, "require_docker", lambda: None)
     cfgmod.update_config(lambda c: c.__setitem__(lc.CREATE_POLICY_KEY, "admin"))
     usersvc.add("bob", "bobs-good-password", role="member")
@@ -2189,7 +2189,7 @@ def test_a_member_may_still_choose_a_host_port(basic_client, monkeypatch):
     """The privileged range this might have guarded — 80 or 443, squatted out from
     under the edge — is refused for EVERYBODY by lifecycle's 1024-65535 check, admin
     included. So the role check protected nothing."""
-    from rc_repro.services import users as usersvc
+    from houston.services import users as usersvc
     monkeypatch.setattr(lc, "require_docker", lambda: None)
     monkeypatch.setattr(lc, "create_repro", lambda req, **kw: {"name": "x"})
     usersvc.add("bob", "bobs-good-password", role="member")
@@ -2218,7 +2218,7 @@ def test_the_audit_log_can_finally_be_read(basic_client, monkeypatch):
 def test_a_non_admin_only_ever_sees_their_own_lines(basic_client):
     """Self-audit rather than admin-only: "wait, did I do that?" is a legitimate
     question, and a 403 there teaches people the log is not for them."""
-    from rc_repro.services import users as usersvc
+    from houston.services import users as usersvc
     usersvc.add("bob", "bobs-good-password", role="member")
     # alice (admin) generates a line of her own
     basic_client.post("/api/users/bob/role", json={"role": "member"}, headers=_auth())
@@ -2231,7 +2231,7 @@ def test_a_non_admin_only_ever_sees_their_own_lines(basic_client):
 def test_a_refusal_is_recorded_so_the_role_lines_can_be_reviewed(basic_client):
     """Whether `readonly` is drawn in the right place is an open question in the
     design; `grep denied` is the evidence to settle it with."""
-    from rc_repro.services import users as usersvc
+    from houston.services import users as usersvc
     usersvc.add("ronly", "read-only-password", role="readonly")
     _as(basic_client, "ronly", "read-only-password")
     assert basic_client.post("/api/repros", json={"version": "8.5.1"},
@@ -2245,7 +2245,7 @@ def test_minting_a_token_is_audited_at_the_one_place_all_callers_pass_through():
     """generate_pat has eight non-test call sites, so a fix at one handler would
     have missed six -- and a bypass-2FA admin token is one of the two most
     sensitive things this tool can do."""
-    from rc_repro import rcapi
+    from houston import rcapi
     src = source_of(rcapi.generate_pat)
     assert "auditsvc.record(\"pat\"" in src
 
@@ -2253,8 +2253,8 @@ def test_minting_a_token_is_audited_at_the_one_place_all_callers_pass_through():
 def test_a_legacy_four_field_line_still_parses(tmp_path, monkeypatch):
     """The two new columns are APPENDED, so an old log stays readable rather than
     being silently skipped by the reader that was supposed to make it useful."""
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    from rc_repro.services import audit as auditsvc
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    from houston.services import audit as auditsvc
     auditsvc.audit_path().parent.mkdir(parents=True, exist_ok=True)
     auditsvc.audit_path().write_text(
         "2026-01-01T00:00:00+00:00\talice\tdown-volumes\tticket-1234\n", encoding="utf-8")
@@ -2266,8 +2266,8 @@ def test_a_legacy_four_field_line_still_parses(tmp_path, monkeypatch):
 # --- first run (D8): creating the very first account ------------------------------
 
 def _first_run_client(tmp_path, monkeypatch):
-    from rc_repro.services import firstrun as frsvc
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from houston.services import firstrun as frsvc
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     _fresh_auth_state()
     key = frsvc.mint()
     return TestClient(create_app(first_run=True), base_url="http://localhost"), key
@@ -2282,7 +2282,7 @@ def test_the_first_account_is_created_by_spending_the_key(tmp_path, monkeypatch)
     r = c.post("/api/session/first-run", headers=H,
                json={"key": key, "user": "alice", "password": "alice-good-password"})
     assert r.status_code == 200 and r.json() == {"user": "alice", "role": "admin"}
-    assert "rc_repro_session=" in r.headers["set-cookie"]
+    assert "houston_session=" in r.headers["set-cookie"]
     assert c.get("/api/session", headers=H).json()["role"] == "admin"
 
 
@@ -2299,7 +2299,7 @@ def test_the_key_is_single_use_and_setup_disappears_with_it(tmp_path, monkeypatc
 
 
 def test_a_wrong_key_creates_nothing(tmp_path, monkeypatch):
-    from rc_repro.services import users as usersvc
+    from houston.services import users as usersvc
     c, _key = _first_run_client(tmp_path, monkeypatch)
     r = c.post("/api/session/first-run", headers=H,
                json={"key": "not-the-key", "user": "eve", "password": "eves-good-password"})
@@ -2310,7 +2310,7 @@ def test_a_wrong_key_creates_nothing(tmp_path, monkeypatch):
 def test_setup_is_closed_when_the_flow_was_never_opened(tmp_path, monkeypatch):
     """`serve` sets first_run only on a loopback bind with no accounts. Anywhere
     else these must not exist at all."""
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     _fresh_auth_state()
     c = TestClient(create_app(first_run=False), base_url="http://localhost")
     assert c.get("/setup", headers=H).status_code == 404
@@ -2322,11 +2322,11 @@ def test_setup_is_closed_when_the_flow_was_never_opened(tmp_path, monkeypatch):
 
 def _workspace(name, owner, tmp_path):
     """A workspace record on disk, owned by somebody."""
-    from rc_repro import runner
+    from houston import runner
     ws = runner.workspace(name)
     ws.mkdir(parents=True, exist_ok=True)
     (ws / "docker-compose.yml").write_text("services: {}\n")
-    meta = runner.Metadata(name=name, project=f"rcrepro-{name}", rc_version="8.5.1",
+    meta = runner.Metadata(name=name, project=f"houston-{name}", rc_version="8.5.1",
                            rc_image="i", mongo_tag="8.0", mongo_flavor="official",
                            preset="default", root_url="http://localhost:3000",
                            host_port=3000, version_source="map",
@@ -2341,8 +2341,8 @@ def test_handing_over_moves_the_owner_and_keeps_who_made_it(basic_client, tmp_pa
     """Who CREATED it is a fact about the past and stays; who is responsible for
     it today is what a handover changes. Before this, "belongs to alice" kept
     warning bob about data that had been his for a week."""
-    from rc_repro.services import users as usersvc
-    from rc_repro import runner
+    from houston.services import users as usersvc
+    from houston import runner
     usersvc.add("bob", "bobs-good-password", role="member")
     _workspace("t4471", "alice", tmp_path)
     r = basic_client.post("/api/repros/t4471/owner", json={"to": "bob"}, headers=_auth())
@@ -2363,7 +2363,7 @@ def test_you_cannot_hand_a_workspace_to_somebody_who_cannot_sign_in(basic_client
 def test_a_member_cannot_destroy_somebody_elses_workspace(basic_client, tmp_path, monkeypatch):
     """§3.3's guardrail was a confirm dialog, which stops being a guardrail around
     the twentieth time you click through it for your own workspaces."""
-    from rc_repro.services import users as usersvc
+    from houston.services import users as usersvc
     monkeypatch.setattr(lc, "require_docker", lambda: None)
     usersvc.add("bob", "bobs-good-password", role="member")
     _workspace("alices-box", "alice", tmp_path)
@@ -2377,7 +2377,7 @@ def test_a_member_cannot_destroy_somebody_elses_workspace(basic_client, tmp_path
 def test_help_on_a_colleagues_workspace_stays_open(basic_client, tmp_path, monkeypatch):
     """Only DESTRUCTION is gated. Covering somebody's ticket is the workflow this
     exists for, so start/stop/logs/seed on their workspace stay allowed."""
-    from rc_repro.services import users as usersvc
+    from houston.services import users as usersvc
     # `**kw`: set_state takes an emit now, so the route can carry what the
     # service says -- a Kubernetes start cannot restore the URL and must say so.
     monkeypatch.setattr(lc, "set_state", lambda n, a, **kw: None)
@@ -2391,8 +2391,8 @@ def test_help_on_a_colleagues_workspace_stays_open(basic_client, tmp_path, monke
 
 def test_an_admin_can_still_force_it(basic_client, tmp_path, monkeypatch):
     monkeypatch.setattr(lc, "require_docker", lambda: None)
-    monkeypatch.setattr("rc_repro.runner.down", lambda n, volumes=False: 0)
-    monkeypatch.setattr("rc_repro.runner.remove", lambda n: None)
+    monkeypatch.setattr("houston.runner.down", lambda n, volumes=False: 0)
+    monkeypatch.setattr("houston.runner.remove", lambda n: None)
     _workspace("bobs-box", "bob", tmp_path)
     allowed, _why = lc.may_destroy("bobs-box", "alice")   # alice is admin
     assert allowed is True
@@ -2400,9 +2400,9 @@ def test_an_admin_can_still_force_it(basic_client, tmp_path, monkeypatch):
 
 def test_the_gate_is_one_config_line_away_from_the_old_behaviour(tmp_path, monkeypatch):
     """A team that preferred confirm-and-proceed should not have to fork."""
-    from rc_repro import config
-    from rc_repro.services import users as usersvc
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from houston import config
+    from houston.services import users as usersvc
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     usersvc.add("alice", "correct-horse-battery", role="admin")
     usersvc.add("bob", "bobs-good-password", role="member")
     _workspace("alices-box", "alice", tmp_path)
@@ -2464,8 +2464,8 @@ def test_signing_in_by_a_dotted_name_files_the_session_under_the_stored_one(anon
     Found in a browser — the top bar read `lucy.felix` beside a People row reading
     `lucy-felix`, which is the same defect wearing a cosmetic face.
     """
-    from rc_repro.services import sessions as sessionsvc
-    from rc_repro.services import users as usersvc
+    from houston.services import sessions as sessionsvc
+    from houston.services import users as usersvc
     usersvc.add("lucy.felix", "correct-horse-battery")
 
     r = anon_client.post("/signin", follow_redirects=False,
@@ -2474,7 +2474,7 @@ def test_signing_in_by_a_dotted_name_files_the_session_under_the_stored_one(anon
                          headers={"Host": "localhost", "Origin": "null",
                                   "Sec-Fetch-Site": "same-origin"})
     assert r.status_code == 303, r.text
-    token = r.cookies.get("rc_repro_session") or ""
+    token = r.cookies.get("houston_session") or ""
     assert sessionsvc.verify(token).user == "lucy-felix", "filed under the typed name"
 
     # The invariant that broke: replacing the password must end that session.
@@ -2505,7 +2505,7 @@ def _app(**kw):
     an address and is therefore never trusted -- correct behaviour, but it makes
     the trusted case untestable unless the client is given one.
     """
-    from rc_repro.services import users as usersvc
+    from houston.services import users as usersvc
     _fresh_auth_state()
     if not usersvc.any_users():
         usersvc.add("alice", PASSWORD, role="admin")
@@ -2539,7 +2539,7 @@ def test_a_trusted_proxy_makes_the_cookie_secure_and_host_prefixed():
                headers=_FWD, follow_redirects=False)
     assert r.status_code == 303
     cookie = r.headers["set-cookie"]
-    assert "__Host-rc_repro_session=" in cookie and "Secure" in cookie
+    assert "__Host-houston_session=" in cookie and "Secure" in cookie
 
 
 def test_the_transport_warning_follows_the_same_decision():
@@ -2558,7 +2558,7 @@ def test_the_transport_warning_follows_the_same_decision():
 def test_the_throttle_keys_on_the_real_client_behind_a_trusted_proxy():
     """Without this every user shares one bucket -- the proxy's address -- so one
     person mistyping their password ten times locks out the whole team."""
-    from rc_repro.web import app as webapp
+    from houston.web import app as webapp
     c = _app(trust_proxy=["127.0.0.1"])
     for _ in range(webapp.SIGNIN_MAX_FAILURES):
         c.post("/api/session", json={"user": "alice", "password": "wrong-wrong-x"},
@@ -2574,8 +2574,8 @@ def test_the_throttle_keys_on_the_real_client_behind_a_trusted_proxy():
 def test_changing_your_own_password_behind_a_proxy_keeps_you_signed_in():
     """The cookie's NAME and its Secure flag follow the BROWSER's hop, not the bind.
 
-    Behind --trust-proxy that hop is https while public_https is False (rc-repro
-    did not arrange the TLS), so the guard reads `__Host-rc_repro_session`.
+    Behind --trust-proxy that hop is https while public_https is False (houston
+    did not arrange the TLS), so the guard reads `__Host-houston_session`.
     me_password was the one call site of four that did not pass the resolved
     scheme, so it wrote the plain name: every session was revoked, the replacement
     went out under a name nothing reads, and changing your own password signed you
@@ -2589,13 +2589,13 @@ def test_changing_your_own_password_behind_a_proxy_keeps_you_signed_in():
     r = c.post("/api/session", json={"user": "alice", "password": PASSWORD},
                headers=_FWD)
     assert r.status_code == 200
-    assert r.headers["set-cookie"].startswith("__Host-rc_repro_session=")
+    assert r.headers["set-cookie"].startswith("__Host-houston_session=")
 
     r = c.post("/api/me/password",
                json={"old": PASSWORD, "new": "a-brand-new-password"}, headers=_FWD)
     assert r.status_code == 200, r.text
     cookie = r.headers["set-cookie"]
-    assert cookie.startswith("__Host-rc_repro_session="), \
+    assert cookie.startswith("__Host-houston_session="), \
         f"the replacement cookie is under a name the guard does not read: {cookie}"
     assert "Secure" in cookie, f"a session token went out without Secure: {cookie}"
 
@@ -2604,7 +2604,7 @@ def test_changing_your_own_password_behind_a_proxy_keeps_you_signed_in():
 
 
 def test_a_cidr_is_accepted_and_a_typo_simply_trusts_nothing():
-    from rc_repro.web.app import parse_trusted
+    from houston.web.app import parse_trusted
     assert len(parse_trusted(["10.0.0.0/8", "127.0.0.1"])) == 2
     assert parse_trusted(["not-an-address", ""]) == [], \
         "a typo must mean 'not trusted', not a server that will not start"
@@ -2619,8 +2619,8 @@ def test_the_job_queue_is_bounded_at_submit_not_at_the_slot():
     """
     import threading
 
-    from rc_repro.errors import ConflictError
-    from rc_repro.web.jobs import MAX_QUEUED_PER_KIND, JobManager
+    from houston.errors import ConflictError
+    from houston.web.jobs import MAX_QUEUED_PER_KIND, JobManager
 
     jm = JobManager()
     gate = threading.Event()
@@ -2655,7 +2655,7 @@ def test_changing_your_own_password_is_throttled_like_a_login():
     made that false, and any signed-in account, readonly included, could spend the
     threadpool on it without limit.
     """
-    from rc_repro.web import app as webapp
+    from houston.web import app as webapp
 
     c = client()
     for _ in range(webapp.SIGNIN_MAX_FAILURES):
@@ -2676,7 +2676,7 @@ def test_a_finished_job_releases_its_result_but_keeps_its_summary():
     only ever renders summary(), which excludes the result, so a hundred summaries
     and ten results is the right shape.
     """
-    from rc_repro.web.jobs import KEEP_RESULTS, JobManager
+    from houston.web.jobs import KEEP_RESULTS, JobManager
 
     jm = JobManager()
     for i in range(KEEP_RESULTS + 5):
@@ -2701,8 +2701,8 @@ def test_a_finished_job_releases_its_result_but_keeps_its_summary():
 def test_releasing_a_result_drops_BOTH_references_to_it():
     """`job.result` and the terminal event's data["result"] are the SAME object,
     not a copy -- which is easy to misread, and clearing only one frees nothing."""
-    from rc_repro.services.events import Event
-    from rc_repro.web.jobs import Job
+    from houston.services.events import Event
+    from houston.web.jobs import Job
 
     job = Job(id="j", kind="capacity")
     payload = {"big": ["x"] * 100}
@@ -2742,7 +2742,7 @@ def test_the_log_stream_drops_the_oldest_line_not_the_newest():
     """
     import asyncio
 
-    from rc_repro.web.app import WS_QUEUE_MAX, make_log_offer
+    from houston.web.app import WS_QUEUE_MAX, make_log_offer
 
     assert WS_QUEUE_MAX == 3_000, "keep this in step with LOG_MAX in app.js"
 
@@ -2765,7 +2765,7 @@ def test_the_end_of_stream_sentinel_is_never_dropped():
     stream that has already ended."""
     import asyncio
 
-    from rc_repro.web.app import WS_QUEUE_MAX, make_log_offer
+    from houston.web.app import WS_QUEUE_MAX, make_log_offer
 
     q = asyncio.Queue(maxsize=WS_QUEUE_MAX)
     offer = make_log_offer(q, [0])
@@ -2785,8 +2785,8 @@ def test_a_member_may_set_the_image_and_bind_by_default(basic_client, monkeypatc
     interface your own listens on" is not a security boundary, it is an inconsistent
     ladder — so the default is open and `gui.create_policy admin` narrows it.
     """
-    from rc_repro import config as cfgmod
-    from rc_repro.services import users as usersvc
+    from houston import config as cfgmod
+    from houston.services import users as usersvc
     monkeypatch.setattr(lc, "require_docker", lambda: None)
     monkeypatch.setattr(lc, "create_repro", lambda req, **kw: {"name": "x"})
     usersvc.add("bob", "bobs-good-password", role="member")
@@ -2808,9 +2808,9 @@ def test_a_member_may_set_the_image_and_bind_by_default(basic_client, monkeypatc
 def test_the_refusal_names_the_setting_that_opens_it(basic_client, monkeypatch):
     """A boundary with no door on the other side is just a wall — the lesson from
     bind_host, which lifecycle read and `config set` would not write."""
-    from rc_repro import config as cfgmod
-    from rc_repro.cli import _CONFIG_KEYS
-    from rc_repro.services import users as usersvc
+    from houston import config as cfgmod
+    from houston.cli import _CONFIG_KEYS
+    from houston.services import users as usersvc
     monkeypatch.setattr(lc, "require_docker", lambda: None)
     cfgmod.update_config(lambda c: c.__setitem__(lc.CREATE_POLICY_KEY, "admin"))
     usersvc.add("bob", "bobs-good-password", role="member")
@@ -2827,8 +2827,8 @@ def test_settings_tells_the_dialog_who_may_set_the_privileged_fields(basic_clien
                                                                     monkeypatch):
     """The dialog must ask rather than recompute the rule: two places deciding one
     permission is how it ended up offering fields the API rejects."""
-    from rc_repro import config as cfgmod
-    from rc_repro.services import users as usersvc
+    from houston import config as cfgmod
+    from houston.services import users as usersvc
     usersvc.add("bob", "bobs-good-password", role="member")
     _as(basic_client, "bob", "bobs-good-password")
     body = basic_client.get("/api/settings", headers=_auth()).json()
@@ -2846,7 +2846,7 @@ def test_a_host_prefixed_cookie_is_accepted_on_the_websocket(monkeypatch, tmp_pa
     An HTTP scope and a WebSocket scope do not always carry the same `client`
     behind a proxy, so `resolve_peer` could conclude https for the sign-in that
     minted the cookie and plain http for the socket that reads it back. It then
-    looked up `rc_repro_session`, the browser had sent `__Host-rc_repro_session`,
+    looked up `houston_session`, the browser had sent `__Host-houston_session`,
     and the handshake was refused 403 — with nothing written anywhere saying so.
 
     `__Host-` is PROOF of the scheme: a browser will not store one without Secure
@@ -2855,11 +2855,11 @@ def test_a_host_prefixed_cookie_is_accepted_on_the_websocket(monkeypatch, tmp_pa
     https was resolved would give back exactly what the prefix buys.
     """
     import io
-    from rc_repro import runner
-    from rc_repro.web import app as webapp
-    from rc_repro.services import sessions, users as usersvc
+    from houston import runner
+    from houston.web import app as webapp
+    from houston.services import sessions, users as usersvc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     usersvc.add("alice", "correct-horse-battery", role="admin")
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
     monkeypatch.setattr(lc, "detail", lambda n: {"name": n})
@@ -2884,7 +2884,7 @@ def test_a_host_prefixed_cookie_is_accepted_on_the_websocket(monkeypatch, tmp_pa
     with c.websocket_connect(
         "/api/repros/t1/logs/stream?tail=1",
         headers={"Origin": "http://testserver"},
-        cookies={"__Host-rc_repro_session": token},
+        cookies={"__Host-houston_session": token},
     ) as ws:
         assert ws is not None       # accepted: the prefixed cookie was honoured
 
@@ -2896,7 +2896,7 @@ def test_a_host_prefixed_cookie_is_accepted_on_the_websocket(monkeypatch, tmp_pa
         with TestClient(app2).websocket_connect(
             "/api/repros/t1/logs/stream?tail=1",
             headers={"Origin": "https://testserver"},
-            cookies={"rc_repro_session": token},
+            cookies={"houston_session": token},
         ):
             pass
 
@@ -2911,7 +2911,7 @@ def test_a_down_engine_is_502_on_the_two_routes_that_check_it(monkeypatch):
     condition. Pinned on both routes because the class is shared: changing it back
     silently would move two statuses at once.
     """
-    from rc_repro import runner as runner_mod
+    from houston import runner as runner_mod
     monkeypatch.setattr(runner_mod, "docker_available", lambda **_k: False)
     monkeypatch.setattr(lc, "resolve_name", lambda n, **kw: n)
     c = client()
@@ -2928,8 +2928,8 @@ def test_settings_publishes_what_each_runtime_costs_and_refuses(monkeypatch, tmp
     were on it until they were built -- and a card quoting a cost the preflight does
     not use is a card the refusal contradicts.
     """
-    from rc_repro.services import lifecycle as lcsvc
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from houston.services import lifecycle as lcsvc
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     body = client().get("/api/settings", headers=H).json()
     kube = next(r for r in body["runtimes"] if r["name"] == "kubernetes")
     docker = next(r for r in body["runtimes"] if r["name"] == "docker")
@@ -2958,8 +2958,8 @@ def test_the_rest_logs_route_is_kubernetes_aware_like_the_websocket_one(monkeypa
     worked and a REST one that answered compose's "no configuration file provided".
     Anything using the documented HTTP API got the broken half.
     """
-    from rc_repro.services import k8s, topology
-    from rc_repro.web import app as webapp
+    from houston.services import k8s, topology
+    from houston.web import app as webapp
 
     monkeypatch.setattr(webapp.lc, "resolve_name", lambda n, actor="": "k")
     monkeypatch.setattr(topology, "of_repro", lambda n: topology.KUBERNETES)
@@ -3001,7 +3001,7 @@ def test_serve_repairs_interrupted_work_at_startup(monkeypatch):
     `recover()` defined and never called is the shape this whole journal exists to
     avoid.
     """
-    from rc_repro.services import journal
+    from houston.services import journal
 
     called: list = []
     monkeypatch.setattr(journal, "recover", lambda *a, **k: called.append(True) or [
@@ -3016,7 +3016,7 @@ def test_serve_repairs_interrupted_work_at_startup(monkeypatch):
 def test_a_failing_recovery_does_not_stop_serve_from_serving(monkeypatch):
     """A box that cannot be repaired still has to be able to serve. Anything else
     turns one stuck workspace into an outage of the whole GUI."""
-    from rc_repro.services import journal
+    from houston.services import journal
 
     def _explode(*a, **k):
         raise RuntimeError("cluster unreachable")
@@ -3045,7 +3045,7 @@ def test_every_engine_heavy_job_kind_lands_in_a_pool():
     import ast
     import pathlib
 
-    from rc_repro.web import jobs
+    from houston.web import jobs
 
     src = pathlib.Path(jobs.__file__).with_name("app.py").read_text()
     submits: list[tuple[str, str]] = []
@@ -3126,8 +3126,8 @@ def test_the_queue_ceiling_counts_the_pool_it_protects_not_the_kind():
     """
     import threading as _threading
 
-    from rc_repro.errors import ConflictError
-    from rc_repro.web import jobs
+    from houston.errors import ConflictError
+    from houston.web import jobs
 
     ceiling = jobs.MAX_QUEUED_PER_KIND
     reg = jobs.JobManager()
@@ -3162,7 +3162,7 @@ def test_a_refused_destructive_request_is_answered_not_queued(basic_client, tmp_
     queued. The same preflight shape v0.70.9 settled on for namespace ownership: a
     refusal leaves no record.
     """
-    from rc_repro.services import users as usersvc
+    from houston.services import users as usersvc
 
     monkeypatch.setattr(lc, "require_docker", lambda: None)
     usersvc.add("bob", "bobs-good-password", role="member")
@@ -3228,10 +3228,10 @@ def test_the_cluster_ledger_is_readable_by_everyone_and_spendable_by_nobody_but_
     workspaces, but the box's shared front door is not theirs to edit -- is the same
     rule, and a cluster is a good deal more shared than the edge.
     """
-    from rc_repro.services import cluster as clustersvc
-    from rc_repro.services import users as usersvc
+    from houston.services import cluster as clustersvc
+    from houston.services import users as usersvc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(clustersvc, "known_contexts",
                         lambda: {"contexts": [], "unreadable": "", "default": ""})
     c = client(role="readonly")
@@ -3261,10 +3261,10 @@ def test_a_create_over_http_gets_the_same_expiry_grammar_as_the_flag(monkeypatch
     Trusting it would let an unparseable value become "no expiry", and the expiry tag
     is the only thing that will later say this cluster was meant to be temporary.
     """
-    from rc_repro.services import cluster as clustersvc
-    from rc_repro.services import eks as ekssvc
+    from houston.services import cluster as clustersvc
+    from houston.services import eks as ekssvc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(clustersvc, "known_contexts",
                         lambda: {"contexts": [], "unreadable": "", "default": ""})
     import time
@@ -3295,9 +3295,9 @@ def test_one_cluster_that_cannot_be_read_does_not_take_the_page_with_it(monkeypa
     timeout on each, so one endpoint returning everything would make the page as slow
     as its worst cluster -- and a browser cannot draw anything until it answers.
     """
-    from rc_repro.services import cluster as clustersvc
+    from houston.services import cluster as clustersvc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     ARN = "arn:aws:eks:us-east-1:1:cluster/support"
     monkeypatch.setattr(clustersvc, "known_contexts", lambda: {
         "contexts": [{"context": ARN, "ours": False, "provider": "eks",

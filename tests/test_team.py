@@ -14,9 +14,9 @@ import re
 import pytest
 from typer.testing import CliRunner
 
-from rc_repro import cli, runner
-from rc_repro.services import lifecycle as lc
-from rc_repro.services import users
+from houston import cli, runner
+from houston.services import lifecycle as lc
+from houston.services import users
 
 def _ok_compose(*a, **k):
     """A successful `docker compose` run. `edge.up()` returns the CompletedProcess now,
@@ -50,8 +50,8 @@ def flat_help(output: str) -> str:
 
 @pytest.fixture(autouse=True)
 def _fresh(tmp_path, monkeypatch):
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    monkeypatch.delenv("RC_REPRO_USER", raising=False)
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    monkeypatch.delenv("HOUSTON_USER", raising=False)
     yield
 
 
@@ -60,7 +60,7 @@ def _fresh(tmp_path, monkeypatch):
 def test_the_cli_has_no_actor_until_somebody_creates_an_account(monkeypatch):
     """Team mode is opt-in. Until `users add` is run, every workspace keeps the
     name it has always had -- no silent rename of anyone's existing repros."""
-    monkeypatch.setenv("RC_REPRO_USER", "alice")
+    monkeypatch.setenv("HOUSTON_USER", "alice")
     assert cli._cli_actor() == ""
 
 
@@ -83,7 +83,7 @@ def test_the_env_override_wins_over_the_login_name(monkeypatch):
     """The OS account and the GUI account are often not the same name."""
     users.add("alice", GOOD)
     monkeypatch.setattr(cli.os, "getlogin", lambda: "ubuntu")
-    monkeypatch.setenv("RC_REPRO_USER", "Alice")
+    monkeypatch.setenv("HOUSTON_USER", "Alice")
     assert cli._cli_actor() == "alice", "and it is lowercased to match the name rules"
 
 
@@ -120,7 +120,7 @@ def test_up_passes_the_actor_into_the_request(monkeypatch):
 def _write_meta(name: str, owner: str = "") -> None:
     """Materialise just enough of a workspace for read_meta() to find it."""
     fields = {f.name: "" for f in dataclasses.fields(runner.Metadata)}
-    fields.update(name=name, project=f"rcrepro-{name}", rc_version="8.5.1",
+    fields.update(name=name, project=f"houston-{name}", rc_version="8.5.1",
                   mongo_tag="6.0", host_port=3000, preset="default",
                   root_url="http://localhost:3000",
                   extra={"created_by": owner} if owner else {})
@@ -195,7 +195,7 @@ def test_a_member_cannot_take_a_workspace_in_order_to_destroy_it():
     next call: two requests, both audited, neither prevented. The refusal message
     even named the command that did it.
     """
-    from rc_repro import errors
+    from houston import errors
 
     users.add("alice", GOOD, role="member")
     users.add("bob", GOOD, role="member")
@@ -239,7 +239,7 @@ def test_the_destroy_refusal_no_longer_names_its_own_bypass():
 
 
 def test_users_add_creates_the_role_it_was_given():
-    """`rc-repro users [action] [name] [role]` accepted the role and the `add`
+    """`houston users [action] [name] [role]` accepted the role and the `add`
     branch never read it, so every account was a MEMBER whatever was typed.
 
     An operator running `users add contractor readonly` believed they had made a
@@ -265,11 +265,11 @@ def test_the_ownership_gate_covers_every_operation_that_destroys_data():
     bundle over a running workspace, and `upgrade --rollback` drops the database and
     loads an older one. All three were member+ over HTTP.
     """
-    from rc_repro import errors
-    from rc_repro.services import backup as backupsvc
-    from rc_repro.services import upgrade as upgradesvc
+    from houston import errors
+    from houston.services import backup as backupsvc
+    from houston.services import upgrade as upgradesvc
 
-    from rc_repro.services import audit as auditsvc
+    from houston.services import audit as auditsvc
 
     users.add("alice", GOOD, role="member")
     users.add("bob", GOOD, role="member")
@@ -288,8 +288,8 @@ def test_the_ownership_gate_covers_every_operation_that_destroys_data():
 def test_up_fresh_does_not_delete_a_colleagues_volume(monkeypatch):
     """`--fresh` runs the identical `docker compose down -v` that `down --volumes`
     is gated on, from a command that reads as "start it again"."""
-    from rc_repro import errors
-    from rc_repro.services import audit as auditsvc
+    from houston import errors
+    from houston.services import audit as auditsvc
 
     users.add("alice", GOOD, role="member")
     users.add("bob", GOOD, role="member")
@@ -349,7 +349,7 @@ def served(monkeypatch):
     fake = types.ModuleType("uvicorn")
     fake.run = lambda app, host="", port=0, **kw: seen.update(host=host, port=port, **kw)
     monkeypatch.setitem(sys.modules, "uvicorn", fake)
-    from rc_repro.web import app as webapp
+    from houston.web import app as webapp
     monkeypatch.setattr(webapp, "create_app", lambda **kw: seen.update(kw) or object())
     return seen
 
@@ -394,12 +394,12 @@ def test_without_accounts_a_reachable_bind_is_refused(served):
     assert "needs an account" in r.output and served == {}
 
 
-# --- serve --domain: rc-repro arranges the TLS itself ---------------------------
+# --- serve --domain: houston arranges the TLS itself ---------------------------
 
 @pytest.fixture
 def fronted(served, monkeypatch):
     """`serve --domain` without Docker: capture the front door it would start."""
-    from rc_repro.services import edge as fdsvc
+    from houston.services import edge as fdsvc
 
     calls: dict = {}
     monkeypatch.setattr(fdsvc, "bridge_address", lambda: "172.17.0.1")
@@ -429,11 +429,11 @@ def test_serve_says_when_the_domain_has_no_certificate(tmp_path, monkeypatch, ca
     and a 404 for as long as issuance keeps failing. Reported by someone whose GUI was
     fine on :7070 and dead on its domain, with the reason in a container log there was no
     command to read."""
-    from rc_repro import cli, tls as tlsmod
-    from rc_repro.services import edge as fdsvc
-    from rc_repro.services import k8s
+    from houston import cli, tls as tlsmod
+    from houston.services import edge as fdsvc
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     # NO CLUSTER, ASSERTED RATHER THAN INHERITED. `_report_gui_tls` calls
     # `_port_claim_note()`, which runs a real `kubectl get svc` -- so on a box whose
     # k3s holds :80 and :443 (which is the box this feature is FOR) both of these
@@ -463,10 +463,10 @@ def test_serve_says_when_the_domain_has_no_certificate(tmp_path, monkeypatch, ca
 def test_serve_confirms_a_real_certificate_when_there_is_one(tmp_path, monkeypatch, capsys):
     """The other half: a healthy start must say so, or a warning nobody ever sees
     succeed is a warning people learn to ignore."""
-    from rc_repro import cli, tls as tlsmod
-    from rc_repro.services import k8s
+    from houston import cli, tls as tlsmod
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     # NO CLUSTER, ASSERTED RATHER THAN INHERITED. `_report_gui_tls` calls
     # `_port_claim_note()`, which runs a real `kubectl get svc` -- so on a box whose
     # k3s holds :80 and :443 (which is the box this feature is FOR) both of these
@@ -491,19 +491,19 @@ def test_serve_renders_an_edge_refusal_instead_of_a_traceback(tmp_path, monkeypa
     to start a server. Every other command in that file wraps its service call."""
     from typer.testing import CliRunner
 
-    from rc_repro import cli
-    from rc_repro.errors import ConflictError
-    from rc_repro.services import edge as fdsvc
-    from rc_repro.services import lifecycle as lc
-    from rc_repro.services import users as usersvc
+    from houston import cli
+    from houston.errors import ConflictError
+    from houston.services import edge as fdsvc
+    from houston.services import lifecycle as lc
+    from houston.services import users as usersvc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     usersvc.add("someone", "correct-horse-battery", role="admin")
     monkeypatch.setattr(lc, "require_docker", lambda: None)
     monkeypatch.setattr(cli.lcsvc, "require_docker", lambda: None)
 
     def refuse(**kw):
-        raise ConflictError("another rc-repro edge is already running")
+        raise ConflictError("another houston edge is already running")
 
     monkeypatch.setattr(fdsvc, "ensure_running", refuse)
     monkeypatch.setattr(fdsvc, "write", lambda fd: None)
@@ -514,7 +514,7 @@ def test_serve_renders_an_edge_refusal_instead_of_a_traceback(tmp_path, monkeypa
     assert res.exit_code == 8, res.output
     assert "Traceback" not in res.output, res.output
     assert "ConflictError" not in res.output, "a class name is not a message"
-    assert "another rc-repro edge is already running" in res.output, res.output
+    assert "another houston edge is already running" in res.output, res.output
 
 
 def test_domain_binds_the_bridge_not_the_whole_network(fronted):
@@ -529,7 +529,7 @@ def test_domain_binds_the_bridge_not_the_whole_network(fronted):
 
 
 def test_domain_stands_the_plain_http_refusal_down(fronted):
-    """Decision (a): with --domain, rc-repro IS the TLS terminator, so refusing
+    """Decision (a): with --domain, houston IS the TLS terminator, so refusing
     its own most secure configuration would be absurd -- and no --insecure has to
     appear in a printed unit file, where it would read as a warning about itself.
     """
@@ -611,7 +611,7 @@ def test_both_ways_to_run_it_are_offered_with_the_tradeoff_stated(fronted):
     users.add("alice", GOOD)
     r = cli_runner.invoke(cli.app, [
         "serve", "--domain", "d.example.com", "--email", "o@e.com", "--print-service"])
-    assert "systemctl enable --now rc-repro" in r.output
+    assert "systemctl enable --now houston" in r.output
     assert "nohup " in r.output
     assert "NOT restart on crash" in r.output, "nohup's limits must be stated"
 
@@ -630,8 +630,8 @@ def test_print_service_without_accounts_says_why_that_defeats_the_point(fronted)
 # about deletions, which is worse than no log: it looks complete.
 
 def test_tearing_down_a_workspace_is_recorded(monkeypatch, tmp_path):
-    from rc_repro import runner
-    from rc_repro.services import audit as auditsvc
+    from houston import runner
+    from houston.services import audit as auditsvc
 
     _write_meta("alice-rc8-5-1", "alice")
     monkeypatch.setattr(runner, "docker_available", lambda **k: True)
@@ -647,7 +647,7 @@ def test_tearing_down_a_workspace_is_recorded(monkeypatch, tmp_path):
 def test_the_cli_writes_to_the_same_log_as_the_gui(monkeypatch):
     """The CLI could not reach audit() at all: it lived in web/jobs.py, and the
     core CLI deliberately does not import the web layer."""
-    from rc_repro.services import audit as auditsvc
+    from houston.services import audit as auditsvc
 
     users.add("alice", GOOD)
     monkeypatch.setattr(cli.os, "getlogin", lambda: "alice")
@@ -662,7 +662,7 @@ def test_the_cli_writes_to_the_same_log_as_the_gui(monkeypatch):
 def test_the_audit_log_is_not_world_readable(monkeypatch):
     import stat
 
-    from rc_repro.services import audit as auditsvc
+    from houston.services import audit as auditsvc
 
     auditsvc.audit("alice", "down", "x")
     mode = stat.S_IMODE(auditsvc.audit_path().stat().st_mode)
@@ -694,8 +694,8 @@ def test_the_no_accounts_refusal_names_the_command_to_run_again(served):
     """Both steps, and the second one is the line that was just typed.
 
     Naming only `users add` left the reader to reconstruct a `--domain --email`
-    invocation from scrollback, and on a rebuilt box -- where ~/.rc-repro is empty
-    and EVERY serve says this -- it read as rc-repro having stopped working rather
+    invocation from scrollback, and on a rebuilt box -- where ~/.houston is empty
+    and EVERY serve says this -- it read as houston having stopped working rather
     than as two commands in a row. That is how a support box stayed down.
     """
     r = cli_runner.invoke(cli.app, [
@@ -718,7 +718,7 @@ def test_the_no_accounts_refusal_names_the_command_to_run_again(served):
 
 
 def test_there_is_a_way_to_ask_which_version_is_installed():
-    """`rc-repro --version` did not exist — it answered "No such option", exit 2 —
+    """`houston --version` did not exist — it answered "No such option", exit 2 —
     while the project's own notes told people to run it to check what a box has,
     and the number appeared nowhere but the sign-in page footer, which needs the
     GUI up and reachable to read.
@@ -727,12 +727,12 @@ def test_there_is_a_way_to_ask_which_version_is_installed():
     answer from a shell, and every version bump made to render that answerable was
     answerable only in a browser.
     """
-    from rc_repro import __version__
+    from houston import __version__
     for flag in ("--version", "-V"):
         r = cli_runner.invoke(cli.app, [flag])
         assert r.exit_code == 0, f"{flag}: {r.output}"
         assert __version__ in r.output, f"{flag} did not name the version: {r.output}"
-        assert "rc-repro" in r.output
+        assert "houston" in r.output
     # Eager: it must not need a subcommand, and must not be swallowed by one.
     assert cli_runner.invoke(cli.app, ["--version", "list"]).exit_code == 0
 
@@ -814,7 +814,7 @@ def test_an_allow_host_that_is_not_a_bare_hostname_is_corrected(served, given, n
     assert note in r.output, f"the correction was not reported: {r.output}"
     assert served["allow_hosts"] == [_LAB], served.get("allow_hosts")
     # And the URL is built from the corrected value, not the raw one.
-    assert f"rc-repro GUI: http://{_LAB}:9944/" in r.output, r.output
+    assert f"houston GUI: http://{_LAB}:9944/" in r.output, r.output
 
 
 def test_the_allow_host_wildcard_survives_correction(served):
@@ -880,7 +880,7 @@ def test_a_wildcard_bind_does_not_print_a_url_nobody_can_open(served):
         "--port", "7070", "--no-open"])
     assert r.exit_code == 0, r.output
     assert "http://0.0.0.0:7070/" not in r.output
-    assert "rc-repro GUI: http://<this-box>:7070/" in r.output, r.output
+    assert "houston GUI: http://<this-box>:7070/" in r.output, r.output
 
 
 def test_a_reachable_bind_prints_a_url_somebody_can_actually_open(served):
@@ -896,7 +896,7 @@ def test_a_reachable_bind_prints_a_url_somebody_can_actually_open(served):
         "serve", "--bind", "0.0.0.0", "--allow-host", "18.232.139.213",
         "--insecure", "--port", "7070", "--no-open"])
     assert r.exit_code == 0, r.output
-    assert "rc-repro GUI: http://18.232.139.213:7070/" in r.output, r.output
+    assert "houston GUI: http://18.232.139.213:7070/" in r.output, r.output
 
 
 def test_allow_host_without_a_bind_says_it_is_doing_nothing(served):
@@ -919,7 +919,7 @@ def test_allow_host_without_a_bind_says_it_is_doing_nothing(served):
 def test_the_no_accounts_stop_is_not_dressed_as_a_failure(served):
     """Nothing has gone wrong when a fresh box has no accounts — that is the
     documented first-run sequence, and on a rebuilt box EVERY serve says it. A red
-    `error:` there reads as rc-repro being broken rather than as two commands in a
+    `error:` there reads as houston being broken rather than as two commands in a
     row, which is exactly how a working box got reported as dead.
 
     It still exits non-zero, and with 3 (`preflight` in errors.EXIT_CODES): serve
@@ -986,10 +986,10 @@ def test_insecure_is_not_advertised_as_replaceable_by_trust_proxy():
     # And the case a first-timer is really in — localhost — comes first. The TLS
     # options used to be introduced by network examples, so the commonest reader
     # met them before learning they had no use for them.
-    assert "TRYING IT OUT? There is nothing to learn: rc-repro serve" in flat
+    assert "TRYING IT OUT? There is nothing to learn: houston serve" in flat
     # ...but not by claiming something that is false on a box already set up with
     # a domain, where plain `serve` keeps serving it and never touches loopback.
-    # Reported from exactly such a box: `rc-repro serve` came up on https with the
+    # Reported from exactly such a box: `houston serve` came up on https with the
     # public name, against a --help that had just promised localhost.
     assert "--no-domain for a local session" in flat
 
@@ -997,7 +997,7 @@ def test_insecure_is_not_advertised_as_replaceable_by_trust_proxy():
 def test_loopback_with_no_accounts_prints_a_one_time_setup_link(served):
     r = cli_runner.invoke(cli.app, ["serve", "--no-open"])
     assert r.exit_code == 0, r.output
-    line = next(ln for ln in r.output.splitlines() if "rc-repro GUI:" in ln)
+    line = next(ln for ln in r.output.splitlines() if "houston GUI:" in ln)
     assert "/setup#k=" in line, line
     assert "?t=" not in line, "no credential in the query string any more"
     assert served["first_run"] is True
@@ -1007,7 +1007,7 @@ def test_the_setup_key_is_in_the_fragment_so_it_reaches_no_log(served):
     """A fragment is never sent to the server: not to an access log, not to a
     proxy log, not in a Referer."""
     r = cli_runner.invoke(cli.app, ["serve", "--no-open"])
-    url = next(ln for ln in r.output.splitlines() if "rc-repro GUI:" in ln).split()[-1]
+    url = next(ln for ln in r.output.splitlines() if "houston GUI:" in ln).split()[-1]
     path, _, frag = url.partition("#")
     assert path.endswith("/setup") and frag.startswith("k=")
 
@@ -1026,7 +1026,7 @@ def test_with_accounts_the_url_carries_no_token(fronted):
     users.add("alice", GOOD)
     r = cli_runner.invoke(cli.app, [
         "serve", "--domain", "rc.example.com", "--email", "ops@example.com"])
-    line = next(ln for ln in r.output.splitlines() if "rc-repro GUI:" in ln)
+    line = next(ln for ln in r.output.splitlines() if "houston GUI:" in ln)
     assert "?t=" not in line and line.strip().endswith("rc.example.com/")
 
 
@@ -1048,7 +1048,7 @@ def test_serve_reuses_the_domain_the_box_was_set_up_with(fronted):
 
 
 def test_no_domain_gives_a_deliberately_local_session(fronted):
-    from rc_repro.services import edge as edgesvc
+    from houston.services import edge as edgesvc
 
     edgesvc.write(edgesvc.Edge(domain="rc.example.com", acme_email="o@e.com"))
     r = cli_runner.invoke(cli.app, ["serve", "--no-domain", "--no-open"])
@@ -1060,7 +1060,7 @@ def test_the_email_is_remembered_after_the_first_use(fronted, tmp_path):
     """`up` documents it as remembered; for serve it was not, so every restart
     needed it retyped."""
     users.add("alice", GOOD)   # serve refuses to start without one
-    from rc_repro import config
+    from houston import config
 
     cli_runner.invoke(cli.app, [
         "serve", "--domain", "rc.example.com", "--email", "ops@example.com"])
@@ -1086,7 +1086,7 @@ def test_users_add_generates_the_password_and_shows_it_once():
 
     # pull the minted value back out of the panel and prove it is the real one
     words = [w for w in r.output.replace("|", " ").split()
-             if len(w) >= 16 and w not in ("rc-repro",)]
+             if len(w) >= 16 and w not in ("houston",)]
     minted = next(w for w in words if users.verify("bob", w))
     assert users.verify("bob", minted) is True
     assert r.output.count(minted) == 1, "shown once, or it is not 'shown once'"
@@ -1112,7 +1112,7 @@ def test_a_typed_password_that_does_not_match_is_refused():
 
 
 def test_users_passwd_mints_too_and_ends_the_old_sessions():
-    from rc_repro.services import sessions as sessionsvc
+    from houston.services import sessions as sessionsvc
 
     users.add("erin", GOOD, role="admin")
     token = sessionsvc.create("erin")
@@ -1128,11 +1128,11 @@ def test_users_passwd_mints_too_and_ends_the_old_sessions():
 
 
 def test_both_front_ends_mint_the_same_shape_of_password():
-    """One definition of "a password rc-repro generated", or the two drift apart on
+    """One definition of "a password houston generated", or the two drift apart on
     the single value that decides whether an account is guessable."""
     import re
 
-    from rc_repro.services import users as usersvc
+    from houston.services import users as usersvc
     minted = usersvc.mint_password()
     assert len(minted) >= 16
     assert re.fullmatch(r"[A-Za-z0-9_-]+", minted), "must survive a URL and a shell"
@@ -1148,7 +1148,7 @@ def test_a_policy_typo_is_refused_rather_than_silently_meaning_strict():
     assert bad.exit_code != 0
     assert "takes 'anyone'" in bad.output
 
-    from rc_repro.services import lifecycle as lc
+    from houston.services import lifecycle as lc
     users.add("bob", GOOD, role="member")
     assert lc.may_set_privileged_fields("bob") is True, "open by default"
 

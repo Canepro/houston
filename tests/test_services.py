@@ -13,9 +13,9 @@ import pytest
 
 from conftest import source_index, source_of
 
-from rc_repro import errors
-from rc_repro.services import events
-from rc_repro.services import lifecycle as lc
+from houston import errors
+from houston.services import events
+from houston.services import lifecycle as lc
 
 
 def test_error_http_status_mapping():
@@ -53,8 +53,8 @@ def test_repro_state_from_rc_container_status():
 
 def test_list_and_detail_agree_on_a_crash_looping_repro(monkeypatch, tmp_path):
     """The same repro, through both code paths, must report the same state."""
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    meta = lc.runner.Metadata(name="r", project="rcrepro-r", rc_version="8.5.1",
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    meta = lc.runner.Metadata(name="r", project="houston-r", rc_version="8.5.1",
                            rc_image="img", mongo_tag="8.0", mongo_flavor="official",
                            preset="default", root_url="http://localhost:3000",
                            host_port=3000, version_source="test")
@@ -68,8 +68,8 @@ def test_list_and_detail_agree_on_a_crash_looping_repro(monkeypatch, tmp_path):
     # What each path actually asks docker: the project aggregate names Mongo as
     # running, which is precisely what used to mislead the list.
     monkeypatch.setattr(lc.runner, "project_states",
-                        lambda: {"rcrepro-r": "restarting(1), running(1)"})
-    monkeypatch.setattr(lc.runner, "rc_status_by_project", lambda: {"rcrepro-r": crash})
+                        lambda: {"houston-r": "restarting(1), running(1)"})
+    monkeypatch.setattr(lc.runner, "rc_status_by_project", lambda: {"houston-r": crash})
     monkeypatch.setattr(lc.runner, "container_details", lambda _n: [
         {"service": "rocketchat", "state": "restarting", "status": crash, "health": ""},
         {"service": "mongo", "state": "running", "status": "Up 2 hours", "health": ""}])
@@ -137,20 +137,20 @@ def test_pick_host_port_out_of_range(monkeypatch):
 
 def test_project_collision_guard(monkeypatch, tmp_path):
     # our workspace's compose path (what a same-home recreate would show)
-    ours = str(tmp_path / "rcrepro" / "repros" / "rc8-5-1" / "docker-compose.yml")
-    monkeypatch.setattr(lc.runner, "project_name", lambda n: "rcrepro-" + n)
+    ours = str(tmp_path / "houston" / "repros" / "rc8-5-1" / "docker-compose.yml")
+    monkeypatch.setattr(lc.runner, "project_name", lambda n: "houston-" + n)
     monkeypatch.setattr(lc.runner, "workspace",
-                        lambda n: tmp_path / "rcrepro" / "repros" / n)
+                        lambda n: tmp_path / "houston" / "repros" / n)
 
     # foreign project with our derived name -> refuse
     monkeypatch.setattr(lc.runner, "project_config_files",
-                        lambda: {"rcrepro-rc8-5-1": "/Users/real/.rc-repro/repros/rc8-5-1/docker-compose.yml"})
+                        lambda: {"houston-rc8-5-1": "/Users/real/.houston/repros/rc8-5-1/docker-compose.yml"})
     with pytest.raises(errors.ConflictError):
         lc._guard_project_collision("rc8-5-1")
 
     # same project owned by OUR workspace (a --force recreate) -> allowed
     monkeypatch.setattr(lc.runner, "project_config_files",
-                        lambda: {"rcrepro-rc8-5-1": ours})
+                        lambda: {"houston-rc8-5-1": ours})
     lc._guard_project_collision("rc8-5-1")   # no raise
 
     # docker unavailable / no such project -> skip (best-effort)
@@ -161,7 +161,7 @@ def test_project_collision_guard(monkeypatch, tmp_path):
 
 
 def test_data_scale_ok_error_mapping():
-    from rc_repro.services import data
+    from houston.services import data
     # non-zero exit / no JSON -> DockerError (infra); {error} payload -> ValidationError (user)
     with pytest.raises(errors.DockerError):
         data._scale_ok(1, "boom", "user prefill")
@@ -173,7 +173,7 @@ def test_data_scale_ok_error_mapping():
 
 
 def test_data_run_scale_validates(monkeypatch):
-    from rc_repro.services import data
+    from houston.services import data
     monkeypatch.setattr(data.lifecycle, "resolve_name", lambda n: n)
     with pytest.raises(errors.ValidationError):
         data.run_scale("x", "garbage-spec")          # parse_scale rejects
@@ -182,7 +182,7 @@ def test_data_run_scale_validates(monkeypatch):
 
 
 def test_data_import_plan(monkeypatch, tmp_path):
-    from rc_repro.services import data
+    from houston.services import data
     monkeypatch.setattr(data.lifecycle, "resolve_name", lambda n: n)
     dump = tmp_path / "s.json"
     dump.write_text(json.dumps([
@@ -196,7 +196,7 @@ def test_data_import_plan(monkeypatch, tmp_path):
 
 
 def test_perf_run_loadtest_validates(monkeypatch):
-    from rc_repro.services import perf
+    from houston.services import perf
     monkeypatch.setattr(perf.lifecycle.runner, "docker_available", lambda **_k: True)
     with pytest.raises(errors.ValidationError):
         perf.run_loadtest(perf.LoadtestReq(name="x", scenario="webhook"))  # not a GUI scenario
@@ -205,7 +205,7 @@ def test_perf_run_loadtest_validates(monkeypatch):
 
 
 def test_repro_links():
-    from rc_repro import runner
+    from houston import runner
     def meta(preset, extra=None):
         return runner.Metadata(name="r", project="p", rc_version="8.5.1", rc_image="i",
                                mongo_tag="8.0", mongo_flavor="official", preset=preset,
@@ -227,7 +227,7 @@ def test_repro_links():
 
 
 def test_perf_capacity_benchmark_validate(monkeypatch):
-    from rc_repro.services import perf
+    from houston.services import perf
     monkeypatch.setattr(perf.lifecycle.runner, "docker_available", lambda **_k: True)
     with pytest.raises(errors.ValidationError):
         perf.run_capacity(perf.CapacityReq(name="x", scenario="webhook"))
@@ -239,7 +239,7 @@ def test_perf_capacity_benchmark_validate(monkeypatch):
 
 def test_rc_restart_count(monkeypatch):
     import types
-    from rc_repro import runner
+    from houston import runner
     monkeypatch.setattr(runner, "service_container_ids", lambda n, s: ["abc"] if s == "rocketchat" else [])
     monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: types.SimpleNamespace(stdout="7\n", returncode=0))
     assert runner.rc_restart_count("x") == 7
@@ -257,7 +257,7 @@ def test_docker_queries_behind_the_gui_poll_cannot_hang_or_raise(monkeypatch):
     """
     import subprocess
 
-    from rc_repro import runner
+    from houston import runner
 
     # `project_states` memoises for _QUERY_TTL, so this test only sees the stubbed
     # failure if the cache is cold -- and it is only cold by luck of test ORDER.
@@ -289,7 +289,7 @@ def test_docker_queries_behind_the_gui_poll_cannot_hang_or_raise(monkeypatch):
 
 
 def test_kernel_major_minor_parsing():
-    from rc_repro.services import doctor as doctorsvc
+    from houston.services import doctor as doctorsvc
     assert doctorsvc._kernel_major_minor("6.19.7-200.fc43.aarch64") == (6, 19)
     assert doctorsvc._kernel_major_minor("5.15.0-generic") == (5, 15)
     assert doctorsvc._kernel_major_minor("6.19") == (6, 19)
@@ -298,7 +298,7 @@ def test_kernel_major_minor_parsing():
 
 
 def test_hub_logged_in(monkeypatch, tmp_path):
-    from rc_repro import runner
+    from houston import runner
     # no auth files readable anywhere -> can't tell (None)
     monkeypatch.delenv("REGISTRY_AUTH_FILE", raising=False)
     monkeypatch.delenv("DOCKER_CONFIG", raising=False)
@@ -345,7 +345,7 @@ def _await_finish(job, tries: int = 400) -> None:
 
 
 def test_job_events_are_capped_with_absolute_indices():
-    from rc_repro.web import jobs as J
+    from houston.web import jobs as J
     job = J.Job(id="job_x", kind="t")
     for i in range(J.MAX_EVENTS_PER_JOB + 50):
         job.emit(events.Event(f"e{i}"))
@@ -360,7 +360,7 @@ def test_job_events_are_capped_with_absolute_indices():
 
 
 def test_job_registry_evicts_finished_jobs_only():
-    from rc_repro.web import jobs as J
+    from houston.web import jobs as J
     mgr = J.JobManager()
     for i in range(J.MAX_JOBS + 20):
         mgr._jobs[f"job_{i}"] = J.Job(id=f"job_{i}", kind="t", status="done")
@@ -372,7 +372,7 @@ def test_job_registry_evicts_finished_jobs_only():
 
 
 def test_job_status_is_set_before_the_terminal_event(monkeypatch):
-    from rc_repro.web import jobs as J
+    from houston.web import jobs as J
     captured = []
     original = J.Job.emit
 
@@ -390,7 +390,7 @@ def test_job_status_is_set_before_the_terminal_event(monkeypatch):
 
 
 def test_job_internal_error_does_not_leak_a_traceback():
-    from rc_repro.web import jobs as J
+    from houston.web import jobs as J
     job = J.JobManager().submit("t", lambda emit: 1 / 0)
     _await_finish(job)
     assert job.status == "error" and job.error_kind == "InternalError"
@@ -401,7 +401,7 @@ def test_job_internal_error_does_not_leak_a_traceback():
 
 
 def test_job_reproerror_keeps_its_kind_on_the_wire():
-    from rc_repro.web import jobs as J
+    from houston.web import jobs as J
 
     def boom(emit):
         raise errors.NotFoundError("no such repro")
@@ -435,10 +435,10 @@ def test_summary_carries_preset_notes_derived_and_not_the_frozen_copy():
     deliberately not what the preset says, and it is the preset's that has to come
     out.
     """
-    from rc_repro import presets
+    from houston import presets
 
     m = lc.runner.Metadata(
-        name="x", project="rcrepro-x", rc_version="8.5.1", rc_image="i",
+        name="x", project="houston-x", rc_version="8.5.1", rc_image="i",
         mongo_tag="8.0", mongo_flavor="official", preset="oidc",
         root_url="http://localhost:3000", host_port=3000, version_source="map",
         extra={"notes": ["a sentence some older release wrote down"]})
@@ -454,7 +454,7 @@ def test_summary_carries_preset_notes_derived_and_not_the_frozen_copy():
 
 
 def test_compose_major_version_parsing():
-    from rc_repro.services import doctor as doctorsvc
+    from houston.services import doctor as doctorsvc
     # A first-CHARACTER compare reported every Compose newer than v2 as
     # unsupported (v5 is current) and would misread v10 as v1.
     assert doctorsvc._major_version("2.29.1") == 2
@@ -468,11 +468,11 @@ def test_compose_major_version_parsing():
 
 
 def test_detail_reports_unknown_state_when_docker_is_unreachable(monkeypatch):
-    from rc_repro import runner
+    from houston import runner
     monkeypatch.setattr(runner, "docker_available", lambda **_k: False)
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
     monkeypatch.setattr(runner, "read_meta", lambda n: lc.runner.Metadata(
-        name=n, project=f"rcrepro-{n}", rc_version="8.5.1", rc_image="i", mongo_tag="8.0",
+        name=n, project=f"houston-{n}", rc_version="8.5.1", rc_image="i", mongo_tag="8.0",
         mongo_flavor="official", preset="default", root_url="http://localhost:3000",
         host_port=3000, version_source="map"))
     monkeypatch.setattr(runner, "read_compose", lambda n: {"services": {"rocketchat": {}}})
@@ -490,12 +490,12 @@ def test_detail_says_whether_this_repro_is_the_default(monkeypatch, tmp_path):
     list_repros() has always carried `default`; detail() did not, so the panel
     had to either hide the action or show it on the repro that already is one.
     """
-    from rc_repro import config, runner
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from houston import config, runner
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(runner, "docker_available", lambda **_k: False)
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
     monkeypatch.setattr(runner, "read_meta", lambda n: lc.runner.Metadata(
-        name=n, project=f"rcrepro-{n}", rc_version="8.5.1", rc_image="i", mongo_tag="8.0",
+        name=n, project=f"houston-{n}", rc_version="8.5.1", rc_image="i", mongo_tag="8.0",
         mongo_flavor="official", preset="default", root_url="http://localhost:3000",
         host_port=3000, version_source="map"))
     monkeypatch.setattr(runner, "read_compose", lambda n: {"services": {"rocketchat": {}}})
@@ -516,7 +516,7 @@ def _req(**kw):
 
 
 def test_a_domain_without_an_email_names_both_ways_to_give_one(tmp_path, monkeypatch):
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     with pytest.raises(errors.ValidationError) as ei:
         lc._resolve_tls(_req(domain="rc1.example.com"), "x", "")
     msg = str(ei.value)
@@ -532,8 +532,8 @@ def test_no_reachability_guessing_stands_between_you_and_a_certificate(tmp_path,
     (it cannot see a tunnel, a port-forward or a firewall), and the single biggest
     source of confusion here.
     """
-    from rc_repro import runner, tls
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from houston import runner, tls
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(runner, "port_free", lambda p, h="": True)
     for probe in ("dns_preflight", "reachability_gaps", "resolves_to",
                   "host_has_public_address"):
@@ -549,8 +549,8 @@ def test_promote_command_reproduces_the_flags_actually_used():
     It is the same two flags the workspace was created with, plus --force, so it
     reproduces the repro rather than describing a different one.
     """
-    from rc_repro import runner
-    from rc_repro.cli import _promote_command
+    from houston import runner
+    from houston.cli import _promote_command
 
     def meta(**extra):
         return runner.Metadata(
@@ -579,13 +579,13 @@ def test_detail_exposes_the_https_fields_the_panel_keys_off(tmp_path, monkeypatc
     list_repros() carried public_url/tls and detail() did not, so the whole feature
     was invisible in the detail panel even though the links were right.
     """
-    from rc_repro import runner
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from houston import runner
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     meta = runner.Metadata(
-        name="g", project="rcrepro-g", rc_version="8.6.1", rc_image="i", mongo_tag="8.0",
+        name="g", project="houston-g", rc_version="8.6.1", rc_image="i", mongo_tag="8.0",
         mongo_flavor="official", preset="default", root_url="http://localhost:3000",
         host_port=3000, version_source="map",
-        public_url="https://g.rcrepro.localhost:8443",
+        public_url="https://g.houston.localhost:8443",
         extra={"tls": "local", "tls_ports": [8443]})
     monkeypatch.setattr(runner, "docker_available", lambda **_k: False)
     monkeypatch.setattr(lc, "resolve_name", lambda n: n)
@@ -593,11 +593,11 @@ def test_detail_exposes_the_https_fields_the_panel_keys_off(tmp_path, monkeypatc
     monkeypatch.setattr(runner, "read_compose", lambda n: {"services": {"rocketchat": {}}})
 
     d = lc.detail("g")
-    assert d["public_url"] == "https://g.rcrepro.localhost:8443"
+    assert d["public_url"] == "https://g.houston.localhost:8443"
     assert d["tls"] == "local"
     # The clickable link prefers https, and the plain port stays available.
     urls = [x["url"] for x in d["links"]]
-    assert "https://g.rcrepro.localhost:8443" in urls
+    assert "https://g.houston.localhost:8443" in urls
     assert "http://localhost:3000" in urls
 
     # A repro without --https must not grow the row or the action.
@@ -613,10 +613,10 @@ def test_env_overrides_survive_up_force(tmp_path, monkeypatch):
     Verified live before this was written: editing only the generated compose file
     worked until the next `up --force`, which silently dropped the change.
     """
-    from rc_repro import runner
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from houston import runner
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     meta = runner.Metadata(
-        name="e", project="rcrepro-e", rc_version="8.6.1", rc_image="i", mongo_tag="8.0",
+        name="e", project="houston-e", rc_version="8.6.1", rc_image="i", mongo_tag="8.0",
         mongo_flavor="official", preset="default", root_url="http://localhost:3000",
         host_port=3000, version_source="map",
         extra={"env": {"KEEP_ME": "yes", "GONE": None}})
@@ -636,9 +636,9 @@ def test_env_overrides_survive_up_force(tmp_path, monkeypatch):
 def test_set_env_refuses_a_no_op_and_warns_on_load_bearing_keys(tmp_path, monkeypatch):
     """Load-bearing keys are allowed — reproducing a broken config is the point —
     but never silently, because the repro stops working and the cause is invisible."""
-    from rc_repro import compose, runner
-    from rc_repro.services import envvars
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from houston import compose, runner
+    from houston.services import envvars
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(envvars.lifecycle, "require_docker", lambda: None)
     monkeypatch.setattr(envvars.lifecycle, "resolve_name", lambda n: n)
 
@@ -646,7 +646,7 @@ def test_set_env_refuses_a_no_op_and_warns_on_load_bearing_keys(tmp_path, monkey
         envvars.set_env("e", {}, [], emit=lambda ev: None)
 
     meta = runner.Metadata(
-        name="e", project="rcrepro-e", rc_version="8.6.1", rc_image="i", mongo_tag="8.0",
+        name="e", project="houston-e", rc_version="8.6.1", rc_image="i", mongo_tag="8.0",
         mongo_flavor="official", preset="default", root_url="http://localhost:3000",
         host_port=3000, version_source="map")
     doc = {"services": {"rocketchat": {"environment": {"PORT": "3000", "KEEP": "1"}},
@@ -675,9 +675,9 @@ def test_set_env_refuses_a_no_op_and_warns_on_load_bearing_keys(tmp_path, monkey
 
 
 def test_set_env_can_write_without_restarting(tmp_path, monkeypatch):
-    from rc_repro import runner
-    from rc_repro.services import envvars
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from houston import runner
+    from houston.services import envvars
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(envvars.lifecycle, "require_docker", lambda: None)
     monkeypatch.setattr(envvars.lifecycle, "resolve_name", lambda n: n)
     monkeypatch.setattr(runner, "read_meta", lambda n: runner.Metadata(
@@ -705,7 +705,7 @@ def test_up_offers_exactly_two_https_flags():
     is worse than either.
     """
     import inspect
-    from rc_repro.cli import up as up_cmd
+    from houston.cli import up as up_cmd
     params = set(inspect.signature(up_cmd).parameters)
     assert {"domain", "email", "https"} <= params
     for dead in ("tls_cert", "tls_key", "tls_san", "acme_staging",
@@ -727,10 +727,10 @@ def test_createreq_carries_no_dead_tls_fields():
 def test_staging_is_reachable_through_config_only(tmp_path, monkeypatch):
     """Not a flag on `up` -- but Let's Encrypt allows only 5 failed validations per
     hostname per hour, so a way to rehearse has to exist somewhere."""
-    from rc_repro import config as cfgmod
-    from rc_repro import runner
-    from rc_repro.cli import _CONFIG_KEYS
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from houston import config as cfgmod
+    from houston import runner
+    from houston.cli import _CONFIG_KEYS
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(runner, "port_free", lambda p, h="": True)
     assert "acme.staging" in _CONFIG_KEYS
 
@@ -749,11 +749,11 @@ def test_every_tls_attribute_the_cli_and_web_reach_for_exists():
     import ast
     import pathlib
 
-    from rc_repro import tls, tls_local
+    from houston import tls, tls_local
     mods = {"tlsmod": tls, "tls": tls, "tls_local": tls_local}
     missing = []
-    for rel in ("rc_repro/cli.py", "rc_repro/web/app.py", "rc_repro/compose.py",
-                "rc_repro/services/lifecycle.py"):
+    for rel in ("houston/cli.py", "houston/web/app.py", "houston/compose.py",
+                "houston/services/lifecycle.py"):
         tree = ast.parse(pathlib.Path(rel).read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
@@ -765,7 +765,7 @@ def test_every_tls_attribute_the_cli_and_web_reach_for_exists():
 # --- the challenge is derived, never asked for (#https-dns01) ---------------------
 
 def _dns_env(tmp_path, body="CF_DNS_API_TOKEN=secret\n"):
-    from rc_repro import tls
+    from houston import tls
     path = tls.dns_env_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
@@ -773,8 +773,8 @@ def _dns_env(tmp_path, body="CF_DNS_API_TOKEN=secret\n"):
 
 
 def test_tls_alpn_is_the_default_matching_the_official_compose(tmp_path, monkeypatch):
-    from rc_repro import runner
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from houston import runner
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(runner, "port_free", lambda p, h="": True)
     spec = lc._resolve_tls(_req(domain="rc1.example.com", acme_email="a@b.c"), "x", "")
     assert spec.acme_challenge == "tlsalpn"
@@ -786,8 +786,8 @@ def test_dns01_is_selected_when_credentials_exist(tmp_path, monkeypatch):
     It is the only way to issue when Let's Encrypt cannot connect inbound: behind
     NAT, behind a tunnel, or behind a proxy that terminates TLS in front of you.
     """
-    from rc_repro import runner
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from houston import runner
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(runner, "port_free", lambda p, h="": True)
     _dns_env(tmp_path)
     req = _req(domain="rc1.example.com", acme_email="a@b.c")
@@ -799,8 +799,8 @@ def test_dns01_is_selected_when_credentials_exist(tmp_path, monkeypatch):
 
 
 def test_dns01_provider_inference_is_not_cloudflare_specific(tmp_path, monkeypatch):
-    from rc_repro import tls
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from houston import tls
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     for body, expected in (("CF_DNS_API_TOKEN=x\n", "cloudflare"),
                            ("AWS_ACCESS_KEY_ID=x\nAWS_SECRET_ACCESS_KEY=y\n", "route53"),
                            ("DO_AUTH_TOKEN=x\n", "digitalocean"),
@@ -815,7 +815,7 @@ def test_dns01_provider_inference_is_not_cloudflare_specific(tmp_path, monkeypat
 def test_unrecognised_credentials_are_refused_not_silently_ignored(tmp_path,
                                                                    monkeypatch):
     """Falling back to tlsalpn would ignore a file the user deliberately created."""
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     _dns_env(tmp_path, "SOME_UNKNOWN_THING=x\n")
     with pytest.raises(errors.ValidationError) as ei:
         lc._resolve_tls(_req(domain="rc1.example.com", acme_email="a@b.c"), "x", "")
@@ -823,9 +823,9 @@ def test_unrecognised_credentials_are_refused_not_silently_ignored(tmp_path,
 
 
 def test_an_explicit_provider_overrides_inference(tmp_path, monkeypatch):
-    from rc_repro import config as cfgmod
-    from rc_repro import runner
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from houston import config as cfgmod
+    from houston import runner
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(runner, "port_free", lambda p, h="": True)
     _dns_env(tmp_path, "SOME_UNKNOWN_THING=x\n")
     cfgmod.update_config(lambda c: c.__setitem__("acme_dns_provider", "exoscale"))
@@ -888,7 +888,7 @@ def test_a_second_load_test_waits_rather_than_corrupting_the_first():
     import threading
     import time as _t
 
-    from rc_repro.web.jobs import JobManager
+    from houston.web.jobs import JobManager
 
     jobs = JobManager()
     started, release = threading.Event(), threading.Event()
@@ -925,8 +925,8 @@ def test_a_failing_job_releases_its_slot():
     test for the life of the process."""
     import time as _t
 
-    from rc_repro.errors import ValidationError
-    from rc_repro.web.jobs import JobManager
+    from houston.errors import ValidationError
+    from houston.web.jobs import JobManager
 
     jobs = JobManager()
 
@@ -952,7 +952,7 @@ def test_ordinary_jobs_are_not_queued():
     """Reads, state changes and seeds stay unbounded, as before."""
     import time as _t
 
-    from rc_repro.web.jobs import JobManager
+    from houston.web.jobs import JobManager
 
     jobs = JobManager()
     job = jobs.submit("seed", lambda emit=None: {"ok": True}, label="x")
@@ -969,10 +969,10 @@ def test_ordinary_jobs_are_not_queued():
 # and which certificate source.
 
 def test_a_domain_still_needs_only_a_domain_and_an_email(tmp_path, monkeypatch):
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    from rc_repro import tls
-    from rc_repro.services import edge as edgesvc
-    from rc_repro.services import lifecycle as lcsvc
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    from houston import tls
+    from houston.services import edge as edgesvc
+    from houston.services import lifecycle as lcsvc
 
     monkeypatch.setattr(edgesvc, "running", lambda: True)
     req = lcsvc.CreateReq(version="8.5.1", domain="chat.example.com",
@@ -984,9 +984,9 @@ def test_a_domain_still_needs_only_a_domain_and_an_email(tmp_path, monkeypatch):
 
 
 def test_a_domain_without_an_email_says_how_to_set_one(tmp_path, monkeypatch):
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    from rc_repro import errors
-    from rc_repro.services import lifecycle as lcsvc
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    from houston import errors
+    from houston.services import lifecycle as lcsvc
 
     req = lcsvc.CreateReq(version="8.5.1", domain="chat.example.com")
     with pytest.raises(errors.ValidationError) as exc:
@@ -997,24 +997,24 @@ def test_a_domain_without_an_email_says_how_to_set_one(tmp_path, monkeypatch):
 def test_local_https_gets_a_localhost_name_and_no_port_of_its_own(tmp_path, monkeypatch):
     """It used to allocate 8443, 8444, ... one per workspace, each with its own
     URL. Every name answers on the edge's 443 now."""
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    from rc_repro import tls
-    from rc_repro.services import edge as edgesvc
-    from rc_repro.services import lifecycle as lcsvc
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    from houston import tls
+    from houston.services import edge as edgesvc
+    from houston.services import lifecycle as lcsvc
 
     monkeypatch.setattr(edgesvc, "running", lambda: True)
     req = lcsvc.CreateReq(version="8.5.1", https=True)
     spec = lcsvc._resolve_tls(req, "w", "127.0.0.1")
     assert spec.mode == tls.MODE_LOCAL
-    assert spec.host == "w.rcrepro.localhost"
-    assert spec.root_url == "https://w.rcrepro.localhost"
+    assert spec.host == "w.houston.localhost"
+    assert spec.root_url == "https://w.houston.localhost"
 
 
 def test_dns01_is_still_chosen_from_credentials_not_a_flag(tmp_path, monkeypatch):
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    from rc_repro import tls
-    from rc_repro.services import edge as edgesvc
-    from rc_repro.services import lifecycle as lcsvc
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    from houston import tls
+    from houston.services import edge as edgesvc
+    from houston.services import lifecycle as lcsvc
 
     tls.acme_dir().mkdir(parents=True, exist_ok=True)
     tls.dns_env_path().write_text("CF_DNS_API_TOKEN=secret\n")
@@ -1033,7 +1033,7 @@ def test_dns01_is_still_chosen_from_credentials_not_a_flag(tmp_path, monkeypatch
 # solved"; these pin the guard that solves it.
 
 def _mem(monkeypatch, available_mb, total_mb=10000, swap_mb=0):
-    from rc_repro import runner
+    from houston import runner
     monkeypatch.setattr(runner, "host_memory",
                         lambda: (total_mb, available_mb, swap_mb))
 
@@ -1044,8 +1044,8 @@ def _mem(monkeypatch, available_mb, total_mb=10000, swap_mb=0):
 # not free memory, so exit 5 told a script to retry something retrying cannot fix.
 # Same argument that moved `require_docker` off exit 5; HTTP status is 409 either way.
 def test_a_workspace_is_refused_when_the_host_cannot_hold_it(monkeypatch):
-    from rc_repro import errors
-    from rc_repro.services import lifecycle as lc
+    from houston import errors
+    from houston.services import lifecycle as lc
 
     _mem(monkeypatch, available_mb=1000)      # 100 MB usable after the reserve
     with pytest.raises(errors.PreflightError) as exc:
@@ -1055,14 +1055,14 @@ def test_a_workspace_is_refused_when_the_host_cannot_hold_it(monkeypatch):
 
 def test_the_refusal_says_what_to_stop_and_how(monkeypatch):
     """"Out of memory" with no next step just moves the problem to the operator."""
-    from rc_repro import errors
-    from rc_repro.services import lifecycle as lc
+    from houston import errors
+    from houston.services import lifecycle as lc
 
     _mem(monkeypatch, available_mb=1000)
     with pytest.raises(errors.PreflightError) as exc:
         lc.check_capacity(lc.CreateReq(version="8.5.1"))
     msg = str(exc.value)
-    assert "rc-repro stop" in msg and "--force" in msg
+    assert "houston stop" in msg and "--force" in msg
     assert "NO SWAP" in msg, "no swap means no buffer at all; say so"
 
 
@@ -1079,8 +1079,8 @@ def test_the_advertised_force_override_actually_overrides(monkeypatch):
     The override also has to stay LOUD: this is the guard added after an OOM killer
     took out a 10 GB host, so bypassing it is reported, not silent.
     """
-    from rc_repro.services import lifecycle as lc
-    from rc_repro.services.events import Event
+    from houston.services import lifecycle as lc
+    from houston.services.events import Event
 
     _mem(monkeypatch, available_mb=1000)          # 100 MB usable: nowhere near enough
     seen: list[Event] = []
@@ -1099,7 +1099,7 @@ def test_the_advertised_force_override_actually_overrides(monkeypatch):
 
 
 def test_plenty_of_memory_is_not_refused(monkeypatch):
-    from rc_repro.services import lifecycle as lc
+    from houston.services import lifecycle as lc
 
     _mem(monkeypatch, available_mb=9000)
     lc.check_capacity(lc.CreateReq(version="8.5.1"))       # must not raise
@@ -1107,8 +1107,8 @@ def test_plenty_of_memory_is_not_refused(monkeypatch):
 
 def test_a_preset_with_keycloak_needs_more_than_a_bare_workspace(monkeypatch):
     """saml/oidc run Keycloak, which is the biggest sidecar there is."""
-    from rc_repro import errors
-    from rc_repro.services import lifecycle as lc
+    from houston import errors
+    from houston.services import lifecycle as lc
 
     # Enough for a bare workspace, not for one plus Keycloak.
     _mem(monkeypatch, available_mb=lc.host_reserve_mb(10024) + lc.WORKSPACE_MB + 100)
@@ -1118,8 +1118,8 @@ def test_a_preset_with_keycloak_needs_more_than_a_bare_workspace(monkeypatch):
 
 
 def test_monitoring_counts_towards_the_estimate(monkeypatch):
-    from rc_repro import errors
-    from rc_repro.services import lifecycle as lc
+    from houston import errors
+    from houston.services import lifecycle as lc
 
     _mem(monkeypatch, available_mb=lc.host_reserve_mb(10024) + lc.WORKSPACE_MB + 100)
     with pytest.raises(errors.PreflightError):
@@ -1128,7 +1128,7 @@ def test_monitoring_counts_towards_the_estimate(monkeypatch):
 
 def test_the_last_workspace_warns_before_the_ceiling(monkeypatch):
     """The ceiling should be visible BEFORE it is hit, not only in the refusal."""
-    from rc_repro.services import lifecycle as lc
+    from houston.services import lifecycle as lc
 
     _mem(monkeypatch, available_mb=lc.host_reserve_mb(10024) + lc.WORKSPACE_MB + 200)
     seen: list = []
@@ -1138,8 +1138,8 @@ def test_the_last_workspace_warns_before_the_ceiling(monkeypatch):
 
 def test_a_host_we_cannot_measure_is_never_refused(monkeypatch):
     """Not Linux: skip rather than guess. A wrong refusal is worse than none."""
-    from rc_repro import runner
-    from rc_repro.services import lifecycle as lc
+    from houston import runner
+    from houston.services import lifecycle as lc
 
     monkeypatch.setattr(runner, "host_memory", lambda: None)
     lc.check_capacity(lc.CreateReq(version="8.5.1"))       # must not raise
@@ -1148,7 +1148,7 @@ def test_a_host_we_cannot_measure_is_never_refused(monkeypatch):
 def test_host_memory_prefers_available_over_free():
     """MemFree excludes the page cache, which the kernel reclaims on demand -- it
     looks alarming on a healthy box and reassuring on a doomed one."""
-    from rc_repro import runner
+    from houston import runner
 
     mem = runner.host_memory()
     if mem is None:
@@ -1166,8 +1166,8 @@ def test_the_guard_would_have_stopped_the_incident(monkeypatch):
     kills a host is what already-admitted workspaces take LATER. A proportional
     reserve refuses it.
     """
-    from rc_repro import errors
-    from rc_repro.services import lifecycle as lc
+    from houston import errors
+    from houston.services import lifecycle as lc
 
     _mem(monkeypatch, total_mb=10024, available_mb=3350, swap_mb=0)
     with pytest.raises(errors.PreflightError):
@@ -1175,7 +1175,7 @@ def test_the_guard_would_have_stopped_the_incident(monkeypatch):
 
 
 def test_the_reserve_scales_with_the_host():
-    from rc_repro.services import lifecycle as lc
+    from houston.services import lifecycle as lc
 
     assert lc.host_reserve_mb(10024) == 2004, "a fifth of a 10 GB box"
     assert lc.host_reserve_mb(2048) == 1024, "never below 1 GB on a small one"
@@ -1191,7 +1191,7 @@ def test_an_impossible_mongo_kernel_pairing_is_refused_before_any_docker_work(mo
     then let mongod die, leaving `diagnose` to explain it afterwards. Now the
     pairing is resolved first and an impossible one is refused.
     """
-    from rc_repro.services import doctor
+    from houston.services import doctor
 
     # The rule itself: version-aware, so it answers differently per pairing.
     assert doctor.mongo_kernel_conflict("8.0", "6.19.7-200.fc43.aarch64")
@@ -1223,7 +1223,7 @@ def test_an_impossible_mongo_kernel_pairing_is_refused_before_any_docker_work(mo
 
 def test_root_url_in_metadata_is_always_the_local_port(monkeypatch, tmp_path):
     """runner.Metadata's own docstring makes this a contract: root_url "stays the
-    plain http://localhost:<port> that rc-repro's own API calls (login, PAT, seeding,
+    plain http://localhost:<port> that houston's own API calls (login, PAT, seeding,
     load tests) use", and public_url carries the external name.
 
     `--root-url` used to displace it, which put a public https name into root_url --
@@ -1235,7 +1235,7 @@ def test_root_url_in_metadata_is_always_the_local_port(monkeypatch, tmp_path):
     The override still reaches Rocket.Chat -- it is what RC ADVERTISES, and the
     compose spec below keeps taking it.
     """
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     seen = {}
 
     monkeypatch.setattr(lc.runner, "docker_available", lambda **_k: True)
@@ -1291,7 +1291,7 @@ def test_a_workspace_with_no_runtime_key_reads_as_docker():
     """The compatibility gate. Every workspace on every existing box predates this
     key, and none of them is rewritten -- so an absent value must mean docker, or
     the socket silently orphans the entire installed base."""
-    from rc_repro.services import topology
+    from houston.services import topology
 
     old = lc.runner.Metadata(name="r", project="p", rc_version="8.5.1", rc_image="i",
                           mongo_tag="8.0", mongo_flavor="official", preset="default",
@@ -1303,10 +1303,10 @@ def test_a_workspace_with_no_runtime_key_reads_as_docker():
 
 def test_an_unknown_runtime_reads_as_docker_rather_than_raising():
     """Forward compatibility, and the reason `of_meta` never raises: a workspace
-    written by a NEWER rc-repro naming a runtime this build has never heard of must
+    written by a NEWER houston naming a runtime this build has never heard of must
     still list and still tear down. A repro the installed version cannot remove is
     worse than one it renders imprecisely."""
-    from rc_repro.services import topology
+    from houston.services import topology
 
     m = lc.runner.Metadata(name="r", project="p", rc_version="8.5.1", rc_image="i",
                         mongo_tag="8.0", mongo_flavor="official", preset="default",
@@ -1325,9 +1325,9 @@ def test_the_runtime_survives_a_real_write_and_read(monkeypatch, tmp_path):
     """Round-trip through repro.json on disk, not through a mock. `read_meta`
     filters unknown keys, so a value living in the wrong place would be dropped
     between writing a workspace and reading it back."""
-    from rc_repro.services import topology
+    from houston.services import topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     m = lc.runner.Metadata(name="k", project="p", rc_version="8.6.1", rc_image="i",
                         mongo_tag="8.0", mongo_flavor="official", preset="default",
                         root_url="u", host_port=3010, version_source="t")
@@ -1341,16 +1341,16 @@ def test_reading_the_runtime_of_a_missing_workspace_does_not_explode(tmp_path, m
     """`of_repro` is called before the caller's own existence check in some paths.
     It must not be the thing that fails, or the user gets a stat error instead of
     'no such repro'."""
-    from rc_repro.services import topology
+    from houston.services import topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     assert topology.of_repro("nope") == topology.DOCKER
 
 
 def test_normalize_accepts_what_people_type_and_refuses_what_they_mistype():
     """The opposite policy to `of_meta`: this reads input a human just typed, where
     a silent fallback would boot the wrong topology."""
-    from rc_repro.services import topology
+    from houston.services import topology
 
     assert topology.normalize("") == topology.DOCKER, "omitting --runtime is not an error"
     assert topology.normalize(None) == topology.DOCKER
@@ -1377,7 +1377,7 @@ def test_doctor_warns_before_inotify_runs_out(tmp_path):
     docs raise it for multi-cluster use, and it resets on reboot -- this host was
     raised to 1024 during the audit and was back to the 128 default afterwards.
     """
-    from rc_repro.services import doctor
+    from houston.services import doctor
 
     def at(limit, clusters, in_use=0):
         f = tmp_path / f"lim{limit}"
@@ -1430,7 +1430,7 @@ def test_kubernetes_logs_do_not_mangle_rocketchats_own_formatting(monkeypatch):
     With one pod the prefix names the only thing it could be, so it is pure noise.
     With several it is the only way to tell replicas apart, so it comes back.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     seen = {}
 
@@ -1490,8 +1490,8 @@ def test_orphaned_namespaces_are_found_but_never_swept_by_default(
         monkeypatch, tmp_path):
     """A namespace with no local record is unreachable by every other command.
 
-    Every rc-repro command starts from the state directory, so a workspace whose
-    repro.json is gone -- interrupted create, wiped RC_REPRO_HOME, a different home
+    Every houston command starts from the state directory, so a workspace whose
+    repro.json is gone -- interrupted create, wiped HOUSTON_HOME, a different home
     -- keeps its pods and its PersistentVolumeClaim running and simply cannot be
     seen. One was found holding 8Gi and five CrashLoopBackOff pods, removable only
     by hand with kubectl.
@@ -1503,9 +1503,9 @@ def test_orphaned_namespaces_are_found_but_never_swept_by_default(
     import json as _json
     from dataclasses import asdict
 
-    from rc_repro.services import k8s, topology
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     m = lc.runner.Metadata(name="known", project="p", rc_version="8.5.1",
                            rc_image="i", mongo_tag="8.0", mongo_flavor="official",
                            preset="default", root_url="u", host_port=3000,
@@ -1516,10 +1516,10 @@ def test_orphaned_namespaces_are_found_but_never_swept_by_default(
     (ws / "repro.json").write_text(_json.dumps(asdict(m)), encoding="utf-8")
 
     monkeypatch.setattr(k8s, "workspace_namespaces",
-                        lambda ctx=k8s.CONTEXT: ["rc-repro-known", "rc-repro-p3",
+                        lambda ctx=k8s.CONTEXT: ["houston-known", "houston-p3",
                                                  k8s.OPERATOR_NAMESPACE])
     found = lc.orphan_namespaces()
-    assert found == ["rc-repro-p3"], found
+    assert found == ["houston-p3"], found
     assert k8s.OPERATOR_NAMESPACE not in found, \
         "the shared operator/monitoring namespace is not a workspace"
 
@@ -1540,8 +1540,8 @@ def test_orphaned_namespaces_are_found_but_never_swept_by_default(
 
     # Asked for explicitly, it removes exactly the unexplained one.
     out = lc.prune(confirm=True, orphans=True)
-    assert out["orphans"] == ["rc-repro-p3"]
-    assert deleted == ["rc-repro-p3"], deleted
+    assert out["orphans"] == ["houston-p3"]
+    assert deleted == ["houston-p3"], deleted
 
 
 def test_env_and_stats_answer_on_kubernetes_instead_of_refusing(
@@ -1550,7 +1550,7 @@ def test_env_and_stats_answer_on_kubernetes_instead_of_refusing(
 
     `env` is answered from the RUNNING CONTAINER rather than a document. That is not
     a translation of the Compose behaviour, it is better than it: the chart
-    contributes variables rc-repro never set, so the generated values would not show
+    contributes variables houston never set, so the generated values would not show
     them and the compose file has no equivalent here at all.
 
     `stats` needs metrics-server, which kind does not ship. When it is missing the
@@ -1561,10 +1561,10 @@ def test_env_and_stats_answer_on_kubernetes_instead_of_refusing(
     import json as _json
     from dataclasses import asdict
 
-    from rc_repro import errors as errs
-    from rc_repro.services import envvars, k8s, topology
+    from houston import errors as errs
+    from houston.services import envvars, k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     m = lc.runner.Metadata(name="k", project="p", rc_version="8.5.1", rc_image="i",
                            mongo_tag="8.0", mongo_flavor="official", preset="default",
                            root_url="u", host_port=3000, version_source="t")
@@ -1615,8 +1615,8 @@ def test_start_restores_the_replica_count_stop_recorded(monkeypatch):
 
     `stop` records the counts in a namespace annotation for exactly this, and `start`
     read it back through jsonpath -- escaping the SLASH in
-    `rc-repro.io/replicas-before-stop` while leaving the DOT in `rc-repro.io`
-    unescaped. jsonpath then read `rc-repro` and `io/...` as separate path segments,
+    `houston.io/replicas-before-stop` while leaving the DOT in `houston.io`
+    unescaped. jsonpath then read `houston` and `io/...` as separate path segments,
     matched nothing and returned empty, so every restore fell through to the default
     of 1. Measured on a live cluster: the slash-escaped form returns "" where the
     dot-escaped form returns the annotation.
@@ -1631,7 +1631,7 @@ def test_start_restores_the_replica_count_stop_recorded(monkeypatch):
     """
     import json as _json
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     recorded = {"deployment/rocketchat-rocketchat": "2",
                 "deployment/rocketchat-presence": "1"}
@@ -1686,9 +1686,9 @@ def test_an_interrupted_kubernetes_create_still_leaves_a_record(monkeypatch, tmp
     so an interrupted create is still listed and still removable. This is the same
     guarantee for the other runtime.
     """
-    from rc_repro.services import k8s, topology
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     # The namespace-ownership preflight talks to the cluster and lives OUTSIDE
     # `create_workspace`, so stubbing that one is no longer enough to keep a test
     # off a real kubectl. Refusing to guess is the point of it, so it is stubbed
@@ -1724,7 +1724,7 @@ def test_an_interrupted_kubernetes_create_still_leaves_a_record(monkeypatch, tmp
 
     assert lc.runner.exists("interrupted"), (
         "the workspace was left running with no record at all -- nothing in "
-        "rc-repro could see it, let alone remove it")
+        "houston could see it, let alone remove it")
     meta = lc.runner.read_meta("interrupted")
     assert topology.of_meta(meta) == topology.KUBERNETES
     assert meta.extra.get("namespace") == k8s.namespace_for("interrupted"), \
@@ -1750,12 +1750,12 @@ def test_prune_asks_kubernetes_whether_a_kubernetes_workspace_is_down(
     import json as _json
     from dataclasses import asdict
 
-    from rc_repro.services import k8s, topology
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
 
     def workspace(name, runtime, port):
-        m = lc.runner.Metadata(name=name, project=f"rcrepro-{name}",
+        m = lc.runner.Metadata(name=name, project=f"houston-{name}",
                                rc_version="8.5.1", rc_image="i", mongo_tag="8.0",
                                mongo_flavor="official", preset="default",
                                root_url=f"http://localhost:{port}", host_port=port,
@@ -1797,10 +1797,10 @@ def test_prune_removes_a_kubernetes_workspace_through_kubernetes(
     import json as _json
     from dataclasses import asdict
 
-    from rc_repro.services import k8s, topology
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    m = lc.runner.Metadata(name="k", project="rcrepro-k", rc_version="8.5.1",
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    m = lc.runner.Metadata(name="k", project="houston-k", rc_version="8.5.1",
                            rc_image="i", mongo_tag="8.0", mongo_flavor="official",
                            preset="default", root_url="http://localhost:3000",
                            host_port=3000, version_source="t")
@@ -1836,7 +1836,7 @@ def test_reading_env_answers_from_the_container_on_kubernetes(monkeypatch, tmp_p
     workspace. Then it refused cleanly. Now it answers.
 
     From the RUNNING CONTAINER, which is not a translation of the Compose behaviour
-    but better than it: the chart contributes variables rc-repro never set, so
+    but better than it: the chart contributes variables houston never set, so
     neither the helm values nor any generated document would show them.
 
     `env --set` still refuses -- an environment variable cannot be changed inside a
@@ -1845,9 +1845,9 @@ def test_reading_env_answers_from_the_container_on_kubernetes(monkeypatch, tmp_p
     import json as _json
     from dataclasses import asdict
 
-    from rc_repro.services import envvars, k8s, topology
+    from houston.services import envvars, k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     m = lc.runner.Metadata(name="k", project="p", rc_version="8.6.1", rc_image="i",
                            mongo_tag="8.0", mongo_flavor="official", preset="default",
                            root_url="u", host_port=3010, version_source="t")
@@ -1890,8 +1890,8 @@ def test_stop_says_so_when_the_operator_keeps_mongodb_running(monkeypatch):
     The hand-written StatefulSet path is untouched: it scales to zero like anything
     else, and must not start paying for this.
     """
-    from rc_repro.services import k8s
-    from rc_repro.services.events import Event
+    from houston.services import k8s
+    from houston.services.events import Event
 
     def cluster(*, operator: bool, pods: list[str]):
         """Stub kubectl for the handful of calls stop_workspace makes."""
@@ -1955,7 +1955,7 @@ def test_ready_speaks_for_every_probed_pod_not_just_the_first(monkeypatch):
     """
     import json as _json
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     def pods(*specs):
         """specs: (name, [ready flags]) -- no flags means Pending, no statuses."""
@@ -2041,9 +2041,9 @@ def test_a_compose_only_operation_refuses_a_kubernetes_workspace(monkeypatch, tm
     serve a workspace that has no compose project. The refusal must name the
     alternative -- 'not supported' leaves the user to find what the person writing
     the message already knew."""
-    from rc_repro.services import topology
+    from houston.services import topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     m = lc.runner.Metadata(name="k", project="p", rc_version="8.6.1", rc_image="i",
                         mongo_tag="8.0", mongo_flavor="official", preset="default",
                         root_url="u", host_port=3010, version_source="t")
@@ -2071,7 +2071,7 @@ def test_both_runtimes_are_registered_and_a_third_would_not_be():
     SPELLABLE: a name can be recognised, and reported honestly as unavailable,
     before it works. That is how `kubernetes` behaved for six commits.
     """
-    from rc_repro.services import topology
+    from houston.services import topology
 
     assert topology.REGISTERED == frozenset({topology.DOCKER, topology.KUBERNETES})
     assert topology.is_registered(topology.DOCKER)
@@ -2089,9 +2089,9 @@ def test_the_create_path_stamps_the_runtime_on_a_compose_workspace(monkeypatch, 
     Captured at the `runner.write` seam, which is the last thing to see the
     metadata before it becomes repro.json.
     """
-    from rc_repro.services import topology
+    from houston.services import topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     written: list = []
     monkeypatch.setattr(lc, "require_docker", lambda: None)
     monkeypatch.setattr(lc, "check_capacity", lambda *a, **k: None)
@@ -2129,7 +2129,7 @@ def test_every_cell_of_the_runtime_deployment_matrix():
     Every combination is decided in one function, because a rule enforced at two
     call sites eventually disagrees with itself.
     """
-    from rc_repro.services import topology as T
+    from houston.services import topology as T
 
     ok = lambda **kw: T.resolve_axes(**kw)                                # noqa: E731
 
@@ -2152,7 +2152,7 @@ def test_the_refusals_name_what_to_do_instead(monkeypatch):
     """Each refusal is about coverage or physics -- never about category
     confusion. 'Is multi-instance a preset or a deployment?' stops being a
     question a user can get wrong, because there is one place it can live."""
-    from rc_repro.services import topology as T
+    from houston.services import topology as T
 
     cases = [
         (dict(runtime="docker", deployment="microservices"), "--runtime kubernetes"),
@@ -2185,7 +2185,7 @@ def test_the_old_spellings_keep_working_and_say_what_they_are_now():
     """Permanent aliases, not a deprecation with a deadline. They cost one dict
     lookup each, and breaking a command line that is pasted into support tickets
     buys nothing."""
-    from rc_repro.services import topology as T
+    from houston.services import topology as T
 
     a = T.resolve_axes(preset="multi-instance", params={"instances": "3"})
     assert (a.deployment, a.replicas) == (T.MULTI_INSTANCE, 3)
@@ -2207,7 +2207,7 @@ def test_rebuilding_a_workspace_does_not_nag_about_a_spelling_nobody_typed():
     Both used to pass `preset=meta.preset`, which for a multi-instance workspace
     IS the legacy spelling -- so clicking Start printed a deprecation notice at a
     user who had typed neither flag."""
-    from rc_repro.services import topology as T
+    from houston.services import topology as T
 
     m = lc.runner.Metadata(name="r", project="p", rc_version="8.5.1", rc_image="i",
                            mongo_tag="8.0", mongo_flavor="official",
@@ -2257,7 +2257,7 @@ def _fake_run(mapping):
         # which is what a create test is describing. Answered before the mapping
         # because the natural `"get namespace"` entry matches this query too, and
         # rc=0 with an empty body now reads as "exists, carrying no labels" -- an
-        # unlabelled namespace is refused rather than adopted, since rc-repro cannot
+        # unlabelled namespace is refused rather than adopted, since houston cannot
         # tell one an older version made from one somebody else made. A mapping that
         # wants to describe an EXISTING namespace says so with a `labels` key.
         if "{.metadata.labels}" in joined and not any("labels" in n for n in mapping):
@@ -2275,7 +2275,7 @@ def test_tool_versions_parse_the_three_formats_the_tools_actually_print():
     """Each tool spells its version differently, and all three strings below are
     real output from this machine. A parser that only handled one would report a
     present tool as unknown and, with a floor to check, refuse to proceed."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     assert k8s._parse_version("kind v0.32.0 go1.26.3 linux/amd64") == (0, 32, 0)
     assert k8s._parse_version("Client Version: v1.36.3") == (1, 36, 3)
@@ -2287,7 +2287,7 @@ def test_an_unparseable_version_is_not_treated_as_too_old():
     """A distro may print something this does not recognise. Refusing to proceed
     over an unrecognised version string is worse than trying: the binary is there,
     and the floor exists to catch a genuinely ancient one, not to gate on parsing."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     assert k8s.Tool(name="helm", path="/usr/bin/helm", raw="weird").new_enough
     assert not k8s.Tool(name="helm", path="/usr/bin/helm", version=(2, 17)).new_enough
@@ -2299,7 +2299,7 @@ def test_a_missing_binary_never_raises_out_of_the_seam():
     """`doctor` is the command someone runs BECAUSE things are wrong. If the seam
     raised on a missing binary, every call site would need a wrapper and one
     forgotten wrapper takes down the whole report."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     res = k8s.run(["definitely-not-a-real-binary-xyz", "version"])
     assert res.returncode != 0
@@ -2308,10 +2308,10 @@ def test_a_missing_binary_never_raises_out_of_the_seam():
 
 def test_namespaces_are_selected_by_label_never_by_name(monkeypatch):
     """The safety property. Anyone can create a namespace called
-    `rc-repro-anything`; a teardown matching on the prefix would eventually delete
-    one rc-repro never made. Asserted on the argv, because that is the thing that
+    `houston-anything`; a teardown matching on the prefix would eventually delete
+    one houston never made. Asserted on the argv, because that is the thing that
     reaches the cluster."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     seen = []
 
@@ -2322,13 +2322,13 @@ def test_namespaces_are_selected_by_label_never_by_name(monkeypatch):
         # has to be able to say "I could not ask" -- `-o name` cannot carry that,
         # and a stub answering the old shape leaves the destructive callers
         # untested against the very case this is about.
-        return sp.CompletedProcess(argv, 0, json.dumps({"items": [{"metadata": {"name": "rc-repro-t1"}}]}), "")
+        return sp.CompletedProcess(argv, 0, json.dumps({"items": [{"metadata": {"name": "houston-t1"}}]}), "")
 
     monkeypatch.setattr(k8s, "run", spy)
-    assert k8s.workspace_namespaces() == ["rc-repro-t1"]
+    assert k8s.workspace_namespaces() == ["houston-t1"]
     argv = seen[0]
     assert "-l" in argv and k8s.OWNER_SELECTOR in argv, argv
-    # The context legitimately contains the prefix (kind-rc-repro-local). What must
+    # The context legitimately contains the prefix (kind-houston-local). What must
     # not appear is a SELECTOR built from the name: no field-selector, and no
     # argument that is the prefix used as a match.
     selectors = [a for i, a in enumerate(argv)
@@ -2341,17 +2341,17 @@ def test_the_release_is_named_as_the_official_docs_name_it():
     """PR #3 calls the release `rc`. The official guide calls it `rocketchat`, and
     with one release per namespace there is no reason to differ -- so every command
     copied from docs.rocket.chat works by substituting the namespace alone."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     assert k8s.RELEASE == "rocketchat"
-    assert k8s.CLUSTER_NAME == "rc-repro-local"
+    assert k8s.CLUSTER_NAME == "houston-local"
 
 
 def test_preflight_stops_before_asking_a_cluster_that_is_not_there(monkeypatch):
     """Ordering matters: asking an absent API server for storage classes would time
     out, and the timeout would be reported as "no storage" -- a wrong answer that
     sends someone to fix the wrong thing."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     asked = []
 
@@ -2375,9 +2375,9 @@ def test_doctor_stays_quiet_about_kubernetes_when_nobody_is_using_it(monkeypatch
     """A doctor that reports FAIL for a feature you are not using teaches people to
     ignore its failures. With no tools and no Kubernetes workspace, the whole
     subject is one informational line -- not five rows of absence."""
-    from rc_repro.services import doctor, k8s
+    from houston.services import doctor, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "which", lambda _t: "")
     report = doctor.run_checks()
     kube = [r for r in report["checks"] if "ubernetes" in r["message"]]
@@ -2391,9 +2391,9 @@ def test_doctor_fails_when_a_kubernetes_workspace_exists_but_the_tools_do_not(
     """The same finding, opposite severity. A workspace that cannot be reached OR
     TORN DOWN is a real fault -- and the teardown half is what makes it urgent,
     because the resources keep running."""
-    from rc_repro.services import doctor, k8s, topology
+    from houston.services import doctor, k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     m = lc.runner.Metadata(name="k", project="p", rc_version="8.6.1", rc_image="i",
                            mongo_tag="8.0", mongo_flavor="official", preset="default",
                            root_url="u", host_port=3010, version_source="t")
@@ -2413,9 +2413,9 @@ def test_a_cluster_with_no_default_storageclass_is_reported(monkeypatch, tmp_pat
     """The guide opens with this warning: local distributions "often ship without a
     storage provisioner enabled". The failure it causes is silent -- a PVC stays
     Pending forever and nothing in the output names storage."""
-    from rc_repro.services import doctor, k8s
+    from houston.services import doctor, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "which", lambda t: f"/usr/bin/{t}")
     monkeypatch.setattr(k8s, "run", _fake_run({
         "get clusters": (0, f"{k8s.CLUSTER_NAME}\n"),
@@ -2438,9 +2438,9 @@ def test_a_stopped_docker_is_not_reported_as_a_missing_cluster(monkeypatch, tmp_
 
     The two are kept apart: answered-no and could-not-ask.
     """
-    from rc_repro.services import doctor, k8s
+    from houston.services import doctor, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "which", lambda t: f"/usr/bin/{t}")
     monkeypatch.setattr(k8s, "run", _fake_run({
         "get clusters": (1, ""),          # non-zero: Docker is down
@@ -2467,7 +2467,7 @@ def test_kubernetes_works_without_kind_because_kind_only_creates_clusters(monkey
     The first cut of this module returned early when kind was absent, which made a
     perfectly good k3s box look like it had no Kubernetes at all.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     monkeypatch.setattr(k8s, "which", lambda t: "" if t == "kind" else f"/usr/bin/{t}")
     monkeypatch.setattr(k8s, "run", _fake_run({
@@ -2489,14 +2489,14 @@ def test_kubernetes_works_without_kind_because_kind_only_creates_clusters(monkey
     assert pre.default_storage_class == "local-path"
 
 
-def test_a_cluster_rc_repro_did_not_create_is_marked_external(monkeypatch):
-    """The ownership rule at the right granularity. rc-repro may delete a cluster
+def test_a_cluster_houston_did_not_create_is_marked_external(monkeypatch):
+    """The ownership rule at the right granularity. houston may delete a cluster
     it created; in one you supplied it owns only the namespaces it labelled, and
     the cluster itself is never its to remove."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     # No kind: the bring-your-own path, where the cluster kubectl points at is
-    # adopted. With kind INSTALLED rc-repro creates its own instead of adopting
+    # adopted. With kind INSTALLED houston creates its own instead of adopting
     # anyone's, so that is not the setup this rule is about.
     monkeypatch.setattr(k8s, "which", lambda t: "" if t == "kind" else f"/usr/bin/{t}")
     monkeypatch.setattr(k8s, "run", _fake_run({
@@ -2511,9 +2511,9 @@ def test_a_cluster_rc_repro_did_not_create_is_marked_external(monkeypatch):
     assert pre.cluster_exists is False, "ours is not among them"
     assert pre.provider == k8s.PROVIDER_EXTERNAL
     assert pre.context == "kind-somebody-elses"
-    assert pre.will_create is False, "a cluster rc-repro cannot make is never one it creates"
+    assert pre.will_create is False, "a cluster houston cannot make is never one it creates"
 
-    # And ours, when it IS there, is the one rc-repro may manage fully.
+    # And ours, when it IS there, is the one houston may manage fully.
     monkeypatch.setattr(k8s, "which", lambda t: f"/usr/bin/{t}")
     monkeypatch.setattr(k8s, "run", _fake_run({
         "get clusters": (0, f"{k8s.CLUSTER_NAME}\n"),
@@ -2531,9 +2531,9 @@ def test_doctor_names_both_ways_to_get_a_cluster_when_there_is_none(monkeypatch,
     """kubectl and helm but nothing to point them at. Naming only kind would be
     wrong -- pointing at an existing k3s or Docker Desktop cluster is equally
     valid, and for most people already done."""
-    from rc_repro.services import doctor, k8s
+    from houston.services import doctor, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "which", lambda t: "" if t == "kind" else f"/usr/bin/{t}")
     monkeypatch.setattr(k8s, "run", _fake_run({
         "config current-context": (1, ""),
@@ -2549,9 +2549,9 @@ def test_the_cluster_in_use_is_not_also_listed_as_another_cluster(monkeypatch, t
     """It described the same cluster twice -- "Using your cluster 'kind-kind'"
     followed by "1 other kind cluster(s) (kind)" -- and the second mention reads as
     a different one."""
-    from rc_repro.services import doctor, k8s
+    from houston.services import doctor, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "which", lambda t: f"/usr/bin/{t}")
     monkeypatch.setattr(k8s, "run", _fake_run({
         "get clusters": (0, f"{k8s.CLUSTER_NAME}\nsomebody-elses\n"),
@@ -2572,14 +2572,14 @@ def test_the_cluster_in_use_is_not_also_listed_as_another_cluster(monkeypatch, t
 
 
 def test_the_kubeconfig_note_matches_which_cluster_the_workspace_is_in(monkeypatch):
-    """The note said `export KUBECONFIG=<rc-repro's own>` on every Kubernetes
-    workspace. On a cluster rc-repro ADOPTED that is wrong three ways -- it created no
+    """The note said `export KUBECONFIG=<houston's own>` on every Kubernetes
+    workspace. On a cluster houston ADOPTED that is wrong three ways -- it created no
     cluster, that file does not describe yours, and your kubectl already pointed at the
-    right one -- so pasting step 1 broke the shell it was pasted into. rc-repro only
+    right one -- so pasting step 1 broke the shell it was pasted into. houston only
     keeps its own kubeconfig for the cluster it created (`own=is_ours(context)`), and
     the note has to say the same thing the code does."""
-    from rc_repro import runner
-    from rc_repro.services import k8s, lifecycle as lc
+    from houston import runner
+    from houston.services import k8s, lifecycle as lc
 
     def note_text(context):
         meta = runner.Metadata(
@@ -2606,14 +2606,14 @@ def test_the_kubeconfig_note_matches_which_cluster_the_workspace_is_in(monkeypat
 def test_doctor_names_the_cluster_up_would_actually_use(monkeypatch, tmp_path):
     """A box with BOTH kind and k3s. `doctor` resolved the cluster itself -- kind's
     if one existed, else whatever kubectl pointed at -- and `up` asked
-    `plan_cluster`, which creates rc-repro's own whenever kind is installed. With
+    `plan_cluster`, which creates houston's own whenever kind is installed. With
     kind present but no cluster yet and k3s running, the two disagreed: the report
     said "Using your cluster 'default' (k3s)" and `up` went and built a kind
     cluster. A preflight whose whole job is predicting a boot cannot be a second
     opinion about it."""
-    from rc_repro.services import doctor, k8s
+    from houston.services import doctor, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "which", lambda t: f"/usr/bin/{t}")
     monkeypatch.setattr(k8s, "run", _fake_run({
         "get clusters": (0, "\n"),            # kind installed, no cluster yet
@@ -2635,7 +2635,7 @@ def test_doctor_names_the_cluster_up_would_actually_use(monkeypatch, tmp_path):
     assert any(f"No cluster yet — {k8s.CLUSTER_NAME!r} is created on first use" in m
                for m in msgs), msgs
     # ...and the one being set aside is still named, or the next question is why
-    # rc-repro is building a second cluster next to a working one.
+    # houston is building a second cluster next to a working one.
     assert any("will NOT be used" in m and "'default'" in m for m in msgs), msgs
 
 
@@ -2646,16 +2646,16 @@ def test_doctor_reports_the_cluster_that_took_the_edge_s_port(monkeypatch, tmp_p
     Measured on this box: the edge's own GUI name answered 404 through the host and 502
     direct to the edge, with nothing connecting the two.
 
-    The cluster that does it need not be the one rc-repro is USING. On the box where this
-    was measured it was not: rc-repro had chosen kind, which has no LoadBalancer, while
+    The cluster that does it need not be the one houston is USING. On the box where this
+    was measured it was not: houston had chosen kind, which has no LoadBalancer, while
     the k3s alongside it held the port."""
-    from rc_repro.services import doctor, k8s
+    from houston.services import doctor, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     chosen = k8s.Preflight(tools={
         n: k8s.Tool(name=n, path=f"/usr/bin/{n}", version=(9, 9, 9), raw="v9.9.9")
         for n in ("kubectl", "helm")})
-    # NOT reachable, deliberately: rc-repro's own cluster does not exist yet, which is
+    # NOT reachable, deliberately: houston's own cluster does not exist yet, which is
     # the state the box was in when this fired for real. The check used to live inside
     # the reachable-cluster block, so on exactly that box it never ran.
     chosen.context = k8s.CONTEXT
@@ -2675,7 +2675,7 @@ def test_doctor_reports_the_cluster_that_took_the_edge_s_port(monkeypatch, tmp_p
                             address="172.16.0.2", ports=[80, 443])
                         if ctx == "default" else None)
 
-    from rc_repro.services import edge as edgesvc
+    from houston.services import edge as edgesvc
     monkeypatch.setattr(edgesvc, "installed", lambda: True)
     monkeypatch.setattr(edgesvc, "registered", lambda: [])
     monkeypatch.setattr(edgesvc, "current",
@@ -2716,7 +2716,7 @@ def test_missing_storage_is_a_refusal_because_nothing_would_ever_log_it():
     Same reasoning as the mongo/kernel gate: there is no case where continuing
     works, so a warning would only be a slower failure.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     none_at_all = k8s.Preflight(context="c", cluster_reachable=True)
     msg = k8s.storage_blocker(none_at_all)
@@ -2742,7 +2742,7 @@ def test_storage_is_not_reported_for_a_cluster_nobody_could_reach():
     """Reporting "no StorageClass" for an unreachable cluster is the same wrong
     answer as reporting an absent cluster for a stopped Docker: it sends someone
     to fix storage when the problem is that nothing answered."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     unreachable = k8s.Preflight(context="c", cluster_reachable=False)
     assert k8s.storage_blocker(unreachable) == ""
@@ -2759,9 +2759,9 @@ def test_doctor_never_warns_about_ingress(monkeypatch, tmp_path):
     So it is reported as a FACT and never as a warning. Severity still belongs to whatever
     needs it, which is `ensure_ingress` adopting or installing one at create time.
     """
-    from rc_repro.services import doctor, k8s
+    from houston.services import doctor, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "which", lambda t: f"/usr/bin/{t}")
     monkeypatch.setattr(k8s, "run", _fake_run({
         "get clusters": (0, f"{k8s.CLUSTER_NAME}\n"),
@@ -2791,20 +2791,20 @@ def test_doctor_never_warns_about_ingress(monkeypatch, tmp_path):
                    for r in rows)
 
 
-def test_rc_repro_never_rewrites_the_users_kubeconfig(monkeypatch, tmp_path):
+def test_houston_never_rewrites_the_users_kubeconfig(monkeypatch, tmp_path):
     """The one way creating a cluster genuinely disturbs existing work.
 
     `kind create cluster` writes ~/.kube/config AND switches current-context to the
     cluster it just made. Without isolation, somebody working in their own cluster
-    runs `rc-repro up` and their next `kubectl get pods` answers from somewhere
+    runs `houston up` and their next `kubectl get pods` answers from somewhere
     else -- with no indication anything moved.
 
-    So anything touching rc-repro's OWN cluster runs with KUBECONFIG and all five
-    Helm homes pointed inside RC_REPRO_HOME. Adopted from PR #3.
+    So anything touching houston's OWN cluster runs with KUBECONFIG and all five
+    Helm homes pointed inside HOUSTON_HOME. Adopted from PR #3.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     env = k8s.owned_env()
     assert env["KUBECONFIG"].startswith(str(tmp_path)), env["KUBECONFIG"]
     for var in ("HELM_CACHE_HOME", "HELM_CONFIG_HOME", "HELM_DATA_HOME",
@@ -2820,7 +2820,7 @@ def test_isolation_is_derived_from_the_target_not_chosen_at_the_call_site(monkey
     is targeting, so forgetting it is not a thing that can happen -- and the
     discovery path deliberately stays ambient, because reading the cluster you
     already configured is the entire point of it."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     seen = []
 
@@ -2852,9 +2852,9 @@ def test_a_kubernetes_workspace_is_not_charged_as_a_compose_one(monkeypatch, tmp
     Under-charging is not a rounding error here: the OOM killer picks its own
     victim, so it destroys somebody else's work.
     """
-    from rc_repro.services import k8s, topology
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "which", lambda _t: "")     # no cluster of ours
 
     compose = lc.CreateReq(version="8.6.1")
@@ -2882,9 +2882,9 @@ def test_the_control_plane_is_charged_only_when_one_is_about_to_be_built(monkeyp
     The charge now turns on whether this create will BUILD a control plane, which is the
     only case where its memory is new.
     """
-    from rc_repro.services import topology
+    from houston.services import topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     req = lc.CreateReq(version="8.6.1", runtime="k8s", deployment=topology.MONOLITH)
 
     assert lc._kube_overhead_mb(req, provisioning=True) == lc.CLUSTER_MB + lc.KUBE_CHART_MB, \
@@ -2896,16 +2896,16 @@ def test_the_control_plane_is_charged_only_when_one_is_about_to_be_built(monkeyp
 def test_a_cluster_that_is_already_running_is_not_charged_for(monkeypatch, tmp_path):
     """INVERTED, deliberately, and the old reasoning is worth recording.
 
-    This charge used to be keyed on whether rc-repro's OWN kind cluster existed, on the
+    This charge used to be keyed on whether houston's OWN kind cluster existed, on the
     argument that "somebody else's cluster being up does not mean the control plane is
-    already paid for" -- true while rc-repro always created its own alongside, and wrong
+    already paid for" -- true while houston always created its own alongside, and wrong
     the moment it can use one that is already running, where the 600 MB is spent whatever
     this create does. Charging it anyway refuses creates the box can hold, on a box whose
     only cluster is the one about to be adopted.
     """
-    from rc_repro.services import k8s, topology
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     req = lc.CreateReq(version="8.6.1", runtime="kubernetes", deployment=topology.MONOLITH)
     # A k3s cluster that is up: nothing to build, so nothing to charge.
     monkeypatch.setattr(k8s, "plan_cluster", lambda *_a, **_k: k8s.ClusterPlan(
@@ -2930,10 +2930,10 @@ def test_no_cluster_and_no_kind_charges_nothing_because_the_create_refuses(monke
     is written. Charging for a control plane that will never be built would refuse for
     memory a create was never going to spend.
     """
-    from rc_repro.services import k8s, topology
-    from rc_repro.errors import PreflightError
+    from houston.services import k8s, topology
+    from houston.errors import PreflightError
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     def refuse(*_a, **_k):
         raise PreflightError("kind is not installed, ...")
     monkeypatch.setattr(k8s, "plan_cluster", refuse)
@@ -2950,9 +2950,9 @@ def test_the_kubernetes_overhead_actually_reaches_the_refusal(monkeypatch, tmp_p
     nothing -- and the first version of this change computed the overhead and then
     did not add it to `need`.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     # A kind box with no cluster yet, so the control plane is part of the bill. STATED
     # rather than probed: `check_capacity` now asks which cluster it would use, and a
     # unit test must not depend on whether one happens to be running on the machine.
@@ -2989,9 +2989,9 @@ def test_creating_a_cluster_never_writes_the_users_kubeconfig(monkeypatch, tmp_p
     switch, so both are set. Verified live as well -- a real `kind create` left
     ~/.kube/config byte-identical and current-context on kind-kind -- but pinned
     here because the live check is not in CI."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "which", lambda t: f"/usr/bin/{t}")
     calls = []
 
@@ -3014,7 +3014,7 @@ def test_creating_a_cluster_never_writes_the_users_kubeconfig(monkeypatch, tmp_p
     argv = create[0]
     assert "--kubeconfig" in argv, "kind must be told where to write"
     assert str(tmp_path) in argv[argv.index("--kubeconfig") + 1], \
-        "it wrote outside RC_REPRO_HOME"
+        "it wrote outside HOUSTON_HOME"
     assert all(own for own, a in calls if "create" in a), \
         "the create must also run with the redirected environment"
 
@@ -3024,9 +3024,9 @@ def test_a_second_up_reuses_the_cluster_instead_of_racing_to_create_it(monkeypat
     the second fails with "node(s) already exist". The re-check inside the lock
     means the loser reuses rather than retries -- concurrent workspaces are the
     whole point of one-cluster-many-namespaces."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "which", lambda t: f"/usr/bin/{t}")
     created = []
 
@@ -3049,11 +3049,11 @@ def test_a_second_up_reuses_the_cluster_instead_of_racing_to_create_it(monkeypat
 
 
 def test_a_create_that_lost_a_race_is_success_not_failure(monkeypatch, tmp_path):
-    """Somebody ran `kind create cluster --name rc-repro-local` by hand while we
+    """Somebody ran `kind create cluster --name houston-local` by hand while we
     held the lock. "already exist" means the thing we wanted is true."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "which", lambda t: f"/usr/bin/{t}")
 
     def spy(argv, timeout=None, own=False, env=None):
@@ -3091,9 +3091,9 @@ def test_a_create_that_lost_a_race_is_success_not_failure(monkeypatch, tmp_path)
 
 
 def test_ensure_cluster_refuses_without_kind_and_names_the_alternative(monkeypatch, tmp_path):
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "which", lambda _t: "")
     with pytest.raises(errors.PreflightError) as caught:
         k8s.ensure_cluster()
@@ -3109,9 +3109,9 @@ def test_deleting_the_cluster_can_only_ever_target_our_own(monkeypatch, tmp_path
     Verified live too: after `delete_cluster`, the unrelated `kind` cluster on this
     box was still there.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "which", lambda t: f"/usr/bin/{t}")
     seen = []
 
@@ -3146,9 +3146,9 @@ def test_the_cluster_is_not_taken_out_from_under_a_colleagues_workspace(monkeypa
     """On a shared box the cluster holds other people's workspaces. `prune`
     reclaiming it mid-ticket is the failure this guards, and the namespaces carry
     an owner label so the refusal can be specific."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "which", lambda t: f"/usr/bin/{t}")
     deleted = []
 
@@ -3166,7 +3166,7 @@ def test_the_cluster_is_not_taken_out_from_under_a_colleagues_workspace(monkeypa
             # has to be able to say "I could not ask" -- `-o name` cannot carry that,
             # and a stub answering the old shape leaves the destructive callers
             # untested against the very case this is about.
-            return sp.CompletedProcess(argv, 0, json.dumps({"items": [{"metadata": {"name": "rc-repro-t1"}}, {"metadata": {"name": "rc-repro-t2"}}]}), "")
+            return sp.CompletedProcess(argv, 0, json.dumps({"items": [{"metadata": {"name": "houston-t1"}}, {"metadata": {"name": "houston-t2"}}]}), "")
         if "delete" in argv:
             deleted.append(argv)
         return sp.CompletedProcess(argv, 0, "", "")
@@ -3175,7 +3175,7 @@ def test_the_cluster_is_not_taken_out_from_under_a_colleagues_workspace(monkeypa
     with pytest.raises(errors.ConflictError) as caught:
         k8s.delete_cluster()
     assert "2 workspace namespace(s)" in str(caught.value)
-    assert "rc-repro-t1" in str(caught.value), "name them, so it is actionable"
+    assert "houston-t1" in str(caught.value), "name them, so it is actionable"
     assert not deleted, "it deleted the cluster anyway"
 
     # --force takes it, because sometimes that is what you want.
@@ -3185,9 +3185,9 @@ def test_the_cluster_is_not_taken_out_from_under_a_colleagues_workspace(monkeypa
 
 def test_deleting_a_cluster_that_is_not_there_is_not_an_error(monkeypatch, tmp_path):
     """`prune` calls this unconditionally; a missing cluster is the state it wanted."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "which", lambda t: f"/usr/bin/{t}")
     monkeypatch.setattr(k8s, "run", _fake_run({"get clusters": (0, "somebody-else\n")}))
     assert k8s.delete_cluster() is False
@@ -3202,9 +3202,9 @@ def test_the_replica_set_is_initiated_and_verified_not_assumed(monkeypatch, tmp_
     The verification matters as much as the call: this is the step whose silent
     failure produces a workspace that looks created and can never become ready.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     scripts = []
 
     def spy(argv, timeout=None, own=False, env=None):
@@ -3220,7 +3220,7 @@ def test_the_replica_set_is_initiated_and_verified_not_assumed(monkeypatch, tmp_
         return sp.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(k8s, "run", spy)
-    k8s.init_replica_set(namespace="rc-repro-t", context=k8s.CONTEXT,
+    k8s.init_replica_set(namespace="houston-t", context=k8s.CONTEXT,
                          sleep=lambda _s: None)
     assert any("rs.initiate" in s for s in scripts), scripts
     assert "rs.status().ok" in scripts, "it must verify, not trust the exit code"
@@ -3239,7 +3239,7 @@ def test_the_replica_set_is_initiated_and_verified_not_assumed(monkeypatch, tmp_
         return sp.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(k8s, "run", already)
-    k8s.init_replica_set(namespace="rc-repro-t", context=k8s.CONTEXT,
+    k8s.init_replica_set(namespace="houston-t", context=k8s.CONTEXT,
                          sleep=lambda _s: None)
 
 
@@ -3248,9 +3248,9 @@ def test_an_uninitiated_replica_set_is_reported_as_dead_not_left_to_time_out(
     """Exit 7, known dead. Every second waited after this is spent waiting for
     something that cannot happen, and the readiness timeout would blame
     Rocket.Chat."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
 
     def never_ok(argv, timeout=None, own=False, env=None):
         import subprocess as sp
@@ -3262,7 +3262,7 @@ def test_an_uninitiated_replica_set_is_reported_as_dead_not_left_to_time_out(
 
     monkeypatch.setattr(k8s, "run", never_ok)
     with pytest.raises(errors.CreateFailedError) as caught:
-        k8s.init_replica_set(namespace="rc-repro-t", context=k8s.CONTEXT,
+        k8s.init_replica_set(namespace="houston-t", context=k8s.CONTEXT,
                              sleep=lambda _s: None)
     assert "change streams" in str(caught.value), "say WHY Rocket.Chat needs it"
     assert caught.value.exit_code == 7
@@ -3276,7 +3276,7 @@ def test_an_uninitiated_replica_set_is_reported_as_dead_not_left_to_time_out(
     monkeypatch.setattr(k8s, "run", never_ready)
     monkeypatch.setattr(k8s, "MONGO_READY_TRIES", 2)
     with pytest.raises(errors.CreateFailedError) as caught2:
-        k8s.init_replica_set(namespace="rc-repro-t", context=k8s.CONTEXT,
+        k8s.init_replica_set(namespace="houston-t", context=k8s.CONTEXT,
                              sleep=lambda _s: None)
     assert "describe pod" in str(caught2.value), "name what to run next"
     assert "never started" in str(caught2.value), \
@@ -3297,9 +3297,9 @@ def test_initiation_waits_for_a_running_pod_not_a_ready_one(monkeypatch, tmp_pat
     So this polls `.status.phase`, and the probe itself connects with
     `directConnection=true` -- which `compose.py` already knew it had to.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     asked = []
 
     def spy(argv, timeout=None, own=False, env=None):
@@ -3320,7 +3320,7 @@ def test_initiation_waits_for_a_running_pod_not_a_ready_one(monkeypatch, tmp_pat
 
     monkeypatch.setattr(k8s, "run", spy)
     # Must succeed despite readiness never being true.
-    k8s.init_replica_set(namespace="rc-repro-t", context=k8s.CONTEXT,
+    k8s.init_replica_set(namespace="houston-t", context=k8s.CONTEXT,
                          sleep=lambda _s: None)
     assert not any("].ready" in a for a in asked), \
         "it waited on readiness, which cannot happen before initiation"
@@ -3336,7 +3336,7 @@ def test_the_readiness_probe_can_answer_before_the_set_is_initiated():
     the problem."""
     import yaml
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     sts = [d for d in yaml.safe_load_all(k8s.mongo_manifest("t", "8.0"))
            if d["kind"] == "StatefulSet"][0]
@@ -3348,9 +3348,9 @@ def test_a_failed_create_leaves_no_namespace_nobody_can_see(monkeypatch, tmp_pat
     """repro.json is written only after a successful create, so a namespace that
     survives a failure is invisible to `list` and to `down`. On Compose a failed
     `up` at least leaves a workspace directory you can find."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     deleted = []
 
     def spy(argv, timeout=None, own=False, env=None):
@@ -3369,7 +3369,7 @@ def test_a_failed_create_leaves_no_namespace_nobody_can_see(monkeypatch, tmp_pat
             # WHAT A REAL CLUSTER SAYS about a namespace that is not there. This spy
             # answered every `get namespace` with rc=0 and an empty body, which now
             # reads as "exists, carrying no labels" -- and an unlabelled namespace is
-            # refused rather than adopted, because rc-repro cannot tell one an older
+            # refused rather than adopted, because houston cannot tell one an older
             # version made from one somebody else made.
             return sp.CompletedProcess(
                 argv, 1, "", 'Error from server (NotFound): namespaces "x" not found')
@@ -3401,7 +3401,7 @@ def test_a_failed_create_leaves_no_namespace_nobody_can_see(monkeypatch, tmp_pat
         k8s.create_workspace(name="t", resolved=resolved, host_port=3000,
                              microservices=False)
     assert deleted, "the namespace survived a failed create"
-    assert "rc-repro-t" in deleted[0]
+    assert "houston-t" in deleted[0]
 
 
 def test_the_headless_service_publishes_dns_before_the_pod_is_ready():
@@ -3417,7 +3417,7 @@ def test_the_headless_service_publishes_dns_before_the_pod_is_ready():
     """
     import yaml
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     svc = [d for d in yaml.safe_load_all(k8s.mongo_manifest("t", "8.0"))
            if d["kind"] == "Service"][0]
@@ -3440,10 +3440,10 @@ def test_down_removes_a_kubernetes_workspace_instead_of_asking_docker(monkeypatc
     record, which are about whose data is being destroyed and do not depend on the
     runtime -- duplicating them per runtime is how one loses a check the other keeps.
     """
-    from rc_repro.services import k8s, topology
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    m = lc.runner.Metadata(name="k", project="rc-repro-k", rc_version="8.6.1",
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    m = lc.runner.Metadata(name="k", project="houston-k", rc_version="8.6.1",
                            rc_image="i", mongo_tag="8.0", mongo_flavor="official",
                            preset="default", root_url="u", host_port=3010,
                            version_source="t")
@@ -3482,10 +3482,10 @@ def test_stop_and_start_scale_a_kubernetes_workspace_rather_than_calling_compose
     stop/start/restart and the GUI's always-enabled buttons both arrive through this
     one function, so one branch covers both and cannot drift.
     """
-    from rc_repro.services import k8s, topology
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    m = lc.runner.Metadata(name="k", project="rc-repro-k", rc_version="8.6.1",
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    m = lc.runner.Metadata(name="k", project="houston-k", rc_version="8.6.1",
                            rc_image="i", mongo_tag="8.0", mongo_flavor="official",
                            preset="default", root_url="u", host_port=3010,
                            version_source="t")
@@ -3529,7 +3529,7 @@ def test_a_stopped_kubernetes_workspace_remembers_what_to_scale_back_to(monkeypa
     workspace stopped by hand carries no annotation at all, which is why the
     fallback is 1 rather than a refusal.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     scaled, annotated = [], []
 
@@ -3568,9 +3568,9 @@ def test_the_port_forward_targets_the_deployment_not_the_service(monkeypatch, tm
 
     A deployment target only needs a pod to EXIST.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     spawned = []
     # "Running", not a pod name: kubectl refuses a ContainerCreating pod, so
     # waiting for existence alone spawned a forward that died immediately.
@@ -3586,7 +3586,7 @@ def test_the_port_forward_targets_the_deployment_not_the_service(monkeypatch, tm
     # child holds the socket, because "the port answers" is satisfied by a
     # squatter and lost that race 3 times out of 3.
     monkeypatch.setattr(k8s, "pid_owns_port_exclusively", lambda *a, **kw: True)
-    pid = k8s.port_forward("k", namespace="rc-repro-k", context=k8s.CONTEXT,
+    pid = k8s.port_forward("k", namespace="houston-k", context=k8s.CONTEXT,
                            host_port=3010, sleep=lambda _s: None)
     assert pid == 4242
     argv = spawned[0]
@@ -3599,9 +3599,9 @@ def test_a_dead_port_forward_is_replaced_rather_than_trusted(monkeypatch, tmp_pa
     """A forward dies with its pod, so a recorded pid is not evidence it is alive --
     and a recycled pid is not evidence it is OURS. `ready` and `start` re-establish
     through this rather than assuming the create-time pid still holds."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     assert k8s.forward_alive(None) is False
     assert k8s.forward_alive(999999999) is False, "a pid that cannot be read is dead"
     # Our own process is alive but is NOT a port-forward, which is the recycled-pid
@@ -3634,9 +3634,9 @@ def test_a_url_is_only_printed_once_the_forward_is_confirmed_alive(monkeypatch, 
     So the URL is confirmed, not assumed, and a dead forward hands over the command
     that establishes one instead of a promise.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     said: list = []
     monkeypatch.setattr(k8s.time, "sleep", lambda _s: None)
     # THE CLUSTER IS A DOUBLE, not this developer's kubeconfig. `create_workspace`
@@ -3659,7 +3659,7 @@ def test_a_url_is_only_printed_once_the_forward_is_confirmed_alive(monkeypatch, 
     monkeypatch.setattr(k8s, "preflight",
                         lambda *a, **k: k8s.Preflight(cluster_reachable=True,
                                                       default_storage_class="s"))
-    monkeypatch.setattr(k8s, "ensure_namespace", lambda n, **k: f"rc-repro-{n}")
+    monkeypatch.setattr(k8s, "ensure_namespace", lambda n, **k: f"houston-{n}")
     monkeypatch.setattr(k8s, "apply", lambda *a, **k: None)
     monkeypatch.setattr(k8s, "init_replica_set", lambda **k: None)
     monkeypatch.setattr(k8s, "ensure_operator", lambda **k: None)
@@ -3690,7 +3690,7 @@ def test_the_microservices_surcharge_matches_the_pods_that_were_observed():
     with pods still ContainerCreating, and the microservices one came out LOWER than
     the monolith's, which cannot be true.
     """
-    from rc_repro.services import lifecycle as lc
+    from houston.services import lifecycle as lc
 
     assert lc.MICROSERVICES_MB == 800, "4 observed pods x ~200 MB"
     # Generous on purpose: under-charging lets through a create that OOMs a swapless
@@ -3702,18 +3702,18 @@ def test_the_microservices_surcharge_matches_the_pods_that_were_observed():
 
 
 def test_a_cluster_that_outlived_its_kubeconfig_is_reconnected(monkeypatch, tmp_path):
-    """`kind get clusters` reads Docker, so it sees clusters rc-repro's OWN kubeconfig
+    """`kind get clusters` reads Docker, so it sees clusters houston's OWN kubeconfig
     knows nothing about. That happens whenever the cluster outlives the config: a
-    fresh or different RC_REPRO_HOME, a deleted config, a cluster made by hand.
+    fresh or different HOUSTON_HOME, a deleted config, a cluster made by hand.
 
     Without an export, "reusing cluster" was followed by every kubectl call going to
     localhost:8080 and the create failing with "the API server is not answering"
     about a cluster that was perfectly healthy. Observed exactly that way: a
     workspace left running from an earlier session broke the next run.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "which", lambda t: f"/usr/bin/{t}")
     seen = []
 
@@ -3732,7 +3732,7 @@ def test_a_cluster_that_outlived_its_kubeconfig_is_reconnected(monkeypatch, tmp_
     monkeypatch.setattr(k8s, "run", spy)
     assert k8s.ensure_cluster() == k8s.CONTEXT
     assert any("export kubeconfig" in c for c in seen), \
-        "it reused a cluster without writing it into rc-repro's kubeconfig"
+        "it reused a cluster without writing it into houston's kubeconfig"
     assert not any("create cluster" in c for c in seen), "it recreated an existing one"
 
     # A failed export is terminal and says so, rather than leaving every later
@@ -3765,16 +3765,16 @@ def test_a_failed_recreate_never_destroys_data_that_down_promised_to_keep(
     A failure may only undo what the same call did. Deleting retained data is what
     `down --volumes` is for -- asked for deliberately, behind a confirmation.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "which", lambda t: f"/usr/bin/{t}")
     monkeypatch.setattr(k8s, "ensure_cluster", lambda **kw: k8s.CONTEXT)
     monkeypatch.setattr(k8s, "ensure_repo", lambda **kw: None)
     monkeypatch.setattr(k8s, "resolve_chart_version", lambda *a, **kw: "7.0.2")
     monkeypatch.setattr(k8s, "preflight", lambda *a, **kw: k8s.Preflight(
         cluster_reachable=True, default_storage_class="standard"))
-    monkeypatch.setattr(k8s, "ensure_namespace", lambda n, **kw: f"rc-repro-{n}")
+    monkeypatch.setattr(k8s, "ensure_namespace", lambda n, **kw: f"houston-{n}")
     monkeypatch.setattr(k8s, "apply", lambda *a, **kw: None)
     monkeypatch.setattr(k8s, "init_replica_set", lambda **kw: None)
     monkeypatch.setattr(k8s, "ensure_operator", lambda **kw: None)
@@ -3791,7 +3791,7 @@ def test_a_failed_recreate_never_destroys_data_that_down_promised_to_keep(
         or __import__("subprocess").CompletedProcess(argv, 0, "", ""))
 
     # The namespace was ALREADY there -- a re-create after `down`.
-    monkeypatch.setattr(k8s, "workspace_namespaces", lambda *a, **kw: ["rc-repro-k"])
+    monkeypatch.setattr(k8s, "workspace_namespaces", lambda *a, **kw: ["houston-k"])
     with pytest.raises(errors.CreateFailedError):
         k8s.create_workspace(name="k", resolved=resolved, host_port=3010,
                              microservices=False)
@@ -3811,7 +3811,7 @@ def test_exec_survives_a_terminating_pod_rather_than_failing_the_create(monkeypa
     re-create can pass the wait and then exec into a pod on its way out:
     "unable to upgrade connection: container not found (mongod)". A one-shot exec
     turns that race into a failed create; retrying turns it into a delay."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     calls = []
 
@@ -3825,7 +3825,7 @@ def test_exec_survives_a_terminating_pod_rather_than_failing_the_create(monkeypa
         return sp.CompletedProcess(argv, 0, "1", "")
 
     monkeypatch.setattr(k8s, "run", flaky)
-    res = k8s._mongo_exec(k8s.CONTEXT, "rc-repro-k", "rs.status().ok",
+    res = k8s._mongo_exec(k8s.CONTEXT, "houston-k", "rs.status().ok",
                           sleep=lambda _s: None)
     assert res.returncode == 0 and len(calls) == 3, calls
 
@@ -3833,7 +3833,7 @@ def test_exec_survives_a_terminating_pod_rather_than_failing_the_create(monkeypa
     calls.clear()
     monkeypatch.setattr(k8s, "run", lambda argv, **kw: __import__("subprocess")
                         .CompletedProcess(argv, 1, "", "authentication failed"))
-    out = k8s._mongo_exec(k8s.CONTEXT, "rc-repro-k", "x", sleep=lambda _s: None)
+    out = k8s._mongo_exec(k8s.CONTEXT, "houston-k", "x", sleep=lambda _s: None)
     assert out.returncode == 1
 
 
@@ -3845,9 +3845,9 @@ def test_bind_reaches_the_port_forward_instead_of_being_dropped(monkeypatch, tmp
     kubectl binds 127.0.0.1 by default and takes `--address`, so this is a real
     setting rather than a Compose-only one.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "run", _fake_run({
         # The pod wait reads `-o json` now; without this it sees a refused read and
         # correctly declines to wait forever, which is a different test than this one.
@@ -3882,9 +3882,9 @@ def test_teardown_waits_for_the_namespace_rather_than_claiming_it_is_gone(
     what they had just been told, and `up` with the same name could race a
     half-deleted namespace.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     said: list = []
     phases = ["Terminating", "Terminating", ""]
 
@@ -3892,7 +3892,7 @@ def test_teardown_waits_for_the_namespace_rather_than_claiming_it_is_gone(
         import subprocess as sp
         joined = " ".join(argv)
         # ONE query answers both questions now, which is what a cluster actually
-        # returns: the labels that prove the namespace is rc-repro's and the phase
+        # returns: the labels that prove the namespace is houston's and the phase
         # that says whether it has gone are fields of the same object. The stub
         # returns that object rather than two narrow strings, because a stub that
         # answers in a shape kubectl cannot produce is how the fix under test would
@@ -3903,7 +3903,7 @@ def test_teardown_waits_for_the_namespace_rather_than_claiming_it_is_gone(
                 # `--ignore-not-found`: gone is exit 0 with nothing on stdout.
                 return sp.CompletedProcess(argv, 0, "", "")
             return sp.CompletedProcess(argv, 0, json.dumps({
-                "metadata": {"name": "rc-repro-k", "labels": {
+                "metadata": {"name": "houston-k", "labels": {
                     k8s.OWNER_LABEL_KEY: k8s.OWNER_LABEL_VALUE,
                     k8s.WORKSPACE_LABEL: "k"}},
                 "status": {"phase": phase}}), "")
@@ -3929,8 +3929,8 @@ def test_the_admin_and_the_setup_wizard_reach_a_kubernetes_workspace():
     Confidently stated credentials that do not work are worse than printing nothing:
     they send someone to debug their own typing.
     """
-    from rc_repro import config
-    from rc_repro.services import k8s
+    from houston import config
+    from houston.services import k8s
 
     env = {e["name"]: e["value"] for e in
            k8s.values_for(rc_version="8.5.1", rc_image="img",
@@ -3971,7 +3971,7 @@ def test_a_failure_reports_its_reason_not_the_warnings_printed_before_it():
     """
     import subprocess as sp
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     noisy = sp.CompletedProcess([], 1, "", (
         'I0813 18:03:17.247875 477232 warnings.go:107] "Warning: '
@@ -3993,7 +3993,7 @@ def test_a_failure_reports_its_reason_not_the_warnings_printed_before_it():
 
 
 def test_up_uses_the_runtime_the_workspace_already_has(monkeypatch, tmp_path):
-    """`rc-repro up -v 8.5.1 --name X` on a Kubernetes workspace defaulted to docker
+    """`houston up -v 8.5.1 --name X` on a Kubernetes workspace defaulted to docker
     and ran `docker compose up` against a workspace with no compose file:
 
         'rc8-5-1' already exists - bringing it back up.
@@ -4002,10 +4002,10 @@ def test_up_uses_the_runtime_the_workspace_already_has(monkeypatch, tmp_path):
 
     `--runtime` says what to CREATE. What already exists is a fact, not a preference.
     """
-    from rc_repro.services import k8s, topology
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    m = lc.runner.Metadata(name="k", project="rc-repro-k", rc_version="8.5.1",
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    m = lc.runner.Metadata(name="k", project="houston-k", rc_version="8.5.1",
                            rc_image="i", mongo_tag="8.0", mongo_flavor="official",
                            preset="default", root_url="u", host_port=3000,
                            version_source="t")
@@ -4027,18 +4027,18 @@ def test_up_brings_a_downed_kubernetes_workspace_back_instead_of_refusing(
         monkeypatch, tmp_path):
     """Two messages in the same tool contradicting each other about one workspace:
 
-        $ rc-repro down --name rc8-5-1
+        $ houston down --name rc8-5-1
         ✓ down (the namespace and its PersistentVolumeClaim are kept).
-          bring it back: rc-repro up --version <same> --name rc8-5-1
-        $ rc-repro up -v 8.5.1 --runtime kubernetes
+          bring it back: houston up --version <same> --name rc8-5-1
+        $ houston up -v 8.5.1 --runtime kubernetes
         error: 'rc8-5-1' already exists. `down` first, or pass --force
 
     Compose reuses an existing workspace. So does this now -- the namespace and PVC
     surviving a plain `down` is exactly what makes bringing it back meaningful.
     """
-    from rc_repro.services import k8s, topology
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     # The namespace-ownership preflight talks to the cluster and lives OUTSIDE
     # `create_workspace`, so stubbing that one is no longer enough to keep a test
     # off a real kubectl. Refusing to guess is the point of it, so it is stubbed
@@ -4058,7 +4058,7 @@ def test_up_brings_a_downed_kubernetes_workspace_back_instead_of_refusing(
     # cluster whether helm can reach it. "" means it can.
     monkeypatch.setattr(k8s, "helm_reachable", lambda ctx: "")
     monkeypatch.setattr(k8s, "assert_namespace_available", lambda *a, **kw: None)
-    m = lc.runner.Metadata(name="k", project="rc-repro-k", rc_version="8.5.1",
+    m = lc.runner.Metadata(name="k", project="houston-k", rc_version="8.5.1",
                            rc_image="i", mongo_tag="8.0", mongo_flavor="official",
                            preset="default", root_url="u", host_port=3000,
                            version_source="t")
@@ -4071,7 +4071,7 @@ def test_up_brings_a_downed_kubernetes_workspace_back_instead_of_refusing(
         "R", (), {"rc_version": v, "mongo_tag": "8.0", "rc_image": "img",
                   "mongo_flavor": "official", "oplog": False, "source": "t"})())
     monkeypatch.setattr(k8s, "create_workspace", lambda **kw: {
-        "context": k8s.CONTEXT, "namespace": "rc-repro-k", "chart_version": "7.0.0",
+        "context": k8s.CONTEXT, "namespace": "houston-k", "chart_version": "7.0.0",
         "release": k8s.RELEASE, "port_forward_pid": 0, "bind_host": "",
         "microservices": False})
 
@@ -4083,7 +4083,7 @@ def test_up_brings_a_downed_kubernetes_workspace_back_instead_of_refusing(
 def test_the_install_is_idempotent_so_bringing_one_back_works(monkeypatch):
     """`helm install` fails on a release that already exists, which is every `up`
     over an existing workspace and every retry after a partial failure."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     seen: list = []
     monkeypatch.setattr(k8s.subprocess, "run",
@@ -4104,20 +4104,20 @@ def test_a_downed_workspace_is_down_not_perpetually_starting(monkeypatch, tmp_pa
     release. Asking only whether the namespace exists reported such a workspace as
     "starting" -- and it would have said so forever, because nothing was coming.
 
-    Seen on a real box: `rc-repro list` showed `starting` for a workspace the user
+    Seen on a real box: `houston list` showed `starting` for a workspace the user
     had just torn down.
     """
-    from rc_repro.services import k8s, topology
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    m = lc.runner.Metadata(name="k", project="rc-repro-k", rc_version="8.5.1",
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    m = lc.runner.Metadata(name="k", project="houston-k", rc_version="8.5.1",
                            rc_image="i", mongo_tag="8.0", mongo_flavor="official",
                            preset="default", root_url="u", host_port=3000,
                            version_source="t")
     topology.stamp(m.extra, topology.KUBERNETES)
     m.extra["context"] = k8s.CONTEXT
 
-    monkeypatch.setattr(k8s, "workspace_namespaces", lambda *a, **kw: ["rc-repro-k"])
+    monkeypatch.setattr(k8s, "workspace_namespaces", lambda *a, **kw: ["houston-k"])
     # Namespace kept, release gone -- exactly what `down` leaves behind.
     monkeypatch.setattr(k8s, "workload_exists", lambda *a, **kw: False)
     assert lc.kubernetes_state("k", m) == "down"
@@ -4138,9 +4138,9 @@ def test_list_says_which_runtime_each_workspace_is_on(monkeypatch, tmp_path):
     """Two workspaces that differ in what every other command will do to them --
     which ones refuse, where the data lives, how to reach it -- looked identical in
     `list`, which is the one place people look first."""
-    from rc_repro.services import k8s, topology
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     for name, rt in (("d", topology.DOCKER), ("k", topology.KUBERNETES)):
         m = lc.runner.Metadata(name=name, project="p", rc_version="8.5.1",
                                rc_image="i", mongo_tag="8.0", mongo_flavor="official",
@@ -4166,9 +4166,9 @@ def test_a_workspace_comes_back_on_the_port_it_left_on(monkeypatch, tmp_path):
     An explicit --port still wins; otherwise the recorded one does, and only a
     genuinely new workspace allocates.
     """
-    from rc_repro.services import k8s, topology
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     # The namespace-ownership preflight talks to the cluster and lives OUTSIDE
     # `create_workspace`, so stubbing that one is no longer enough to keep a test
     # off a real kubectl. Refusing to guess is the point of it, so it is stubbed
@@ -4188,7 +4188,7 @@ def test_a_workspace_comes_back_on_the_port_it_left_on(monkeypatch, tmp_path):
     # cluster whether helm can reach it. "" means it can.
     monkeypatch.setattr(k8s, "helm_reachable", lambda ctx: "")
     monkeypatch.setattr(k8s, "assert_namespace_available", lambda *a, **kw: None)
-    m = lc.runner.Metadata(name="k", project="rc-repro-k", rc_version="8.5.1",
+    m = lc.runner.Metadata(name="k", project="houston-k", rc_version="8.5.1",
                            rc_image="i", mongo_tag="8.0", mongo_flavor="official",
                            preset="default", root_url="http://localhost:3382",
                            host_port=3382, version_source="t")
@@ -4203,7 +4203,7 @@ def test_a_workspace_comes_back_on_the_port_it_left_on(monkeypatch, tmp_path):
                   "mongo_flavor": "official", "oplog": False, "source": "t"})())
     seen: dict = {}
     monkeypatch.setattr(k8s, "create_workspace", lambda **kw: seen.update(kw) or {
-        "context": k8s.CONTEXT, "namespace": "rc-repro-k", "chart_version": "7.0.0",
+        "context": k8s.CONTEXT, "namespace": "houston-k", "chart_version": "7.0.0",
         "release": k8s.RELEASE, "port_forward_pid": 0, "bind_host": "",
         "microservices": False})
 
@@ -4221,14 +4221,14 @@ def test_a_workspace_comes_back_on_the_port_it_left_on(monkeypatch, tmp_path):
 def test_up_waits_before_seeding_a_kubernetes_workspace(monkeypatch, tmp_path):
     """`up --seed` ran the seeder the instant helm returned:
 
-        error: can't seed — repro not ready (`rc-repro ready --name rc8-5-1`)
+        error: can't seed — repro not ready (`houston ready --name rc8-5-1`)
 
     The CLI already forces wait=True when seeding -- `wait=(wait or seed)` -- and
     this path never read it. Helm returning is not Rocket.Chat serving.
     """
-    from rc_repro.services import k8s, topology
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     # The namespace-ownership preflight talks to the cluster and lives OUTSIDE
     # `create_workspace`, so stubbing that one is no longer enough to keep a test
     # off a real kubectl. Refusing to guess is the point of it, so it is stubbed
@@ -4255,7 +4255,7 @@ def test_up_waits_before_seeding_a_kubernetes_workspace(monkeypatch, tmp_path):
         "R", (), {"rc_version": v, "mongo_tag": "8.0", "rc_image": "img",
                   "mongo_flavor": "official", "oplog": False, "source": "t"})())
     monkeypatch.setattr(k8s, "create_workspace", lambda **kw: {
-        "context": k8s.CONTEXT, "namespace": "rc-repro-k", "chart_version": "7.0.0",
+        "context": k8s.CONTEXT, "namespace": "houston-k", "chart_version": "7.0.0",
         "release": k8s.RELEASE, "port_forward_pid": 0, "bind_host": "",
         "microservices": False})
     monkeypatch.setattr(lc, "wait_serving",
@@ -4275,22 +4275,22 @@ def test_up_waits_before_seeding_a_kubernetes_workspace(monkeypatch, tmp_path):
 
 
 def test_ready_asks_kubernetes_not_docker(monkeypatch, tmp_path):
-    """`rc-repro ready` answered "Rocket.Chat container is not running (check
+    """`houston ready` answered "Rocket.Chat container is not running (check
     `logs`)" about a workspace whose pods were perfectly healthy -- `rc_state` asks
     docker whether a CONTAINER runs.
 
     It also re-establishes the port-forward, because `ready` is exactly the command
     someone runs when the URL is not answering, and a forward dies with its pod.
     """
-    from rc_repro.services import k8s, topology
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    m = lc.runner.Metadata(name="k", project="rc-repro-k", rc_version="8.5.1",
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    m = lc.runner.Metadata(name="k", project="houston-k", rc_version="8.5.1",
                            rc_image="i", mongo_tag="8.0", mongo_flavor="official",
                            preset="default", root_url="http://localhost:3000",
                            host_port=3000, version_source="t")
     topology.stamp(m.extra, topology.KUBERNETES)
-    m.extra.update({"context": k8s.CONTEXT, "namespace": "rc-repro-k",
+    m.extra.update({"context": k8s.CONTEXT, "namespace": "houston-k",
                     "port_forward_pid": 999999999})
     lc.runner.write("k", "", m)
 
@@ -4324,10 +4324,10 @@ def test_every_compose_only_command_refuses_with_a_way_forward(monkeypatch, tmp_
     implementation that does not exist yet, and it can ship first. Each refusal
     names the namespace, so it is copy-pasteable rather than a hint.
     """
-    from rc_repro.services import envvars, k8s, topology
+    from houston.services import envvars, k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    m = lc.runner.Metadata(name="k", project="rc-repro-k", rc_version="8.5.1",
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    m = lc.runner.Metadata(name="k", project="houston-k", rc_version="8.5.1",
                            rc_image="i", mongo_tag="8.0", mongo_flavor="official",
                            preset="default", root_url="u", host_port=3000,
                            version_source="t")
@@ -4352,11 +4352,11 @@ def test_every_compose_only_command_refuses_with_a_way_forward(monkeypatch, tmp_
             call()
         msg = str(caught.value)
         assert expect in msg, msg
-        assert "rc-repro-k" in msg, f"the namespace must be named: {msg}"
+        assert "houston-k" in msg, f"the namespace must be named: {msg}"
         assert caught.value.exit_code == 2
 
     # A Compose workspace passes straight through the guard.
-    plain = lc.runner.Metadata(name="d", project="rcrepro-d", rc_version="8.5.1",
+    plain = lc.runner.Metadata(name="d", project="houston-d", rc_version="8.5.1",
                                rc_image="i", mongo_tag="8.0", mongo_flavor="official",
                                preset="default", root_url="u", host_port=3001,
                                version_source="t")
@@ -4370,12 +4370,12 @@ def test_mongodb_uses_the_operator_where_it_can_and_the_statefulset_where_it_can
     """Keyed on the MongoDB VERSION, which is the shape `mongo_flavor` already uses
     on the Compose side ("official" >= 8, "bitnami-legacy" below).
 
-    rc-repro pairs twelve MongoDB versions -- 3.0 through 8.2 -- because "the
+    houston pairs twelve MongoDB versions -- 3.0 through 8.2 -- because "the
     customer's exact version" is the product's promise, and the operator's window
     does not reach the old half. So this is not operator-or-StatefulSet; it is
     operator where it works, StatefulSet where it must, decided by one rule.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     # The version rule, with the operator switched on -- it is opt-in by default
     # until its PVC binds on a live cluster (see the opt-in test).
@@ -4393,7 +4393,7 @@ def test_the_operator_resource_asks_for_scram_and_the_two_documented_users():
     and secret names match the official guide so its commands transfer."""
     import yaml
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     doc = yaml.safe_load(k8s.mongodb_community_manifest("t", "8.0"))
     assert doc["kind"] == "MongoDBCommunity"
@@ -4418,16 +4418,16 @@ def test_the_operator_is_installed_once_per_cluster_not_once_per_workspace(
 
     So: one install, its own namespace, watching all of them.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     seen: list = []
     monkeypatch.setattr(k8s, "run", lambda argv, **kw: seen.append(" ".join(argv)) or
                         __import__("subprocess").CompletedProcess(argv, 0, "", ""))
     k8s.ensure_operator(context=k8s.CONTEXT)
     install = [c for c in seen if "upgrade --install" in c][0]
     assert f"-n {k8s.OPERATOR_NAMESPACE}" in install, install
-    assert "rc-repro-" not in install.split("-n ")[1].split()[0].replace(
+    assert "houston-" not in install.split("-n ")[1].split()[0].replace(
         k8s.OPERATOR_NAMESPACE, ""), "it went into a workspace namespace"
     assert "operator.watchNamespace=*" in install, "it would not see other namespaces"
     # Idempotent: every workspace after the first re-runs this.
@@ -4437,18 +4437,18 @@ def test_the_operator_is_installed_once_per_cluster_not_once_per_workspace(
 def test_the_mongo_uri_carries_credentials_and_the_operator_service_name():
     """The operator names its service `<name>-svc`, not `<name>` -- the two are not
     interchangeable, and the hand-written path uses the bare name."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    uri = k8s.operator_mongo_url("rc-repro-t", "s3cret")
+    uri = k8s.operator_mongo_url("houston-t", "s3cret")
     assert "rocketchat:s3cret@" in uri
-    assert "mongodb-0.mongodb-svc.rc-repro-t.svc.cluster.local" in uri
+    assert "mongodb-0.mongodb-svc.houston-t.svc.cluster.local" in uri
     assert "authSource=rocketchat" in uri and "replicaSet=mongodb" in uri
     # The oplog URI points at `local` and needs no authSource.
-    assert "/local?" in k8s.operator_mongo_url("rc-repro-t", "s3cret", oplog=True)
+    assert "/local?" in k8s.operator_mongo_url("houston-t", "s3cret", oplog=True)
 
 
 def test_the_operator_gets_a_full_release_version_not_a_docker_tag():
-    """rc-repro carries a Docker TAG -- "8.0" -- because that is what pulls an image.
+    """houston carries a Docker TAG -- "8.0" -- because that is what pulls an image.
     The operator wants a RELEASE version, and the guide shows "8.0.0".
 
     Given "8.0" it accepts the resource and never reconciles it: no `.status.phase`
@@ -4458,7 +4458,7 @@ def test_the_operator_gets_a_full_release_version_not_a_docker_tag():
     """
     import yaml
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     assert k8s.operator_version("8.0") == "8.0.0"
     assert k8s.operator_version("7.0") == "7.0.0"
@@ -4481,7 +4481,7 @@ def test_the_operator_is_opt_in_until_it_is_proven(monkeypatch):
     So the operator waits behind a flag. What that costs is auth, which is the
     thing it was adopted for -- and saying so is the point of this test.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     monkeypatch.delenv(k8s.USE_OPERATOR_ENV, raising=False)
     assert not k8s.operator_enabled()
@@ -4505,7 +4505,7 @@ def test_the_operator_volume_claims_cover_both_volumes_the_pod_mounts():
     """
     import yaml
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     doc = yaml.safe_load(k8s.mongodb_community_manifest("t", "8.0"))
     names = [v["metadata"]["name"]
@@ -4518,12 +4518,12 @@ def test_the_database_pod_gets_its_service_account_in_the_workspace_namespace():
 
     The operator writes a StatefulSet whose pod runs as `mongodb-kubernetes-appdb`.
     Its chart creates that account only in the namespace the chart is installed
-    into. rc-repro installs the operator ONCE, in `rc-repro-system`, because the
+    into. houston installs the operator ONCE, in `houston-system`, because the
     chart owns cluster-scoped CRDs and a per-workspace install collides on them at
     the second workspace -- so the account is missing exactly where the pod needs it:
 
         error: pods "mongodb-0" is forbidden: error looking up service account
-        rc-repro-optest/mongodb-kubernetes-appdb: serviceaccount ... not found
+        houston-optest/mongodb-kubernetes-appdb: serviceaccount ... not found
 
     That is an event on the StatefulSet. The MongoDBCommunity resource reports only
     "Pending ReplicaSet is not yet ready", and because no pod is ever created,
@@ -4532,7 +4532,7 @@ def test_the_database_pod_gets_its_service_account_in_the_workspace_namespace():
     """
     import yaml
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     docs = {d["kind"]: d
             for d in yaml.safe_load_all(k8s.mongo_rbac_manifest("t", owner="o"))}
@@ -4554,7 +4554,7 @@ def test_the_database_pod_gets_its_service_account_in_the_workspace_namespace():
 
     # Owned like everything else, so `prune` and the ownership guards see it.
     for doc in docs.values():
-        assert doc["metadata"]["labels"]["app.kubernetes.io/managed-by"] == "rc-repro"
+        assert doc["metadata"]["labels"]["app.kubernetes.io/managed-by"] == "houston"
 
 
 def test_the_service_account_is_applied_before_the_database_that_needs_it():
@@ -4563,7 +4563,7 @@ def test_the_service_account_is_applied_before_the_database_that_needs_it():
     backs off. Applying it with the Secrets -- ahead of the MongoDBCommunity
     resource -- is what makes the first attempt the successful one."""
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     body = source_of(k8s.create_workspace)
     rbac = body.index("mongo_rbac_manifest")
@@ -4576,7 +4576,7 @@ def test_asking_for_the_operator_explicitly_satisfies_the_opt_in_but_not_the_flo
     """`--mongo-operator` is the user asking for it, so the opt-in switch is met.
     The VERSION floor still applies: the operator cannot manage MongoDB 5.0, and
     silently ignoring the flag would be worse than falling back."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     monkeypatch.delenv(k8s.USE_OPERATOR_ENV, raising=False)
     assert not k8s.operator_supports("8.0"), "off by default"
@@ -4594,12 +4594,12 @@ def test_the_monitoring_stack_is_shared_by_the_cluster_not_owned_by_a_workspace(
     workspace, exactly as the MongoDB operator's CRDs do, and would also put one
     collector per node per workspace on the same host paths.
 
-    So it lives once in rc-repro-system, like the operator, and `--monitor` on a
+    So it lives once in houston-system, like the operator, and `--monitor` on a
     workspace means "point the shared Prometheus at me", not "install a stack".
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    assert k8s.MONITORING_NAMESPACE == k8s.OPERATOR_NAMESPACE == "rc-repro-system"
+    assert k8s.MONITORING_NAMESPACE == k8s.OPERATOR_NAMESPACE == "houston-system"
 
 
 def test_prometheus_is_told_to_look_outside_its_own_release():
@@ -4613,7 +4613,7 @@ def test_prometheus_is_told_to_look_outside_its_own_release():
     excluded it".
     """
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     src = source_of(k8s.ensure_monitoring)
     for key in ("serviceMonitorSelectorNilUsesHelmValues=false",
@@ -4631,12 +4631,12 @@ def test_detaching_monitoring_leaves_it_up_for_the_workspaces_still_using_it(
     """
     import subprocess
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     monkeypatch.setattr(k8s, "workspace_namespaces",
-                        lambda ctx: ["rc-repro-a", "rc-repro-b"])
+                        lambda ctx: ["houston-a", "houston-b"])
     monkeypatch.setattr(k8s, "monitoring_wanted",
-                        lambda ns, *, context: ns == "rc-repro-b")
+                        lambda ns, *, context: ns == "houston-b")
     # The stack IS installed here: "who else wants it" is only a question once
     # something exists to keep, and `remove_monitoring` now returns early otherwise.
     monkeypatch.setattr(k8s, "release_installed", lambda *a, **k: True)
@@ -4659,8 +4659,8 @@ def test_detaching_monitoring_leaves_it_up_for_the_workspaces_still_using_it(
 
 def test_the_chart_repo_and_the_install_share_one_helm_home(monkeypatch, tmp_path):
     """`owned_env` set the kubeconfig AND every HELM_* variable together, and that
-    conflation broke `up --runtime kubernetes` on a cluster rc-repro ADOPTED. The chart
-    repo went into rc-repro's Helm home (`ensure_repo`, `own=True`) while the install that
+    conflation broke `up --runtime kubernetes` on a cluster houston ADOPTED. The chart
+    repo went into houston's Helm home (`ensure_repo`, `own=True`) while the install that
     needed it read the user's (`is_ours(context)` is False on an adopted cluster). Two
     different repositories.yaml, so the create failed at 60% -- after the namespace, the
     operator and MongoDB had all been built -- with
@@ -4673,10 +4673,10 @@ def test_the_chart_repo_and_the_install_share_one_helm_home(monkeypatch, tmp_pat
 
     The MongoDB operator path worked only because BOTH its halves used the user's home --
     consistent, and also wrong, because it wrote repositories into the home `owned_env`
-    exists to keep rc-repro out of."""
-    from rc_repro.services import k8s
+    exists to keep houston out of."""
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.delenv("KUBECONFIG", raising=False)
 
     owned = k8s.owned_env()                       # what ensure_repo uses
@@ -4690,7 +4690,7 @@ def test_the_chart_repo_and_the_install_share_one_helm_home(monkeypatch, tmp_pat
     for var in ("HELM_CACHE_HOME", "HELM_CONFIG_HOME", "HELM_DATA_HOME",
                 "HELM_REPOSITORY_CACHE"):
         assert adopted[var] == owned[var], f"{var} escaped to the user's home"
-        assert str(tmp_path) in adopted[var], f"{var} is not under RC_REPRO_HOME"
+        assert str(tmp_path) in adopted[var], f"{var} is not under HOUSTON_HOME"
 
     # The kubeconfig is the half that MUST differ: ours for our cluster, the user's for
     # one we adopted -- which is what `owned_env` got right and could not express alone.
@@ -4713,8 +4713,8 @@ def test_a_missing_compose_plugin_is_a_preflight_not_a_mid_create_crash(monkeypa
         unknown shorthand flag: 'd' in -d
 
     `serve --domain` reported only "the edge did not start" with `docker ps -a` empty."""
-    from rc_repro import errors, runner
-    from rc_repro.services import lifecycle as lc
+    from houston import errors, runner
+    from houston.services import lifecycle as lc
 
     monkeypatch.setattr(runner, "docker_available", lambda: True)
 
@@ -4744,7 +4744,7 @@ def test_a_missing_compose_plugin_is_a_preflight_not_a_mid_create_crash(monkeypa
 
 def test_finalizers_are_cleared_the_moment_the_deletes_stop_working(monkeypatch):
     """Nine minutes of silence, measured on a live workspace. The Grafana operator was
-    already gone -- only the MongoDB operator was left in `rc-repro-system` -- while
+    already gone -- only the MongoDB operator was left in `houston-system` -- while
     twelve grafana-operator resources remained, one carrying
     `operator.grafana.com/finalizer` and a deletionTimestamp ten minutes old, with the
     release stuck in `uninstalling`. Every step paid its full timeout for nothing: four
@@ -4753,7 +4753,7 @@ def test_finalizers_are_cleared_the_moment_the_deletes_stop_working(monkeypatch)
     once. The clearing has to happen when the deletes are seen to have failed, not nine
     minutes later."""
     import subprocess
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     monkeypatch.setattr(k8s, "release_installed", lambda *a, **k: True)
     monkeypatch.setattr(k8s, "workspace_namespaces", lambda ctx: [])
@@ -4789,23 +4789,23 @@ def test_detaching_monitoring_reports_progress_rather_than_going_quiet(monkeypat
     """A GUI job showed "running" with an empty log for nine minutes, which is
     indistinguishable from a hang -- and that is how the finalizer wait above was
     reported. Both detach paths emitted almost nothing until they had finished."""
-    from rc_repro import runner
-    from rc_repro.services import monitor as monsvc
+    from houston import runner
+    from houston.services import monitor as monsvc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     meta = runner.Metadata(
-        name="w", project="rc-repro-w", rc_version="8.5.1",
+        name="w", project="houston-w", rc_version="8.5.1",
         rc_image="img", mongo_tag="8.0", mongo_flavor="community",
         preset="default", root_url="http://localhost:3000", host_port=3000,
         version_source="shipped")
-    meta.extra.update({"runtime": "kubernetes", "namespace": "rc-repro-w",
-                       "context": "kind-rc-repro-local", "monitoring": True})
+    meta.extra.update({"runtime": "kubernetes", "namespace": "houston-w",
+                       "context": "kind-houston-local", "monitoring": True})
     ws = runner.workspace("w"); ws.mkdir(parents=True, exist_ok=True)
     import json
     from dataclasses import asdict
     runner.atomic_write(ws / "repro.json", json.dumps(asdict(meta), indent=2))
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
     monkeypatch.setattr(k8s, "set_monitoring_label", lambda *a, **k: None)
     monkeypatch.setattr(k8s, "remove_monitoring", lambda **k: True)
     monkeypatch.setattr(monsvc.lifecycle, "login",
@@ -4824,7 +4824,7 @@ def test_grafana_is_forwarded_from_the_instance_not_the_operator():
     `monitoring-grafana-deployment` is the Grafana it manages. Forwarding the wrong
     one gives a page that loads and has no dashboards -- a working URL showing
     nothing, which is worse than a refusal."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     assert k8s.GRAFANA_DEPLOYMENT == "monitoring-grafana-deployment"
     # Deployment, not Service, for the same reason the workspace forward is:
@@ -4849,11 +4849,11 @@ def test_the_grafana_url_is_not_handed_over_before_the_forward_answers(monkeypat
     """`kubectl port-forward` returns a pid before it binds the socket.
 
     The workspace path already carries a test named for this mistake. The Grafana
-    path repeated it and the deployment matrix caught it: `rc-repro monitor`
+    path repeated it and the deployment matrix caught it: `houston monitor`
     reported attached and exited 0, and a curl to the URL it printed got nothing at
     all -- a link handed over that quietly did not work.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     slept = []
     assert k8s.forward_reachable(1, tries=3, interval=0.01,
@@ -4866,7 +4866,7 @@ def test_the_statefulset_image_covers_the_versions_the_operator_cannot():
 
     This StatefulSet exists to serve what the operator cannot reach, and
     `mongodb/mongodb-community-server` publishes NO tag below 4.4 -- 3.6, 4.0 and
-    4.2 are 404 on Docker Hub -- while rc-repro pairs Rocket.Chat < 3.0 with MongoDB
+    4.2 are 404 on Docker Hub -- while houston pairs Rocket.Chat < 3.0 with MongoDB
     3.6. "Make it consistent with compose.py" looks like a tidy-up and would break
     precisely the versions this code was written for.
 
@@ -4875,7 +4875,7 @@ def test_the_statefulset_image_covers_the_versions_the_operator_cannot():
     """
     import yaml
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     assert k8s.mongo_image("3.6") == "mongo:3.6"
     docs = list(yaml.safe_load_all(k8s.mongo_manifest("t", "3.6")))
@@ -4887,13 +4887,13 @@ def test_kubernetes_records_what_built_the_database_not_a_compose_flavour():
     """`mongo_flavor` is "official" / "bitnami-legacy" -- a COMPOSE image choice.
 
     The Kubernetes StatefulSet honours neither value, so reporting it made
-    `rc-repro list` print "8.0 (official)" for a workspace running Docker Hub's
+    `houston list` print "8.0 (official)" for a workspace running Docker Hub's
     `mongo:8.0`. A label describing an image the workspace does not run is worse
     than no label, because it is the field someone checks when a version-specific
     bug will not reproduce.
     """
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     src = source_of(k8s.create_workspace)
     assert '"mongo_managed_by"' in src and '"mongo_image"' in src
@@ -4904,9 +4904,9 @@ def test_kubernetes_records_what_built_the_database_not_a_compose_flavour():
 def test_the_notes_say_the_operator_is_shared_when_it_is_used():
     """The deviation from the official guide has to be visible where someone reads it.
 
-    The guide installs the operator INTO the Rocket.Chat namespace. rc-repro runs
+    The guide installs the operator INTO the Rocket.Chat namespace. houston runs
     several workspaces, its CRDs are cluster-scoped, so it installs once in
-    rc-repro-system watching everything. Undocumented, the first person to run the
+    houston-system watching everything. Undocumented, the first person to run the
     guide's `kubectl -n <ns> get pods` finds no operator and concludes it was never
     installed.
     """
@@ -4916,11 +4916,11 @@ def test_the_notes_say_the_operator_is_shared_when_it_is_used():
     # only the second of those is what anybody sees.
     def groups_for(managed_by):
         m = lc.runner.Metadata(
-            name="k", project="rc-repro-k", rc_version="8.5.1", rc_image="i",
+            name="k", project="houston-k", rc_version="8.5.1", rc_image="i",
             mongo_tag="8.0", mongo_flavor="official", preset="default",
             root_url="http://localhost:3000", host_port=3000, version_source="map",
             extra={"runtime": "kubernetes", "deployment": "microservices",
-                   "namespace": "rc-repro-k", "context": "kind-rc-repro-local",
+                   "namespace": "houston-k", "context": "kind-houston-local",
                    "release": "rocketchat", "mongo_managed_by": managed_by,
                    "mongo_image": "mongo:8.0"})
         return {g["title"]: g for g in lc.note_groups_of(m)}
@@ -4959,9 +4959,9 @@ def test_the_oplog_user_can_actually_read_the_oplog(monkeypatch):
     """
     import yaml
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    oplog = k8s.operator_mongo_url("rc-repro-x", "PW", oplog=True)
+    oplog = k8s.operator_mongo_url("houston-x", "PW", oplog=True)
     assert "/local?" in oplog, oplog
     assert f"authSource={k8s.MONGO_APP_DB}" in oplog, \
         "without authSource the driver authenticates against `local`"
@@ -4978,7 +4978,7 @@ def test_the_oplog_url_is_only_emitted_for_the_versions_that_use_it():
     """RC 8.x dropped oplog tailing, so emitting it there is wrong in the other
     direction. The rule lives in versions.py and applies to both runtimes; this
     checks the Kubernetes chart values honour it."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     with_oplog = k8s.values_for(rc_version="7.10.0", rc_image="i", microservices=False,
                                 oplog=True, mongo_url="m", oplog_url="o")
@@ -5005,7 +5005,7 @@ def test_the_chart_fix_is_applied_only_where_the_chart_needs_it(monkeypatch):
     the bug upstream, put a literal `fsGroup: null` onto the container instead --
     the same undeclared field from the other direction.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     def fake_run(argv, **kw):
         import subprocess
@@ -5034,14 +5034,14 @@ def test_ready_confirms_the_socket_not_just_the_pid(monkeypatch, tmp_path):
     So the loop keeps going until something actually answers on the port. This is
     the same defect as the Grafana URL, in the place it was fixed second.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    m = lc.runner.Metadata(name="k", project="rc-repro-k", rc_version="8.5.1",
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    m = lc.runner.Metadata(name="k", project="houston-k", rc_version="8.5.1",
                            rc_image="i", mongo_tag="8.0", mongo_flavor="official",
                            preset="default", root_url="http://localhost:3999",
                            host_port=3999, version_source="t")
-    from rc_repro.services import topology
+    from houston.services import topology
     topology.stamp(m.extra, topology.KUBERNETES)
 
     monkeypatch.setattr(k8s, "workspace_ready", lambda *a, **kw: True)
@@ -5075,9 +5075,9 @@ def test_a_port_forward_that_never_bound_is_not_recorded_as_a_pid(monkeypatch, t
     The record then named a dead process while the squatter answered the URL, which is
     the first half of `ready` certifying somebody else's software.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "run", _fake_run({
         # `-o json` now, because the pod wait has to tell a REFUSED read from "not
         # Running yet" -- empty stdout was identical for both, and it waited 40 x 3s
@@ -5142,10 +5142,10 @@ def test_ready_refuses_a_url_served_by_something_that_is_not_rocketchat(
     Occupancy is not identity. A support engineer reading that URL draws every
     conclusion about a program that is not Rocket.Chat.
     """
-    from rc_repro.services import k8s, topology
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    m = lc.runner.Metadata(name="k", project="rc-repro-k", rc_version="8.5.1",
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    m = lc.runner.Metadata(name="k", project="houston-k", rc_version="8.5.1",
                            rc_image="i", mongo_tag="8.0", mongo_flavor="official",
                            preset="default", root_url="http://localhost:3998",
                            host_port=3998, version_source="t")
@@ -5207,7 +5207,7 @@ def test_a_create_stops_waiting_for_a_pod_that_cannot_start(monkeypatch):
     """
     import json as _json
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     def pods(*states):
         return _json.dumps({"items": [
@@ -5269,7 +5269,7 @@ def test_the_registration_token_never_becomes_a_value_or_an_argument(monkeypatch
     is better than the obvious one, and the reason is exposure:
 
       * helm VALUES are readable with `helm get values` by anyone who can reach the
-        release, and rc-repro also writes them to `repros/<n>/kubernetes/values.yaml`
+        release, and houston also writes them to `repros/<n>/kubernetes/values.yaml`
         for a human to read. That is precisely where the MongoDB password was moved
         out of, so putting a licence token there would undo the same lesson.
       * The manifest goes to `kubectl apply -f -` on STDIN, so the token is never a
@@ -5277,7 +5277,7 @@ def test_the_registration_token_never_becomes_a_value_or_an_argument(monkeypatch
     """
     import yaml as _yaml
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     token = "SUPERSECRETTOKEN"
 
@@ -5285,7 +5285,7 @@ def test_the_registration_token_never_becomes_a_value_or_an_argument(monkeypatch
     doc = _yaml.safe_load(k8s.reg_token_secret_manifest("w", token=token, owner="me"))
     assert doc["kind"] == "Secret" and doc["type"] == "Opaque"
     assert doc["stringData"][k8s.REG_TOKEN_KEY] == token
-    assert doc["metadata"]["labels"]["app.kubernetes.io/managed-by"] == "rc-repro", \
+    assert doc["metadata"]["labels"]["app.kubernetes.io/managed-by"] == "houston", \
         "teardown selects on ownership, so the Secret has to carry it"
 
     values = k8s.values_for(rc_version="8.5.1",
@@ -5328,7 +5328,7 @@ def test_kubernetes_refuses_what_it_would_silently_drop(monkeypatch, tmp_path):
 
     `--preset ldap` is the clearest: the Kubernetes path's only `presets.load` is a
     hardcoded "default", so the name was written into repro.json and nothing else
-    happened -- `rc-repro list` showed "ldap" for a workspace with no LDAP in it. A
+    happened -- `houston list` showed "ldap" for a workspace with no LDAP in it. A
     create that reports success and produces something else is the worst outcome
     available, and it is the failure mode this whole runtime split keeps producing:
     --seed, --https, mongo_flavor and mongo_shell were all the same shape.
@@ -5336,9 +5336,9 @@ def test_kubernetes_refuses_what_it_would_silently_drop(monkeypatch, tmp_path):
     `--fresh` is the one that matters most and is reported first: it means DELETE
     this workspace's data, and the Kubernetes path keeps the PersistentVolumeClaim.
     """
-    from rc_repro.services import topology
+    from houston.services import topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
 
     def req(**kw):
         return lc.CreateReq(version="8.5.1", runtime=topology.KUBERNETES, **kw)
@@ -5383,7 +5383,7 @@ def test_kubernetes_refuses_what_it_would_silently_drop(monkeypatch, tmp_path):
     # EVERY preset reaches Kubernetes now, each with its own backing workload:
     # openldap, keycloak (twice), mailpit, minio, nginx. The guard stays because it
     # is what keeps a future preset from being recorded and never applied.
-    from rc_repro import presets
+    from houston import presets
     for p in presets.list_presets():
         # `multi-instance` is a DEPLOYMENT on this branch, not a scenario -- the
         # legacy YAML still exists in the catalogue and correctly refuses here,
@@ -5428,8 +5428,8 @@ def test_a_scenarios_settings_reach_the_rocket_chat_container(monkeypatch):
     Appended AFTER the base list so a preset can override a default rather than be
     overridden by one -- the precedence compose.py already gives it.
     """
-    from rc_repro import presets
-    from rc_repro.services import k8s, topology
+    from houston import presets
+    from houston.services import k8s, topology
 
     preset = presets.resolve("ldap", topology.KUBERNETES, {"users": "7"})
     values = k8s.values_for(rc_version="8.5.1", rc_image="i", microservices=False,
@@ -5469,7 +5469,7 @@ def test_the_chart_value_host_is_a_hostname_and_a_url_is_refused():
     exactly what the HTTPS work has to set. Refused rather than normalised: a caller
     passing a URL here has a bug, and stripping the scheme would hide it.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     with pytest.raises(errors.ValidationError) as exc:
         k8s.values_for(rc_version="8.5.1", rc_image="i", microservices=False,
@@ -5478,11 +5478,11 @@ def test_the_chart_value_host_is_a_hostname_and_a_url_is_refused():
     # A port is the same trap one character smaller.
     with pytest.raises(errors.ValidationError):
         k8s.values_for(rc_version="8.5.1", rc_image="i", microservices=False,
-                       host="ticket.rcrepro.localhost:443")
+                       host="ticket.houston.localhost:443")
     # The legitimate shape, which is what the official values.yaml documents.
     values = k8s.values_for(rc_version="8.5.1", rc_image="i", microservices=False,
-                            host="ticket.rcrepro.localhost")
-    assert values["host"] == "ticket.rcrepro.localhost"
+                            host="ticket.houston.localhost")
+    assert values["host"] == "ticket.houston.localhost"
 
 
 def test_a_kubernetes_workspace_advertises_the_url_it_is_reached_on():
@@ -5497,7 +5497,7 @@ def test_a_kubernetes_workspace_advertises_the_url_it_is_reached_on():
     second entry from `extraEnv` is a server-side-apply failure rather than an
     override -- the same `duplicate entries for key` that DEPLOY_PLATFORM produced.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     plain = k8s.values_for(rc_version="8.5.1", rc_image="i", microservices=False,
                            root_url="http://localhost:32812")
@@ -5507,7 +5507,7 @@ def test_a_kubernetes_workspace_advertises_the_url_it_is_reached_on():
 
     # With a name, the chart derives the URL -- so extraEnv must NOT carry one.
     named = k8s.values_for(rc_version="8.5.1", rc_image="i", microservices=False,
-                           host="ticket.rcrepro.localhost")
+                           host="ticket.houston.localhost")
     assert [e for e in named["extraEnv"] if e["name"] == "ROOT_URL"] == [], \
         "the chart already emits ROOT_URL from `host`; a second entry is a conflict"
 
@@ -5524,9 +5524,9 @@ def test_the_kubernetes_create_passes_the_url_it_just_computed(monkeypatch, tmp_
     dead on every real create -- which is how a whole runtime shipped with no
     ROOT_URL. The fix is one keyword, and this is the test that keeps it there.
     """
-    from rc_repro.services import k8s, topology
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     # THE CLUSTER IS A DOUBLE, not this developer's kubeconfig. `create_workspace`
     # calls `plan_cluster()` when given no plan, and that reads the real
     # `~/.kube/config` -- so these passed only on a box whose current-context
@@ -5549,7 +5549,7 @@ def test_the_kubernetes_create_passes_the_url_it_just_computed(monkeypatch, tmp_
                   "mongo_flavor": "official", "oplog": False, "source": "t"})())
     seen: dict = {}
     monkeypatch.setattr(k8s, "create_workspace", lambda **kw: seen.update(kw) or {
-        "context": k8s.CONTEXT, "namespace": "rc-repro-k", "chart_version": "7.0.0",
+        "context": k8s.CONTEXT, "namespace": "houston-k", "chart_version": "7.0.0",
         "release": k8s.RELEASE, "port_forward_pid": 0, "bind_host": "",
         "microservices": False})
 
@@ -5568,15 +5568,15 @@ def test_tearing_down_a_kubernetes_workspace_drops_its_edge_route(monkeypatch, t
     -- and the name can never be reused by anyone else. The Compose branch twenty
     lines below has always dropped it, for exactly this reason.
     """
-    from rc_repro.services import edge as edgesvc
-    from rc_repro.services import k8s, topology
+    from houston.services import edge as edgesvc
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    m = lc.runner.Metadata(name="kws", project="rc-repro-kws", rc_version="8.5.1",
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    m = lc.runner.Metadata(name="kws", project="houston-kws", rc_version="8.5.1",
                            rc_image="i", mongo_tag="8.0", mongo_flavor="",
                            preset="default", root_url="http://localhost:3001",
                            host_port=3001, version_source="t",
-                           public_url="https://kws.rcrepro.localhost")
+                           public_url="https://kws.houston.localhost")
     topology.stamp(m.extra, topology.KUBERNETES)
     m.extra["edge"] = True
     lc.runner.write("kws", "", m)
@@ -5611,7 +5611,7 @@ def _svc_reader(monkeypatch, items, *, rc=0, stderr=""):
     """Stub the ONE seam every cluster read goes through, and record the argv."""
     import subprocess as sp
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     seen: list[list[str]] = []
 
@@ -5643,7 +5643,7 @@ def test_the_ingress_endpoint_is_the_service_reachable_from_outside(monkeypatch)
     doing its job -- the alternative was picking the API server and passing a
     workspace's TLS through to it.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     _svc_reader(monkeypatch, [
         _svc("default", "kubernetes", "ClusterIP"),
@@ -5669,7 +5669,7 @@ def test_a_nodeport_is_a_real_endpoint_and_not_a_degraded_one(monkeypatch):
     moved off the host ports, which is exactly what `doctor` tells a k3s user to do
     when the cluster is taking :443 from the edge.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     _svc_reader(monkeypatch, [
         _svc("kube-system", "traefik", "NodePort", node_port=31123),
@@ -5688,7 +5688,7 @@ def test_a_cluster_that_could_not_be_asked_is_not_a_cluster_without_an_ingress(m
     unreachable API server -- and send the reader to install something they already
     have. `Answer.require` is what refuses to guess.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     _svc_reader(monkeypatch, [], rc=1,
                 stderr="Error in configuration: context was not found")
@@ -5703,7 +5703,7 @@ def test_two_candidate_ingresses_are_reported_rather_than_guessed(monkeypatch):
     on :443 there is no answer, and picking the first would work on every cluster
     anybody tests and silently pass one workspace's TLS to the wrong ingress on the
     cluster where it mattered."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     _svc_reader(monkeypatch, [
         _svc("kube-system", "traefik", "LoadBalancer", address="172.16.0.2"),
@@ -5718,7 +5718,7 @@ def test_two_candidate_ingresses_are_reported_rather_than_guessed(monkeypatch):
 def test_a_cluster_with_no_reachable_ingress_answers_none(monkeypatch):
     """Absence, asserted by the cluster, is a fact and safe to act on -- as distinct
     from the refused read above. kind ships no ingress controller at all."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     _svc_reader(monkeypatch, [_svc("default", "kubernetes", "ClusterIP")])
     assert k8s.ingress_endpoint("default") is None
@@ -5733,7 +5733,7 @@ def test_services_are_asked_for_across_every_namespace(monkeypatch):
     rather than being global, so placed before it kubectl answers "flags cannot be
     placed before plugin name: --context". Both were live bugs, in that order.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     seen = _svc_reader(monkeypatch, [
         _svc("kube-system", "traefik", "LoadBalancer", address="10.0.0.9")])
@@ -5767,7 +5767,7 @@ def _kube_tls_env(monkeypatch, *, ingress=("traefik",), cert_manager=True,
     to describe an INSTALL, where the class that appears is not the one the earlier
     probe saw.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     pre = k8s.Preflight(context="default", cluster_reachable=True,
                         ingress_classes=list(ingress), distribution=distribution,
@@ -5793,8 +5793,8 @@ def _kube_tls_env(monkeypatch, *, ingress=("traefik",), cert_manager=True,
     return k8s.ClusterPlan(context="default", distribution=distribution, create=False)
 
 
-def _local_spec(host="ws.rcrepro.localhost"):
-    from rc_repro import tls as tlsmod
+def _local_spec(host="ws.houston.localhost"):
+    from houston import tls as tlsmod
     return tlsmod.TlsSpec(mode=tlsmod.MODE_LOCAL, host=host, port=443)
 
 
@@ -5803,14 +5803,14 @@ def test_https_on_kubernetes_installs_an_ingress_when_the_cluster_has_none(monke
 
     The ingress controller is the component a support case is usually about, so a
     cluster already running nginx keeps running nginx. Installing is only for a cluster
-    that has NONE: k3s with `--disable traefik`, a bare kubeadm, or rc-repro's own
+    that has NONE: k3s with `--disable traefik`, a bare kubeadm, or houston's own
     fresh kind cluster, where `--https` used to be a dead end.
 
     This replaced a blanket refusal, and with it the `plan.create` refusal: a cluster
     that does not exist yet is now created and filled in rather than turned away.
     """
-    from rc_repro import tls as tlsmod
-    from rc_repro.services import k8s
+    from houston import tls as tlsmod
+    from houston.services import k8s
 
     # Already has one: the plan uses that class.
     plan = _kube_tls_env(monkeypatch, ingress=("traefik",))
@@ -5838,7 +5838,7 @@ def test_https_on_kubernetes_installs_an_ingress_when_the_cluster_has_none(monke
     assert ktls.ingress_class == "nginx"
 
     # cert-manager is no longer a refusal either: the guide lists it as a prerequisite
-    # AND gives the command, so rc-repro runs the documented step. Requiring it by hand
+    # AND gives the command, so houston runs the documented step. Requiring it by hand
     # while installing the ingress automatically was an inconsistency with no reason.
     acme = tlsmod.TlsSpec(mode=tlsmod.MODE_ACME, host="a.example.com", port=443,
                           acme_email="ops@example.com")
@@ -5853,7 +5853,7 @@ def test_https_on_kubernetes_installs_an_ingress_when_the_cluster_has_none(monke
 
 def test_cert_manager_is_adopted_or_installed_like_the_ingress(monkeypatch):
     """The guide lists cert-manager as a prerequisite AND gives the command, so
-    rc-repro runs the documented step rather than demanding it.
+    houston runs the documented step rather than demanding it.
 
     Requiring it by hand while installing the ingress controller automatically was an
     inconsistency with no reason behind it -- both are things the guide tells an
@@ -5867,7 +5867,7 @@ def test_cert_manager_is_adopted_or_installed_like_the_ingress(monkeypatch):
     """
     import subprocess as sp
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     # Already there: adopted, nothing run.
     ran: list[list[str]] = []
@@ -5902,7 +5902,7 @@ def test_cert_manager_is_not_installed_into_somebody_elses_cluster(monkeypatch):
     """Six CRDs and an admission webhook change what a cluster IS, for every workload
     in it -- not something to do to a managed cluster on the way to booting a repro.
     There it names the command, and adopts as soon as it is there."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     monkeypatch.setattr(k8s, "cert_manager_installed", lambda ctx: False)
     monkeypatch.setattr(k8s, "run", lambda *a, **kw: pytest.fail("must not install"))
@@ -5923,7 +5923,7 @@ def test_cert_manager_applied_but_never_answering_is_a_failure(monkeypatch):
     whether the cluster can issue a Certificate, which is the CRD being there."""
     import subprocess as sp
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     monkeypatch.setattr(k8s, "cert_manager_installed", lambda ctx: False)
     monkeypatch.setattr(k8s, "run",
@@ -5935,7 +5935,7 @@ def test_cert_manager_applied_but_never_answering_is_a_failure(monkeypatch):
 
 
 def test_https_on_kubernetes_will_not_send_the_ca_key_to_a_remote_cluster(monkeypatch):
-    """A `ca` ClusterIssuer means rc-repro's CA PRIVATE KEY in a cluster Secret.
+    """A `ca` ClusterIssuer means houston's CA PRIVATE KEY in a cluster Secret.
 
     `tls_local.py` says what that key is: it "can mint a certificate for any name the
     browser will trust". On this machine's own cluster that is the same trust boundary
@@ -5943,7 +5943,7 @@ def test_https_on_kubernetes_will_not_send_the_ca_key_to_a_remote_cluster(monkey
     and there is a better answer that needs no CA at all.
 
     An `AuthorityGateError`, not a validation failure: the input is fine and the
-    environment is fine, and what is missing is a decision rc-repro is not entitled
+    environment is fine, and what is missing is a decision houston is not entitled
     to make.
     """
     plan = _kube_tls_env(monkeypatch, distribution="eks")
@@ -5980,9 +5980,9 @@ def test_the_https_plan_reports_whether_the_cluster_already_owns_443(monkeypatch
     """
     # THE CLAIM HAS TO BE TRUE FOR THIS NAME. Holding host :443 is not the same as
     # being where the workspace's hostname points, and this asserted only the first:
-    # k3s ServiceLB claims 172.16.0.2 while `<name>.rcrepro.localhost` resolves to
+    # k3s ServiceLB claims 172.16.0.2 while `<name>.houston.localhost` resolves to
     # loopback, klipper's DNAT is IPv4-only, and the EDGE answers there -- so the
-    # https URL rc-repro printed returned 404. Both directions are pinned now.
+    # https URL houston printed returned 404. Both directions are pinned now.
     plan = _kube_tls_env(monkeypatch, claims=(80, 443))
     monkeypatch.setattr(lc, "_name_reaches", lambda host, claim: True)
     ktls = lc._kubernetes_tls_plan(lc.CreateReq(version="8.5.1", https="local"),
@@ -6006,14 +6006,14 @@ def test_the_https_plan_reports_whether_the_cluster_already_owns_443(monkeypatch
 def test_a_loopback_name_is_not_reached_by_a_cluster_on_a_host_address():
     """`_name_reaches` on its own, because the decision above turns on it.
 
-    The real resolver, no stubs: `*.rcrepro.localhost` is loopback by construction
+    The real resolver, no stubs: `*.houston.localhost` is loopback by construction
     and a ServiceLB address is not, which is the pairing that produced a 404 from a
     URL the create had just printed as ready.
     """
     import types
 
     claim = types.SimpleNamespace(address="172.16.0.2", ports=[80, 443])
-    assert lc._name_reaches("ws.rcrepro.localhost", claim) is False
+    assert lc._name_reaches("ws.houston.localhost", claim) is False
     assert lc._name_reaches("localhost", claim) is False
     # Unresolvable is NOT a mismatch: a `--domain` whose DNS has not propagated is
     # the normal state of a name being set up, and must not be moved off the cluster
@@ -6033,8 +6033,8 @@ def test_a_domain_on_kubernetes_plans_an_acme_issuer(monkeypatch):
     at a staging account fails in a way that names neither. `tls.py` separates its
     storage file for the same reason.
     """
-    from rc_repro import tls as tlsmod
-    from rc_repro.services import k8s
+    from houston import tls as tlsmod
+    from houston.services import k8s
 
     plan = _kube_tls_env(monkeypatch)
     spec = tlsmod.TlsSpec(mode=tlsmod.MODE_ACME, host="a.example.com", port=443,
@@ -6057,12 +6057,12 @@ def test_a_domain_on_kubernetes_plans_an_acme_issuer(monkeypatch):
 def test_a_domain_needs_no_local_cluster_because_no_ca_key_leaves_the_box(monkeypatch):
     """The asymmetry that makes `--domain` the answer `--https`'s refusal points at.
 
-    A `ca` issuer holds rc-repro's CA private key, which can mint a certificate for
+    A `ca` issuer holds houston's CA private key, which can mint a certificate for
     any name this box trusts -- so it does not go into somebody else's cluster. An
     ACME issuer holds a Let's Encrypt ACCOUNT key, which is the cluster's own and
     mints nothing here. So a managed cluster refuses `--https` and accepts `--domain`.
     """
-    from rc_repro import tls as tlsmod
+    from houston import tls as tlsmod
 
     plan = _kube_tls_env(monkeypatch, distribution="eks")
     with pytest.raises(errors.AuthorityGateError):
@@ -6088,7 +6088,7 @@ def test_the_acme_issuer_is_the_official_guides_own_shape():
     """
     import yaml as _yaml
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     doc = _yaml.safe_load(k8s.acme_issuer_manifest(
         k8s.IssuerSpec(mode="acme", acme_email="ops@example.com"),
@@ -6109,9 +6109,9 @@ def test_force_does_not_switch_the_memory_preflight_off(monkeypatch, tmp_path):
     The caller excluded force from the call entirely, so for a new workspace the
     function was never reached and the loud override was a silent one.
     """
-    from rc_repro.services import lifecycle as lcsvc
+    from houston.services import lifecycle as lcsvc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     calls: list = []
     monkeypatch.setattr(lcsvc, "check_capacity",
                         lambda *a, **k: calls.append(True))
@@ -6134,9 +6134,9 @@ def test_a_half_written_workspace_is_a_404_not_a_traceback(tmp_path, monkeypatch
     read, and the bare FileNotFoundError escaped the ReproError contract -- in
     `serve` a 500 with a traceback, because detail() runs on the request thread.
     """
-    from rc_repro import runner as runnersvc
+    from houston import runner as runnersvc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     ws = runnersvc.workspace("halfwritten")
     ws.mkdir(parents=True)
     (ws / "docker-compose.yml").write_text("services: {}\n")
@@ -6154,9 +6154,9 @@ def test_a_half_written_workspace_is_a_404_not_a_traceback(tmp_path, monkeypatch
 def test_the_record_is_written_before_the_compose_file(tmp_path, monkeypatch):
     """Which half survives a kill is decided by this order. The record is what makes
     a directory a workspace; the compose document is regenerated by `up` anyway."""
-    from rc_repro import runner as runnersvc
+    from houston import runner as runnersvc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     order: list[str] = []
     real = runnersvc.atomic_write
     monkeypatch.setattr(runnersvc, "atomic_write",
@@ -6176,9 +6176,9 @@ def test_a_kubernetes_workspace_directory_is_restricted_like_every_other(tmp_pat
     calls "what does the work" was absent on the one runtime that also writes
     `kubernetes/values.yaml` with ADMIN_PASS in it.
     """
-    from rc_repro import runner as runnersvc
+    from houston import runner as runnersvc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     meta = runnersvc.Metadata(name="kube", project="p", rc_version="8.5.1",
                               rc_image="i", mongo_tag="7.0", mongo_flavor="official",
                               preset="default", root_url="http://localhost:3000",
@@ -6187,6 +6187,346 @@ def test_a_kubernetes_workspace_directory_is_restricted_like_every_other(tmp_pat
     mode = runnersvc.workspace("kube").stat().st_mode & 0o777
     assert mode == 0o700, f"workspace root is {mode:o}, traversable by other users"
     assert runnersvc.read_meta("kube").name == "kube"
+
+
+def test_a_workspace_keeps_the_compose_project_it_was_created_under(tmp_path,
+                                                                    monkeypatch):
+    """`project_name` derived the name from `PROJECT_PREFIX` instead of reading the
+    one repro.json already records, so the prefix and the containers on the daemon
+    were two sources of truth that merely happened to agree.
+
+    Renaming the tool ends the agreement: `list` reads the RECORDED project and
+    reports the workspace running, while `down` derives a different one and tears
+    down nothing -- leaking the containers with their published ports and the
+    customer's Mongo volume. Pre-fix this returns "houston-legacy"; the recorded
+    "rcrepro-legacy" is the finding.
+    """
+    from houston import runner as runnersvc
+
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    meta = runnersvc.Metadata(name="legacy", project="rcrepro-legacy",
+                              rc_version="8.5.1", rc_image="i", mongo_tag="7.0",
+                              mongo_flavor="official", preset="default",
+                              root_url="http://localhost:3000", host_port=3000,
+                              version_source="x")
+    runnersvc.write_record("legacy", meta)
+    assert runnersvc.project_name("legacy") == "rcrepro-legacy", (
+        "a workspace must be addressed by the project its containers actually "
+        "carry, not by the prefix this build would mint today")
+
+
+def test_a_workspace_with_no_record_is_minted_from_the_current_prefix(tmp_path,
+                                                                     monkeypatch):
+    """The other half of the same rule: reading the record must not break creation.
+
+    `up` calls `project_name` before there is anything to read, so an absent record
+    has to fall through to the mint-time prefix rather than raise or return "".
+    """
+    from houston import config, runner as runnersvc
+
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    assert runnersvc.project_name("fresh") == runnersvc.mint_project_name("fresh")
+    assert runnersvc.project_name("fresh") == config.PROJECT_PREFIX + "fresh"
+
+
+def test_a_kubernetes_workspace_keeps_the_namespace_it_was_created_in(tmp_path,
+                                                                     monkeypatch):
+    """A namespace cannot be renamed in place, so once its objects exist the prefix
+    that minted it is history rather than a description.
+
+    Deriving it meant a changed prefix would send `down` at a namespace that was
+    never created while the real one kept its pods, its PVCs and its port-forward.
+    Pre-fix this returns "houston-legacy"; the recorded namespace is the finding.
+    """
+    from houston import runner as runnersvc
+    from houston.services import k8s
+
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    meta = runnersvc.Metadata(name="legacy", project="rcrepro-legacy",
+                              rc_version="8.5.1", rc_image="i", mongo_tag="7.0",
+                              mongo_flavor="official", preset="default",
+                              root_url="http://localhost:3000", host_port=3000,
+                              version_source="x",
+                              extra={"namespace": "rc-repro-legacy"})
+    runnersvc.write_record("legacy", meta)
+    assert k8s.namespace_for("legacy") == "rc-repro-legacy", (
+        "a workspace must be addressed by the namespace its objects are in, not "
+        "by the prefix this build would mint today")
+    assert k8s.namespace_for("absent") == k8s.mint_namespace("absent")
+
+
+def _legacy_home(root, *, runtime="kubernetes"):
+    """A pre-rename ~/.rc-repro with one workspace, a state marker and an event log."""
+    import json as _json
+
+    legacy = root / ".rc-repro"
+    (legacy / "repros" / "w1").mkdir(parents=True)
+    (legacy / "logs").mkdir()
+    (legacy / "repros" / "w1" / "repro.json").write_text(_json.dumps({
+        "name": "w1", "project": "rcrepro-w1", "rc_version": "8.5.1", "rc_image": "rc",
+        "mongo_tag": "7.0", "mongo_flavor": "official", "preset": "default",
+        "root_url": "http://localhost:3000", "host_port": 3000,
+        "version_source": "live", "public_url": "https://w1.rcrepro.localhost",
+        "extra": {"runtime": runtime, "tls": "local"}}))
+    (legacy / "sessions").write_text(
+        "# rc-repro GUI sessions.\n# rc-repro-state: 2\n")
+    (legacy / "logs" / "rc-repro.log").write_text('{"ts":"old"}\n')
+    return legacy
+
+
+def test_the_pre_rename_state_directory_is_adopted_not_recreated(tmp_path,
+                                                                 monkeypatch):
+    """The move must carry the workspace across intact, still addressed by the names
+    its containers and namespace actually carry.
+
+    Recreating anything here would destroy the customer data a repro exists to hold,
+    so the check is that the OLD project and the OLD namespace survive the migration.
+    """
+    from houston import runner as runnersvc
+    from houston.services import migrate as migratesvc
+
+    monkeypatch.delenv("HOUSTON_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    legacy = _legacy_home(tmp_path)
+
+    res = migratesvc.migrate()
+    assert res["moved"] is True
+    assert not legacy.exists(), "the old directory must not be left behind"
+    assert (tmp_path / ".houston" / "repros" / "w1" / "repro.json").exists()
+    assert runnersvc.project_name("w1") == "rcrepro-w1", "adopted, not re-minted"
+    assert res["namespaces_recorded"] == ["w1"]
+    meta = runnersvc.read_meta("w1")
+    assert meta.extra["namespace"] == "rc-repro-w1"
+
+
+def test_the_event_log_is_renamed_before_the_migration_says_anything(tmp_path,
+                                                                    monkeypatch):
+    """`events.info` TEES every event into the event log, which opens
+    logs/houston.log as a side effect of being called.
+
+    So a migration that announced the move before renaming the log would create the
+    destination file itself and turn its own rename into a permanent no-op: the box
+    keeps logs/rc-repro.log forever, `pending()` stays true, and the whole migration
+    re-runs on every single command. Pre-fix logs/rc-repro.log survives; its absence
+    is the finding.
+    """
+    from houston.services import migrate as migratesvc
+
+    monkeypatch.delenv("HOUSTON_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _legacy_home(tmp_path)
+
+    migratesvc.migrate(emit=lambda ev: None)
+    logs = tmp_path / ".houston" / "logs"
+    assert not (logs / "rc-repro.log").exists(), sorted(p.name for p in logs.iterdir())
+    assert (logs / "houston.log").read_text().startswith('{"ts":"old"}')
+    assert migratesvc.pending() is False, "a finished migration must not re-run"
+
+
+def test_a_target_holding_only_this_tools_own_event_log_is_still_migrated(
+        tmp_path, monkeypatch):
+    """`logs/houston.log` is opened by the FIRST command that runs at all, before any
+    state has been adopted.
+
+    So a box where somebody ran a single `houston --version` between upgrading and
+    adopting has a non-empty ~/.houston containing nothing but a record of that one
+    command -- and treating that as "state" refuses the migration permanently, on the
+    strength of a file whose entire content is the invocation that created it. This
+    is not hypothetical; it happened during this rename. Pre-fix the move is refused
+    with a ConflictError; the move happening is the finding.
+    """
+    from houston.services import migrate as migratesvc
+
+    monkeypatch.delenv("HOUSTON_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _legacy_home(tmp_path)
+    (tmp_path / ".houston" / "logs").mkdir(parents=True)
+    (tmp_path / ".houston" / "logs" / "houston.log").write_text('{"cmd":"--version"}\n')
+
+    assert migratesvc.migrate()["moved"] is True
+    assert not (tmp_path / ".rc-repro").exists()
+    assert (tmp_path / ".houston" / "repros" / "w1" / "repro.json").exists()
+
+
+def test_agent_skill_copies_are_moved_to_the_new_directory_name(tmp_path,
+                                                                monkeypatch):
+    """`skill install` writes into ~/.claude/skills/<tool>/, so the directory name IS
+    the tool name and a rename strands the copy.
+
+    Nothing breaks loudly, which is the problem: the stale SKILL.md keeps teaching
+    agents to run `rc-repro <cmd>`, a command that no longer exists, and the agent
+    that follows it fails in a way that looks like the agent's fault. Safe to do
+    unattended -- unlike the other leftovers these are this tool's own files, in a
+    directory it made for itself, with no sudo and nothing shared.
+    """
+    from houston.services import migrate as migratesvc
+
+    monkeypatch.delenv("HOUSTON_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _legacy_home(tmp_path)
+    for rel in (".claude/skills", ".agents/skills"):
+        old = tmp_path / rel / "rc-repro"
+        old.mkdir(parents=True)
+        (old / "SKILL.md").write_text("# rc-repro\n")
+
+    res = migratesvc.migrate()
+    # The behavioural claim FIRST, so this fails on the behaviour against the pre-fix
+    # code rather than on a result key that did not exist yet.
+    for rel in (".claude/skills", ".agents/skills"):
+        assert not (tmp_path / rel / "rc-repro").exists(), (
+            f"{rel}/rc-repro survived the migration, still telling agents to run a "
+            f"command that no longer exists")
+        new = tmp_path / rel / "houston" / "SKILL.md"
+        assert new.exists(), f"{rel} did not get the renamed copy"
+        assert "name: houston" in new.read_text()
+    assert len(res["skills_replaced"]) == 2, res["skills_replaced"]
+
+
+def test_two_populated_state_directories_are_refused_rather_than_merged(tmp_path,
+                                                                       monkeypatch):
+    """Merging two state directories means choosing which `users` file wins, and no
+    safe answer exists -- so it is a typed refusal that names both paths."""
+    from houston.services import migrate as migratesvc
+
+    monkeypatch.delenv("HOUSTON_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _legacy_home(tmp_path)
+    (tmp_path / ".houston").mkdir()
+    (tmp_path / ".houston" / "users").write_text("# houston GUI accounts.\nbob\tx\n")
+
+    with pytest.raises(errors.ConflictError) as caught:
+        migratesvc.migrate()
+    assert ".rc-repro" in str(caught.value) and ".houston" in str(caught.value)
+    assert (tmp_path / ".rc-repro").exists(), "a refusal must not have moved anything"
+
+
+def test_an_explicit_home_is_never_migrated_out_from_under_the_operator(tmp_path,
+                                                                       monkeypatch):
+    """HOUSTON_HOME set means somebody said where state lives. Moving a directory
+    they named by hand is not this code's decision to make."""
+    from houston.services import migrate as migratesvc
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path / "chosen"))
+    _legacy_home(tmp_path)
+
+    assert migratesvc.legacy_home() is None
+    assert migratesvc.migrate()["moved"] is False
+    assert (tmp_path / ".rc-repro").exists()
+
+
+def test_doctor_names_the_leftovers_the_rename_could_not_move(tmp_path, monkeypatch):
+    """Three classes of thing are outside the migration's reach: root-owned files, the
+    shared edge, and copies this tool installed into other tools' directories.
+
+    Each is INVISIBLE rather than broken -- a stale systemd unit fails at boot, an
+    orphaned skill teaches an agent commands that no longer exist -- so the whole
+    value is that something says so. Every row carries the command that fixes it.
+    """
+    from houston import runner as runnersvc
+    from houston.services import doctor
+
+    # The DEVELOPER's own box may be running a pre-rename edge, which would make this
+    # pass for the wrong reason and the clean-box test below fail for one.
+    monkeypatch.setattr(runnersvc, "docker_available", lambda **kw: False)
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".rc-repro").mkdir()
+    (tmp_path / ".agents" / "skills" / "rc-repro").mkdir(parents=True)
+
+    rows = [r for r in doctor.run_checks()["checks"] if r["check"] == "legacy-artifacts"]
+    found = " ".join(r["message"] for r in rows)
+    assert ".rc-repro" in found and "skills/rc-repro" in found, found
+    assert all(r["status"] == "warn" for r in rows), rows
+    assert "rm -rf" in found, "a row that does not say how to fix it is just noise"
+
+
+def test_doctor_is_silent_about_a_box_that_never_ran_the_old_name(tmp_path,
+                                                                  monkeypatch):
+    """A clean box must get no rows about leftovers it does not have -- otherwise the
+    check becomes a permanent paragraph everybody learns to scroll past."""
+    from houston import runner as runnersvc
+    from houston.services import doctor
+
+    monkeypatch.setattr(runnersvc, "docker_available", lambda **kw: False)
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    rows = [r for r in doctor.run_checks()["checks"] if r["check"] == "legacy-artifacts"]
+    assert rows == [], rows
+
+
+def _quoted_houston_commands() -> "list[tuple[str, str]]":
+    """Every `houston <something>` this package tells a person to run, with its file."""
+    import pathlib
+    import re
+
+    import houston
+
+    root = pathlib.Path(houston.__file__).parent
+    found = []
+    for path in sorted(root.rglob("*.py")):
+        # BACKTICKED only. This file's convention is that a backtick means "run
+        # this", and prose mentions the tool by name constantly -- "another houston
+        # edge is already running" is a sentence, not an instruction, and matching it
+        # would make the check noisy enough to be switched off.
+        for m in re.finditer(r"`houston ([a-z][a-z0-9-]*)",
+                             path.read_text(encoding="utf-8")):
+            found.append((m.group(1), path.name))
+    return found
+
+
+def test_every_command_this_tool_tells_you_to_run_actually_exists():
+    """A message naming a command that does not exist is worse than no message: it
+    reads as authoritative and costs the reader a round trip to find out otherwise.
+
+    This is not hypothetical. The migration and the doctor check both said `houston
+    edge up`, and the verb is `start` -- so the one instruction printed at somebody
+    whose edge had just stopped was the one thing they could not run. Nothing else in
+    the suite could have caught it: the string was correct English in a correct
+    sentence, and no test executes the text of a warning.
+    """
+    from houston import cli
+
+    known = {c.name or c.callback.__name__ for c in cli.app.registered_commands}
+    known |= {g.name for g in cli.app.registered_groups}
+    wrong = sorted({(verb, where) for verb, where in _quoted_houston_commands()
+                    if verb not in known})
+    assert not wrong, (
+        "these messages name a `houston <verb>` that is not a registered command: "
+        + ", ".join(f"`houston {v}` in {w}" for v, w in wrong))
+
+
+def test_every_edge_action_this_tool_tells_you_to_run_actually_exists():
+    """The same rule one level down, where it actually bit.
+
+    `edge` dispatches on a positional action rather than sub-commands, so a wrong verb
+    is not a Typer error at import -- it is a runtime "unknown action" in front of
+    somebody following instructions. The valid set is read from the CLI's own help
+    text so this cannot drift from it.
+    """
+    import pathlib
+    import re
+
+    import houston
+    from houston import cli
+
+    src = source_of(cli.edge) if hasattr(cli, "edge") else ""
+    declared = re.search(r'help="((?:status|start)[^"]*)"',
+                         src or pathlib.Path(cli.__file__).read_text(encoding="utf-8"))
+    assert declared, "could not find the edge action list in the CLI to check against"
+    valid = {w.strip() for w in declared.group(1).split("|")}
+    assert "start" in valid and "status" in valid, valid
+
+    root = pathlib.Path(houston.__file__).parent
+    wrong = []
+    for path in sorted(root.rglob("*.py")):
+        for m in re.finditer(r"`houston edge ([a-z-]+)",
+                             path.read_text(encoding="utf-8")):
+            if m.group(1) not in valid:
+                wrong.append(f"`houston edge {m.group(1)}` in {path.name}")
+    assert not wrong, ("these messages name an edge action that does not exist: "
+                       + ", ".join(sorted(set(wrong))) + f". Valid: {sorted(valid)}")
 
 
 def test_a_contact_address_cannot_add_keys_to_a_cluster_scoped_issuer():
@@ -6200,7 +6540,7 @@ def test_a_contact_address_cannot_add_keys_to_a_cluster_scoped_issuer():
     """
     import yaml as _yaml
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     hostile = ("ops@example.com\n    skipTLSVerify: true\n"
                "    disableAccountKeyGeneration: true\n    # ")
@@ -6224,7 +6564,7 @@ def test_a_mongo_tag_cannot_add_structure_to_the_statefulset():
     two-document manifest that `kubectl apply` accepts, bypassing the very control
     that exists to stop a member choosing what code runs.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     hostile = ("8.0\n        securityContext:\n          privileged: true\n"
                "        hostPID: true\n        # ")
@@ -6239,7 +6579,7 @@ def test_an_acme_issuer_that_never_registers_says_why(monkeypatch):
     """Registering an ACME account is a real call to Let's Encrypt FROM INSIDE the
     cluster, so this fails on no pod egress or a rejected contact address -- and it
     should fail once, here, rather than silently per Certificate afterwards."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     monkeypatch.setattr(k8s, "apply", lambda *a, **kw: None)
     monkeypatch.setattr(k8s, "ask_object",
@@ -6256,7 +6596,7 @@ def test_an_acme_issuer_that_never_registers_says_why(monkeypatch):
 def test_the_issuer_call_dispatches_on_the_spec_not_on_the_caller(monkeypatch):
     """One call site, two mechanisms. A branch at the caller is how `--https` and
     `--domain` would drift into two code paths again."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     seen: list[str] = []
     monkeypatch.setattr(k8s, "ensure_ca_issuer",
@@ -6272,7 +6612,7 @@ def test_the_issuer_call_dispatches_on_the_spec_not_on_the_caller(monkeypatch):
 
 def test_the_ingress_values_are_the_official_guides_shape():
     """From docs.rocket.chat/docs/deploy-with-kubernetes, and the point is that a
-    customer's values.yaml and rc-repro's differ only in the issuer NAME:
+    customer's values.yaml and houston's differ only in the issuer NAME:
 
         host: <domain.xyz>
         ingress:
@@ -6284,17 +6624,17 @@ def test_the_ingress_values_are_the_official_guides_shape():
             - secretName: rckube
               hosts: [<domain.xyz>]
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    v = k8s.ingress_values("ws.rcrepro.localhost", ingress_class="traefik",
+    v = k8s.ingress_values("ws.houston.localhost", ingress_class="traefik",
                            secret_name="ws-tls")
-    assert v["host"] == "ws.rcrepro.localhost"
+    assert v["host"] == "ws.houston.localhost"
     assert v["ingress"]["enabled"] is True
     assert v["ingress"]["ingressClassName"] == "traefik"
     assert v["ingress"]["annotations"] == {
         "cert-manager.io/cluster-issuer": k8s.CA_ISSUER}
     assert v["ingress"]["tls"] == [{"secretName": "ws-tls",
-                                    "hosts": ["ws.rcrepro.localhost"]}]
+                                    "hosts": ["ws.houston.localhost"]}]
 
 
 def test_the_ca_issuer_is_a_tls_secret_and_a_clusterissuer_that_signs_from_it():
@@ -6302,7 +6642,7 @@ def test_the_ca_issuer_is_a_tls_secret_and_a_clusterissuer_that_signs_from_it():
     the same values.yaml with one field different."""
     import yaml as _yaml
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     docs = [d for d in _yaml.safe_load_all(
         k8s.ca_issuer_manifest("-----BEGIN CERTIFICATE-----\nc\n-----END CERTIFICATE-----",
@@ -6327,7 +6667,7 @@ def test_an_issuer_that_never_reconciles_is_a_refusal_not_a_silence(monkeypatch)
     Waiting for `Ready=True` means a workspace has either a working issuer or a
     refusal, never the silent third thing.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     monkeypatch.setattr(k8s, "apply", lambda *a, **kw: None)
     monkeypatch.setattr(k8s, "ask_object",
@@ -6354,14 +6694,14 @@ def test_publishing_a_kubernetes_name_checks_it_instead_of_claiming_it(monkeypat
     -- and a name that does not work has to say so at create time rather than be
     discovered in a browser.
     """
-    from rc_repro import tls as tlsmod
-    from rc_repro.services import edge as edgesvc
-    from rc_repro.services import k8s
+    from houston import tls as tlsmod
+    from houston.services import edge as edgesvc
+    from houston.services import k8s
 
     monkeypatch.setattr(edgesvc, "installed", lambda: True)
     monkeypatch.setattr(edgesvc, "running", lambda: True)
     monkeypatch.setattr(edgesvc, "register", lambda *a, **kw: False)
-    ktls = lc._KubeTls(host="ws.rcrepro.localhost", ingress_class="traefik",
+    ktls = lc._KubeTls(host="ws.houston.localhost", ingress_class="traefik",
                        endpoint=k8s.IngressEndpoint("172.16.0.2", 443, "loadbalancer",
                                                     "kube-system/traefik", True),
                        cluster_owns_443=True)
@@ -6377,7 +6717,7 @@ def test_publishing_a_kubernetes_name_checks_it_instead_of_claiming_it(monkeypat
 
     said.clear()
     monkeypatch.setattr(tlsmod, "verify", lambda *a, **kw: {
-        "serving": True, "fallback": False, "issuer": "CN = rc-repro local CA"})
+        "serving": True, "fallback": False, "issuer": "CN = houston local CA"})
     lc._publish_kubernetes_name("ws", ktls, emit=emit, sleep=lambda s: None)
     assert any("is serving the cluster's certificate" in s for s in said), said
 
@@ -6395,14 +6735,14 @@ def test_the_name_is_given_time_to_go_live_before_it_is_called_broken(monkeypatc
     reader learns to ignore the one line here that would have told them something.
     `cli._report_gui_tls` already polls about ACME for exactly this reason.
     """
-    from rc_repro import tls as tlsmod
-    from rc_repro.services import edge as edgesvc
-    from rc_repro.services import k8s
+    from houston import tls as tlsmod
+    from houston.services import edge as edgesvc
+    from houston.services import k8s
 
     monkeypatch.setattr(edgesvc, "installed", lambda: True)
     monkeypatch.setattr(edgesvc, "running", lambda: True)
     monkeypatch.setattr(edgesvc, "register", lambda *a, **kw: False)
-    ktls = lc._KubeTls(host="ws.rcrepro.localhost", ingress_class="traefik",
+    ktls = lc._KubeTls(host="ws.houston.localhost", ingress_class="traefik",
                        endpoint=k8s.IngressEndpoint("172.16.0.2", 443, "loadbalancer",
                                                     "kube-system/traefik", True),
                        cluster_owns_443=False)
@@ -6412,7 +6752,7 @@ def test_the_name_is_given_time_to_go_live_before_it_is_called_broken(monkeypatc
     answers = [
         {"serving": True, "fallback": True, "issuer": "CN = TRAEFIK DEFAULT CERT"},
         {"serving": True, "fallback": True, "issuer": "CN = TRAEFIK DEFAULT CERT"},
-        {"serving": True, "fallback": False, "issuer": "CN = rc-repro local CA"},
+        {"serving": True, "fallback": False, "issuer": "CN = houston local CA"},
     ]
     monkeypatch.setattr(tlsmod, "verify",
                         lambda *a, **kw: answers.pop(0) if answers else answers)
@@ -6441,7 +6781,7 @@ def test_a_public_name_create_says_nothing_about_credentials(monkeypatch):
     `reachable_beyond_loopback` generates a password for exactly these workspaces --
     so the condition the sentence existed to report does not occur any more.
     """
-    from rc_repro import tls as tlsmod
+    from houston import tls as tlsmod
 
     plan = _kube_tls_env(monkeypatch)
     said: list[str] = []
@@ -6464,7 +6804,7 @@ def test_a_public_name_still_gets_a_password_of_its_own(monkeypatch):
     """The property the warning used to announce. Removing the sentence must not be
     read, later, as removing the behaviour -- so it is asserted where the sentence
     used to be tested."""
-    from rc_repro import tls as tlsmod
+    from houston import tls as tlsmod
 
     acme = tlsmod.TlsSpec(mode=tlsmod.MODE_ACME, host="a.example.com", port=443,
                           acme_email="ops@example.com")
@@ -6499,8 +6839,8 @@ def test_routing_a_name_starts_the_edge_only_when_the_cluster_does_not_own_443(m
     directly -- starting an edge would take the port away from the thing already
     serving it. Anywhere else the edge must own :443 and pass the name through.
     """
-    from rc_repro.services import edge as edgesvc
-    from rc_repro.services import k8s
+    from houston.services import edge as edgesvc
+    from houston.services import k8s
 
     ep = k8s.IngressEndpoint("172.16.0.2", 443, "loadbalancer", "kube-system/traefik",
                              True)
@@ -6542,7 +6882,7 @@ def test_a_cold_mongod_is_retried_rather_than_failing_the_create(monkeypatch):
     """
     import subprocess as sp
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     calls: list[int] = []
 
@@ -6595,12 +6935,12 @@ def test_the_edge_joins_a_kind_clusters_docker_network(monkeypatch):
     `edge.attach` could not do this: it derives a network from a WORKSPACE name, and a
     cluster is not a workspace.
     """
-    from rc_repro.services import edge as edgesvc
-    from rc_repro.services import k8s
+    from houston.services import edge as edgesvc
+    from houston.services import k8s
 
     # The derivation is pure -- no Docker in k8s.py, which owns no such seam.
-    assert k8s.kind_node_container("kind-rc-repro-local") == \
-        "rc-repro-local-control-plane"
+    assert k8s.kind_node_container("kind-houston-local") == \
+        "houston-local-control-plane"
     assert k8s.kind_node_container("default") == "", "k3s has no node container"
     assert k8s.kind_node_container("kind-") == ""
 
@@ -6609,7 +6949,7 @@ def test_the_edge_joins_a_kind_clusters_docker_network(monkeypatch):
     monkeypatch.setattr(edgesvc, "running", lambda: True)
     monkeypatch.setattr(edgesvc, "register", lambda *a, **kw: False)
     monkeypatch.setattr(edgesvc, "container_network",
-                        lambda c: "kind" if c == "rc-repro-local-control-plane" else "")
+                        lambda c: "kind" if c == "houston-local-control-plane" else "")
     monkeypatch.setattr(edgesvc, "attach_network",
                         lambda n: joined.append(n) or True)
 
@@ -6617,7 +6957,7 @@ def test_the_edge_joins_a_kind_clusters_docker_network(monkeypatch):
                              "ingress-nginx/ingress-nginx-controller", False)
     lc._route_kubernetes_name("ws", lc._KubeTls(
         host="a.example.com", ingress_class="nginx", endpoint=ep,
-        context="kind-rc-repro-local", cluster_owns_443=False))
+        context="kind-houston-local", cluster_owns_443=False))
     assert joined == ["kind"], "the edge must join the network the node is on"
 
     # And a k3s cluster has nothing to join: its endpoint is on the host itself.
@@ -6637,7 +6977,7 @@ def test_ensure_ingress_adopts_before_it_installs(monkeypatch):
     installing Traefik over the top of somebody's nginx would reproduce the wrong
     thing in exactly the dimension that matters.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     ran: list[list[str]] = []
     monkeypatch.setattr(k8s, "run", lambda argv, **kw: ran.append(argv))
@@ -6648,7 +6988,7 @@ def test_ensure_ingress_adopts_before_it_installs(monkeypatch):
 
 def test_ensure_ingress_installs_the_guides_own_chart(monkeypatch):
     """`helm install traefik traefik/traefik -n traefik --create-namespace` is the
-    official Rocket.Chat guide's own example, so a cluster rc-repro filled in looks
+    official Rocket.Chat guide's own example, so a cluster houston filled in looks
     like a cluster somebody followed the guide on.
 
     And the chart's default Service type is LEFT ALONE. `helm show values` renders
@@ -6659,7 +6999,7 @@ def test_ensure_ingress_installs_the_guides_own_chart(monkeypatch):
     """
     import subprocess as sp
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     calls: list[list[str]] = []
     seen = {"n": 0}
@@ -6699,7 +7039,7 @@ def test_ensure_ingress_waits_for_the_class_not_just_the_release(monkeypatch):
     would find none and refuse for want of the thing it had just installed."""
     import subprocess as sp
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     looks = {"n": 0}
 
@@ -6721,7 +7061,7 @@ def test_ensure_ingress_will_not_provision_a_cloud_load_balancer_implicitly(monk
     a REAL load balancer -- billable, created implicitly, in somebody's account.
     `.docs/design/kubernetes-cluster-model.md` already decided that one: never create a
     billable cloud resource implicitly. So a remote cluster is told what to run."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     import subprocess as sp
 
@@ -6748,7 +7088,7 @@ def test_ensure_ingress_refuses_a_read_it_could_not_make(monkeypatch):
     """The module's oldest rule at one more call site. Reading a refused list as "this
     cluster has no controller" would install one into a cluster that already had it,
     over a credential problem."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     monkeypatch.setattr(k8s, "ingress_classes", lambda ctx: None)
     monkeypatch.setattr(k8s, "run", lambda *a, **kw: pytest.fail("must not install"))
@@ -6766,9 +7106,9 @@ def test_doctor_says_which_https_shape_the_box_is_in(monkeypatch, tmp_path):
     shapes the box is in is the fact every HTTPS question turns on: the cluster owning
     :443 and answering directly, or the edge owning it and passing the name through.
     """
-    from rc_repro.services import doctor, k8s
+    from houston.services import doctor, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     pre = k8s.Preflight(context="default", cluster_reachable=True,
                         cluster_exists=True, ingress_classes=["traefik"],
                         distribution="k3s", provider=k8s.PROVIDER_EXTERNAL,
@@ -6832,7 +7172,7 @@ def test_nothing_is_installed_before_every_read_only_refusal_has_passed(monkeypa
 
     # And a refusal really does happen without touching the cluster: `--https` on a
     # cluster that is not on this machine would send the CA key there.
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     plan = _kube_tls_env(monkeypatch, distribution="eks", ingress=())
     monkeypatch.setattr(k8s, "ensure_cert_manager",
@@ -6859,7 +7199,7 @@ def test_a_scenario_forward_waits_for_a_ready_endpoint(monkeypatch):
     """
     import subprocess
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     calls = []
 
@@ -6875,7 +7215,7 @@ def test_a_scenario_forward_waits_for_a_ready_endpoint(monkeypatch):
     monkeypatch.setattr(k8s, "run", fake_run)
     monkeypatch.setattr(k8s.subprocess, "Popen",
                         lambda *a, **kw: pytest.fail("forwarded before it was ready"))
-    out = k8s.scenario_ui_forwards("w", namespace="rc-repro-w", context=k8s.CONTEXT,
+    out = k8s.scenario_ui_forwards("w", namespace="houston-w", context=k8s.CONTEXT,
                                    sleep=lambda _s: None)
     assert out == {}, out
     assert sum("endpoints" in a for argv in calls for a in argv) >= 10, \
@@ -6892,9 +7232,9 @@ def test_a_preset_configures_itself_through_the_runtime_that_owns_it(monkeypatch
     now, so the one call that reaches into a container had to stop being a Compose
     call.
     """
-    from rc_repro.services import postready, topology
+    from houston.services import postready, topology
 
-    m = postready.runner.Metadata(name="k", project="rc-repro-k", rc_version="8.5.1",
+    m = postready.runner.Metadata(name="k", project="houston-k", rc_version="8.5.1",
                                   rc_image="i", mongo_tag="8.0",
                                   mongo_flavor="official", preset="saml",
                                   root_url="u", host_port=3000, version_source="t")
@@ -6902,7 +7242,7 @@ def test_a_preset_configures_itself_through_the_runtime_that_owns_it(monkeypatch
 
     monkeypatch.setattr(postready.runner, "compose_exec",
                         lambda *a, **kw: pytest.fail("it reached for docker compose"))
-    from rc_repro.services import k8s
+    from houston.services import k8s
     seen = []
 
     class _R:
@@ -6914,7 +7254,7 @@ def test_a_preset_configures_itself_through_the_runtime_that_owns_it(monkeypatch
     assert any("exec" in argv for argv in seen), seen
 
     # A Compose workspace must still go the other way -- this is a fork, not a swap.
-    c = postready.runner.Metadata(name="c", project="rcrepro-c", rc_version="8.5.1",
+    c = postready.runner.Metadata(name="c", project="houston-c", rc_version="8.5.1",
                                   rc_image="i", mongo_tag="8.0",
                                   mongo_flavor="official", preset="saml",
                                   root_url="u", host_port=3001, version_source="t")
@@ -6933,7 +7273,7 @@ def test_a_half_configured_preset_says_so_instead_of_reporting_success():
     preset has to say which one it is -- naming what failed and the command that
     retries it.
     """
-    from rc_repro.services import postready
+    from houston.services import postready
 
     m = postready.runner.Metadata(name="w", project="p", rc_version="8.5.1",
                                   rc_image="i", mongo_tag="8.0",
@@ -6954,7 +7294,7 @@ def test_a_half_configured_preset_says_so_instead_of_reporting_success():
     joined = " ".join(said)
     assert "RUNNING" in joined and "partly configured" in joined, joined
     assert "saml_idp_cert" in joined, joined
-    assert "rc-repro ready --name w" in joined, joined
+    assert "houston ready --name w" in joined, joined
 
 
 def test_a_scenario_forward_targets_the_deployment_not_the_service(monkeypatch):
@@ -6968,7 +7308,7 @@ def test_a_scenario_forward_targets_the_deployment_not_the_service(monkeypatch):
     """
     import subprocess
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     spawned = []
 
@@ -6997,7 +7337,7 @@ def test_a_scenario_forward_targets_the_deployment_not_the_service(monkeypatch):
     # squatter and lost that race 3 times out of 3.
     monkeypatch.setattr(k8s, "pid_owns_port_exclusively", lambda *a, **kw: True)
 
-    out = k8s.scenario_ui_forwards("w", namespace="rc-repro-w", context=k8s.CONTEXT,
+    out = k8s.scenario_ui_forwards("w", namespace="houston-w", context=k8s.CONTEXT,
                                    sleep=lambda _s: None)
     assert out == {8081: 4242}, out
     argv = spawned[0]
@@ -7017,8 +7357,8 @@ def test_what_was_deployed_is_written_next_to_repro_json(tmp_path, monkeypatch):
     Written for READING: re-running `up` regenerates them, exactly as it regenerates
     docker-compose.yml.
     """
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    from rc_repro.services import k8s
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    from houston.services import k8s
 
     written = k8s.record_rendered(
         "w",
@@ -7051,7 +7391,7 @@ def test_the_idp_cert_is_fetched_once_not_retried_around_a_retrier(monkeypatch):
     wait.
     """
 
-    from rc_repro.services import postready
+    from houston.services import postready
 
     src = source_of(postready._pr_saml_idp_cert)
     # The CALL, not the prose: the comment above it names the function to explain
@@ -7086,15 +7426,15 @@ def _kube_workspace(tmp_path, monkeypatch, name="k", preset="ldap", extra=None):
     import json as _json
     from dataclasses import asdict
 
-    from rc_repro.services import k8s, topology
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     m = lc.runner.Metadata(name=name, project="p", rc_version="8.6.1", rc_image="i",
                            mongo_tag="8.0", mongo_flavor="official", preset=preset,
                            root_url="http://localhost:3010", host_port=3010,
                            version_source="t")
     topology.stamp(m.extra, topology.KUBERNETES)
-    m.extra.update({"context": k8s.CONTEXT, "namespace": f"rc-repro-{name}",
+    m.extra.update({"context": k8s.CONTEXT, "namespace": f"houston-{name}",
                     "bind_host": "127.0.0.1", **(extra or {})})
     ws = lc.runner.workspace(name)
     ws.mkdir(parents=True, exist_ok=True)
@@ -7117,7 +7457,7 @@ def test_detail_gives_a_kubernetes_workspace_its_links_and_its_pods(
     containers — this repro is down" — under a workspace that was running, with no
     way at all to see an ImagePullBackOff from a browser.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     _kube_workspace(tmp_path, monkeypatch, preset="ldap")
     monkeypatch.setattr(lc, "kubernetes_state", lambda name, meta: "running")
@@ -7138,7 +7478,7 @@ def test_detail_gives_a_kubernetes_workspace_its_links_and_its_pods(
     # microservices, because that is what this runtime DEFAULTS to and the record
     # names no deployment -- see topology.DEPLOYMENTS.
     assert d["runtime"] == "kubernetes" and d["deployment"] == "microservices"
-    assert d["namespace"] == "rc-repro-k"
+    assert d["namespace"] == "houston-k"
     assert d["uptime"], "an uptime, from the earliest running pod"
 
 
@@ -7149,7 +7489,7 @@ def test_detail_of_a_kubernetes_workspace_survives_docker_being_down(
     was merely asleep answered the panel with a FileNotFoundError -- a 500 -- for a
     workspace running perfectly well in the cluster. The runtime is asked first now.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     _kube_workspace(tmp_path, monkeypatch, preset="default")
     monkeypatch.setattr(lc.runner, "docker_available", lambda **_k: False)
@@ -7170,7 +7510,7 @@ def test_detail_recovers_the_bind_host_of_a_workspace_older_than_the_key(
     import json as _json
     from dataclasses import asdict
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     m = lc.runner.Metadata(name="old", project="p", rc_version="8.5.1", rc_image="i",
                            mongo_tag="8.0", mongo_flavor="official", preset="default",
                            root_url="http://localhost:3001", host_port=3001,
@@ -7193,7 +7533,7 @@ def test_a_load_test_refuses_a_kubernetes_workspace_instead_of_crashing(
     and the CLI printed a traceback. And the refusal is not "unimplemented" -- the
     numbers would be measuring the `kubectl port-forward`.
     """
-    from rc_repro.services import perf
+    from houston.services import perf
 
     _kube_workspace(tmp_path, monkeypatch, preset="default")
     monkeypatch.setattr(perf.lifecycle.runner, "docker_available", lambda **_k: True)
@@ -7214,7 +7554,7 @@ def test_pod_rows_names_the_reason_a_pod_cannot_start(monkeypatch):
     """
     import json as _json
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     pods = {"items": [
         {"metadata": {"name": "rocketchat-mongodb-0"},
@@ -7244,7 +7584,7 @@ def test_pod_rows_names_the_reason_a_pod_cannot_start(monkeypatch):
 def test_pod_rows_answers_empty_rather_than_raising_when_the_cluster_is_asleep():
     """detail() is on the path of every panel open, so this may never raise: a
     workspace whose cluster is unreachable still has to render."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     import unittest.mock as mock
     with mock.patch.object(k8s, "run", return_value=type(
@@ -7260,13 +7600,13 @@ def test_a_release_has_a_state_and_a_wedged_one_is_freed(monkeypatch):
     locked, `up` went on to `helm upgrade --install`, and helm refused with "another
     operation (install/upgrade/rollback) is in progress" -- whose central claim is
     false: nothing is in progress, the process that was doing it is gone. Every later
-    attempt failed identically and rc-repro offered no way out.
+    attempt failed identically and houston offered no way out.
 
     The remedy depends on whether there is anything to go back TO, which is why "just
     run helm rollback" is not the whole answer: a pending-install at revision 1 never
     completed once, so a rollback has no target.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     # A state, not a presence.
     monkeypatch.setattr(k8s, "run", lambda argv, **kw: _completed(
@@ -7327,7 +7667,7 @@ def test_the_upgrade_re_supplies_the_values_file_like_the_official_guide(monkeyp
     re-applies the last release's values over the new defaults. Only re-supplying a
     values file, with that key recomputed against the TARGET chart, is correct.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     seen: list = []
     sent: list = []
@@ -7385,14 +7725,14 @@ def test_a_release_with_no_values_of_its_own_is_not_a_failure(monkeypatch):
     """`helm get values` answers the literal string `null` for a release installed
     with no values. That is an empty values file, not an error, and reading it as one
     would refuse every upgrade of such a release."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     monkeypatch.setattr(k8s, "run", lambda argv, **kw: _completed(0, out="null"))
     assert k8s.release_values("rocketchat", "ns", "c") == {}
 
     # A refused read is still refused: not knowing the values is not the same as
     # there being none, and upgrading on {} would erase the release's whole config.
-    from rc_repro.errors import DockerError
+    from houston.errors import DockerError
     monkeypatch.setattr(k8s, "run", lambda argv, **kw: _completed(
         1, err="Error: release: not found"))
     with pytest.raises(DockerError):
@@ -7407,7 +7747,7 @@ def test_the_flag_that_undoes_a_failed_install_is_named_for_the_helm_installed()
     Verified against the 4.2.3 on this machine: `helm upgrade --help` lists
     `--rollback-on-failure` and no `--atomic`.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     class _T:
         present, version = True, ()
@@ -7430,11 +7770,11 @@ def test_a_multi_line_helm_error_keeps_its_reason(monkeypatch):
     error puts the location on that line and the cause on the indented lines after it.
 
     So the file and line survived and `nil pointer` did not -- which is what made the
-    chart-version upgrade failure unreadable from rc-repro's own output. The
+    chart-version upgrade failure unreadable from houston's own output. The
     docstring's premise, diagnostics first and error last, holds for klog and inverts
     here.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     helm = ("Error: UPGRADE FAILED: template: rocketchat/templates/podmonitor.yaml:24:18\n"
             '  executing "podmonitor.yaml" at <.Values.podMonitor.enabled>:\n'
@@ -7491,16 +7831,16 @@ def test_the_repo_copies_of_the_skill_match_the_packaged_one():
     drift, so this is the thing that stops them.
 
     It is a real check rather than a formality: the packaged copy is what
-    `rc-repro skill install` writes on a machine that has no checkout, so a repo
+    `houston skill install` writes on a machine that has no checkout, so a repo
     copy that says something different is instructions half the callers never see.
     """
     from pathlib import Path
 
-    from rc_repro.services import skill
+    from houston.services import skill
 
     root = Path(skill.packaged()).resolve().parents[3]
     want = skill.packaged().read_text(encoding="utf-8")
-    for rel in (".claude/skills/rc-repro/SKILL.md", ".agents/skills/rc-repro/SKILL.md"):
+    for rel in (".claude/skills/houston/SKILL.md", ".agents/skills/houston/SKILL.md"):
         copy = root / rel
         assert copy.exists(), f"{rel} is missing — `cp {skill.packaged()} {rel}`"
         assert copy.read_text(encoding="utf-8") == want, (
@@ -7520,8 +7860,8 @@ def test_the_skill_states_only_numbers_the_build_still_confirms():
     """
     import re
 
-    from rc_repro import errors, presets, seed
-    from rc_repro.services import skill
+    from houston import errors, presets, seed
+    from houston.services import skill
 
     text = skill.packaged().read_text(encoding="utf-8")
 
@@ -7558,8 +7898,8 @@ def test_the_skill_states_only_numbers_the_build_still_confirms():
     #    section is about telling a caller whether it is current. Pinning it here is
     #    what lets it stay a real value instead of drifting into a fossil -- it was
     #    four minor versions behind when this walk was written.
-    from rc_repro import __version__
-    assert f'"rc_repro_version":"{__version__}"' in text, (
+    from houston import __version__
+    assert f'"houston_version":"{__version__}"' in text, (
         "the skill's sample envelope names a version this build is not")
 
 
@@ -7568,9 +7908,9 @@ def test_the_skill_knows_stale_from_edited_locally(tmp_path, monkeypatch):
     moved on (reinstall it) or a human edited it (that is theirs). The sidecar's
     recorded sha is what separates them -- without it, an edit and a new release look
     identical and one of the two gets clobbered."""
-    from rc_repro.services import skill
+    from houston.services import skill
 
-    monkeypatch.setenv("RC_REPRO_SKILL_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_SKILL_HOME", str(tmp_path))
     assert skill.host_state("claude").status == "absent"
 
     skill.install("claude")
@@ -7590,22 +7930,22 @@ def test_the_skill_knows_stale_from_edited_locally(tmp_path, monkeypatch):
     # A copy this build wrote, from an older build: stale, and overwritten freely.
     path.write_text("what 0.1.0 shipped\n", encoding="utf-8")
     (path.parent / skill.SIDECAR).write_text(json.dumps(
-        {"rc_repro_version": "0.1.0", "sha256": skill.sha256("what 0.1.0 shipped\n")}),
+        {"houston_version": "0.1.0", "sha256": skill.sha256("what 0.1.0 shipped\n")}),
         encoding="utf-8")
     assert skill.host_state("claude").status == "stale"
     assert skill.install("claude")["hosts"][0]["action"] == "updated"
 
 
-def test_the_skill_never_writes_into_the_rc_repro_state_directory(tmp_path, monkeypatch):
-    """It is read by an agent that knows nothing about RC_REPRO_HOME, so it goes
+def test_the_skill_never_writes_into_the_houston_state_directory(tmp_path, monkeypatch):
+    """It is read by an agent that knows nothing about HOUSTON_HOME, so it goes
     where that agent looks -- and a test that got this wrong would write into the
     developer's real ~/.claude."""
-    from rc_repro.services import skill
+    from houston.services import skill
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path / "state"))
-    monkeypatch.setenv("RC_REPRO_SKILL_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("HOUSTON_SKILL_HOME", str(tmp_path / "home"))
     skill.install("all")
-    assert (tmp_path / "home" / ".claude" / "skills" / "rc-repro" / "SKILL.md").exists()
+    assert (tmp_path / "home" / ".claude" / "skills" / "houston" / "SKILL.md").exists()
     assert not (tmp_path / "state").exists()
 
 
@@ -7616,7 +7956,7 @@ def test_a_kubernetes_create_is_refused_when_the_ENGINE_is_too_small(monkeypatch
     Podman, and the capacity check only ever asked the host. A laptop with 32 GB and
     a 4 GB VM passed everything and then could not run a Kubernetes workspace -- the
     failure arriving minutes later as pods stuck Pending, which names nothing."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
     monkeypatch.setattr(k8s, "plan_cluster", lambda *_a, **_k: k8s.ClusterPlan(
         context=k8s.CONTEXT, distribution="kind", create=True))
     monkeypatch.setattr(lc.runner, "docker_capacity", lambda: (2.0, 3 * 1024 ** 3))
@@ -7641,7 +7981,7 @@ def test_an_unreadable_engine_is_not_evidence_of_a_small_one(monkeypatch):
 
 def test_force_downgrades_the_engine_floor_to_a_warning(monkeypatch):
     events = []
-    from rc_repro.services import k8s
+    from houston.services import k8s
     monkeypatch.setattr(k8s, "plan_cluster", lambda *_a, **_k: k8s.ClusterPlan(
         context=k8s.CONTEXT, distribution="kind", create=True))
     monkeypatch.setattr(lc.runner, "docker_capacity", lambda: (1.0, 1 * 1024 ** 3))
@@ -7660,12 +8000,12 @@ def test_the_skill_reports_the_copy_an_agent_actually_reads(tmp_path, monkeypatc
 
     Found by driving the skill and watching `capabilities` say exactly that.
     """
-    from rc_repro.services import skill
+    from houston.services import skill
 
-    monkeypatch.setenv("RC_REPRO_SKILL_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("HOUSTON_SKILL_HOME", str(tmp_path / "home"))
     project = tmp_path / "checkout"
-    (project / ".claude" / "skills" / "rc-repro").mkdir(parents=True)
-    local = project / ".claude" / "skills" / "rc-repro" / "SKILL.md"
+    (project / ".claude" / "skills" / "houston").mkdir(parents=True)
+    local = project / ".claude" / "skills" / "houston" / "SKILL.md"
     local.write_text(skill.packaged().read_text(encoding="utf-8"), encoding="utf-8")
     monkeypatch.chdir(project)
 
@@ -7684,9 +8024,9 @@ def test_the_skill_reports_the_copy_an_agent_actually_reads(tmp_path, monkeypatc
 
 
 def test_no_copy_anywhere_is_not_current(tmp_path, monkeypatch):
-    from rc_repro.services import skill
+    from houston.services import skill
 
-    monkeypatch.setenv("RC_REPRO_SKILL_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("HOUSTON_SKILL_HOME", str(tmp_path / "home"))
     empty = tmp_path / "elsewhere"
     empty.mkdir()
     monkeypatch.chdir(empty)
@@ -7741,12 +8081,12 @@ def test_an_empty_group_contributes_no_stray_heading():
 def _k8s_meta(**extra):
     """A Kubernetes workspace record, as `repro.json` holds one."""
     base = {"runtime": "kubernetes", "deployment": "microservices",
-            "namespace": "rc-repro-old", "context": "kind-rc-repro-local",
+            "namespace": "houston-old", "context": "kind-houston-local",
             "release": "rocketchat", "bind_host": "127.0.0.1",
             "mongo_managed_by": "statefulset", "mongo_image": "mongo:8.0"}
     base.update(extra)
     return lc.runner.Metadata(
-        name="old", project="rc-repro-old", rc_version="8.5.1", rc_image="i",
+        name="old", project="houston-old", rc_version="8.5.1", rc_image="i",
         mongo_tag="8.0", mongo_flavor="official", preset="default",
         root_url="http://localhost:3000", host_port=3000, version_source="map",
         extra=base)
@@ -7797,7 +8137,7 @@ def test_no_kubectl_read_answers_a_failed_call_with_an_empty_one():
     """
     import ast
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     tree = ast.parse(source_of(k8s))
     offenders = []
@@ -7855,7 +8195,7 @@ def test_the_shared_teardown_chain_cannot_answer_from_ignorance(monkeypatch):
     """
     import typing
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     for fn in (k8s.workspace_namespaces, k8s.mongodb_resources, k8s.monitoring_wanted):
         ann = typing.get_type_hints(fn).get("return")
@@ -7866,7 +8206,7 @@ def test_the_shared_teardown_chain_cannot_answer_from_ignorance(monkeypatch):
     # And the two callers act on it. Asserted on behaviour, not on the source.
     monkeypatch.setattr(k8s, "release_installed", lambda *a, **kw: True)
     monkeypatch.setattr(k8s, "operator_installed", lambda *a, **kw: True)
-    monkeypatch.setattr(k8s, "workspace_namespaces", lambda ctx=None: ["rc-repro-other"])
+    monkeypatch.setattr(k8s, "workspace_namespaces", lambda ctx=None: ["houston-other"])
     monkeypatch.setattr(k8s, "mongodb_resources", lambda ctx: None)
     said: list = []
     assert k8s.remove_operator(context="c", emit=lambda e: said.append(e.message)) is False
@@ -7890,8 +8230,8 @@ def test_the_shared_teardown_chain_cannot_answer_from_ignorance(monkeypatch):
     # One name for the label, in one place: it was a literal at the setter and a
     # literal in the reference count, which is two chances to disagree about the
     # thing that decides whether the shared stack is uninstalled.
-    assert "rc-repro.io/monitoring" not in source_of(k8s.set_monitoring_label)
-    assert k8s.MONITORING_LABEL == "rc-repro.io/monitoring"
+    assert "houston.io/monitoring" not in source_of(k8s.set_monitoring_label)
+    assert k8s.MONITORING_LABEL == "houston.io/monitoring"
 
 
 def test_a_cluster_that_cannot_be_listed_is_not_a_cluster_with_nothing_in_it(monkeypatch):
@@ -7903,7 +8243,7 @@ def test_a_cluster_that_cannot_be_listed_is_not_a_cluster_with_nothing_in_it(mon
     Forbidden. An 8-second PROBE_TIMEOUT under load and a rolling control-plane
     restart produce the same answer.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     denied = _completed(1, err='Error from server (Forbidden): namespaces is '
                                'forbidden: User "system:serviceaccount:x:limited" '
@@ -7934,7 +8274,7 @@ def test_a_cluster_that_cannot_be_listed_is_not_a_cluster_with_nothing_in_it(mon
         "a refused read must count as 'the namespace was already there'"
 
     # And a cluster whose contents are unknown is not an empty cluster to reclaim.
-    from rc_repro.errors import ConflictError
+    from houston.errors import ConflictError
     monkeypatch.setattr(k8s, "which", lambda n: "/usr/bin/kind")
     monkeypatch.setattr(k8s, "clusters", lambda: ([k8s.CLUSTER_NAME], False))
     monkeypatch.setattr(k8s, "cluster_context", lambda: k8s.CONTEXT)
@@ -7953,10 +8293,10 @@ def test_a_kubernetes_workspace_is_not_down_just_because_nobody_could_ask(monkey
     worst of the available guesses. The Docker branch in the same function has said
     `?` for an unreachable daemon all along, and the browser already renders it.
     """
-    from rc_repro.services import k8s, topology
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    m = lc.runner.Metadata(name="k", project="rc-repro-k", rc_version="8.5.1",
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    m = lc.runner.Metadata(name="k", project="houston-k", rc_version="8.5.1",
                            rc_image="i", mongo_tag="8.0", mongo_flavor="official",
                            preset="default", root_url="http://localhost:3000",
                            host_port=3000, version_source="t")
@@ -7988,7 +8328,7 @@ def test_a_forward_is_confirmed_by_owning_the_socket_not_by_the_port_answering()
     import socket
     import subprocess
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     squatter = socket.socket()
     squatter.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -8019,7 +8359,7 @@ def test_a_pending_shared_release_is_not_mistaken_for_a_working_one(monkeypatch)
     dashboards did not exist. The same collapse `release_state` was written for, in
     the one function that was not migrated with the others.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     def listing(status):
         return _helm_list(k8s.MONITORING_RELEASE, status=status)
@@ -8042,14 +8382,14 @@ def test_both_shared_releases_free_a_wedged_one_before_installing():
     """A killed `helm install` wedges the SHARED releases for every workspace on the
     cluster, and only the workspace's own release knew how to recover.
 
-    `rc-repro-system` holds the MongoDB operator and the monitoring stack, so one
+    `houston-system` holds the MongoDB operator and the monitoring stack, so one
     Ctrl-C inside their five-minute `--wait` left every later `--mongo-operator` and
     every `--monitor` failing with "another operation (install/upgrade/rollback) is
     in progress". `--rollback-on-failure` does not cover it: a killed helm is not
     there to perform the rollback.
     """
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     for fn in (k8s.ensure_operator, k8s.ensure_monitoring, k8s.install):
         src = source_of(fn)
@@ -8067,8 +8407,8 @@ def test_doctor_is_told_which_cluster_is_not_answering(monkeypatch):
     somebody whose cluster IS configured and whose credentials are what need fixing,
     sending them to configure a second one.
     """
-    from rc_repro.errors import PreflightError
-    from rc_repro.services import k8s
+    from houston.errors import PreflightError
+    from houston.services import k8s
 
     monkeypatch.setattr(k8s, "plan_cluster", lambda *_a, **_k: (_ for _ in ()).throw(
         PreflightError("kubectl is pointed at 'my-prod', which is not answering")))
@@ -8102,7 +8442,7 @@ def test_a_forward_that_hid_its_arguments_is_not_called_dead(monkeypatch):
     An argv with nothing in it to check is "I cannot identify it this way", not a
     mismatch. Same distinction the rest of this module is built on.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     class _Proc:
         def __init__(self, path):
@@ -8126,25 +8466,25 @@ def test_a_forward_that_hid_its_arguments_is_not_called_dead(monkeypatch):
 
     # The k3s shape: argv[0] and a hundred empty slots.
     cmdline, comm, port_up = b"kubectl \0" + b"\0" * 100, "kubectl", True
-    assert k8s.forward_alive(4242, namespace="rc-repro-k", host_port=3000) is True
+    assert k8s.forward_alive(4242, namespace="houston-k", host_port=3000) is True
 
     # ...but only while the port it was started for is actually held. Three facts
     # together: our recorded pid, still a kubectl, and the port is up.
     port_up = False
-    assert k8s.forward_alive(4242, namespace="rc-repro-k", host_port=3000) is False
+    assert k8s.forward_alive(4242, namespace="houston-k", host_port=3000) is False
 
     # A recycled pid running something else is still refused.
     cmdline, comm, port_up = b"nginx\0", "nginx", True
-    assert k8s.forward_alive(4242, namespace="rc-repro-k", host_port=3000) is False
+    assert k8s.forward_alive(4242, namespace="houston-k", host_port=3000) is False
 
     # And a FULL argv is still matched strictly -- the strong path is unchanged, so a
     # different workspace's forward on a recycled pid does not pass.
-    cmdline = b"\0".join([b"kubectl", b"--context", b"c", b"-n", b"rc-repro-OTHER",
+    cmdline = b"\0".join([b"kubectl", b"--context", b"c", b"-n", b"houston-OTHER",
                           b"port-forward", b"deployment/x", b"3000:3000"])
     comm = "kubectl"
-    assert k8s.forward_alive(4242, namespace="rc-repro-k", host_port=3000) is False
-    cmdline = cmdline.replace(b"rc-repro-OTHER", b"rc-repro-k")
-    assert k8s.forward_alive(4242, namespace="rc-repro-k", host_port=3000) is True
+    assert k8s.forward_alive(4242, namespace="houston-k", host_port=3000) is False
+    cmdline = cmdline.replace(b"houston-OTHER", b"houston-k")
+    assert k8s.forward_alive(4242, namespace="houston-k", host_port=3000) is True
 
 
 def test_a_service_with_no_ready_pod_behind_it_is_reported(monkeypatch):
@@ -8162,7 +8502,7 @@ def test_a_service_with_no_ready_pod_behind_it_is_reported(monkeypatch):
     is normal, and a false negative here would block a boot -- a worse failure than
     the one being found. Every doubt therefore returns "nothing to say".
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     slices = {"items": [
         {"metadata": {"labels": {"kubernetes.io/service-name": "rocketchat-rocketchat"}},
@@ -8194,7 +8534,7 @@ def test_a_service_with_no_ready_pod_behind_it_is_reported(monkeypatch):
         # excluded without being named -- it has its own lifecycle and its own
         # reasons to be briefly empty.
         {"metadata": {"name": "mongodb",
-                      "labels": {"rc-repro.io/workspace": "w"}},
+                      "labels": {"houston.io/workspace": "w"}},
          "spec": {"selector": {"app": "mongodb"}, "type": "ClusterIP"}},
         # No selector: wired by hand, so there are no pods to be missing.
         {"metadata": {"name": "rocketchat-manual", "labels": {}},
@@ -8246,15 +8586,15 @@ def test_a_dead_port_forward_is_said_out_loud_and_names_its_repair(monkeypatch, 
     met. So the note is derived on every read rather than recorded, and disappears the
     moment the forward is back.
     """
-    from rc_repro.services import k8s, topology
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    m = lc.runner.Metadata(name="k", project="rc-repro-k", rc_version="8.5.1",
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    m = lc.runner.Metadata(name="k", project="houston-k", rc_version="8.5.1",
                            rc_image="i", mongo_tag="8.0", mongo_flavor="official",
                            preset="default", root_url="http://localhost:3000",
                            host_port=3000, version_source="t")
     topology.stamp(m.extra, topology.KUBERNETES)
-    m.extra.update({"context": k8s.CONTEXT, "namespace": "rc-repro-k",
+    m.extra.update({"context": k8s.CONTEXT, "namespace": "houston-k",
                     "port_forward_pid": 4242})
 
     def titles(meta):
@@ -8264,7 +8604,7 @@ def test_a_dead_port_forward_is_said_out_loud_and_names_its_repair(monkeypatch, 
     groups = lc.note_groups_of(m)
     dead = [g for g in groups if g["title"] == "The URL is not published right now"]
     assert dead, titles(m)
-    assert any("rc-repro ready --name k" in c for c in dead[0]["commands"]), dead[0]
+    assert any("houston ready --name k" in c for c in dead[0]["commands"]), dead[0]
     assert any("localhost:3000" in b for b in dead[0]["body"]), dead[0]
     # It must not read as an accusation against Rocket.Chat, which may be fine.
     assert any("says nothing about Rocket.Chat" in b for b in dead[0]["body"])
@@ -8283,7 +8623,7 @@ def test_a_dead_port_forward_is_said_out_loud_and_names_its_repair(monkeypatch, 
         "no pid recorded is 'I cannot say', not 'nothing is running'"
 
     # A Compose workspace is not affected: it publishes a real port.
-    c = lc.runner.Metadata(name="d", project="rc-repro-d", rc_version="8.5.1",
+    c = lc.runner.Metadata(name="d", project="houston-d", rc_version="8.5.1",
                            rc_image="i", mongo_tag="8.0", mongo_flavor="official",
                            preset="default", root_url="http://localhost:3001",
                            host_port=3001, version_source="t")
@@ -8304,7 +8644,7 @@ def test_a_workspace_made_before_groups_existed_still_renders_as_groups():
     """
     m = _k8s_meta()
     m.extra["notes"] = [
-        "microservices on kind-rc-repro-local - about 9 pods, namespace rc-repro-old",
+        "microservices on kind-houston-local - about 9 pods, namespace houston-old",
         "reachable on this box at http://localhost:3000",
     ]
     s = lc._summary(m)
@@ -8316,7 +8656,7 @@ def test_a_workspace_made_before_groups_existed_still_renders_as_groups():
                            "3 · Look at what is inside"], titles
     # The facts that were welded into a sentence are rows now, for this record too.
     rows = dict((k, v) for k, v in s["note_groups"][0]["rows"])
-    assert rows == {"Cluster": "kind-rc-repro-local", "Namespace": "rc-repro-old",
+    assert rows == {"Cluster": "kind-houston-local", "Namespace": "houston-old",
                     "Arrangement": "microservices", "Pods": "about 9"}
     # And the flat list the CLI prints is the derived one, not the sentence above.
     assert s["notes"] == lc.flatten_notes(s["note_groups"])
@@ -8353,7 +8693,7 @@ def test_a_compose_workspaces_add_ons_are_groups_too():
     three sections -- and derived, so an older record gets them as well.
     """
     m = lc.runner.Metadata(
-        name="c", project="rcrepro-c", rc_version="8.5.1", rc_image="i",
+        name="c", project="houston-c", rc_version="8.5.1", rc_image="i",
         mongo_tag="8.0", mongo_flavor="official", preset="default",
         root_url="http://localhost:3000", host_port=3000, version_source="map",
         public_url="https://c.example.test",
@@ -8378,13 +8718,13 @@ def test_a_command_in_the_notes_is_never_wrapped_where_it_would_be_pasted(capsys
     Driven from a RECORDED flat note, which is both what an older workspace holds and
     the shape the derived groups render commands in.
     """
-    from rc_repro import cli
+    from houston import cli
 
-    forward = ("kubectl -n rc-repro-a-fairly-long-workspace-name port-forward "
+    forward = ("kubectl -n houston-a-fairly-long-workspace-name port-forward "
                "deployment/rocketchat-rocketchat 3000:3000")
     assert len(forward) > 88          # wider than anything `_print_notes` renders
     m = lc.runner.Metadata(
-        name="c", project="rcrepro-c", rc_version="8.5.1", rc_image="i",
+        name="c", project="houston-c", rc_version="8.5.1", rc_image="i",
         mongo_tag="8.0", mongo_flavor="official", preset="default",
         root_url="http://localhost:3000", host_port=3000, version_source="map",
         extra={"notes": ["bring the forward back with:", "    " + forward,
@@ -8403,7 +8743,7 @@ def test_the_terminal_prints_the_same_sections_the_panel_draws(capsys):
     """One definition, two renderings. The CLI used to print a flat list inside a box
     while the browser drew cards, and the two could only be compared by eye.
     """
-    from rc_repro import cli
+    from houston import cli
 
     m = _k8s_meta()
     cli._print_notes(m)
@@ -8428,7 +8768,7 @@ def _kube_probe_stubs(monkeypatch, *, kind: bool, our_cluster: bool, active: str
     are the same probe and a test that stated one and left the other to run for real
     would drive a live `kubectl` from a unit test.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
     monkeypatch.setattr(k8s, "which", lambda t: "/usr/bin/kind" if (t == "kind" and kind) else "")
     monkeypatch.setattr(k8s, "clusters",
                         lambda: ([k8s.CLUSTER_NAME] if our_cluster else [], ""))
@@ -8443,7 +8783,7 @@ def _kube_probe_stubs(monkeypatch, *, kind: bool, our_cluster: bool, active: str
 
 
 def test_the_only_difference_between_kind_and_k3s_is_whether_a_cluster_is_built(monkeypatch):
-    """`up --runtime kubernetes` could only ever use a cluster rc-repro built itself:
+    """`up --runtime kubernetes` could only ever use a cluster houston built itself:
     `create_workspace` opened with `ensure_cluster()`, which refuses when `kind` is
     absent. So on a box running k3s -- an ordinary way to have Kubernetes -- `doctor`
     said "Using your cluster 'default'" and `up` refused to use it, two commands in one
@@ -8452,8 +8792,8 @@ def test_the_only_difference_between_kind_and_k3s_is_whether_a_cluster_is_built(
     Provisioning is the ONE step that differs. Everything after it already took
     `context=`, which is why adopting a cluster is a resolver and not a runtime.
     """
-    from rc_repro.errors import PreflightError
-    from rc_repro.services import k8s
+    from houston.errors import PreflightError
+    from houston.services import k8s
 
     # kind, with its cluster already up: ours, and nothing to build. Today's behaviour.
     _kube_probe_stubs(monkeypatch, kind=True, our_cluster=True, active="default")
@@ -8495,7 +8835,7 @@ def test_a_named_context_is_adopted_and_never_provisioned(monkeypatch):
     cluster of ours yet, so the un-named call plans a BUILD and ignores the k3s beside
     it.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     _kube_probe_stubs(monkeypatch, kind=True, our_cluster=False, active="default")
     monkeypatch.setattr(k8s, "contexts", lambda: (["default", "eks-support"], ""))
@@ -8509,7 +8849,7 @@ def test_a_named_context_is_adopted_and_never_provisioned(monkeypatch):
 
 def test_an_unknown_context_is_refused_and_says_what_exists(monkeypatch):
     """A typo is argument validation, so it refuses with the list rather than probing."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     _kube_probe_stubs(monkeypatch, kind=True, our_cluster=False, active="default")
     monkeypatch.setattr(k8s, "contexts", lambda: (["default", "eks-support"], ""))
@@ -8528,7 +8868,7 @@ def test_a_kubeconfig_that_cannot_be_read_does_not_refuse_a_context(monkeypatch)
     to the user as a typo in their cluster name. The reachability probe is the real
     test and answers for itself.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     _kube_probe_stubs(monkeypatch, kind=True, our_cluster=False, active="default")
     monkeypatch.setattr(k8s, "contexts", lambda: ([], "permission denied"))
@@ -8540,7 +8880,7 @@ def test_a_kubeconfig_that_cannot_be_read_does_not_refuse_a_context(monkeypatch)
 
 def test_a_named_context_that_does_not_answer_is_refused(monkeypatch):
     """And the refusal carries the read failure, so the cause is not thrown away."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     _kube_probe_stubs(monkeypatch, kind=True, our_cluster=False, active="default",
                       reachable=False)
@@ -8562,12 +8902,12 @@ def test_the_cluster_is_privileged_and_both_callers_resolve_it_the_same_way(monk
     `_create_kubernetes` decides where the workspace actually goes. A default applied
     in one and not the other reserves memory for a kind cluster while building in EKS.
     """
-    from rc_repro import config
+    from houston import config
 
     assert "context" in lc.PRIVILEGED_CREATE_FIELDS, \
         "choosing the cluster is the same class of decision as rc_image and bind"
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     assert lc.req_context(lc.CreateReq(version="8.5.1")) == ""
 
     config.update_config(lambda c: c.__setitem__(config.KUBE_CONTEXT_KEY, "eks-support"))
@@ -8585,7 +8925,7 @@ def test_rebuilding_a_workspace_cannot_move_it_to_another_cluster():
     workspace living in a remote cluster would be rebuilt by BUILDING A LOCAL CLUSTER
     for it.
     """
-    from rc_repro.services import topology
+    from houston.services import topology
 
     class M:
         preset = "default"
@@ -8610,11 +8950,11 @@ def test_doctor_reports_on_the_cluster_up_would_actually_use(monkeypatch, tmp_pa
     `up` alone recreates it for exactly the people who need it most, so `doctor` takes
     the same option and honours the same box default.
     """
-    from rc_repro import config
-    from rc_repro.services import doctor as doctorsvc
-    from rc_repro.services import k8s
+    from houston import config
+    from houston.services import doctor as doctorsvc
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     seen: list[str] = []
 
     def spy(context: str = ""):
@@ -8643,13 +8983,13 @@ def test_a_refused_context_is_told_what_to_do_about_THAT_context(monkeypatch):
     """The remedy has to match the cluster, and for one case it was actively wrong.
 
     Both refusals used to end in `aws eks update-kubeconfig`, which is the right hint
-    for the case `--context` was built for and the wrong one for rc-repro's OWN kind
+    for the case `--context` was built for and the wrong one for houston's OWN kind
     cluster -- where the answer is to stop passing `--context`, because a named context
-    is adopted rather than created. Measured: on a fresh RC_REPRO_HOME,
-    `--context kind-rc-repro-local` refused and told the user to run an AWS command
+    is adopted rather than created. Measured: on a fresh HOUSTON_HOME,
+    `--context kind-houston-local` refused and told the user to run an AWS command
     about a local kind cluster.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     _kube_probe_stubs(monkeypatch, kind=True, our_cluster=False, active="default")
     monkeypatch.setattr(k8s, "contexts", lambda: (["default"], ""))
@@ -8682,7 +9022,7 @@ def test_a_refused_context_is_told_what_to_do_about_THAT_context(monkeypatch):
         k8s.plan_cluster(context=k8s.CONTEXT)
     assert "WITHOUT" in str(exc.value)
     assert "get nodes" not in str(exc.value), \
-        "telling someone to debug kubectl against a cluster rc-repro would build is noise"
+        "telling someone to debug kubectl against a cluster houston would build is noise"
 
     # Somebody else's, present but not answering: debug it, and `aws` is named because
     # an EKS kubeconfig cannot authenticate without it.
@@ -8701,7 +9041,7 @@ def test_a_cloud_provisioning_tool_cannot_switch_off_local_provisioning(monkeypa
     runtime card "Kubernetes (kind)". A box that can build a kind cluster would have
     stopped saying so because it had no AWS tooling installed.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     kind_only = {"kind": k8s.Tool(name="kind", path="/usr/bin/kind", version=(0, 32)),
                  "kubectl": k8s.Tool(name="kubectl", path="/usr/bin/kubectl",
@@ -8739,9 +9079,9 @@ def test_an_advisory_note_is_cleared_only_when_ITS_subject_is_gone(monkeypatch, 
     half-created cloud cluster is exactly that shape, and it is the most expensive note
     the product could hold.
     """
-    from rc_repro.services import journal
+    from houston.services import journal
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
 
     # Unchanged for a workspace kind: absent means gone.
     e = journal.Entry(id="a", kind=journal.CREATE_UNFINISHED, workspace="ghost", pid=1)
@@ -8779,7 +9119,7 @@ def test_a_tool_probed_with_the_wrong_flag_passes_its_floor_silently(monkeypatch
     they mean a tool that does not accept `--version` is reported present, new enough,
     and unversioned. `eksctl` is cobra-based and spells it `eksctl version`.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     seen: list[list[str]] = []
 
@@ -8814,10 +9154,10 @@ def test_a_version_floor_says_something_true_about_where_it_came_from(monkeypatc
     being sent to a document that does not contain the requirement -- and the same
     sentence would have been produced for any cloud tool added to the registry.
     """
-    from rc_repro.services import doctor as doctorsvc
-    from rc_repro.services import k8s
+    from houston.services import doctor as doctorsvc
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     old = k8s.Preflight(tools={
         "kubectl": k8s.Tool(name="kubectl", path="/k", version=(1, 36)),
         "helm": k8s.Tool(name="helm", path="/h", version=(4, 2)),
@@ -8843,9 +9183,9 @@ def test_the_ledger_never_reports_a_zero_it_did_not_read(monkeypatch, tmp_path):
     which. This is `k8s.Answer`'s three-answer discipline applied to a screen instead
     of a delete, and the screen is where the mistake is quietest.
     """
-    from rc_repro.services import cluster, k8s
+    from houston.services import cluster, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     # The named context has to EXIST, because `status` refuses an unknown one the same
     # way `up --context` does -- a typo is a bad argument, not a cluster that is down.
     monkeypatch.setattr(k8s, "contexts", lambda: (["eks-support"], ""))
@@ -8882,7 +9222,7 @@ def test_the_cost_estimate_counts_the_nodes_it_cannot_price(monkeypatch):
     Same failure as a zero for an unreadable cluster, one layer along: the number is
     believable, arrived at honestly, and wrong in the direction that costs money.
     """
-    from rc_repro.services import cluster
+    from houston.services import cluster
 
     # Free distributions are not priced at all -- quoting zero for somebody's own k3s
     # would be a claim about their infrastructure bill.
@@ -8911,11 +9251,11 @@ def test_the_cost_estimate_counts_the_nodes_it_cannot_price(monkeypatch):
         "instance types could not be priced"
 
 
-def test_being_signed_in_to_aws_is_a_prerequisite_rc_repro_reads_not_one_it_holds(
+def test_being_signed_in_to_aws_is_a_prerequisite_houston_reads_not_one_it_holds(
         monkeypatch):
     """Three states, because "no credentials" and "I could not find out" differ.
 
-    Only one of them is the operator's to fix by signing in, and rc-repro never stores
+    Only one of them is the operator's to fix by signing in, and houston never stores
     or refreshes a credential -- it reads whatever `aws configure`, SSO, an instance
     profile or the environment already arranged. The identity is then carried into
     every message, because `cluster support` exists in more than one AWS account and
@@ -8923,7 +9263,7 @@ def test_being_signed_in_to_aws_is_a_prerequisite_rc_repro_reads_not_one_it_hold
     """
     import subprocess
 
-    from rc_repro.services import eks, k8s
+    from houston.services import eks, k8s
 
     # No `aws` at all: a tool problem, not a credentials problem.
     monkeypatch.setattr(k8s, "which", lambda t: "")
@@ -8931,7 +9271,7 @@ def test_being_signed_in_to_aws_is_a_prerequisite_rc_repro_reads_not_one_it_hold
     assert not who.known and "not installed" in who.error
 
     # Present but refusing -- expired SSO, no profile, no route. AWS's own words are
-    # kept, because they say which of those it was and rc-repro cannot.
+    # kept, because they say which of those it was and houston cannot.
     monkeypatch.setattr(k8s, "which", lambda t: "/usr/bin/aws")
     monkeypatch.setattr(k8s, "run", lambda argv, **kw: subprocess.CompletedProcess(
         argv, 255, "", "Error loading SSO Token: Token has expired"))
@@ -8955,7 +9295,7 @@ def test_a_missing_tool_does_not_also_complain_about_credentials(monkeypatch):
     same absence -- and a report that lists three problems where there is one teaches
     the reader that the list is noise.
     """
-    from rc_repro.services import eks, k8s
+    from houston.services import eks, k8s
 
     absent = k8s.Tool(name="aws", path="")
     pre = eks.CloudPreflight(tools={"aws": absent}, identity=eks.Identity(), region="")
@@ -8970,7 +9310,7 @@ def test_a_missing_tool_does_not_also_complain_about_credentials(monkeypatch):
     assert len(pre.blockers) == 1 and "not signed in" in pre.blockers[0]
     assert "aws sso login" in pre.blockers[0]
 
-    # A region is its own blocker: rc-repro and eksctl resolving it differently means
+    # A region is its own blocker: houston and eksctl resolving it differently means
     # a cluster somewhere neither of them will look for it afterwards.
     pre = eks.CloudPreflight(
         tools={"aws": present},
@@ -8992,7 +9332,7 @@ def test_a_new_vpc_by_default_and_an_existing_one_only_when_named():
     cannot reach out from, in ways nobody asked for. New is the answer that is wrong in
     the recoverable direction.
     """
-    from rc_repro.services import eks
+    from houston.services import eks
 
     fresh = eks.cluster_config("rc-support", region="eu-west-1")
     assert fresh["vpc"] == {"cidr": eks.DEFAULT_VPC_CIDR}
@@ -9016,7 +9356,7 @@ def test_the_cluster_shape_matches_the_reference_it_claims_to_match():
     the one deliberate divergence: Launchpad sizes for a production workspace and a
     repro carries one.
     """
-    from rc_repro.services import eks
+    from houston.services import eks
 
     doc = eks.cluster_config("rc-support", region="us-east-1")
     assert doc["metadata"]["version"] == "1.33"
@@ -9040,11 +9380,11 @@ def test_doctor_is_silent_about_aws_until_aws_is_somebody_s_business(monkeypatch
     But on a cluster that IS EKS, `aws` is not optional -- the kubeconfig authenticates
     by shelling out to it -- so there it fails rather than warns.
     """
-    from rc_repro.services import doctor as doctorsvc
-    from rc_repro.services import eks as ekssvc
-    from rc_repro.services import k8s
+    from houston.services import doctor as doctorsvc
+    from houston.services import eks as ekssvc
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     nothing = ekssvc.CloudPreflight(
         tools={"aws": k8s.Tool(name="aws", path=""),
                "eksctl": k8s.Tool(name="eksctl", path="")},
@@ -9070,7 +9410,7 @@ def test_doctor_is_silent_about_aws_until_aws_is_somebody_s_business(monkeypatch
 
 def _aws_ready(monkeypatch, account="123456789012"):
     """A box that could build a cluster: tools present, signed in, region set."""
-    from rc_repro.services import eks, k8s
+    from houston.services import eks, k8s
     tool = k8s.Tool(name="x", path="/usr/bin/x", version=(9, 9))
     monkeypatch.setattr(eks, "preflight", lambda: eks.CloudPreflight(
         tools={"aws": tool, "eksctl": tool},
@@ -9087,10 +9427,10 @@ def test_creating_a_cluster_is_gated_on_the_account_that_gets_the_bill(monkeypat
     can consent to. And the gate carries `approve_with`, which is what to ask a human
     to run, never something the caller may run for itself.
     """
-    from rc_repro import errors
-    from rc_repro.services import eks
+    from houston import errors
+    from houston.services import eks
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     _aws_ready(monkeypatch)
     spent: list = []
     monkeypatch.setattr(eks.k8s, "run", lambda *a, **kw: spent.append(a) or None)
@@ -9119,10 +9459,10 @@ def test_an_approved_account_reaches_eksctl_with_the_right_command(monkeypatch,
     """
     import yaml
 
-    from rc_repro import config
-    from rc_repro.services import eks, journal
+    from houston import config
+    from houston.services import eks, journal
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     _aws_ready(monkeypatch)
     config.update_config(
         lambda c: c.__setitem__(config.CLOUD_ACCOUNTS_KEY, "123456789012"))
@@ -9171,13 +9511,13 @@ def test_a_create_that_fails_keeps_the_note_that_says_it_may_be_billing(monkeypa
                                                                        tmp_path):
     """eksctl can build a VPC, a NAT gateway and a control plane and then fail.
 
-    rc-repro does not decide on its own to destroy those — so the note stays, and it
+    houston does not decide on its own to destroy those — so the note stays, and it
     is the note, not the exception, that survives the process ending.
     """
-    from rc_repro import config, errors
-    from rc_repro.services import eks, journal
+    from houston import config, errors
+    from houston.services import eks, journal
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     _aws_ready(monkeypatch)
     config.update_config(
         lambda c: c.__setitem__(config.CLOUD_ACCOUNTS_KEY, "123456789012"))
@@ -9210,10 +9550,10 @@ def test_deleting_a_cloud_cluster_reproduces_every_guard_the_local_one_earned(
     """
     import subprocess
 
-    from rc_repro import errors
-    from rc_repro.services import eks, k8s
+    from houston import errors
+    from houston.services import eks, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     _aws_ready(monkeypatch)
     ran: list = []
     monkeypatch.setattr(eks, "_stream",
@@ -9281,7 +9621,7 @@ def test_deleting_a_cloud_cluster_reproduces_every_guard_the_local_one_earned(
 
     # GUARD 3: non-empty refuses, and NAMES WHOSE -- on a shared cloud cluster this
     # refusal is the only record that colleagues on other boxes have work in here.
-    monkeypatch.setattr(k8s, "workspace_namespaces", lambda ctx: ["rc-repro-tkt-1"])
+    monkeypatch.setattr(k8s, "workspace_namespaces", lambda ctx: ["houston-tkt-1"])
     monkeypatch.setattr(k8s, "namespace_owner", lambda ns, context: "priya")
     with pytest.raises(errors.ConflictError) as conf:
         eks.delete_cluster("support")
@@ -9298,7 +9638,7 @@ def test_deleting_a_cloud_cluster_reproduces_every_guard_the_local_one_earned(
     # AND THEN IT TIDIES, which is why that is no longer the LAST thing to run.
     # `aws eks update-kubeconfig` and `eksctl` each wrote a context naming this
     # cluster and neither removes it, so a cluster deleted successfully went on being
-    # listed for ever. Those entries are rc-repro's own litter and the delete clears
+    # listed for ever. Those entries are houston's own litter and the delete clears
     # them -- after the cluster is gone, never before, so a delete that fails leaves
     # the operator still able to reach what they were deleting.
     after = ran[ran.index(gone) + 1:]
@@ -9308,9 +9648,9 @@ def test_deleting_a_cloud_cluster_reproduces_every_guard_the_local_one_earned(
 
 def test_a_cluster_that_is_simply_gone_is_not_an_error(monkeypatch, tmp_path):
     """ABSENT is a fact AWS asserted, and deleting nothing is not a failure."""
-    from rc_repro.services import eks, k8s
+    from houston.services import eks, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     _aws_ready(monkeypatch)
     monkeypatch.setattr(eks, "describe_cluster",
                         lambda n, r: k8s.Answer(state=k8s.ABSENT))
@@ -9325,9 +9665,9 @@ def test_an_interrupted_create_note_survives_a_serve_restart(monkeypatch, tmp_pa
     the most expensive one the product can hold -- would have been deleted at the next
     `serve` startup, silently.
     """
-    from rc_repro.services import eks, journal, k8s
+    from houston.services import eks, journal, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     journal.record(journal.CLUSTER_UNFINISHED, "rc-support",
                    region="eu-west-1", account="1")
 
@@ -9355,7 +9695,7 @@ def test_an_interrupted_create_note_survives_a_serve_restart(monkeypatch, tmp_pa
 def test_a_version_floor_cannot_express_skew(monkeypatch):
     """Two different questions, and only the second can be true about a cluster.
 
-    A floor is a fact about rc-repro: kubectl >= 1.21. Skew is a fact about the cluster
+    A floor is a fact about houston: kubectl >= 1.21. Skew is a fact about the cluster
     in front of you, and Rocket.Chat's own Launchpad builds them at 1.33 — so a kubectl
     eleven minors PAST the floor is still outside the supported ±1 window, and passing
     a floor is exactly what it would report doing. Calls do not fail cleanly across
@@ -9364,7 +9704,7 @@ def test_a_version_floor_cannot_express_skew(monkeypatch):
     """
     import subprocess
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     def server(ver: str):
         monkeypatch.setattr(k8s, "run", lambda argv, **kw:
@@ -9405,10 +9745,10 @@ def test_a_cloud_cluster_this_box_built_is_reported_even_with_no_aws_installed(
     the whole reason the pointer exists: `doctor` has to be able to say this without a
     credential or a round trip.
     """
-    from rc_repro.services import doctor as doctorsvc
-    from rc_repro.services import eks, k8s
+    from houston.services import doctor as doctorsvc
+    from houston.services import eks, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "which", lambda t: "/usr/bin/kubectl"
                         if t in ("kubectl", "helm") else "")
     pre = k8s.Preflight(tools={
@@ -9434,7 +9774,7 @@ def test_a_cloud_cluster_this_box_built_is_reported_even_with_no_aws_installed(
                 if r["check"] == "kubernetes-cloud-owned"]
 
 
-def test_which_kubeconfig_rc_repro_reads_does_not_depend_on_which_kubectl_is_installed(
+def test_which_kubeconfig_houston_reads_does_not_depend_on_which_kubectl_is_installed(
         monkeypatch, tmp_path):
     """Found live, and it was the worst possible failure text.
 
@@ -9445,7 +9785,7 @@ def test_which_kubeconfig_rc_repro_reads_does_not_depend_on_which_kubectl_is_ins
     operator to run the exact command they had just run. The context existed, was
     correct, and was invisible.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     home = tmp_path / "home"
     (home / ".kube").mkdir(parents=True)
@@ -9465,9 +9805,9 @@ def test_which_kubeconfig_rc_repro_reads_does_not_depend_on_which_kubectl_is_ins
     monkeypatch.setenv("KUBECONFIG", "/somewhere/else.yaml")
     assert k8s.user_env() is None
 
-    # And it is only for clusters rc-repro does NOT own: its own kubeconfig still wins.
+    # And it is only for clusters houston does NOT own: its own kubeconfig still wins.
     monkeypatch.delenv("KUBECONFIG", raising=False)
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path / "rc"))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path / "rc"))
     assert k8s.owned_env()["KUBECONFIG"] != str(home / ".kube" / "config")
 
 
@@ -9480,9 +9820,9 @@ def test_a_managed_cluster_with_no_nodes_is_not_a_free_one(monkeypatch):
     did not match BILLABLE, so it priced a running control plane at nothing at all —
     the exact failure this module exists to prevent, rebuilt one layer up.
     """
-    from rc_repro.services import cluster
+    from houston.services import cluster
 
-    arn = "arn:aws:eks:us-east-1:533674205877:cluster/rc-repro-probe"
+    arn = "arn:aws:eks:us-east-1:533674205877:cluster/houston-probe"
     assert cluster.provider_of(arn, "unknown") == "eks"
     assert cluster.provider_of(arn, "") == "eks"
 
@@ -9506,7 +9846,7 @@ def test_a_node_costs_its_disk_as_well_as_itself():
     "unpriced types are reported" safeguard could not see it: the cost was not
     underpriced, it was uncounted, and the total read as complete.
     """
-    from rc_repro.services import cluster
+    from houston.services import cluster
 
     disk = (cluster.NODE_VOLUME_GB * cluster.EBS_GP3_USD_GB_MONTH
             / cluster.HOURS_PER_MONTH)
@@ -9524,22 +9864,22 @@ def test_a_node_costs_its_disk_as_well_as_itself():
         "the disks of unpriced nodes were dropped along with their instance cost"
 
 
-def test_the_ledger_can_reach_rc_repros_own_cluster_from_a_fresh_home(monkeypatch,
+def test_the_ledger_can_reach_houstons_own_cluster_from_a_fresh_home(monkeypatch,
                                                                      tmp_path):
     """A cluster that is up, and reported as not answering.
 
-    `is_ours()` is a NAME compare, so rc-repro decides its own cluster is its own and
-    reaches it through its OWN kubeconfig — which a fresh RC_REPRO_HOME has not got.
+    `is_ours()` is a NAME compare, so houston decides its own cluster is its own and
+    reaches it through its OWN kubeconfig — which a fresh HOUSTON_HOME has not got.
     `ensure_kubeconfig` exists for exactly this and its docstring names the case:
     "With a kind cluster already up and a fresh home, every command failed ... and
     could not self-heal". It was fixed for `up`, and `cluster status` reintroduced it
     by probing without calling it. CLAUDE.md tells anyone writing a script to
-    `export RC_REPRO_HOME=$(mktemp -d)`, so it is reachable by following our own
+    `export HOUSTON_HOME=$(mktemp -d)`, so it is reachable by following our own
     instructions.
     """
-    from rc_repro.services import cluster, k8s
+    from houston.services import cluster, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     exported: list = []
     monkeypatch.setattr(k8s, "ensure_kubeconfig",
                         lambda plan, emit=None: exported.append(plan.context) or "")
@@ -9548,13 +9888,13 @@ def test_the_ledger_can_reach_rc_repros_own_cluster_from_a_fresh_home(monkeypatc
 
     cluster.status(context=k8s.CONTEXT)
     assert exported == [k8s.CONTEXT], \
-        "rc-repro's own cluster must have its kubeconfig exported before probing"
+        "houston's own cluster must have its kubeconfig exported before probing"
 
     # And NOT for a cluster somebody else made: there is nothing to export, and
     # rewriting their kubeconfig is not ours to do.
     exported.clear()
     cluster.status(context="someone-elses")
-    assert exported == [], "a cluster rc-repro did not create must be left alone"
+    assert exported == [], "a cluster houston did not create must be left alone"
 
 
 def test_more_than_one_cloud_cluster_can_be_remembered(monkeypatch, tmp_path):
@@ -9567,9 +9907,9 @@ def test_more_than_one_cloud_cluster_can_be_remembered(monkeypatch, tmp_path):
     thing that would ENFORCE it does not exist: it is possible, it is just not
     designed for.
     """
-    from rc_repro.services import eks
+    from houston.services import eks
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     eks.remember("support-a", region="us-east-1", account="1")
     eks.remember("support-b", region="eu-west-1", account="1")
 
@@ -9587,7 +9927,7 @@ def test_no_call_site_re_implements_which_kubeconfig_to_use():
 
     `owned_env() if is_ours(context) else None` was written out at eight places: once
     in `run()` and once each in apply, helm install, helm upgrade, port-forward, logs,
-    exec-in and exec-out. When the kubeconfig resolution was fixed — so that rc-repro's
+    exec-in and exec-out. When the kubeconfig resolution was fixed — so that houston's
     view of a kubeconfig stops depending on which kubectl BINARY is installed — the fix
     reached `run()` and none of the other seven. The preflight would pass on an EKS
     context and the first `kubectl apply` would fail on the very context it had just
@@ -9597,7 +9937,7 @@ def test_no_call_site_re_implements_which_kubeconfig_to_use():
     `doctor.CHECKS` are: prose saying "always use the helper" is what was there before.
     """
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     src = source_of(k8s)
     body = src.split("def env_for(", 1)[1].split("\ndef ", 1)[0]
@@ -9623,10 +9963,10 @@ def test_a_billable_cluster_without_a_domain_warns_but_does_not_refuse(monkeypat
     it restarts, one machine at a time, and leaving the cluster's whole reason for
     being remote unused.
     """
-    from rc_repro.services import k8s
-    from rc_repro.services import lifecycle as lcmod
+    from houston.services import k8s
+    from houston.services import lifecycle as lcmod
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     seen: list = []
 
     def spy(ev):
@@ -9679,15 +10019,15 @@ def test_locality_was_standing_in_for_consent(monkeypatch):
     admission webhook "are a change to what a cluster IS, for every workload in it --
     not something to do to somebody else's ON THE WAY TO BOOTING A REPRO". What makes
     that wrong is that nobody asked. `cluster prepare` is somebody asking, and for a
-    cluster rc-repro provisioned there is no somebody else to be careful of.
+    cluster houston provisioned there is no somebody else to be careful of.
 
     `up` must never pass it, or the implicit install these guards exist to stop comes
     straight back.
     """
     import inspect
 
-    from rc_repro.services import k8s
-    from rc_repro.services import lifecycle as lcmod
+    from houston.services import k8s
+    from houston.services import lifecycle as lcmod
 
     for fn in (k8s.ensure_ingress, k8s.ensure_cert_manager):
         assert "invited" in inspect.signature(fn).parameters, fn.__name__
@@ -9710,16 +10050,16 @@ def test_locality_was_standing_in_for_consent(monkeypatch):
 def test_prepare_installs_a_storage_class_only_when_none_is_default(monkeypatch,
                                                                     tmp_path):
     """EKS ships `gp2` on the in-tree provisioner and marks nothing default, so the
-    addon rc-repro pins at Launchpad's version sits there referenced by nothing and
+    addon houston pins at Launchpad's version sits there referenced by nothing and
     every PVC would stay Pending.
 
     But a cluster that already HAS a default has been set up by somebody, and replacing
     their choice is not this command's business: `up` needs one to exist, and two
     defaults is an error state in Kubernetes anyway.
     """
-    from rc_repro.services import eks, k8s
+    from houston.services import eks, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     applied: list = []
     monkeypatch.setattr(k8s, "apply",
                         lambda man, **kw: applied.append(man))
@@ -9755,7 +10095,7 @@ def test_prepare_installs_a_storage_class_only_when_none_is_default(monkeypatch,
     assert "storage class 'mine'" in out["already"]
 
     # A refused read is not "none default" -- that would install a second default into
-    # a cluster whose classes rc-repro could not see.
+    # a cluster whose classes houston could not see.
     monkeypatch.setattr(k8s, "storage_classes", lambda ctx: None)
     with pytest.raises(errors.PreflightError):
         eks.prepare_cluster("arn:aws:eks:x")
@@ -9766,18 +10106,18 @@ def test_naming_a_context_says_kubernetes_without_saying_it_twice(monkeypatch,
     """A context is a Kubernetes word.
 
     Measured on a first run: `--context <an eks arn>` without `--runtime kubernetes`
-    was refused, and the whole command had to be retyped for the half rc-repro could
+    was refused, and the whole command had to be retyped for the half houston could
     have worked out. Somebody who named a cluster has already said where it runs.
 
     Only from an EXPLICIT context, never from the box default — letting a default
     cluster silently move `up` off Compose would change what an un-flagged command
     means for every workspace on the box.
     """
-    from rc_repro import config
-    from rc_repro.services import lifecycle as lc
-    from rc_repro.services import topology
+    from houston import config
+    from houston.services import lifecycle as lc
+    from houston.services import topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
 
     assert lc.infer_runtime(lc.CreateReq(version="8.5.1", context="arn:aws:eks:x")) \
         == topology.KUBERNETES
@@ -9797,20 +10137,20 @@ def test_naming_a_context_says_kubernetes_without_saying_it_twice(monkeypatch,
 
 def test_creating_a_cluster_makes_it_the_default_and_deleting_it_takes_that_back(
         monkeypatch, tmp_path):
-    """rc-repro has just built this cluster and knows its ARN.
+    """houston has just built this cluster and knows its ARN.
 
     Making the operator read it back out of `aws` and paste it into every later
-    command is ceremony rc-repro imposes on itself — and an ARN is the worst possible
+    command is ceremony houston imposes on itself — and an ARN is the worst possible
     thing to ask somebody to retype.
 
     The delete has to put it back, or a `kubernetes.context` pointing at a cluster
     that no longer exists makes the next `up` fail on a context that cannot be found,
     which reads as a bug in `up` rather than the consequence of a delete.
     """
-    from rc_repro import config
-    from rc_repro.services import eks, k8s
+    from houston import config
+    from houston.services import eks, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     arn = "arn:aws:eks:us-east-1:1:cluster/support"
     assert config.default_kube_context() == ""
 
@@ -9868,9 +10208,9 @@ def test_what_was_applied_to_a_cluster_is_written_down(monkeypatch, tmp_path):
     """
     import yaml
 
-    from rc_repro.services import eks
+    from houston.services import eks
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
 
     kept = eks.keep_manifest("support", "cluster.yaml", yaml.safe_dump(
         eks.cluster_config("support", region="us-east-1")))
@@ -9899,9 +10239,9 @@ def test_the_old_flat_pointer_is_still_read(monkeypatch, tmp_path):
     """
     import json
 
-    from rc_repro.services import eks
+    from houston.services import eks
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     old = tmp_path / "clusters"
     old.mkdir(parents=True)
     (old / "legacy.json").write_text(json.dumps(
@@ -9926,9 +10266,9 @@ def test_the_ledger_prices_everything_it_puts_on_the_screen(monkeypatch, tmp_pat
     The cause was ordering: the estimate was computed beside the node inventory, before
     the load balancers and volumes had been read at all.
     """
-    from rc_repro.services import cluster, k8s
+    from houston.services import cluster, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     disk = cluster.EBS_GP3_USD_GB_MONTH / cluster.HOURS_PER_MONTH
     # Built from the RAW components, not from an already-rounded subtotal: the
     # implementation sums everything and rounds once, and rounding twice here made the
@@ -9992,7 +10332,7 @@ def test_a_cluster_says_when_somebody_expected_to_be_finished_with_it():
     """
     import datetime as dt
 
-    from rc_repro.services import eks
+    from houston.services import eks
 
     today = dt.date(2026, 9, 1)
     assert eks.expiry_date(7, today=today) == "2026-09-08"
@@ -10031,10 +10371,10 @@ def test_doctor_says_how_far_past_its_date_a_cluster_is(monkeypatch, tmp_path):
     Still a warning and never a failure. Nothing here deletes, and a report that fails
     on somebody's spending decision is a report that gets ignored.
     """
-    from rc_repro.services import doctor as doctorsvc
-    from rc_repro.services import eks, k8s
+    from houston.services import doctor as doctorsvc
+    from houston.services import eks, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     pre = k8s.Preflight(tools={
         "kubectl": k8s.Tool(name="kubectl", path="/k", version=(1, 36)),
         "helm": k8s.Tool(name="helm", path="/h", version=(4, 2))})
@@ -10063,13 +10403,13 @@ def test_doctor_says_how_far_past_its_date_a_cluster_is(monkeypatch, tmp_path):
     assert "expiry" not in none["message"] and "PAST" not in none["message"]
 
 
-def test_a_cluster_rc_repro_made_is_found_by_asking_it_not_by_asking_kind(monkeypatch):
+def test_a_cluster_houston_made_is_found_by_asking_it_not_by_asking_kind(monkeypatch):
     """`cluster_exists` was `CLUSTER_NAME in clusters()`, and that probe needs the kind
     BINARY. So uninstalling kind while its cluster was still running made the cluster
-    invisible -- node containers holding memory that nothing in rc-repro could see or
+    invisible -- node containers holding memory that nothing in houston could see or
     remove, and resolution quietly falling through to a different cluster.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     # kind gone, but our kubeconfig still names a cluster that answers.
     _kube_probe_stubs(monkeypatch, kind=False, our_cluster=True, active="default")
@@ -10085,7 +10425,7 @@ def test_the_distribution_is_read_from_the_node_not_guessed_from_a_name(monkeypa
     """
     import subprocess as sp
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     def answer(text):
         return lambda argv, timeout=None, own=False: sp.CompletedProcess(argv, 0, text, "")
@@ -10093,8 +10433,8 @@ def test_the_distribution_is_read_from_the_node_not_guessed_from_a_name(monkeypa
     monkeypatch.setattr(k8s, "run", answer("k3s://docker-01 v1.36.3+k3s1 k3s docker-01"))
     assert k8s.distribution("default") == "k3s"
     monkeypatch.setattr(k8s, "run", answer(
-        "kind://docker/rc-repro-local/rc-repro-local-control-plane v1.36.1  x"))
-    assert k8s.distribution("kind-rc-repro-local") == "kind"
+        "kind://docker/houston-local/houston-local-control-plane v1.36.1  x"))
+    assert k8s.distribution("kind-houston-local") == "kind"
     monkeypatch.setattr(k8s, "run", answer("aws:///eu-west-1a/i-0abc v1.31.0-eks-1234 m5"))
     assert k8s.distribution("arn:aws:eks:x") == "eks", \
         "a cloud providerID is the most reliable 'not a disposable cluster' signal"
@@ -10115,11 +10455,11 @@ def test_a_create_refused_for_want_of_a_cluster_leaves_no_record(monkeypatch, tm
     an interrupted create once left a workspace running and unrecorded. The order was.
     Choosing the cluster only probes, so it belongs above the write.
     """
-    from rc_repro.errors import PreflightError
+    from houston.errors import PreflightError
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(lc, "check_capacity", lambda *a, **k: None)
     # Only functions that predate this change, so the test drives the OLD code too: no
     # kind and nothing for kubectl to point at is the box that gets refused.
@@ -10151,9 +10491,9 @@ def test_doctor_reports_what_a_cluster_provides_the_same_way_on_every_distributi
     hostname. A doctor that warns about a feature you are not using teaches people to
     ignore its warnings.
     """
-    from rc_repro.services import doctor, k8s
+    from houston.services import doctor, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
 
     def report_for(pre):
         monkeypatch.setattr(k8s, "preflight", lambda *a, **k: pre)
@@ -10172,7 +10512,7 @@ def test_doctor_reports_what_a_cluster_provides_the_same_way_on_every_distributi
     assert "k3s, 1 node, amd64" in k3s["kubernetes-cluster"]["message"]
     assert "traefik" in k3s["kubernetes-ingress"]["message"]
     assert "172.16.0.2" in k3s["kubernetes-loadbalancer"]["message"]
-    assert "`rc-repro stats` works here" in k3s["kubernetes-metrics"]["message"]
+    assert "`houston stats` works here" in k3s["kubernetes-metrics"]["message"]
     assert all(k3s[c]["status"] == "ok" for c in
                ("kubernetes-ingress", "kubernetes-loadbalancer", "kubernetes-metrics"))
 
@@ -10203,7 +10543,7 @@ def test_the_mongodb_operator_goes_with_the_last_workspace_but_not_before(monkey
     """
     import subprocess as sp
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     calls = []
 
@@ -10233,7 +10573,7 @@ def test_the_mongodb_operator_goes_with_the_last_workspace_but_not_before(monkey
     # Another workspace still has one: left alone, and it says whose.
     calls.clear()
     events = []
-    monkeypatch.setattr(k8s, "run", fake(["rc-repro-other"]))
+    monkeypatch.setattr(k8s, "run", fake(["houston-other"]))
     assert k8s.remove_operator(context="default", emit=events.append) is False
     assert not any("helm uninstall" in c for c in calls), calls
     assert any("still used by other" in e.message for e in events), \
@@ -10253,7 +10593,7 @@ def test_removing_the_operator_never_fails_a_teardown(monkeypatch):
     still there."""
     import subprocess as sp
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     def run(argv, timeout=None, own=False, env=None):
         j = " ".join(argv)
@@ -10275,21 +10615,21 @@ def test_down_volumes_takes_the_monitoring_stack_with_it(monkeypatch, tmp_path):
     asked for it had been destroyed.
 
     `remove_monitoring` could always do this. It was only ever called by `monitor --off`,
-    so the teardown walked past the most expensive thing rc-repro installs. On Compose
+    so the teardown walked past the most expensive thing houston installs. On Compose
     there was nothing to fix: the stack is part of the workspace's own compose project
     and goes down with it.
     """
     import json as _json
 
-    from rc_repro.services import k8s, topology
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     (tmp_path / "repros" / "mon").mkdir(parents=True)
     (tmp_path / "repros" / "mon" / "repro.json").write_text(_json.dumps({
         "name": "mon", "project": "p", "rc_version": "8.5.1", "rc_image": "i",
         "mongo_tag": "8.0", "mongo_flavor": "official", "preset": "default",
         "root_url": "http://localhost:3001", "host_port": 3001, "version_source": "x",
-        "extra": {"runtime": "kubernetes", "namespace": "rc-repro-mon",
+        "extra": {"runtime": "kubernetes", "namespace": "houston-mon",
                   "context": "default", "monitoring": True,
                   "grafana_pid": 4242}}))
     monkeypatch.setattr(lc, "require_docker", lambda: None)
@@ -10305,15 +10645,15 @@ def test_down_volumes_takes_the_monitoring_stack_with_it(monkeypatch, tmp_path):
                         lambda pid, **kw: stopped.append(pid))
     lc.teardown("mon", volumes=True, confirm=True)
     assert "monitoring" in called, "the monitoring stack was left running"
-    # And the Grafana forward, which targets a deployment in `rc-repro-system` and so
+    # And the Grafana forward, which targets a deployment in `houston-system` and so
     # SURVIVES the workspace: it went on holding :5050 after the workspace was destroyed,
     # and the next `up --monitor` was refused for a port held by a corpse.
     assert 4242 in stopped, "the Grafana port-forward was left holding its host port"
     # The namespace being destroyed must not be counted as still wanting it: the count
     # reads a label on the namespace, and a namespace still Terminating is still listed
     # and still labelled.
-    assert called["monitoring"]["excluding"] == "rc-repro-mon"
-    assert called["operator"]["excluding"] == "rc-repro-mon"
+    assert called["monitoring"]["excluding"] == "houston-mon"
+    assert called["operator"]["excluding"] == "houston-mon"
 
     # A plain `down` keeps the namespace and the data, so the workspace can come back and
     # the stack it wants must stay with it.
@@ -10323,7 +10663,7 @@ def test_down_volumes_takes_the_monitoring_stack_with_it(monkeypatch, tmp_path):
         "name": "mon", "project": "p", "rc_version": "8.5.1", "rc_image": "i",
         "mongo_tag": "8.0", "mongo_flavor": "official", "preset": "default",
         "root_url": "http://localhost:3001", "host_port": 3001, "version_source": "x",
-        "extra": {"runtime": "kubernetes", "namespace": "rc-repro-mon",
+        "extra": {"runtime": "kubernetes", "namespace": "houston-mon",
                   "context": "default", "monitoring": True}}))
     stopped.clear()
     lc.teardown("mon", volumes=False, confirm=True)
@@ -10341,7 +10681,7 @@ def test_the_workspace_being_destroyed_does_not_vote_to_keep_the_stack(monkeypat
     """
     import subprocess as sp
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     def run(argv, timeout=None, own=False, env=None):
         j = " ".join(argv)
@@ -10352,8 +10692,8 @@ def test_the_workspace_being_destroyed_does_not_vote_to_keep_the_stack(monkeypat
             # has to be able to say "I could not ask" -- `-o name` cannot carry that,
             # and a stub answering the old shape leaves the destructive callers
             # untested against the very case this is about.
-            return sp.CompletedProcess(argv, 0, json.dumps({"items": [{"metadata": {"name": "rc-repro-going"}}]}), "")
-        if "get namespace rc-repro-going" in j:
+            return sp.CompletedProcess(argv, 0, json.dumps({"items": [{"metadata": {"name": "houston-going"}}]}), "")
+        if "get namespace houston-going" in j:
             # `monitoring_wanted` reads the namespace DOCUMENT now, not a jsonpath.
             # It has to tell "this workspace does not want monitoring" from "I could
             # not read the label" -- and it is the INNER test of the reference count,
@@ -10361,7 +10701,7 @@ def test_the_workspace_being_destroyed_does_not_vote_to_keep_the_stack(monkeypat
             # from under a workspace that is using it. An empty jsonpath result also
             # cannot say whether the LABEL is absent or the NAMESPACE is.
             return sp.CompletedProcess(argv, 0, json.dumps({
-                "metadata": {"name": "rc-repro-going",
+                "metadata": {"name": "houston-going",
                              "labels": {k8s.MONITORING_LABEL: "true"}}}), "")
         return sp.CompletedProcess(argv, 0, "", "")
 
@@ -10372,7 +10712,7 @@ def test_the_workspace_being_destroyed_does_not_vote_to_keep_the_stack(monkeypat
     assert any("still used by going" in e.message for e in events)
     # Excluded: nothing else wants it, so it goes.
     events.clear()
-    assert k8s.remove_monitoring(context="default", excluding="rc-repro-going",
+    assert k8s.remove_monitoring(context="default", excluding="houston-going",
                                  emit=events.append) is True
 
 
@@ -10387,7 +10727,7 @@ def test_detaching_monitoring_that_was_never_attached_says_nothing_alarming(monk
     """
     import subprocess as sp
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     calls = []
 
@@ -10405,14 +10745,14 @@ def test_detaching_monitoring_that_was_never_attached_says_nothing_alarming(monk
 
 def test_prune_gives_back_the_cluster_it_created(monkeypatch, tmp_path):
     """Measured live: with every workspace gone, `prune` said "Nothing to prune" and left
-    rc-repro's own kind control plane running -- 514 MiB holding nothing. Both the README
+    houston's own kind control plane running -- 514 MiB holding nothing. Both the README
     and the agent skill said `prune` reclaims it; `delete_cluster` had exactly one caller,
     a failed create's rollback, so the documented promise was never kept and the memory
     the tool tells you to worry about was the memory it left behind.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(lc, "prunable", lambda: [])
     monkeypatch.setattr(lc, "orphan_namespaces", lambda *a, **k: [])
     deleted = []
@@ -10431,16 +10771,16 @@ def test_prune_gives_back_the_cluster_it_created(monkeypatch, tmp_path):
 
 
 def test_reclaiming_the_cluster_can_only_ever_reach_our_own(monkeypatch, tmp_path):
-    """The teardown asymmetry the runtime split is built on: what rc-repro created it may
+    """The teardown asymmetry the runtime split is built on: what houston created it may
     destroy, what you supplied it only borrows a namespace in. `delete_cluster` takes no
     parameter, needs the `kind` binary, and refuses while a workspace namespace remains --
     so an adopted k3s cannot be reached from a prune at all. And a refusal is not a failed
     prune: the workspaces are already gone, which is what was asked for.
     """
-    from rc_repro.errors import ConflictError
-    from rc_repro.services import k8s
+    from houston.errors import ConflictError
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(lc, "prunable", lambda: [])
     monkeypatch.setattr(lc, "orphan_namespaces", lambda *a, **k: [])
 
@@ -10450,7 +10790,7 @@ def test_reclaiming_the_cluster_can_only_ever_reach_our_own(monkeypatch, tmp_pat
 
     # A cluster that still holds a workspace refuses, and the prune still succeeds.
     def refuse(**_kw):
-        raise ConflictError("cluster rc-repro-local still holds 1 workspace namespace(s)")
+        raise ConflictError("cluster houston-local still holds 1 workspace namespace(s)")
     monkeypatch.setattr(k8s, "delete_cluster", refuse)
     events = []
     res = lc.prune(confirm=True, emit=events.append)
@@ -10462,7 +10802,7 @@ def test_an_existing_cluster_is_never_planned_as_one_to_create(monkeypatch):
     """Caught by a live sweep, in the resolver itself.
 
     An earlier version decided `create` from whether THIS HOME's kubeconfig named a
-    reachable context. A fresh RC_REPRO_HOME facing a cluster that already exists -- a
+    reachable context. A fresh HOUSTON_HOME facing a cluster that already exists -- a
     wiped state directory, a second user on the box, a kubeconfig cleared by a previous
     `prune` -- therefore planned to create one. Two consequences, the second serious:
     `check_capacity` charged 600 MB for a control plane already running, and the failed
@@ -10473,7 +10813,7 @@ def test_an_existing_cluster_is_never_planned_as_one_to_create(monkeypatch):
     when it finds a cluster its config does not know about, which is why the context is
     knowable before it has been read.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     monkeypatch.setattr(k8s, "which", lambda t: "/usr/bin/kind" if t == "kind" else "")
     monkeypatch.setattr(k8s, "cluster_context", lambda: "")       # this home knows nothing
@@ -10511,7 +10851,7 @@ def test_host_port_claim_reads_the_ports_the_service_actually_asks_for(monkeypat
     """
     import subprocess
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     doc = _k8s_svc_json(
         # Skipped: a ClusterIP takes no host port however it is addressed.
@@ -10555,9 +10895,9 @@ def test_the_edge_port_row_names_the_port_it_found_not_always_443(monkeypatch, t
     and which port to give back. On the box this came from, `acme.challenge` was
     `http` -- so :80 was the whole problem and the report pointed at the other port.
     """
-    from rc_repro.services import doctor, k8s
+    from houston.services import doctor, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     pre = k8s.Preflight(tools={
         n: k8s.Tool(name=n, path=f"/usr/bin/{n}", version=(9, 9, 9), raw="v9.9.9")
         for n in ("kubectl", "helm")})
@@ -10572,7 +10912,7 @@ def test_the_edge_port_row_names_the_port_it_found_not_always_443(monkeypatch, t
                             context=ctx, service="kube-system/traefik",
                             address="172.16.0.2", ports=[80]))
 
-    from rc_repro.services import edge as edgesvc
+    from houston.services import edge as edgesvc
     monkeypatch.setattr(edgesvc, "installed", lambda: True)
     monkeypatch.setattr(edgesvc, "registered", lambda: ["w1"])
     monkeypatch.setattr(edgesvc, "current", lambda: None)
@@ -10591,7 +10931,7 @@ def test_the_edge_port_row_names_the_port_it_found_not_always_443(monkeypatch, t
 
 
 def _idp_meta(preset: str = "oidc"):
-    from rc_repro.services import postready
+    from houston.services import postready
     return postready.runner.Metadata(
         name="w", project="p", rc_version="8.5.1", rc_image="i", mongo_tag="8.0",
         mongo_flavor="official", preset=preset, root_url="http://localhost:3001",
@@ -10606,7 +10946,7 @@ def test_an_oidc_provider_that_did_not_configure_is_reported_as_a_failure(monkey
     created printed one warning, was left out of the "only partly configured"
     summary that exists for exactly this, and exited 0.
     """
-    from rc_repro.services import postready
+    from houston.services import postready
 
     monkeypatch.setattr(postready.rcapi, "add_oauth_service", lambda *a, **kw: False)
     said: list = []
@@ -10628,7 +10968,7 @@ def test_a_provider_created_without_its_settings_is_not_a_success(monkeypatch):
     pointing at nothing. That is what a support engineer sees as "I click the OIDC
     button and the page is blank".
     """
-    from rc_repro.services import postready
+    from houston.services import postready
 
     monkeypatch.setattr(postready.rcapi, "add_oauth_service", lambda *a, **kw: True)
     monkeypatch.setattr(postready.time, "sleep", lambda s: None)
@@ -10661,7 +11001,7 @@ def test_every_post_ready_handler_reports_a_boolean(monkeypatch):
     """
     import inspect
 
-    from rc_repro.services import postready
+    from houston.services import postready
 
     for name, fn in postready._POST_READY_ACTIONS.items():
         ret = inspect.signature(fn).return_annotation
@@ -10679,7 +11019,7 @@ def test_the_idp_host_is_taken_from_the_url_the_caller_already_gave():
     laptop -- and the only clue was a login page the browser bounced back to. Nothing
     had to be guessed: the address was on the request all along.
     """
-    from rc_repro.services import lifecycle as lc
+    from houston.services import lifecycle as lc
 
     # `--bind` throughout: a host is only derived when the ports are published
     # somewhere it could answer. See
@@ -10724,9 +11064,9 @@ def test_the_idp_host_is_derived_on_kubernetes_too(tmp_path, monkeypatch):
     `req.params`, so one call site above the fork covers both by construction, and
     this test is on the call site rather than on either branch.
     """
-    from rc_repro.services import lifecycle as lc
+    from houston.services import lifecycle as lc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     seen: dict = {}
 
     def _fake_k8s(req, emit=None, **kw):
@@ -10766,10 +11106,10 @@ def test_a_shared_workspace_says_which_host_its_preset_pages_are_on(tmp_path, mo
     fail silently, in prose instead of a setting. A preset builder is never given the
     bind host or the advertised URL, so the correction belongs to the record.
     """
-    from rc_repro import runner
-    from rc_repro.services import lifecycle as lc
+    from houston import runner
+    from houston.services import lifecycle as lc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
 
     def meta(**extra):
         m = runner.Metadata(name="w", project="p", rc_version="8.5.1", rc_image="i",
@@ -10830,9 +11170,9 @@ def test_a_browser_host_is_only_derived_when_something_could_reach_it(tmp_path,
     --domain rc.example.com` is the plausible invocation that hits it, so the
     derivation is gated on the bind and the un-derivable states are reported instead.
     """
-    from rc_repro.services import lifecycle as lc
+    from houston.services import lifecycle as lc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
 
     def derived(**kw):
         req = lc.CreateReq(version="8.5.1", name="n", **kw)
@@ -10855,7 +11195,7 @@ def test_a_browser_host_is_only_derived_when_something_could_reach_it(tmp_path,
 
     # A configured bind counts the same as the flag, or the two would disagree about
     # the same workspace.
-    from rc_repro import config
+    from houston import config
     cfg = config.load_config()
     cfg["bind_host"] = "0.0.0.0"
     config.save_config(cfg)
@@ -10867,7 +11207,7 @@ def test_the_requested_bind_is_read_in_one_place():
     of `req.bind or cfg or default` is how they come to disagree about one workspace --
     and the disagreement would be silent, because each is right on its own."""
 
-    from rc_repro.services import lifecycle as lc
+    from houston.services import lifecycle as lc
 
     src = source_of(lc._create_repro_locked)
     assert "_requested_bind_host(req)" in src, src[:200]
@@ -10892,10 +11232,10 @@ def test_the_engine_gate_asks_for_the_engine_the_workspace_actually_runs_on(
     """
     import shutil as _shutil
 
-    from rc_repro.errors import DockerError, PreflightError
-    from rc_repro.services import lifecycle as lc, topology
+    from houston.errors import DockerError, PreflightError
+    from houston.services import lifecycle as lc, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     # Docker is NOT available, which is the whole point.
     monkeypatch.setattr(lc.runner, "docker_available", lambda **k: False)
 
@@ -10926,9 +11266,9 @@ def test_upgrade_reaches_a_kubernetes_workspace_with_no_docker_on_the_box(
     """
     import shutil as _shutil
 
-    from rc_repro.services import k8s, lifecycle as lc, topology, upgrade
+    from houston.services import k8s, lifecycle as lc, topology, upgrade
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     meta = runner_meta = _idp_meta("default")
     runner_meta.extra["runtime"] = "kubernetes"
     monkeypatch.setattr(upgrade.runner, "read_meta", lambda n: meta)
@@ -10950,9 +11290,9 @@ def test_kubernetes_migration_errors_come_from_kubernetes_logs(tmp_path, monkeyp
     they are worth most.
     """
 
-    from rc_repro.services import k8s, topology, upgrade
+    from houston.services import k8s, topology, upgrade
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(topology, "of_repro", lambda n: topology.KUBERNETES)
     monkeypatch.setattr(upgrade.runner, "read_meta", lambda n: _idp_meta("default"))
 
@@ -10979,10 +11319,10 @@ def test_scale_prefill_refuses_kubernetes_instead_of_asking_compose(tmp_path, mo
     Found while widening the engine gate: making `seed` runtime-aware without this
     would have traded a clear "Docker isn't running" for that.
     """
-    from rc_repro.errors import ValidationError
-    from rc_repro.services import data as datasvc, lifecycle as lc, topology
+    from houston.errors import ValidationError
+    from houston.services import data as datasvc, lifecycle as lc, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(lc, "resolve_name", lambda n, actor="": "k")
     monkeypatch.setattr(topology, "of_repro", lambda n: topology.KUBERNETES)
     for fn in (lambda: datasvc.run_scale("k", "users=10"),
@@ -11000,28 +11340,28 @@ def test_doctor_says_which_build_is_actually_answering(tmp_path, monkeypatch):
     Three shipped fixes looked ineffective for exactly that reason this week, and
     nothing in the tool said which build was answering.
     """
-    from rc_repro.services import doctor
+    from houston.services import doctor
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     rows = doctor.run_checks()["checks"]
     hit = [r for r in rows if r.get("check") == "install-fresh"]
     assert hit, [r.get("check") for r in rows]
     # This checkout is in step with its own install, which is the ok case.
     assert hit[0]["status"] == "ok", hit[0]
-    assert "rc-repro" in hit[0]["message"], hit[0]
+    assert "houston" in hit[0]["message"], hit[0]
 
 
 def test_the_create_claim_names_the_binary_that_makes_it_true(tmp_path, monkeypatch):
-    """"No cluster yet — 'rc-repro-local' is created on first use" said nothing about
+    """"No cluster yet — 'houston-local' is created on first use" said nothing about
     what would create it.
 
     Reported as confusing by someone who believed kind was not installed: the row
     promised a cluster and gave the reader no way to tell the claim was well-founded.
     It requires kind (`can_provision`), so naming the kind settles it either way.
     """
-    from rc_repro.services import doctor, k8s
+    from houston.services import doctor, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     pre = k8s.Preflight(tools={
         "kubectl": k8s.Tool(name="kubectl", path="/k", version=(1, 30), raw="v1.30.0"),
         "helm": k8s.Tool(name="helm", path="/h", version=(3, 14), raw="v3.14.0"),
@@ -11051,10 +11391,10 @@ def test_doctor_reports_a_workspace_whose_idp_points_at_this_machine(tmp_path, m
     page, the OIDC popup opens blank, presigned previews fail, and none of them logs
     anything.
     """
-    from rc_repro import runner
-    from rc_repro.services import doctor
+    from houston import runner
+    from houston.services import doctor
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
 
     def meta(name, preset, **extra):
         m = runner.Metadata(name=name, project="p", rc_version="8.5.1", rc_image="i",
@@ -11086,19 +11426,19 @@ def _completed(rc=0, out="", err=""):
                                        stdout=out, stderr=err)
 
 
-def test_a_namespace_rc_repro_did_not_make_is_refused_not_adopted(monkeypatch):
+def test_a_namespace_houston_did_not_make_is_refused_not_adopted(monkeypatch):
     """`ensure_namespace` ran `create` (ignoring the result, so an existing namespace
     was fine) and then `label --overwrite` whatever was there.
 
-    That stamped rc-repro's ownership onto a namespace it did not make, after which
+    That stamped houston's ownership onto a namespace it did not make, after which
     `down --volumes` deletes it and its PersistentVolumeClaims. The realistic trigger
-    is not a stranger: it is two rc-repro users on one adopted cluster, because name
+    is not a stranger: it is two houston users on one adopted cluster, because name
     collisions are guarded through the local repro.json and another user's home is
     invisible from here. The namespace's own labels are the only evidence there is,
     and overwriting them destroyed it.
     """
-    from rc_repro.errors import ConflictError
-    from rc_repro.services import k8s
+    from houston.errors import ConflictError
+    from houston.services import k8s
 
     def _labels_are(labels):
         monkeypatch.setattr(k8s, "namespace_labels", lambda ns, **kw: labels)
@@ -11106,21 +11446,21 @@ def test_a_namespace_rc_repro_did_not_make_is_refused_not_adopted(monkeypatch):
     labelled = {k8s.OWNER_LABEL_KEY: k8s.OWNER_LABEL_VALUE,
                 k8s.WORKSPACE_LABEL: "mine"}
 
-    # Somebody else's namespace, or one an older rc-repro left unlabelled: refused
-    # either way, because rc-repro cannot tell them apart and being wrong deletes data.
+    # Somebody else's namespace, or one an older houston left unlabelled: refused
+    # either way, because houston cannot tell them apart and being wrong deletes data.
     _labels_are({})
     with pytest.raises(ConflictError) as caught:
         k8s.ensure_namespace("mine", context="c")
-    assert "not managed by rc-repro" in str(caught.value)
+    assert "not managed by houston" in str(caught.value)
     assert "kubectl delete namespace" in str(caught.value), "name the manual step"
 
-    # rc-repro's, but another workspace's.
+    # houston's, but another workspace's.
     _labels_are({**labelled, k8s.WORKSPACE_LABEL: "theirs"})
     with pytest.raises(ConflictError) as caught:
         k8s.ensure_namespace("mine", context="c")
     assert "'theirs'" in str(caught.value)
 
-    # rc-repro's, this workspace, another user.
+    # houston's, this workspace, another user.
     _labels_are({**labelled, k8s.OWNER_OF_LABEL: "bob"})
     with pytest.raises(ConflictError) as caught:
         k8s.ensure_namespace("mine", context="c", owner="alice")
@@ -11145,19 +11485,19 @@ def test_cannot_ask_the_cluster_is_not_the_same_answer_as_nothing_is_there(monke
     namespace and its PersistentVolumeClaim were gone, while all of it went on running
     with the only record that knew about it destroyed.
     """
-    from rc_repro.errors import DockerError
-    from rc_repro.services import k8s
+    from houston.errors import DockerError
+    from houston.services import k8s
 
     # Genuinely absent.
     monkeypatch.setattr(k8s, "run", lambda *a, **k: _completed(
-        1, err='Error from server (NotFound): namespaces "rc-repro-x" not found'))
-    assert k8s.namespace_labels("rc-repro-x", context="c") is None
+        1, err='Error from server (NotFound): namespaces "houston-x" not found'))
+    assert k8s.namespace_labels("houston-x", context="c") is None
 
     # Could not ask -- and that must not look like absence.
     monkeypatch.setattr(k8s, "run", lambda *a, **k: _completed(
         1, err="Unable to connect to the server: dial tcp: i/o timeout"))
     with pytest.raises(DockerError) as caught:
-        k8s.namespace_labels("rc-repro-x", context="c")
+        k8s.namespace_labels("houston-x", context="c")
     assert "refusing to guess" in str(caught.value)
     with pytest.raises(DockerError):
         k8s.delete_namespace("x", context="c", volumes=True)
@@ -11167,7 +11507,7 @@ def test_a_cluster_that_cannot_be_asked_never_reads_as_a_deleted_namespace(monke
     """`delete_namespace`'s wait loop read `returncode != 0` as "the namespace is
     gone" -- so ONE transient API error, one expired credential or one wrong context
     made `down --volumes` announce a deletion that had not happened and drop the local
-    record, leaving a namespace with no rc-repro path back to it.
+    record, leaving a namespace with no houston path back to it.
 
     Measured on this box: kubectl exits **1** for an absent namespace AND for a
     context that does not exist, so no threshold on the exit code can tell them
@@ -11177,7 +11517,7 @@ def test_a_cluster_that_cannot_be_asked_never_reads_as_a_deleted_namespace(monke
     This is the `down` half. `wait_namespace_gone` below is the `prune` half, and it
     had the identical defect twenty lines away.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     monkeypatch.setattr(k8s, "namespace_labels",
                         lambda ns, **kw: {k8s.OWNER_LABEL_KEY: k8s.OWNER_LABEL_VALUE,
@@ -11214,18 +11554,18 @@ def test_waiting_for_an_orphan_asks_the_cluster_it_was_deleted_from(monkeypatch,
 
     `_orphan_context()` exists BECAUSE that hardcoding was already found and fixed
     once, at the delete call, one block above -- and it was reintroduced at the wait.
-    On any cluster rc-repro did not create the two disagree, so the wait asked a
+    On any cluster houston did not create the two disagree, so the wait asked a
     context that is not in the kubeconfig, kubectl exited non-zero, and the loop read
     that as "gone": `✓ removed 1 orphaned namespace(s)`, exit 0, over a namespace
     still Terminating. Invisible on kind, where the two happen to be equal, which is
     why a live pass on kind did not catch it.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(lc, "prunable", lambda: [])
     monkeypatch.setattr(lc.auditsvc, "record", lambda *a, **kw: None)
-    monkeypatch.setattr(lc, "orphan_namespaces", lambda *a, **k: ["rc-repro-p9"])
+    monkeypatch.setattr(lc, "orphan_namespaces", lambda *a, **k: ["houston-p9"])
     monkeypatch.setattr(lc, "_orphan_context", lambda: "someone-elses-cluster")
     monkeypatch.setattr(lc, "_reclaim_cluster", lambda emit: False)
     monkeypatch.setattr(k8s, "run", lambda argv, **kw: _completed(0))
@@ -11258,7 +11598,7 @@ def test_a_refused_cluster_read_is_not_reported_as_a_cluster_with_nothing(monkey
     1. A classifier that looked at the payload before the exit code would rebuild the
     bug inside the fix.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     denied = _completed(1, out='{"apiVersion":"v1","items":[],"kind":"List"}',
                         err='Error from server (Forbidden): storageclasses.storage.'
@@ -11285,9 +11625,9 @@ def test_a_namespace_still_terminating_is_not_reported_as_gone(monkeypatch):
     the local record and tore down the shared operator and monitoring stack.
 
     Finalizers can wedge indefinitely; the workspace was then an orphan with no
-    rc-repro path left to it.
+    houston path left to it.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     monkeypatch.setattr(k8s, "namespace_labels",
                         lambda ns, **kw: {k8s.OWNER_LABEL_KEY: k8s.OWNER_LABEL_VALUE,
@@ -11301,7 +11641,7 @@ def test_a_namespace_still_terminating_is_not_reported_as_gone(monkeypatch):
         # string: `-o json` is what the code asks for, so a stub answering with
         # anything else is testing a wire shape that does not exist.
         return _completed(0, out=json.dumps({                # never goes away
-            "metadata": {"name": "rc-repro-x"},
+            "metadata": {"name": "houston-x"},
             "status": {"phase": "Terminating"}}))
 
     monkeypatch.setattr(k8s, "run", _run)
@@ -11320,10 +11660,10 @@ def test_prune_does_not_need_docker_when_every_workspace_is_kubernetes(tmp_path,
     the loop below it has asked Kubernetes about Kubernetes workspaces for a while.
     The gate contradicted the runtime it was gating.
     """
-    from rc_repro import runner
-    from rc_repro.services import k8s, lifecycle as lc, topology
+    from houston import runner
+    from houston.services import k8s, lifecycle as lc, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     m = runner.Metadata(name="k", project="p", rc_version="8.5.1", rc_image="i",
                         mongo_tag="8.0", mongo_flavor="official", preset="default",
                         root_url="http://localhost:3001", host_port=3001,
@@ -11346,11 +11686,11 @@ def test_a_recycled_pid_is_not_our_port_forward(monkeypatch):
     identity's clothes.
 
     A recycled pid belonging to another workspace's forward, or another user's on a
-    shared box, passed it: so rc-repro could believe a workspace was reachable when it
+    shared box, passed it: so houston could believe a workspace was reachable when it
     was not, decline to start the forward it needed, and signal a stranger's process at
     teardown. The argv already carries the proof.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     def _argv(*parts):
         class _P:
@@ -11358,25 +11698,25 @@ def test_a_recycled_pid_is_not_our_port_forward(monkeypatch):
                 return "\0".join(parts).encode()
         monkeypatch.setattr(k8s, "Path", lambda _p: _P())
 
-    ours = ("kubectl", "--context", "c", "-n", "rc-repro-mine", "port-forward",
+    ours = ("kubectl", "--context", "c", "-n", "houston-mine", "port-forward",
             "deployment/rocketchat-rocketchat", "3001:3000")
     _argv(*ours)
-    assert k8s.forward_alive(42, namespace="rc-repro-mine", host_port=3001)
+    assert k8s.forward_alive(42, namespace="houston-mine", host_port=3001)
 
     # Someone else's workspace, same box, recycled pid.
-    _argv("kubectl", "--context", "c", "-n", "rc-repro-theirs", "port-forward",
+    _argv("kubectl", "--context", "c", "-n", "houston-theirs", "port-forward",
           "deployment/rocketchat-rocketchat", "3002:3000")
-    assert not k8s.forward_alive(42, namespace="rc-repro-mine", host_port=3001)
+    assert not k8s.forward_alive(42, namespace="houston-mine", host_port=3001)
 
     # Same namespace, different port -- and a substring test would have matched.
-    _argv("kubectl", "--context", "c", "-n", "rc-repro-mine", "port-forward",
+    _argv("kubectl", "--context", "c", "-n", "houston-mine", "port-forward",
           "deployment/rocketchat-rocketchat", "13001:3000")
-    assert not k8s.forward_alive(42, namespace="rc-repro-mine", host_port=3001), \
+    assert not k8s.forward_alive(42, namespace="houston-mine", host_port=3001), \
         "13001 must not satisfy 3001"
 
     # Not a port-forward at all.
     _argv("python", "-m", "http.server")
-    assert not k8s.forward_alive(42, namespace="rc-repro-mine", host_port=3001)
+    assert not k8s.forward_alive(42, namespace="houston-mine", host_port=3001)
 
 
 def test_a_kubeconfig_error_is_not_read_as_an_absent_namespace(monkeypatch):
@@ -11392,19 +11732,19 @@ def test_a_kubeconfig_error_is_not_read_as_an_absent_namespace(monkeypatch):
 
     Only the API says `Error from server (NotFound)`.
     """
-    from rc_repro.errors import DockerError
-    from rc_repro.services import k8s
+    from houston.errors import DockerError
+    from houston.services import k8s
 
     monkeypatch.setattr(k8s, "run", lambda *a, **k: _completed(
         1, err="Error in configuration: context was not found for specified "
                "context: no-such-context"))
     with pytest.raises(DockerError):
-        k8s.namespace_labels("rc-repro-x", context="no-such-context")
+        k8s.namespace_labels("houston-x", context="no-such-context")
 
     # The server's own reason still reads as absence.
     monkeypatch.setattr(k8s, "run", lambda *a, **k: _completed(
-        1, err='Error from server (NotFound): namespaces "rc-repro-x" not found'))
-    assert k8s.namespace_labels("rc-repro-x", context="c") is None
+        1, err='Error from server (NotFound): namespaces "houston-x" not found'))
+    assert k8s.namespace_labels("houston-x", context="c") is None
 
 
 def test_not_knowing_who_you_are_is_not_proof_the_namespace_is_yours(monkeypatch):
@@ -11415,8 +11755,8 @@ def test_not_knowing_who_you_are_is_not_proof_the_namespace_is_yours(monkeypatch
     plain CLI box the check could not fire at all. Done on a live cluster: a namespace
     labelled `owner=bob` was adopted and Rocket.Chat installed into it.
     """
-    from rc_repro.errors import ConflictError
-    from rc_repro.services import k8s
+    from houston.errors import ConflictError
+    from houston.services import k8s
 
     labels = {k8s.OWNER_LABEL_KEY: k8s.OWNER_LABEL_VALUE,
               k8s.WORKSPACE_LABEL: "w", k8s.OWNER_OF_LABEL: "bob"}
@@ -11424,30 +11764,30 @@ def test_not_knowing_who_you_are_is_not_proof_the_namespace_is_yours(monkeypatch
     # labels now and gets both from one `get namespace -o json`. Stubbing
     # `namespace_labels` no longer intercepts anything, and a stub that answers a call
     # the code does not make tests nothing.
-    ns_doc = json.dumps({"metadata": {"name": "rc-repro-w", "labels": labels},
+    ns_doc = json.dumps({"metadata": {"name": "houston-w", "labels": labels},
                          "status": {"phase": "Active"}})
     monkeypatch.setattr(k8s, "run", lambda *a, **k: _completed(0, out=ns_doc))
 
     # THE REASON DEPENDS ON WHETHER TEAM MODE IS ON, and saying the wrong one made
     # the namespace un-adoptable. `_cli_actor()` returns "" whenever this box has no
-    # accounts -- even with RC_REPRO_USER set -- so on such a box the old message
-    # said "RC_REPRO_USER is not set" while it WAS, and the remedy it named produced
+    # accounts -- even with HOUSTON_USER set -- so on such a box the old message
+    # said "HOUSTON_USER is not set" while it WAS, and the remedy it named produced
     # the identical refusal. The refusal itself was always right.
     with pytest.raises(ConflictError) as caught:
         k8s.assert_namespace_available("w", context="c")          # no owner at all
-    assert "no rc-repro accounts" in str(caught.value), caught.value
-    assert "rc-repro users add bob" in str(caught.value), \
+    assert "no houston accounts" in str(caught.value), caught.value
+    assert "houston users add bob" in str(caught.value), \
         "the remedy has to be one that actually works on a box with no accounts"
-    assert "RC_REPRO_USER=bob" in str(caught.value), "say how to identify yourself"
+    assert "HOUSTON_USER=bob" in str(caught.value), "say how to identify yourself"
 
     # With accounts, an empty owner really does mean the variable is unset, and the
     # original message is the right one.
-    from rc_repro.services import users as usersvc
+    from houston.services import users as usersvc
     usersvc.add("someone", "correct-horse-battery")
     with pytest.raises(ConflictError) as caught:
         k8s.assert_namespace_available("w", context="c")
-    assert "RC_REPRO_USER is not set" in str(caught.value), caught.value
-    assert "RC_REPRO_USER=bob" in str(caught.value), "say how to identify yourself"
+    assert "HOUSTON_USER is not set" in str(caught.value), caught.value
+    assert "HOUSTON_USER=bob" in str(caught.value), "say how to identify yourself"
 
     with pytest.raises(ConflictError):
         k8s.assert_namespace_available("w", context="c", owner="alice")
@@ -11457,7 +11797,7 @@ def test_not_knowing_who_you_are_is_not_proof_the_namespace_is_yours(monkeypatch
 
     # And a namespace of bob's that is still going away is refused for a DIFFERENT
     # reason, with a different remedy: waiting, not identifying yourself.
-    gone = json.dumps({"metadata": {"name": "rc-repro-w", "labels": labels},
+    gone = json.dumps({"metadata": {"name": "houston-w", "labels": labels},
                        "status": {"phase": "Terminating"}})
     monkeypatch.setattr(k8s, "run", lambda *a, **k: _completed(0, out=gone))
     with pytest.raises(ConflictError) as terminating:
@@ -11476,7 +11816,7 @@ def test_the_no_auth_message_names_the_reason_that_actually_applies(monkeypatch)
     obstacle -- while the workspace notes printed moments later said the true thing,
     so the two outputs contradicted each other.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     monkeypatch.delenv(k8s.USE_OPERATOR_ENV, raising=False)
     # The version floor is met for every version this tool actually pairs.
@@ -11511,7 +11851,7 @@ def test_a_refused_create_is_refused_before_the_write_ahead_record():
     Asserted on the order in the source, the same way the Kubernetes refusals are.
     """
 
-    from rc_repro.services import lifecycle as lc
+    from houston.services import lifecycle as lc
 
     src = source_of(lc._create_kubernetes)
     guard = source_index(src, "assert_namespace_available")
@@ -11537,9 +11877,9 @@ def test_a_live_owner_means_the_note_is_not_abandoned(tmp_path, monkeypatch):
     """
     import os
 
-    from rc_repro.services import journal
+    from houston.services import journal
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     mine = journal.record(journal.RATE_LIMITER_OFF, "w")
     assert mine, "the entry must be written"
     assert len(journal.open_entries()) == 1
@@ -11558,9 +11898,9 @@ def test_a_live_owner_means_the_note_is_not_abandoned(tmp_path, monkeypatch):
 def test_the_note_is_cleared_when_the_cleanup_runs_and_kept_when_it_does_not(
         tmp_path, monkeypatch):
     """A surviving entry has to mean precisely "the cleanup did not happen"."""
-    from rc_repro.services import journal
+    from houston.services import journal
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     with journal.side_effect(journal.RATE_LIMITER_OFF, "w"):
         assert len(journal.open_entries()) == 1
     assert journal.open_entries() == [], "cleared on the way out"
@@ -11586,9 +11926,9 @@ def test_recovery_restarts_rocketchat_and_re_enables_the_rate_limiter(
     nobody chose. Verified live as well: SIGKILL a real quiesce and `serve` starts
     Rocket.Chat again at its next startup.
     """
-    from rc_repro.services import journal
+    from houston.services import journal
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(journal.runner, "exists", lambda n: True)
     dead = {"pid": 999999, "started": "1"}
 
@@ -11610,8 +11950,8 @@ def test_recovery_restarts_rocketchat_and_re_enables_the_rate_limiter(
     assert journal.open_entries() == [], "a repaired note is cleared"
 
     # The rate limiter, and a repair that FAILS must keep its note.
-    from rc_repro import rcapi
-    from rc_repro.services import lifecycle
+    from houston import rcapi
+    from houston.services import lifecycle
     monkeypatch.setattr(lifecycle, "login", lambda m: object())
     monkeypatch.setattr(journal.runner, "read_meta",
                         lambda n: _idp_meta("default"))
@@ -11629,9 +11969,9 @@ def test_recovery_restarts_rocketchat_and_re_enables_the_rate_limiter(
 def test_a_note_for_a_workspace_that_is_gone_is_not_a_failure(tmp_path, monkeypatch):
     """Whatever was done to it went with it, so clearing the note is the right
     outcome -- not an unrepairable warning that never goes away."""
-    from rc_repro.services import journal
+    from houston.services import journal
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(journal.runner, "exists", lambda n: False)
     eid = journal.record(journal.ROCKETCHAT_STOPPED, "deleted-long-ago")
     path = journal.journal_dir() / f"{eid}.json"
@@ -11649,9 +11989,9 @@ def test_doctor_tells_a_cli_box_about_interrupted_work(tmp_path, monkeypatch):
 
     An entry a LIVE job holds is reported as progress, not as a fault.
     """
-    from rc_repro.services import doctor, journal
+    from houston.services import doctor, journal
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     journal.record(journal.RATE_LIMITER_OFF, "mine")        # this process: alive
     rows = [r for r in doctor.run_checks()["checks"]
             if r.get("check") == "interrupted-work"]
@@ -11676,7 +12016,7 @@ def test_the_namespace_preflight_is_skipped_when_the_cluster_is_about_to_be_made
 
     `namespace_labels` correctly refuses to read "context was not found" as "no
     namespace" -- so with the check running unconditionally, the FIRST Kubernetes
-    create on any box failed with rc-repro's own "refusing to guess". Found by doing
+    create on any box failed with houston's own "refusing to guess". Found by doing
     exactly that after `prune` had reclaimed the cluster; every earlier live run of
     the check passed only because a cluster happened to be there.
 
@@ -11684,19 +12024,19 @@ def test_the_namespace_preflight_is_skipped_when_the_cluster_is_about_to_be_made
     `ensure_namespace` repeats the check once it is up.
     """
 
-    from rc_repro.services import lifecycle as lc
+    from houston.services import lifecycle as lc
 
     src = source_of(lc._create_kubernetes)
     guard = source_index(src, "assert_namespace_available")
     # The call must sit under a `not plan.create` test, not at the top level.
     before = src[:guard]
     assert "if not plan.create:" in before.split("plan = k8s.plan_cluster(")[-1], \
-        "the preflight must be skipped when rc-repro is about to create the cluster"
+        "the preflight must be skipped when houston is about to create the cluster"
 
     # And it must still run when the cluster is already there.
     asked: list = []
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    from rc_repro.services import k8s
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    from houston.services import k8s
     monkeypatch.setattr(k8s, "assert_namespace_available",
                         lambda name, **kw: asked.append(name))
     # The helm gate sits directly above the call under test, in the same
@@ -11714,7 +12054,7 @@ def test_the_namespace_preflight_is_skipped_when_the_cluster_is_about_to_be_made
         "R", (), {"rc_version": v, "rc_image": "i", "mongo_tag": "8.0",
                   "mongo_flavor": "official", "source": "t", "oplog": False})())
     monkeypatch.setattr(k8s, "create_workspace", lambda **kw: {
-        "context": "default", "namespace": "rc-repro-x", "chart_version": "7.0.0",
+        "context": "default", "namespace": "houston-x", "chart_version": "7.0.0",
         "release": k8s.RELEASE, "port_forward_pid": 0, "bind_host": ""})
     try:
         lc._create_repro_locked(lc.CreateReq(version="8.5.1", name="x",
@@ -11733,9 +12073,9 @@ def test_a_finished_create_clears_every_earlier_claim_that_it_did_not_finish(
     went on claiming a complete workspace had never finished. Seen exactly that way:
     one attempt died on a preflight, the retry succeeded, and the warning stayed.
     """
-    from rc_repro.services import journal
+    from houston.services import journal
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     for at in ("T1", "T2"):
         eid = journal.record(journal.CREATE_UNFINISHED, "w")
         path = journal.journal_dir() / f"{eid}.json"
@@ -11755,9 +12095,9 @@ def test_an_advisory_note_for_a_workspace_that_is_gone_stops_warning(
     """Advisory notes are never repaired, so nothing would ever clear one whose
     workspace has been removed -- it would warn forever about something that cannot be
     acted on. A create that failed and rolled back is exactly that case."""
-    from rc_repro.services import journal
+    from houston.services import journal
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(journal.runner, "exists", lambda n: False)
     eid = journal.record(journal.CREATE_UNFINISHED, "rolled-back")
     path = journal.journal_dir() / f"{eid}.json"
@@ -11777,7 +12117,7 @@ def test_an_advisory_note_for_a_workspace_that_is_gone_stops_warning(
     path.write_text(json.dumps(data))
     rows = journal.recover()
     assert len(rows) == 1 and rows[0]["repaired"] is False, rows
-    assert "rc-repro ready" in rows[0]["why"], rows[0]
+    assert "houston ready" in rows[0]["why"], rows[0]
     assert len(journal.open_entries()) == 1, "kept until somebody acts on it"
 
 
@@ -11786,10 +12126,10 @@ def test_the_bench_workspace_and_the_constraints_can_be_undone(tmp_path, monkeyp
     expensive thing on this branch behind -- a Rocket.Chat and a MongoDB per version --
     and a performance run's CPU/RAM caps have to go back to the PRIOR values rather
     than to "unlimited", which is why the note carries them."""
-    from rc_repro.perf import constrain as constrain_mod
-    from rc_repro.services import journal
+    from houston.perf import constrain as constrain_mod
+    from houston.services import journal
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(journal.runner, "exists", lambda n: True)
     dead = {"pid": 999999, "started": "1"}
 
@@ -11830,7 +12170,7 @@ def test_describe_only_describes(monkeypatch):
     with `what` holding a boolean.
     """
 
-    from rc_repro.services import journal
+    from houston.services import journal
 
     src = source_of(journal.describe)
     for forbidden in ("runner.", "restore(", "subprocess", "clear("):
@@ -11853,8 +12193,8 @@ def test_a_done_warning_reaches_the_terminal_and_a_done_info_does_not(capsys):
     operator-managed workspace frees Rocket.Chat's memory and not MongoDB's, which is a
     warning written specifically so `stop` would say it instead of staying quiet.
     """
-    from rc_repro import cli
-    from rc_repro.services.events import Event
+    from houston import cli
+    from houston.services.events import Event
 
     # The full 3x2 matrix, so this cannot pass by accident on one level.
     for level in ("info", "warn", "error"):
@@ -11885,20 +12225,20 @@ def test_prune_says_which_namespaces_it_destroyed(monkeypatch, tmp_path):
     """
     from typer.testing import CliRunner
 
-    from rc_repro import cli
-    from rc_repro.services import lifecycle as lc
+    from houston import cli
+    from houston.services import lifecycle as lc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(lc, "prunable", lambda *a, **k: [])
-    monkeypatch.setattr(lc, "orphan_namespaces", lambda *a, **k: ["rc-repro-ghost"])
+    monkeypatch.setattr(lc, "orphan_namespaces", lambda *a, **k: ["houston-ghost"])
     monkeypatch.setattr(cli, "_cluster_reclaimable", lambda *a, **k: False)
     monkeypatch.setattr(lc, "prune", lambda **k: {
-        "targets": [], "removed": [], "orphans": ["rc-repro-ghost"], "cluster": False})
+        "targets": [], "removed": [], "orphans": ["houston-ghost"], "cluster": False})
 
     res = CliRunner().invoke(cli.app, ["prune", "--orphans", "--yes"])
 
     assert res.exit_code == 0, res.output
-    assert "rc-repro-ghost" in res.output, res.output
+    assert "houston-ghost" in res.output, res.output
     assert "Nothing to prune" not in res.output, res.output
 
 
@@ -11909,14 +12249,14 @@ def test_prune_audits_the_namespaces_it_swept_not_just_the_records(monkeypatch, 
     subject, so between that and the silent stdout there was no trace anywhere of what
     had been destroyed.
     """
-    from rc_repro.services import audit as auditsvc
-    from rc_repro.services import lifecycle as lc
+    from houston.services import audit as auditsvc
+    from houston.services import lifecycle as lc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     seen = []
     monkeypatch.setattr(auditsvc, "record", lambda a, s="", **k: seen.append((a, s)))
     monkeypatch.setattr(lc, "prunable", lambda *a, **k: [])
-    monkeypatch.setattr(lc, "orphan_namespaces", lambda *a, **k: ["rc-repro-ghost"])
+    monkeypatch.setattr(lc, "orphan_namespaces", lambda *a, **k: ["houston-ghost"])
     monkeypatch.setattr(lc, "_reclaim_cluster", lambda *a, **k: False)
 
     # The audit is written before the sweep, so the sweep itself is not stubbed and
@@ -11929,7 +12269,7 @@ def test_prune_audits_the_namespaces_it_swept_not_just_the_records(monkeypatch, 
     assert seen, "prune recorded no audit entry at all"
     action, subject = seen[0]
     assert action == "prune"
-    assert "rc-repro-ghost" in subject, subject
+    assert "houston-ghost" in subject, subject
 
 
 def test_a_workspace_whose_database_is_gone_is_not_reported_healthy(monkeypatch, tmp_path):
@@ -11940,14 +12280,14 @@ def test_a_workspace_whose_database_is_gone_is_not_reported_healthy(monkeypatch,
     health=healthy uptime="2 minutes" -- and the same payload's containers array
     holding ("mongodb", "exited"). The summary contradicted its own detail. Every
     remediation the tool then offered pointed back at `ready`: `api` exits 5 with
-    "wait for it with `rc-repro ready`" and `seed` exits 1 with the same, and `ready`
+    "wait for it with `houston ready`" and `seed` exits 1 with the same, and `ready`
     reports success. There was no exit from that loop without reading `docker ps`.
 
     `degraded_reason` is one rule, consulted by the list, the panel and `ready`, so
     they cannot drift -- the same remedy `repro_state()` needed when the list and the
     panel disagreed about state.
     """
-    from rc_repro.services.lifecycle import ESSENTIAL_SERVICES, degraded_reason
+    from houston.services.lifecycle import ESSENTIAL_SERVICES, degraded_reason
 
     healthy = {"mongodb": "Up 2 hours", "rocketchat": "Up 2 hours (healthy)"}
     dead_db = {"mongodb": "Exited (0) 3 minutes ago",
@@ -11966,13 +12306,13 @@ def test_a_workspace_whose_database_is_gone_is_not_reported_healthy(monkeypatch,
 
 def test_the_detail_summary_cannot_contradict_its_own_containers(monkeypatch, tmp_path):
     """`detail()` derived state AND health from the Rocket.Chat container alone."""
-    from rc_repro import runner
-    from rc_repro.services import lifecycle as lc
+    from houston import runner
+    from houston.services import lifecycle as lc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(lc, "resolve_name", lambda n: "dbgone")
     monkeypatch.setattr(runner, "read_meta", lambda n: lc.runner.Metadata(
-        name=n, project=f"rcrepro-{n}", rc_version="8.5.1", rc_image="i",
+        name=n, project=f"houston-{n}", rc_version="8.5.1", rc_image="i",
         mongo_tag="8.0", mongo_flavor="official", preset="default",
         root_url="http://localhost:3000", host_port=3000, version_source="map"))
     monkeypatch.setattr(runner, "docker_available", lambda: True)
@@ -12008,14 +12348,14 @@ def test_a_readiness_failure_asks_diagnose_instead_of_asserting_memory_pressure(
     sentence survives only as a possibility and only when nothing matched -- stated as
     fact it sends a reader hunting for memory they already have.
     """
-    from rc_repro import rcapi, runner
-    from rc_repro.errors import NotReadyError
-    from rc_repro.services import diagnose
-    from rc_repro.services import lifecycle as lc
+    from houston import rcapi, runner
+    from houston.errors import NotReadyError
+    from houston.services import diagnose
+    from houston.services import lifecycle as lc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     meta = lc.runner.Metadata(
-        name="slow", project="rcrepro-slow", rc_version="8.5.1", rc_image="i",
+        name="slow", project="houston-slow", rc_version="8.5.1", rc_image="i",
         mongo_tag="8.0", mongo_flavor="official", preset="default",
         root_url="http://localhost:3000", host_port=3000, version_source="map")
     monkeypatch.setattr(runner, "rc_state", lambda n: "running")
@@ -12063,14 +12403,14 @@ def test_a_crash_loop_stops_waiting_once_the_cause_is_known(monkeypatch, tmp_pat
     nobody reads. A matched log signature is different: that is evidence, so this stops
     on evidence and keeps waiting without it.
     """
-    from rc_repro import rcapi, runner
-    from rc_repro.errors import NotReadyError
-    from rc_repro.services import diagnose
-    from rc_repro.services import lifecycle as lc
+    from houston import rcapi, runner
+    from houston.errors import NotReadyError
+    from houston.services import diagnose
+    from houston.services import lifecycle as lc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     meta = lc.runner.Metadata(
-        name="loop", project="rcrepro-loop", rc_version="8.5.1", rc_image="i",
+        name="loop", project="houston-loop", rc_version="8.5.1", rc_image="i",
         mongo_tag="8.0", mongo_flavor="official", preset="default",
         root_url="http://localhost:3000", host_port=3000, version_source="map")
     monkeypatch.setattr(runner, "rc_state", lambda n: "restarting")
@@ -12114,8 +12454,8 @@ def test_every_side_effect_that_outlives_a_kill_is_journalled():
     """The walk that makes the journal a registry rather than a habit.
 
     THIS TEST USED TO PASS FOR THE WRONG REASON, TWICE, and a second reviewer found
-    both. It was a hardcoded four-function list rather than a walk, so `rc_repro/seed.py`
-    and `rc_repro/configimport.py` -- which both disable the API rate limiter, and seed
+    both. It was a hardcoded four-function list rather than a walk, so `houston/seed.py`
+    and `houston/configimport.py` -- which both disable the API rate limiter, and seed
     also disables email-2FA -- were simply outside its scope. And even once they were in
     scope the assertion silently skipped, because the guard was the source text
     `"config.RC_RATE_LIMITER_SETTING" in src` while both files spelled the setting as
@@ -12136,8 +12476,8 @@ def test_every_side_effect_that_outlives_a_kill_is_journalled():
     import ast
     import pathlib as _pl
 
-    from rc_repro import config
-    from rc_repro.services import journal
+    from houston import config
+    from houston.services import journal
 
     root = _pl.Path(config.__file__).parent
 
@@ -12206,8 +12546,8 @@ def test_a_dry_run_of_the_journal_does_not_change_it():
     removed the other -- and a dry run is the only way to inspect the journal without
     repairing it, which makes mutating one a contradiction in terms.
     """
-    from rc_repro import runner
-    from rc_repro.services import journal
+    from houston import runner
+    from houston.services import journal
 
     import os
     ident = journal.record(journal.CREATE_UNFINISHED, "ghost-workspace")
@@ -12236,15 +12576,15 @@ def test_a_refused_create_leaves_no_note_behind(monkeypatch, tmp_path):
     namespace-ownership check, a Kubernetes-unsupported flag -- one per attempt. Seven
     accumulated during the audit, three of them for the same never-created name. Worse
     than untidy: `doctor` then warns "the create started at ... never finished ...
-    `rc-repro ready --name X` completes it", and that command exits 4 NOT_FOUND. On a
+    `houston ready --name X` completes it", and that command exits 4 NOT_FOUND. On a
     CLI-only box nothing ever clears them, because recovery runs at `serve` startup and
     `doctor` reports without repairing.
     """
-    from rc_repro.errors import ValidationError
-    from rc_repro.services import journal
-    from rc_repro.services import lifecycle as lc
+    from houston.errors import ValidationError
+    from houston.services import journal
+    from houston.services import lifecycle as lc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(lc, "_create_repro_locked",
                         lambda *a, **k: (_ for _ in ()).throw(
                             ValidationError("--https is not supported on kubernetes")))
@@ -12280,10 +12620,10 @@ def test_ready_carries_the_seed_the_interrupted_create_asked_for(monkeypatch, tm
     tool's own instruction, is told the workspace is complete, doctor agrees, and the
     evidence that anything was missing has been deleted.
     """
-    from rc_repro.services import journal
-    from rc_repro.services import lifecycle as lc
+    from houston.services import journal
+    from houston.services import lifecycle as lc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
 
     # 1. THE NOTE `create_repro` WRITES carries the request. That is where the detail
     #    was missing -- `journal.record` has always accepted **detail and was called
@@ -12332,7 +12672,7 @@ def test_ready_carries_the_seed_the_interrupted_create_asked_for(monkeypatch, tm
 def test_an_explicitly_wide_bind_is_warned_about(monkeypatch, tmp_path):
     """`--bind 0.0.0.0` published fixed weak credentials and said nothing.
 
-    The exposure warning fired only on `req.bind_public`, which rc-repro sets ITSELF
+    The exposure warning fired only on `req.bind_public`, which houston sets ITSELF
     when it widens the bind for an ACME challenge -- so the derived case was announced
     and the case a person deliberately asked for was silent. Verified from the box's
     own LAN address: /api/info 200, and POST /api/v1/login with admin/admin123
@@ -12344,7 +12684,7 @@ def test_an_explicitly_wide_bind_is_warned_about(monkeypatch, tmp_path):
     stays; being quiet about it was an omission, not a decision.
     """
 
-    from rc_repro.services import lifecycle as lc
+    from houston.services import lifecycle as lc
 
     src = source_of(lc._create_repro_locked)
     # The derived branch, and the ASKED-FOR branch beside it.
@@ -12390,9 +12730,9 @@ def test_a_restore_retargets_site_url_at_the_workspace_it_landed_in(monkeypatch,
     reason and the restore path had no equivalent.
     """
 
-    from rc_repro import rcapi
-    from rc_repro import runner
-    from rc_repro.services import backup, lifecycle as lc
+    from houston import rcapi
+    from houston import runner
+    from houston.services import backup, lifecycle as lc
 
     # FIRST, and by source: the pre-fix tree has no retarget step at all, and this must
     # fail for that reason rather than on a missing attribute name.
@@ -12403,9 +12743,9 @@ def test_a_restore_retargets_site_url_at_the_workspace_it_landed_in(monkeypatch,
     assert "_retarget_site_url" in source_of(backup._restore_locked), (
         "the restore path does not retarget Site_Url")
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     meta = lc.runner.Metadata(
-        name="restored", project="rcrepro-restored", rc_version="8.5.1", rc_image="i",
+        name="restored", project="houston-restored", rc_version="8.5.1", rc_image="i",
         mongo_tag="8.0", mongo_flavor="official", preset="default",
         root_url="http://localhost:3000", host_port=3000, version_source="map")
     monkeypatch.setattr(runner, "read_meta", lambda n: meta)
@@ -12434,24 +12774,24 @@ def test_a_restore_retargets_site_url_at_the_workspace_it_landed_in(monkeypatch,
 
 def test_doctor_says_the_home_is_not_writable_rather_than_blaming_kind(monkeypatch,
                                                                        tmp_path):
-    """A read-only RC_REPRO_HOME passed `doctor` and surfaced as a kind problem.
+    """A read-only HOUSTON_HOME passed `doctor` and surfaced as a kind problem.
 
     `home-perms` asks whether OTHER local users can read the accounts and sessions;
-    nothing asked whether rc-repro can write. So `list` and `doctor` exited 0 while
+    nothing asked whether houston can write. So `list` and `doctor` exited 0 while
     `up` and `users add` raised a bare PermissionError -- and doctor's only mention of
-    it was "Could not tell whether cluster 'rc-repro-local' exists ([Errno 13]
+    it was "Could not tell whether cluster 'houston-local' exists ([Errno 13]
     Permission denied) - kind needs Docker", because the error surfaced through the
-    kind probe (which writes rc-repro's own kubeconfig dir) and was attributed to
+    kind probe (which writes houston's own kubeconfig dir) and was attributed to
     Docker. The symptom was found and blamed on the wrong thing.
     """
     import os
 
-    from rc_repro.services import doctor as doctorsvc
+    from houston.services import doctor as doctorsvc
 
     home = tmp_path / "ro-home"
     home.mkdir()
     os.chmod(home, 0o500)
-    monkeypatch.setenv("RC_REPRO_HOME", str(home))
+    monkeypatch.setenv("HOUSTON_HOME", str(home))
     try:
         rows = doctorsvc.run_checks()["checks"]
     finally:
@@ -12476,7 +12816,7 @@ def test_a_bad_settings_file_is_a_validation_error_not_a_traceback(tmp_path):
     """
     import json as _json
 
-    from rc_repro import configimport
+    from houston import configimport
 
     html = tmp_path / "customer-settings.json"
     html.write_text("<html><body>Link expired</body></html>")
@@ -12492,8 +12832,8 @@ def test_a_bad_settings_file_is_a_validation_error_not_a_traceback(tmp_path):
         raise AssertionError("a non-JSON dump was accepted")
 
     # And the service layer turns it into the typed error both front-ends render.
-    from rc_repro.errors import ValidationError
-    from rc_repro.services import data as datasvc
+    from houston.errors import ValidationError
+    from houston.services import data as datasvc
     try:
         datasvc._build_plan(str(html), None)
     except ValidationError:
@@ -12511,9 +12851,9 @@ def test_journal_timestamps_are_utc_like_every_other_record(tmp_path, monkeypatc
     """
     import time as _time
 
-    from rc_repro.services import journal
+    from houston.services import journal
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     ident = journal.record(journal.RATE_LIMITER_OFF, "clocktest")
     entry = next(e for e in journal.open_entries() if e.id == ident)
 
@@ -12531,13 +12871,13 @@ def test_prune_waits_for_the_namespaces_it_swept_before_reclaiming_the_cluster()
 
     The sweep deletes with `--wait=false` and `_reclaim_cluster` ran immediately after
     in the same call, so `delete_cluster` refused -- correctly -- because the namespaces
-    prune had just deleted were still Terminating. Observed: run 1 left rc-repro-local
+    prune had just deleted were still Terminating. Observed: run 1 left houston-local
     and its control plane, run 2 twenty seconds later printed "the cluster is gone".
     About 600 MB survived the prune that had emptied it.
     """
 
-    from rc_repro.services import k8s
-    from rc_repro.services import lifecycle as lc
+    from houston.services import k8s
+    from houston.services import lifecycle as lc
 
     src = source_of(lc.prune)
     assert "wait_namespace_gone" in src, (
@@ -12562,10 +12902,10 @@ def test_use_resolves_the_name_like_every_other_command(monkeypatch, tmp_path):
     """
     from typer.testing import CliRunner
 
-    from rc_repro import cli
-    from rc_repro.services import lifecycle as lc
+    from houston import cli
+    from houston.services import lifecycle as lc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     seen: list = []
     monkeypatch.setattr(lc, "resolve_name",
                         lambda n: seen.append(n) or "ticket-1234")
@@ -12574,12 +12914,12 @@ def test_use_resolves_the_name_like_every_other_command(monkeypatch, tmp_path):
     assert res.exit_code == 0, res.output
     assert seen == ["TICKET-1234"], "use did not go through resolve_name"
     assert "ticket-1234" in res.output, res.output
-    from rc_repro import config
+    from houston import config
     assert config.load_config().get("default_repro") == "ticket-1234"
 
     # And an unknown name exits 4, not 1.
     def missing(n):
-        from rc_repro.errors import NotFoundError
+        from houston.errors import NotFoundError
         raise NotFoundError(f"no repro named {n!r}")
     monkeypatch.setattr(lc, "resolve_name", missing)
     res = CliRunner().invoke(cli.app, ["use", "nope"])
@@ -12596,8 +12936,8 @@ def test_a_failed_cap_restore_keeps_its_note(monkeypatch, tmp_path):
     successful restore; this one did not, at all four sites.
     """
 
-    from rc_repro import cli
-    from rc_repro.services import perf as perfsvc
+    from houston import cli
+    from houston.services import perf as perfsvc
 
     for fn in (perfsvc.run_loadtest, perfsvc.run_capacity, cli.loadtest, cli.capacity):
         src = source_of(fn)
@@ -12617,18 +12957,18 @@ def test_the_cli_records_the_seed_it_is_about_to_run(monkeypatch, tmp_path):
 
     So the write-ahead note recorded `seed: False` with the profile defaulted, and
     `create_repro` cleared it before control returned -- which meant the `pending_seed`
-    recovery landed in v0.72.2 covered the GUI and NOT `rc-repro up --seed`, the
+    recovery landed in v0.72.2 covered the GUI and NOT `houston up --seed`, the
     invocation the README documents. Exactly the scenario lifecycle.py describes:
     "told the workspace is complete, doctor agrees, and the evidence that anything was
     missing has been deleted."
     """
     from typer.testing import CliRunner
 
-    from rc_repro import cli
-    from rc_repro.services import journal
-    from rc_repro.services import lifecycle as lc
+    from houston import cli
+    from houston.services import journal
+    from houston.services import lifecycle as lc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     captured: dict = {}
 
     # The INNER function, so the real `create_repro` runs and actually writes the
@@ -12666,7 +13006,7 @@ def test_create_repro_does_not_seed_when_the_caller_will():
     holding more than planned and the second attempt collide on names it just created.
     """
 
-    from rc_repro.services import lifecycle as lc
+    from houston.services import lifecycle as lc
 
     src = source_of(lc)
     assert "if req.seed and not req.seed_here:" in src, (
@@ -12689,8 +13029,8 @@ def test_a_seed_is_serialised_like_every_other_mutation():
     mid-manifest and the readback reports faults nobody caused.
     """
 
-    from rc_repro.services import data as lc_data
-    from rc_repro.services import lifecycle as lc
+    from houston.services import data as lc_data
+    from houston.services import lifecycle as lc
 
     src = source_of(lc.run_seed_inline)
     assert "repro_lock" in src, "a seed still races every other mutator"
@@ -12698,7 +13038,7 @@ def test_a_seed_is_serialised_like_every_other_mutation():
     assert "reentrant" in src.lower() or "re-entering" in src.lower()
 
     # And the seed is pooled: hundreds of REST writes against one workspace.
-    from rc_repro.web import jobs
+    from houston.web import jobs
     assert jobs._slots_for("seed") is not None, "seed submits unbounded"
 
     # CONFIG-IMPORT IS THE OTHER ONE, and it was missed right beside the seed: it
@@ -12744,7 +13084,7 @@ def test_the_monitor_job_is_pooled_and_the_walk_can_see_it():
     N members clicking Monitor was N pulling compose-ups on one engine, which is the
     failure the pool was added for.
     """
-    from rc_repro.web import jobs
+    from houston.web import jobs
 
     for kind in ("monitor", "monitor-off"):
         assert jobs._slots_for(kind) is not None, f"{kind} is unpooled"
@@ -12762,7 +13102,7 @@ def test_a_job_that_dies_of_a_baseexception_does_not_stay_running_forever():
     releases its result, and the SSE stream never terminates: a browser tab holds the
     connection open waiting for an event that cannot arrive.
     """
-    from rc_repro.web import jobs
+    from houston.web import jobs
 
     reg = jobs.JobManager()
 
@@ -12793,7 +13133,7 @@ def test_doctor_never_raises_out_of_a_bad_check_id():
     this function's own rule that a check must never break the report.
     """
 
-    from rc_repro.services import doctor as doctorsvc
+    from houston.services import doctor as doctorsvc
 
     src = source_of(doctorsvc.run_checks)
     assert "assert cid in CHECKS" not in src, "still a bare assert"
@@ -12806,7 +13146,7 @@ def test_doctor_never_raises_out_of_a_bad_check_id():
 def test_a_private_key_is_never_written_at_the_umask():
     """`atomic_write` wrote at the umask, and `certs/<host>.key` went through it.
 
-    So the edge's leaf key landed 0644 on a box where `~/.rc-repro` is only tightened to
+    So the edge's leaf key landed 0644 on a box where `~/.houston` is only tightened to
     0700 by `serve` or a config save -- neither of which runs on a CLI-only
     `up --https`. And the local CA key is created by `openssl genrsa -out`, which makes
     the file at 0666 & ~umask with the chmod landing after it: a real, if brief,
@@ -12815,8 +13155,8 @@ def test_a_private_key_is_never_written_at_the_umask():
     import tempfile
     from pathlib import Path
 
-    from rc_repro import runner
-    from rc_repro.services import edge as edgesvc
+    from houston import runner
+    from houston.services import edge as edgesvc
 
     # The mode is applied to the TEMP file, so the target never exists at the umask
     # even for an instant.
@@ -12834,7 +13174,7 @@ def test_a_private_key_is_never_written_at_the_umask():
     assert 'f"{host}.key", key_pem, mode=0o600' in esrc, esrc[-400:]
 
     # The CA directory is created 0700 before the key is generated in it.
-    from rc_repro import tls_local
+    from houston import tls_local
     csrc = source_of(tls_local)
     assert "mkdir(parents=True, exist_ok=True, mode=0o700)" in csrc
 
@@ -12847,7 +13187,7 @@ def test_a_successful_signin_does_not_hand_back_the_whole_throttle_window():
     -- `services/users.py` cannot refuse on a counter without also refusing correct
     passwords -- so the reset has to be per address too; it just must not be total.
     """
-    import rc_repro.web.app as appmod
+    import houston.web.app as appmod
 
     with appmod._signin_lock:
         appmod._signin_fails.clear()
@@ -12883,7 +13223,7 @@ def test_an_absent_namespace_is_confirmed_gone_not_a_failure(monkeypatch):
     two. Splitting "I could not ask" from "it is not there" was right; wiring the second
     into the failure branch beside it was not.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     # None = the namespace does not exist. (Cannot-ask RAISES, and still does.)
     monkeypatch.setattr(k8s, "namespace_labels", lambda ns, *, context: None)
@@ -12899,7 +13239,7 @@ def test_an_absent_namespace_is_confirmed_gone_not_a_failure(monkeypatch):
     # deleted-cluster path added later would see this box's real kind listing -- which
     # is empty -- prove the cluster gone and return True, which is right for a deleted
     # cluster and not what this half is about.
-    from rc_repro.errors import DockerError
+    from houston.errors import DockerError
 
     def cannot_ask(ns, *, context):
         raise DockerError("could not ask cluster 'c' about namespace")
@@ -12924,10 +13264,10 @@ def test_down_reports_the_result_not_the_flag(monkeypatch, tmp_path):
     """
     from typer.testing import CliRunner
 
-    from rc_repro import cli
-    from rc_repro.services import lifecycle as lc
+    from houston import cli
+    from houston.services import lifecycle as lc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(lc, "resolve_name", lambda *a, **k: "stuck")
     monkeypatch.setattr(lc, "owner_of", lambda *a, **k: "", raising=False)
     monkeypatch.setattr(lc, "may_destroy", lambda *a, **k: (True, ""), raising=False)
@@ -12935,7 +13275,7 @@ def test_down_reports_the_result_not_the_flag(monkeypatch, tmp_path):
     def refuses(name, **kw):
         emit = kw.get("emit")
         if emit:
-            from rc_repro.services.events import Event
+            from houston.services.events import Event
             emit(Event("'stuck': the namespace is not confirmed gone, so the local "
                        "record is KEPT.", phase="teardown", level="warn"))
         return {"name": "stuck", "removed": False, "found": False,
@@ -12974,12 +13314,12 @@ def test_a_deleted_cluster_lets_its_records_be_removed(monkeypatch):
     answer, `teardown` refuses, and `doctor` reports the cluster missing for ever.
     Reported from a live box in exactly that state.
     """
-    from rc_repro.errors import DockerError
-    from rc_repro.services import k8s
+    from houston.errors import DockerError
+    from houston.services import k8s
 
     def refused(ns, *, context):
-        raise DockerError("could not ask cluster 'kind-rc-repro-local' about namespace "
-                          "rc-repro-x: The connection to the server 127.0.0.1:39911 "
+        raise DockerError("could not ask cluster 'kind-houston-local' about namespace "
+                          "houston-x: The connection to the server 127.0.0.1:39911 "
                           "was refused")
     monkeypatch.setattr(k8s, "namespace_labels", refused)
     monkeypatch.setattr(k8s, "is_ours", lambda c: True)
@@ -13009,7 +13349,7 @@ def test_a_deleted_cluster_lets_its_records_be_removed(monkeypatch):
     else:
         raise AssertionError("a failed kind probe was treated as proof of absence")
 
-    # And a cluster rc-repro does not own is never assumed gone on kind's word.
+    # And a cluster houston does not own is never assumed gone on kind's word.
     monkeypatch.setattr(k8s, "is_ours", lambda c: False)
     monkeypatch.setattr(k8s, "clusters", lambda: ([], ""))
     try:
@@ -13033,16 +13373,16 @@ def test_a_stale_kubernetes_record_is_a_warning_not_a_failed_preflight(monkeypat
     Driven through `run_checks` rather than by reading the source, so it asserts the
     STATUS a caller sees and the verdict it produces.
     """
-    from rc_repro import runner
-    from rc_repro.services import doctor as doctorsvc
-    from rc_repro.services import k8s
+    from houston import runner
+    from houston.services import doctor as doctorsvc
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     meta = runner.Metadata(
-        name="ghost", project="rc-repro-ghost", rc_version="8.5.1", rc_image="i",
+        name="ghost", project="houston-ghost", rc_version="8.5.1", rc_image="i",
         mongo_tag="8.0", mongo_flavor="", preset="default",
         root_url="http://localhost:3000", host_port=3000, version_source="map")
-    meta.extra.update({"runtime": "kubernetes", "namespace": "rc-repro-ghost",
+    meta.extra.update({"runtime": "kubernetes", "namespace": "houston-ghost",
                        "context": k8s.CONTEXT})
     monkeypatch.setattr(runner, "list_meta", lambda: [meta])
 
@@ -13065,7 +13405,7 @@ def test_a_stale_kubernetes_record_is_a_warning_not_a_failed_preflight(monkeypat
     assert "is gone" in row["message"], row["message"]
     # Actionable: names the record and the command that clears it.
     assert "ghost" in row["message"], row["message"]
-    assert "rc-repro down" in row["message"], row["message"]
+    assert "houston down" in row["message"], row["message"]
 
 
 def test_an_unproven_seed_does_not_pass_verify_seed(monkeypatch, tmp_path):
@@ -13082,7 +13422,7 @@ def test_an_unproven_seed_does_not_pass_verify_seed(monkeypatch, tmp_path):
     write or an attempted message count."
     """
 
-    from rc_repro import cli
+    from houston import cli
 
     src = source_of(cli._run_seed)
     # The unknown is gated BEFORE the faults check, and on `ok`, not on `faults`.
@@ -13104,7 +13444,7 @@ def test_an_unproven_seed_does_not_pass_verify_seed(monkeypatch, tmp_path):
     # as `why` now, so what matters is that the renderer shows it.
     assert 'verdict.get("why")' in rsrc, (
         "the reason a readback could not run is not shown to anybody")
-    from rc_repro.services import lifecycle as lc
+    from houston.services import lifecycle as lc
     csrc = source_of(lc.check_seed)
     assert '"why": str(exc)' in csrc, "check_seed does not record why it could not read back"
 
@@ -13118,7 +13458,7 @@ def test_prune_reads_the_same_answer_teardown_does(monkeypatch):
     `teardown`, left standing twenty lines away in the same file.
     """
 
-    from rc_repro.services import lifecycle as lc
+    from houston.services import lifecycle as lc
 
     src = source_of(lc.prune)
     assert "if not k8s.delete_namespace(" in src, (
@@ -13139,7 +13479,7 @@ def test_ending_a_session_that_had_already_ended_is_not_a_success(monkeypatch, t
     revoke. A sign-out that revoked nothing should not report that it did.
     """
 
-    import rc_repro.web.app as appmod
+    import houston.web.app as appmod
 
     src = source_of(appmod.build_app) if hasattr(appmod, "build_app") \
         else pathlib_read()
@@ -13149,7 +13489,7 @@ def test_ending_a_session_that_had_already_ended_is_not_a_success(monkeypatch, t
 
 def pathlib_read():
     import pathlib
-    import rc_repro.web.app as appmod
+    import houston.web.app as appmod
     return pathlib.Path(appmod.__file__).read_text()
 
 
@@ -13164,10 +13504,10 @@ def test_the_event_log_never_writes_a_credential(monkeypatch, tmp_path):
     """
     import json
 
-    from rc_repro.services import eventlog
-    from rc_repro.services.events import Event
+    from houston.services import eventlog
+    from houston.services.events import Event
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     eventlog._DISABLED = False
     eventlog._SIZE = None
 
@@ -13200,7 +13540,7 @@ def test_the_event_log_never_writes_a_credential(monkeypatch, tmp_path):
 def test_events_imports_standalone_so_the_log_cannot_cycle():
     """The failure mode that would break every command at startup.
 
-    `services/events.py` deliberately imports nothing from `rc_repro` and is imported by
+    `services/events.py` deliberately imports nothing from `houston` and is imported by
     thirteen modules. `eventlog` reaches `config` for the path and `lifecycle` for the
     redaction helpers, and `lifecycle` imports `events`. A module-level import in the
     tee is a circular import, and the symptom is not a subtle bug -- it is every command
@@ -13211,21 +13551,21 @@ def test_events_imports_standalone_so_the_log_cannot_cycle():
     import subprocess
     import sys
 
-    from rc_repro.services import events
+    from houston.services import events
 
     tree = ast.parse(pathlib.Path(events.__file__).read_text())
     top = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
     for node in top:
         mod = getattr(node, "module", "") or ""
         names = [a.name for a in node.names]
-        assert not mod.startswith("rc_repro"), (
+        assert not mod.startswith("houston"), (
             f"events.py imports {mod} at module level — that is the cycle")
-        assert not any(n.startswith("rc_repro") for n in names), names
+        assert not any(n.startswith("houston") for n in names), names
 
     # And proven by import, in a fresh interpreter, with nothing else loaded first.
     root = str(pathlib.Path(events.__file__).parent.parent.parent)
     proc = subprocess.run(
-        [sys.executable, "-c", "import rc_repro.services.events; print('ok')"],
+        [sys.executable, "-c", "import houston.services.events; print('ok')"],
         capture_output=True, text=True, timeout=60,
         env={"PATH": "/usr/bin:/bin", "PYTHONPATH": root, "HOME": "/tmp"})
     assert proc.returncode == 0 and "ok" in proc.stdout, proc.stderr[-400:]
@@ -13235,11 +13575,11 @@ def test_the_event_log_is_bounded_private_and_silent(monkeypatch, tmp_path):
     """Three properties that stop a log becoming its own problem."""
     import os
 
-    from rc_repro.services import eventlog
-    from rc_repro.services.events import Event
+    from houston.services import eventlog
+    from houston.services.events import Event
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    monkeypatch.setenv("RC_REPRO_LOG_MAX_MB", "0.002")     # ~2 KB, to rotate quickly
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_LOG_MAX_MB", "0.002")     # ~2 KB, to rotate quickly
     eventlog._DISABLED = False
     eventlog._SIZE = None
 
@@ -13250,7 +13590,7 @@ def test_the_event_log_is_bounded_private_and_silent(monkeypatch, tmp_path):
     old = cur.with_suffix(cur.suffix + ".1")
     assert cur.exists() and old.exists(), "did not rotate"
     # TWO files, not a growing family.
-    assert len(list(cur.parent.glob("rc-repro.log*"))) == 2, sorted(cur.parent.iterdir())
+    assert len(list(cur.parent.glob("houston.log*"))) == 2, sorted(cur.parent.iterdir())
     assert oct(cur.stat().st_mode)[-3:] == "600", oct(cur.stat().st_mode)
     assert oct(cur.parent.stat().st_mode)[-3:] == "700", oct(cur.parent.stat().st_mode)
 
@@ -13259,8 +13599,8 @@ def test_the_event_log_is_bounded_private_and_silent(monkeypatch, tmp_path):
     ro = tmp_path / "ro"
     ro.mkdir()
     os.chmod(ro, 0o500)
-    monkeypatch.setenv("RC_REPRO_HOME", str(ro))
-    monkeypatch.delenv("RC_REPRO_LOG_MAX_MB", raising=False)
+    monkeypatch.setenv("HOUSTON_HOME", str(ro))
+    monkeypatch.delenv("HOUSTON_LOG_MAX_MB", raising=False)
     eventlog._DISABLED = False
     eventlog._SIZE = None
     try:
@@ -13280,11 +13620,11 @@ def test_dockers_echo_stays_out_but_warnings_never_do(monkeypatch, tmp_path):
     cap on one create. A warning or an error is never skipped, echo or not.
     """
 
-    from rc_repro.services import eventlog
-    from rc_repro.services import lifecycle as lc
-    from rc_repro.services.events import Event
+    from houston.services import eventlog
+    from houston.services import lifecycle as lc
+    from houston.services.events import Event
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     eventlog._DISABLED = False
     eventlog._SIZE = None
 
@@ -13299,7 +13639,7 @@ def test_dockers_echo_stays_out_but_warnings_never_do(monkeypatch, tmp_path):
     assert "rate limit" in text, "a WARNING was skipped because it carried echo"
 
     # Opt back in when somebody is debugging a pull.
-    monkeypatch.setenv("RC_REPRO_LOG_ECHO", "1")
+    monkeypatch.setenv("HOUSTON_LOG_ECHO", "1")
     eventlog.event(Event("Downloading 99MB", phase="boot", data={"echo": "docker"}))
     assert "Downloading 99MB" in eventlog.log_path().read_text()
 
@@ -13331,7 +13671,7 @@ def _pin_edge(monkeypatch):
 
 def _capture_create(monkeypatch):
     """The create path with Docker stubbed at the seam, capturing record + compose."""
-    from rc_repro import config, tls as tlsmod  # noqa: F401
+    from houston import config, tls as tlsmod  # noqa: F401
     seen: dict = {}
     monkeypatch.setattr(lc.runner, "docker_available", lambda **_k: True)
     monkeypatch.setattr(lc.runner, "exists", lambda _n: False)
@@ -13351,7 +13691,7 @@ def _capture_create(monkeypatch):
 def test_a_loopback_workspace_keeps_the_shared_password(monkeypatch):
     """Nothing off this box can reach it, which is the entire reason `admin123` is
     acceptable. Rotating it here would cost every runbook and buy nothing."""
-    from rc_repro import config, tls as tlsmod  # noqa: F401
+    from houston import config, tls as tlsmod  # noqa: F401
     seen = _capture_create(monkeypatch)
     lc.create_repro(lc.CreateReq(version="8.5.1", name="loop", wait=False),
                     emit=lc.null_emit)
@@ -13363,7 +13703,7 @@ def test_a_loopback_workspace_keeps_the_shared_password(monkeypatch):
 def test_a_public_name_gets_a_password_of_its_own(monkeypatch):
     """THE DEFECT. A name anybody on the internet can resolve was created running
     the same `admin123` every loopback workspace runs."""
-    from rc_repro import config, tls as tlsmod  # noqa: F401
+    from houston import config, tls as tlsmod  # noqa: F401
     seen = _capture_create(monkeypatch)
     monkeypatch.setattr(lc, "_resolve_tls", lambda req, name, bind, **k:
                         tlsmod.TlsSpec(mode=tlsmod.MODE_ACME, host="a.example.com",
@@ -13384,7 +13724,7 @@ def test_the_compose_document_provisions_the_password_that_was_recorded(monkeypa
     ADMIN_PASS would be a stored credential for a login that does not exist -- and
     every command reads the record, so ALL of them would 401 against a workspace
     whose real password is `admin123`."""
-    from rc_repro import config, tls as tlsmod  # noqa: F401
+    from houston import config, tls as tlsmod  # noqa: F401
     seen = _capture_create(monkeypatch)
     monkeypatch.setattr(lc, "_resolve_tls", lambda req, name, bind, **k:
                         tlsmod.TlsSpec(mode=tlsmod.MODE_ACME, host="b.example.com",
@@ -13404,7 +13744,7 @@ def test_binding_wide_generates_one_too(monkeypatch):
     """`--bind 0.0.0.0` removes the same premise by the other mechanism, and the
     bind path is the one that already warned -- so it must not be the one left
     handing `admin123` to the LAN."""
-    from rc_repro import config, tls as tlsmod  # noqa: F401
+    from houston import config, tls as tlsmod  # noqa: F401
     seen = _capture_create(monkeypatch)
     lc.create_repro(lc.CreateReq(version="8.5.1", name="wide", wait=False,
                                  bind="0.0.0.0"), emit=lc.null_emit)
@@ -13414,7 +13754,7 @@ def test_binding_wide_generates_one_too(monkeypatch):
 def test_two_public_workspaces_do_not_share_a_password(monkeypatch):
     """Per WORKSPACE. One password for every public workspace on the box would make
     a single leak the whole box, which is the property being bought here."""
-    from rc_repro import config, tls as tlsmod  # noqa: F401
+    from houston import config, tls as tlsmod  # noqa: F401
     made = []
     for i, host in enumerate(("c1.example.com", "c2.example.com")):
         seen = _capture_create(monkeypatch)
@@ -13435,10 +13775,10 @@ def test_reachable_beyond_loopback_is_the_whole_decision():
     A local-CA `--https` name resolves to 127.0.0.1. Treating it as exposed would
     rotate the password for the ordinary local case -- the common one -- for nothing.
     """
-    from rc_repro import config, tls as tlsmod  # noqa: F401
+    from houston import config, tls as tlsmod  # noqa: F401
     acme = tlsmod.TlsSpec(mode=tlsmod.MODE_ACME, host="a.example.com", port=443,
                           acme_email="ops@example.com")
-    local = tlsmod.TlsSpec(mode=tlsmod.MODE_LOCAL, host="x.rcrepro.localhost", port=443)
+    local = tlsmod.TlsSpec(mode=tlsmod.MODE_LOCAL, host="x.houston.localhost", port=443)
     assert lc.reachable_beyond_loopback(tlsspec=acme, bind_host="127.0.0.1")
     assert lc.reachable_beyond_loopback(tlsspec=None, bind_host="0.0.0.0")
     assert lc.reachable_beyond_loopback(tlsspec=None, bind_host="192.168.1.5")
@@ -13449,18 +13789,18 @@ def test_reachable_beyond_loopback_is_the_whole_decision():
 
 
 def test_a_record_written_before_the_field_existed_still_works(tmp_path, monkeypatch):
-    """BACK-COMPAT, and it is not cosmetic: a workspace made by an older rc-repro
+    """BACK-COMPAT, and it is not cosmetic: a workspace made by an older houston
     really does run `admin123`, so the fallback is a statement of fact about that
     workspace, not a default."""
-    from rc_repro import config, tls as tlsmod  # noqa: F401
+    from houston import config, tls as tlsmod  # noqa: F401
     import json
 
-    from rc_repro import runner
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from houston import runner
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     ws = runner.workspace("old")
     ws.mkdir(parents=True)
     (ws / "repro.json").write_text(json.dumps({
-        "name": "old", "project": "rcrepro-old", "rc_version": "6.5.3",
+        "name": "old", "project": "houston-old", "rc_version": "6.5.3",
         "rc_image": "registry.rocket.chat/rocketchat/rocket.chat", "mongo_tag": "5.0",
         "mongo_flavor": "bitnami-legacy", "preset": "default",
         "root_url": "http://localhost:3001", "host_port": 3001,
@@ -13475,11 +13815,11 @@ def test_the_detail_payload_carries_the_workspace_password(tmp_path, monkeypatch
     button and the create dialog's result box shows the same dict, so a generated
     password reaches a browser-only operator through this one key -- which is also
     the payload-shape trap `_fake_detail` exists for."""
-    from rc_repro import config, tls as tlsmod  # noqa: F401
-    from rc_repro import runner
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    from houston import config, tls as tlsmod  # noqa: F401
+    from houston import runner
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     meta = runner.Metadata(
-        name="d", project="rcrepro-d", rc_version="8.5.1", rc_image="i",
+        name="d", project="houston-d", rc_version="8.5.1", rc_image="i",
         mongo_tag="8.0", mongo_flavor="official", preset="default",
         root_url="http://localhost:3001", host_port=3001, version_source="live",
         admin_password="s3cret-generated-value")
@@ -13495,15 +13835,15 @@ def test_a_stale_edge_route_is_not_told_to_run_down(tmp_path, monkeypatch):
     workspace is the missing half, so `down` answers "no such workspace" and the
     route stays exactly where it was.
 
-    Found by running `rc-repro doctor` against a home in that state and following
+    Found by running `houston doctor` against a home in that state and following
     its own advice. The route survives, the hostname goes on 502ing, and the name
     cannot be reused. `edge delete` takes the HOSTNAME, which is the part that still
     exists, and takes the certificate and private key with it.
     """
-    from rc_repro.services import doctor as doctorsvc
-    from rc_repro.services import edge as edgesvc
+    from houston.services import doctor as doctorsvc
+    from houston.services import edge as edgesvc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     edgesvc.write(edgesvc.Edge(domain="support.example.com",
                                acme_email="ops@example.com"))
     edgesvc.register("ghost", "ghost.example.com", local=True)
@@ -13525,7 +13865,7 @@ def test_helm_reachable_reports_what_helm_said(monkeypatch):
     """It returns the LINE, not a boolean. "helm cannot reach the cluster" sends a
     reader to the cluster; `x509: certificate signed by unknown authority` sends them
     to the kubeconfig, which is where the problem actually was."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     monkeypatch.setattr(k8s, "which", lambda t: f"/usr/bin/{t}")
     monkeypatch.setattr(k8s, "run", _fake_run({"helm list": (
@@ -13539,7 +13879,7 @@ def test_helm_reachable_reports_what_helm_said(monkeypatch):
 def test_a_missing_helm_is_not_reported_as_an_unreachable_cluster(monkeypatch):
     """There is already a tools check for that, and two rows about one binary is how
     a reader learns to distrust both."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     monkeypatch.setattr(k8s, "which", lambda t: "" if t == "helm" else f"/usr/bin/{t}")
     monkeypatch.setattr(k8s, "run",
@@ -13551,8 +13891,8 @@ def test_a_create_refuses_when_helm_cannot_reach_the_cluster_kubectl_can(monkeyp
                                                                         tmp_path):
     """THE DEFECT, and it cost four minutes each time.
 
-    rc-repro drives kubectl AND helm; they resolve their configuration differently --
-    `helm_env` gives helm rc-repro's HELM_* homes while leaving KUBECONFIG to whoever
+    houston drives kubectl AND helm; they resolve their configuration differently --
+    `helm_env` gives helm houston's HELM_* homes while leaving KUBECONFIG to whoever
     owns the cluster -- and only kubectl was ever asked. Measured on a box whose
     `~/.kube/config` carried the server CA and client certificate of a PREVIOUS
     install of the same cluster: kubectl was entirely happy (`get ns`, `auth whoami`
@@ -13560,7 +13900,7 @@ def test_a_create_refuses_when_helm_cannot_reach_the_cluster_kubectl_can(monkeyp
     create built a namespace, a StatefulSet, a PersistentVolume and an initiated
     replica set, then died at the chart and rolled all of it back:
 
-        create failed — removing namespace rc-repro-k8slive
+        create failed — removing namespace houston-k8slive
         error: helm install failed: Error: kubernetes cluster unreachable: Get
         "https://127.0.0.1:6443/version": tls: failed to verify certificate: x509:
         certificate signed by unknown authority
@@ -13569,9 +13909,9 @@ def test_a_create_refuses_when_helm_cannot_reach_the_cluster_kubectl_can(monkeyp
     second. A refusal here leaves nothing -- the gate this codebase applies to every
     other read-only precondition on this path.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(lc.runner, "docker_available", lambda **_k: True)
     monkeypatch.setattr(lc.runner, "exists", lambda _n: False)
     monkeypatch.setattr(lc, "check_capacity", lambda *a, **k: None)
@@ -13613,9 +13953,9 @@ def test_doctor_fails_when_helm_cannot_reach_a_cluster_kubectl_can(monkeypatch,
     """FAIL, not warn: every Kubernetes create on this box is broken until it is
     fixed, and the tick doctor used to print beside it is what sent a reader looking
     at the chart instead of the kubeconfig."""
-    from rc_repro.services import doctor, k8s
+    from houston.services import doctor, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "which", lambda t: f"/usr/bin/{t}")
     monkeypatch.setattr(k8s, "run", _fake_run({
         "get clusters": (0, f"{k8s.CLUSTER_NAME}\n"),
@@ -13641,14 +13981,14 @@ def test_doctor_fails_when_helm_cannot_reach_a_cluster_kubectl_can(monkeypatch,
 # --- the Kubernetes audit's findings (K-01 .. K-24) -----------------------------
 
 def _cluster_env(monkeypatch, *, reachable, held):
-    """rc-repro's own kind cluster, present, with `held` workspace namespaces."""
-    from rc_repro.services import k8s
+    """houston's own kind cluster, present, with `held` workspace namespaces."""
+    from houston.services import k8s
     calls: list = []
     monkeypatch.setattr(k8s, "run",
                         lambda argv, **kw: calls.append(argv) or _completed(0))
     monkeypatch.setattr(k8s, "which", lambda b: "/usr/bin/kind")
     monkeypatch.setattr(k8s, "clusters", lambda: ([k8s.CLUSTER_NAME], ""))
-    monkeypatch.setattr(k8s, "cluster_context", lambda: "kind-rc-repro-local")
+    monkeypatch.setattr(k8s, "cluster_context", lambda: "kind-houston-local")
     monkeypatch.setattr(k8s, "reachable", lambda ctx, **kw: reachable)
     monkeypatch.setattr(k8s, "workspace_namespaces", lambda ctx=None: held)
     return calls
@@ -13661,14 +14001,14 @@ def test_an_unreachable_cluster_is_never_treated_as_an_empty_one(monkeypatch):
 
     `kind delete` talks to Docker, so unreachability was no obstacle: a paused
     control plane holding live workspaces was deleted by one `prune --yes`, with the
-    prompt calling the cluster empty. A cluster nobody can reach is the case rc-repro
+    prompt calling the cluster empty. A cluster nobody can reach is the case houston
     knows LEAST about, not most.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     # Holds a workspace and cannot be reached: the worst case, and the one that used
     # to delete it.
-    calls = _cluster_env(monkeypatch, reachable=False, held=["rc-repro-victim"])
+    calls = _cluster_env(monkeypatch, reachable=False, held=["houston-victim"])
     assert k8s.cluster_reclaimable() is False
     with pytest.raises(errors.ConflictError, match="not answering"):
         k8s.delete_cluster()
@@ -13688,34 +14028,34 @@ def test_an_unreachable_cluster_is_never_treated_as_an_empty_one(monkeypatch):
     assert [a for a in calls if "delete" in a and "cluster" in a]
 
     # Reachable and occupied: refused, naming what it holds.
-    _cluster_env(monkeypatch, reachable=True, held=["rc-repro-victim"])
+    _cluster_env(monkeypatch, reachable=True, held=["houston-victim"])
     with pytest.raises(errors.ConflictError, match="still holds"):
         k8s.delete_cluster()
 
     # --force is still the way through a wedged one.
-    calls = _cluster_env(monkeypatch, reachable=False, held=["rc-repro-victim"])
+    calls = _cluster_env(monkeypatch, reachable=False, held=["houston-victim"])
     assert k8s.delete_cluster(force=True) is True
 
 
 def test_an_orphaned_namespace_owned_by_someone_else_is_left_alone(monkeypatch,
                                                                    tmp_path):
     """K-02. `prune --orphans` deleted a stray namespace and its PVC without ever
-    reading `rc-repro.io/owner` -- and a stray is by definition what a colleague's
+    reading `houston.io/owner` -- and a stray is by definition what a colleague's
     workspace looks like from here, since their repro.json is on their machine.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(lc, "prunable", lambda: [])
     monkeypatch.setattr(lc.auditsvc, "record", lambda *a, **kw: None)
     monkeypatch.setattr(lc.auditsvc, "actor", lambda: "me")
     monkeypatch.setattr(lc, "_orphan_context", lambda: "c")
     monkeypatch.setattr(lc, "orphan_namespaces",
-                        lambda *a, **kw: ["rc-repro-hers", "rc-repro-mine",
-                                          "rc-repro-unreadable"])
+                        lambda *a, **kw: ["houston-hers", "houston-mine",
+                                          "houston-unreadable"])
     monkeypatch.setattr(lc, "_reclaim_cluster", lambda emit: False)
-    owners = {"rc-repro-hers": "alice", "rc-repro-mine": "me",
-              "rc-repro-unreadable": None}
+    owners = {"houston-hers": "alice", "houston-mine": "me",
+              "houston-unreadable": None}
     monkeypatch.setattr(k8s, "namespace_owner",
                         lambda ns, **kw: owners[ns])
     monkeypatch.setattr(k8s, "wait_namespace_gone", lambda *a, **kw: True)
@@ -13726,14 +14066,14 @@ def test_an_orphaned_namespace_owned_by_someone_else_is_left_alone(monkeypatch,
                         or _completed(0))
 
     out = lc.prune(confirm=True, orphans=True)
-    assert deleted == ["rc-repro-mine"], deleted
-    assert out["orphans"] == ["rc-repro-mine"]
+    assert deleted == ["houston-mine"], deleted
+    assert out["orphans"] == ["houston-mine"]
 
     # --force is the documented way to take them anyway.
     deleted.clear()
     out = lc.prune(confirm=True, orphans=True, force=True)
-    assert sorted(deleted) == ["rc-repro-hers", "rc-repro-mine",
-                               "rc-repro-unreadable"], deleted
+    assert sorted(deleted) == ["houston-hers", "houston-mine",
+                               "houston-unreadable"], deleted
 
 
 def test_an_unreadable_workspace_is_not_offered_for_deletion_as_down(monkeypatch,
@@ -13745,9 +14085,9 @@ def test_an_unreadable_workspace_is_not_offered_for_deletion_as_down(monkeypatch
     """
     from dataclasses import asdict
 
-    from rc_repro.services import k8s, topology
+    from houston.services import k8s, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     m = lc.runner.Metadata(name="k", project="p", rc_version="8.5.1", rc_image="i",
                            mongo_tag="8.0", mongo_flavor="official", preset="default",
                            root_url="u", host_port=3000, version_source="t")
@@ -13770,7 +14110,7 @@ def test_one_unreadable_workspace_does_not_abort_the_whole_prune(monkeypatch,
     """K-04. `prune` caught ConflictError but not the DockerError `delete_namespace`
     raises, so the first unreadable workspace ended the run and every later one was
     silently left -- the reported "prune doesn't work"."""
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(lc.auditsvc, "record", lambda *a, **kw: None)
     monkeypatch.setattr(lc, "orphan_namespaces", lambda *a, **kw: [])
     monkeypatch.setattr(lc, "_reclaim_cluster", lambda emit: False)
@@ -13801,10 +14141,10 @@ def test_a_wedged_workspace_is_not_reported_as_starting_for_ever(monkeypatch):
     """
     import types
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     meta = types.SimpleNamespace(extra={"context": "c"})
-    monkeypatch.setattr(k8s, "workspace_namespaces", lambda ctx=None: ["rc-repro-k"])
+    monkeypatch.setattr(k8s, "workspace_namespaces", lambda ctx=None: ["houston-k"])
     monkeypatch.setattr(k8s, "workload_exists", lambda n, **kw: True)
     monkeypatch.setattr(k8s, "desired_replicas", lambda n, **kw: 1)
     monkeypatch.setattr(k8s, "workspace_ready", lambda n, **kw: False)
@@ -13842,7 +14182,7 @@ def test_the_mongodb_manifest_satisfies_pod_security_restricted():
     """
     import yaml as _yaml
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     sts = [d for d in _yaml.safe_load_all(k8s.mongo_manifest("t", "8.0"))
            if d and d["kind"] == "StatefulSet"][0]
@@ -13864,7 +14204,7 @@ def test_a_monolith_does_not_run_a_nats_cluster_it_never_uses():
     nothing connected to -- three more pods to schedule, wait for and tear down.
     Confirmed by rendering chart 7.0.2: 6 NATS objects without this, 0 with it.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     mono = k8s.values_for(rc_version="8.5.1", rc_image="i", microservices=False,
                           host="rc.example.com")
@@ -13893,7 +14233,7 @@ def test_a_forward_that_only_got_one_address_family_is_not_certified():
     import sys
     import time as _time
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     mine = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
     try:
@@ -13939,7 +14279,7 @@ def test_a_port_change_retires_the_previous_forward(monkeypatch):
     left the old kubectl holding 3260 with nothing able to find it again. It survived
     `down --volumes` for the same reason.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     signalled: list[int] = []
     monkeypatch.setattr(k8s.os, "kill", lambda pid, sig: signalled.append(pid))
@@ -13963,7 +14303,7 @@ def test_the_monitoring_stack_reclaims_its_volume(monkeypatch):
     monitoring one. There was no code path anywhere that could: a clean
     `monitor --off` left `prometheus-...-db-...-0` Bound, 10 Gi, permanently.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     seen: list[list[str]] = []
 
@@ -13987,9 +14327,9 @@ def test_the_operator_is_not_installed_with_telemetry_on(monkeypatch):
     """K-13. The chart sends the cluster UID, the Kubernetes version and deployment
     UIDs to MongoDB on a weekly timer, enabled by default. Nobody using a support
     reproduction tool opted into third-party analytics about the cluster they are
-    debugging, and on a customer's adopted cluster rc-repro would be what started it.
+    debugging, and on a customer's adopted cluster houston would be what started it.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     seen: list[list[str]] = []
     monkeypatch.setattr(k8s, "run",
@@ -14016,10 +14356,10 @@ def test_a_version_the_index_has_never_heard_of_is_named_before_the_build(
     Measured on EC2 against the real index. A warning rather than a refusal: the
     shipped map can legitimately pair a version the live index has not indexed yet.
     """
-    from rc_repro import versions
-    from rc_repro.services import lifecycle as lcsvc
+    from houston import versions
+    from houston.services import lifecycle as lcsvc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     said: list[str] = []
     monkeypatch.setattr(lcsvc.runner, "up", lambda *a, **k: 0)
     monkeypatch.setattr(lcsvc.runner, "down", lambda *a, **k: 0)
@@ -14068,7 +14408,7 @@ def test_reach_tells_a_refused_cluster_apart_from_a_dead_one(monkeypatch):
     them is matching none of them half the time.
     """
     import types
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     cases = [
         ("error: You must be logged in to the server (Unauthorized)", k8s.REACH_DENIED),
@@ -14102,11 +14442,11 @@ def test_a_cluster_that_refuses_is_not_reported_as_one_that_is_down(monkeypatch)
     Measured, three times in one day of live testing against a real EKS cluster:
     `cluster status` told an engineer to check an ACTIVE cluster that was merely
     refusing their credential; `cluster delete` said an ACTIVE cluster "is not
-    answering" when the real cause was a fresh RC_REPRO_HOME with no kubeconfig entry
+    answering" when the real cause was a fresh HOUSTON_HOME with no kubeconfig entry
     for it; and `plan_cluster` offered three guesses at a cause it had not read.
     """
-    from rc_repro.services import cluster as clustersvc
-    from rc_repro.services import eks, k8s
+    from houston.services import cluster as clustersvc
+    from houston.services import eks, k8s
 
     ARN = "arn:aws:eks:us-east-1:1:cluster/support"
     # The kubeconfig is STATED, not read: this box's real one is whatever the last
@@ -14152,19 +14492,19 @@ def test_a_cluster_that_refuses_is_not_reported_as_one_that_is_down(monkeypatch)
 # --- the command that looks where you are not already looking ------------------------
 
 def test_a_cluster_in_a_region_nobody_named_is_still_found(monkeypatch):
-    """Nothing else in rc-repro can answer "what am I paying for".
+    """Nothing else in houston can answer "what am I paying for".
 
     `cluster status` needs a context you already have and `doctor` reads a local
-    pointer a fresh RC_REPRO_HOME has not got, so a cluster in a region you have
+    pointer a fresh HOUSTON_HOME has not got, so a cluster in a region you have
     stopped thinking about is invisible to the entire tool. MEASURED: a cluster
-    rc-repro built sat in eu-west-1 for 16.8 hours and $2.47 while that day's checks
+    houston built sat in eu-west-1 for 16.8 hours and $2.47 while that day's checks
     swept only us-east-1, and it was found by an unrelated `aws` call.
 
     The ownership tag needed to find it had existed since the first cloud commit. What
     was missing was anything that went looking.
     """
     import types
-    from rc_repro.services import eks, k8s
+    from houston.services import eks, k8s
 
     monkeypatch.setattr(k8s, "which", lambda t: "/usr/bin/aws")
 
@@ -14204,7 +14544,7 @@ def test_a_cluster_in_a_region_nobody_named_is_still_found(monkeypatch):
 def test_a_cluster_that_is_there_and_cannot_be_described_is_never_silently_dropped(monkeypatch):
     """`list-clusters` named it, so it EXISTS. Failing to describe it is not absence."""
     import types
-    from rc_repro.services import eks, k8s
+    from houston.services import eks, k8s
 
     monkeypatch.setattr(k8s, "which", lambda t: "/usr/bin/aws")
     monkeypatch.setattr(k8s, "run", lambda argv, **kw: types.SimpleNamespace(
@@ -14236,10 +14576,10 @@ def test_a_saved_cluster_never_changes_what_a_bare_up_means_but_now_says_so(monk
     Neither is a refusal: the first is right and the second is a thing people want.
     The fix is that both are now said out loud.
     """
-    from rc_repro import config
-    from rc_repro.services import lifecycle as lc
+    from houston import config
+    from houston.services import lifecycle as lc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     EKS = "arn:aws:eks:us-east-1:1:cluster/support"
 
     def said(saved, typed, **kw):
@@ -14283,16 +14623,16 @@ def test_every_permissions_document_is_shipped_and_every_shipped_one_is_listed()
     """A registry and a directory that disagree is how a document goes missing.
 
     These are pasted into `aws iam create-policy` and `kubectl apply` by somebody
-    setting rc-repro up for the first time, so an entry naming a file that is not
+    setting houston up for the first time, so an entry naming a file that is not
     there fails at the worst possible moment -- and a file nobody lists is one nobody
     knows to use.
     """
     from importlib import resources
 
-    from rc_repro.services import eks
+    from houston.services import eks
 
     shipped = {p.name for p in
-               resources.files("rc_repro").joinpath("data", "iam").iterdir()
+               resources.files("houston").joinpath("data", "iam").iterdir()
                if p.is_file()}
     listed = {fname for fname, _ in eks.IAM_DOCUMENTS.values()}
     assert listed == shipped, (
@@ -14306,14 +14646,14 @@ def test_the_permissions_documents_ship_in_a_wheel():
     """package-data is a glob somebody has to remember to widen.
 
     Without it the files are in the repo, every test passes, and they are simply
-    absent from an installed rc-repro -- which is the one place they matter, because
+    absent from an installed houston -- which is the one place they matter, because
     the person running `cluster iam-policy` is setting up a machine that is not this
     one.
     """
     import re
     from pathlib import Path
 
-    from rc_repro.services import eks
+    from houston.services import eks
 
     text = Path(eks.__file__).parents[2].joinpath("pyproject.toml").read_text()
     globs = re.findall(r'"(data/[^"]+)"', text)
@@ -14339,7 +14679,7 @@ def test_the_two_permissions_nobody_would_guess_are_still_in_the_policy():
     """
     import json
 
-    from rc_repro.services import eks
+    from houston.services import eks
 
     doc = json.dumps(json.loads(eks.iam_document("operator")))
     assert "ec2:RunInstances" in doc, \
@@ -14351,14 +14691,14 @@ def test_the_two_permissions_nobody_would_guess_are_still_in_the_policy():
 def test_the_engineer_rbac_grants_the_cluster_scoped_things_aws_own_policy_omits():
     """`AmazonEKSAdminPolicy` is admin INSIDE a namespace and stops exactly there.
 
-    rc-repro crosses that line on every `up`: a namespace per workspace is the whole
+    houston crosses that line on every `up`: a namespace per workspace is the whole
     model, and a namespace is cluster-scoped. MEASURED against a live cluster -- with
     only the AWS managed policy, `up` failed twice, first unable to read StorageClasses
     and then unable to create the namespace at all.
     """
     import yaml
 
-    from rc_repro.services import eks
+    from houston.services import eks
 
     docs = [d for d in yaml.safe_load_all(eks.iam_document("rbac")) if d]
     role = next(d for d in docs if d["kind"] == "ClusterRole")
@@ -14382,7 +14722,7 @@ def test_the_engineer_rbac_grants_the_cluster_scoped_things_aws_own_policy_omits
             continue
         assert set(rule["verbs"]) <= {"get", "list", "watch"}, \
             f"{rule['resources']} grants more than a read: {rule['verbs']}"
-    assert binding["subjects"][0]["name"] == "rc-repro-engineers", \
+    assert binding["subjects"][0]["name"] == "houston-engineers", \
         "the binding must name the group the EKS access entry puts people in"
 
 
@@ -14394,20 +14734,20 @@ def test_the_cheap_cluster_list_probes_nothing_and_says_which_cost_money(monkeyp
     the context NAME already know, and the front end fills each card in from its own
     `status()` request -- one slow card instead of a slow page.
     """
-    from rc_repro import config
-    from rc_repro.services import cluster as clustersvc
-    from rc_repro.services import k8s
+    from houston import config
+    from houston.services import cluster as clustersvc
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     ARN = "arn:aws:eks:us-east-1:1:cluster/support"
-    monkeypatch.setattr(k8s, "contexts", lambda: ([ARN, "default", "kind-rc-repro-local"], ""))
-    monkeypatch.setattr(k8s, "is_ours", lambda c: c == "kind-rc-repro-local")
+    monkeypatch.setattr(k8s, "contexts", lambda: ([ARN, "default", "kind-houston-local"], ""))
+    monkeypatch.setattr(k8s, "is_ours", lambda c: c == "kind-houston-local")
     # Anything that would touch a cluster is made to explode: this function must not
     # reach one, and a test that merely asserted it was fast would not notice.
     #
     # THE ONE EXCEPTION IS NOT REACHED HERE. `known_contexts` probes our OWN context
     # when `kind` is missing, to tell a cluster that is gone from one that is merely
-    # unmanageable -- so this states that rc-repro built nothing, which is the case
+    # unmanageable -- so this states that houston built nothing, which is the case
     # every adopted cluster is in and the one this test is about. The probe itself has
     # its own test below.
     monkeypatch.setattr(k8s, "cluster_context", lambda: "")
@@ -14417,23 +14757,23 @@ def test_the_cheap_cluster_list_probes_nothing_and_says_which_cost_money(monkeyp
 
     out = clustersvc.known_contexts()
     rows = {r["context"]: r for r in out["contexts"]}
-    assert set(rows) == {ARN, "default", "kind-rc-repro-local"}
+    assert set(rows) == {ARN, "default", "kind-houston-local"}
     assert rows[ARN]["billable"] is True and rows[ARN]["provider"] == "eks"
     assert rows[ARN]["is_default"] is True
     assert rows["default"]["billable"] is False
     assert rows["default"]["provider"] == "", \
         "kind and k3s look alike in a context name — guessing would put a distribution " \
         "on a card that status() then contradicts"
-    assert rows["kind-rc-repro-local"]["ours"] is True
+    assert rows["kind-houston-local"]["ours"] is True
 
 
 def test_a_kubeconfig_that_could_not_be_listed_says_so_rather_than_showing_nothing(monkeypatch,
                                                                                    tmp_path):
     """"I could not read the kubeconfig" is not "there are no clusters"."""
-    from rc_repro.services import cluster as clustersvc
-    from rc_repro.services import k8s
+    from houston.services import cluster as clustersvc
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "contexts", lambda: ([], "permission denied"))
     out = clustersvc.known_contexts()
     assert out["contexts"] == []
@@ -14441,7 +14781,7 @@ def test_a_kubeconfig_that_could_not_be_listed_says_so_rather_than_showing_nothi
         "the caller has to be able to say the page may be missing clusters"
 
 
-def test_a_cluster_rc_repro_can_no_longer_remove_says_so(monkeypatch, tmp_path):
+def test_a_cluster_houston_can_no_longer_remove_says_so(monkeypatch, tmp_path):
     """Uninstalling the kind BINARY does not remove the cluster it built.
 
     The containers keep running, the API server keeps answering, and 675 MiB stays
@@ -14455,11 +14795,11 @@ def test_a_cluster_rc_repro_can_no_longer_remove_says_so(monkeypatch, tmp_path):
     not understand why the ledger still listed the cluster -- it was right to, and it
     could not say the one thing that had actually changed.
     """
-    from rc_repro.services import cluster as clustersvc
-    from rc_repro.services import k8s
+    from houston.services import cluster as clustersvc
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    OURS = "kind-rc-repro-local"
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    OURS = "kind-houston-local"
     monkeypatch.setattr(k8s, "contexts", lambda: ([OURS], ""))
     monkeypatch.setattr(k8s, "is_ours", lambda c: True)
     monkeypatch.setattr(k8s, "ensure_kubeconfig", lambda plan, emit=None: OURS)
@@ -14483,7 +14823,7 @@ def test_a_cluster_rc_repro_can_no_longer_remove_says_so(monkeypatch, tmp_path):
     assert fine["manageable"] is True and fine["unmanageable_why"] == "", \
         "with kind installed there is nothing to warn about"
 
-    # A cluster that is NOT rc-repro's was never rc-repro's to remove, so kind being
+    # A cluster that is NOT houston's was never houston's to remove, so kind being
     # absent says nothing about it.
     monkeypatch.setattr(k8s, "is_ours", lambda c: False)
     monkeypatch.setattr(k8s, "which", lambda t: "" if t == "kind" else "/usr/bin/" + t)
@@ -14496,15 +14836,15 @@ def test_the_eks_guide_ships_and_its_commands_are_real():
 
     Two ways this rots. It can fail to ship -- package-data is a glob somebody has to
     remember to widen, and without it the file is in the repository, every test passes,
-    and it is simply absent from an installed rc-repro, which is the one place it
+    and it is simply absent from an installed houston, which is the one place it
     matters. And it can drift from the CLI: a walkthrough is only useful if every
     command in it still exists, and nothing else would notice a renamed one.
     """
     import re
     from pathlib import Path
 
-    from rc_repro import cli
-    from rc_repro.services import eks
+    from houston import cli
+    from houston.services import eks
 
     body = eks.guide()
     assert eks.guide_path() is not None
@@ -14514,25 +14854,25 @@ def test_the_eks_guide_ships_and_its_commands_are_real():
     assert "data/docs/*.md" in text, \
         "the guide would not ship: pyproject package-data has no data/docs/*.md glob"
 
-    # Every `rc-repro <command>` the guide tells somebody to RUN has to be one --
-    # scanned from code only. The prose says "rc-repro built this cluster" and
-    # "rc-repro never reaches it", and a scan of the whole text reads those as
+    # Every `houston <command>` the guide tells somebody to RUN has to be one --
+    # scanned from code only. The prose says "houston built this cluster" and
+    # "houston never reaches it", and a scan of the whole text reads those as
     # commands named `built` and `never`.
     known = {c.name or (c.callback and c.callback.__name__) for c in cli.app.registered_commands}
     known |= {g.name for g in getattr(cli.app, "registered_groups", [])}
     known.discard(None)
     code = "\n".join(re.findall(r'```[a-z]*\n(.*?)```', body, re.S))
     code += "\n" + "\n".join(re.findall(r'`([^`\n]+)`', body))
-    used = set(re.findall(r'\brc-repro ([a-z][a-z-]*)', code))
+    used = set(re.findall(r'\bhouston ([a-z][a-z-]*)', code))
     unknown = sorted(used - known)
-    # AND THE ACTION AFTER IT. `rc-repro cluster prepair` passes the check above --
+    # AND THE ACTION AFTER IT. `houston cluster prepair` passes the check above --
     # `cluster` is a real command -- so a renamed action would sail through the very
     # test written to stop the guide rotting. Measured: it did.
-    actions = set(re.findall(r'\brc-repro cluster ([a-z][a-z-]*)', code))
+    actions = set(re.findall(r'\bhouston cluster ([a-z][a-z-]*)', code))
     unknown += sorted(actions - set(cli.CLUSTER_ACTIONS) - {"--path", "--json"})
     assert not unknown, (
         f"the guide names commands that do not exist: {unknown}. "
-        f"rc-repro has: {sorted(known)}")
+        f"houston has: {sorted(known)}")
 
 
 def test_the_readme_points_at_the_guide_that_actually_exists():
@@ -14544,37 +14884,37 @@ def test_the_readme_points_at_the_guide_that_actually_exists():
     """
     from pathlib import Path
 
-    from rc_repro.services import eks
+    from houston.services import eks
 
     root = Path(eks.__file__).parents[2]
     readme = root.joinpath("README.md").read_text()
-    assert "rc_repro/data/docs/eks.md" in readme, \
+    assert "houston/data/docs/eks.md" in readme, \
         "the README must say where the EKS walkthrough went"
-    assert root.joinpath("rc_repro/data/docs/eks.md").is_file(), \
+    assert root.joinpath("houston/data/docs/eks.md").is_file(), \
         "and the path it names has to be there"
-    assert "rc-repro cluster guide" in readme
+    assert "houston cluster guide" in readme
 
 
 def test_a_cluster_of_ours_that_is_gone_stops_being_listed_but_a_running_one_does_not(
         monkeypatch, tmp_path):
     """Three cases, and only the middle one is new.
 
-    rc-repro writes its OWN kubeconfig when it builds its own cluster and never
-    removes that entry. So a cluster deleted outside rc-repro -- or one whose `kind`
+    houston writes its OWN kubeconfig when it builds its own cluster and never
+    removes that entry. So a cluster deleted outside houston -- or one whose `kind`
     was uninstalled and whose container was then removed by hand -- left a context for
     something that does not exist, on every screen, for ever, unusable and impossible
     to clear. Reported from a real machine.
 
     Dropping it whenever `kind` is missing would be the wrong fix and `plan_cluster`
     says why: doing that once made a RUNNING cluster invisible, "containers holding
-    memory that nothing in rc-repro could see or remove". So the question is whether
+    memory that nothing in houston could see or remove". So the question is whether
     the cluster is there, not whether the binary is.
     """
-    from rc_repro.services import cluster as clustersvc
-    from rc_repro.services import k8s
+    from houston.services import cluster as clustersvc
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    OURS = "kind-rc-repro-local"
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    OURS = "kind-houston-local"
     monkeypatch.setattr(k8s, "contexts", lambda: ([OURS, "default"], ""))
     monkeypatch.setattr(k8s, "cluster_context", lambda: OURS)
     monkeypatch.setattr(k8s, "is_ours", lambda c: c == OURS)
@@ -14586,7 +14926,7 @@ def test_a_cluster_of_ours_that_is_gone_stops_being_listed_but_a_running_one_doe
             status=k8s.REACH_OK if answers else k8s.REACH_DOWN))
         return [r["context"] for r in clustersvc.known_contexts()["contexts"]]
 
-    # 1. kind installed: listed whatever it is doing -- rc-repro can rebuild it.
+    # 1. kind installed: listed whatever it is doing -- houston can rebuild it.
     assert OURS in listed(kind_installed=True, answers=False)
 
     # 2. kind gone but the cluster is UP: still listed. It is real, it holds memory,
@@ -14603,14 +14943,14 @@ def test_a_cluster_of_ours_that_is_gone_stops_being_listed_but_a_running_one_doe
 def test_the_phantom_rule_never_touches_a_cluster_that_is_not_ours(monkeypatch, tmp_path):
     """An adopted k3s or EKS context that is down is somebody else's business.
 
-    rc-repro did not write those entries and removing them from a report would be
+    houston did not write those entries and removing them from a report would be
     hiding the operator's own kubeconfig from them -- and an EKS cluster that is not
     answering is exactly the one they most need to see, because it is still billing.
     """
-    from rc_repro.services import cluster as clustersvc
-    from rc_repro.services import k8s
+    from houston.services import cluster as clustersvc
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     ARN = "arn:aws:eks:us-east-1:1:cluster/support"
     monkeypatch.setattr(k8s, "contexts", lambda: ([ARN, "default"], ""))
     monkeypatch.setattr(k8s, "cluster_context", lambda: "")   # we built nothing
@@ -14627,7 +14967,7 @@ def test_every_shipped_data_file_is_actually_in_the_repository():
     """Present on this machine is not the same as shipped.
 
     `.gitignore` had `docs/` unanchored, which matches a directory of that name at ANY
-    depth -- so `rc_repro/data/docs/` was silently excluded. The guide existed here,
+    depth -- so `houston/data/docs/` was silently excluded. The guide existed here,
     the package-data glob covered it, the test that checks the glob passed, and it
     would have been absent from every clone and from any wheel built from one. Nothing
     in the suite could see the difference, because the suite runs against the working
@@ -14638,13 +14978,13 @@ def test_every_shipped_data_file_is_actually_in_the_repository():
     import subprocess
     from pathlib import Path
 
-    from rc_repro.services import eks
+    from houston.services import eks
 
     root = Path(eks.__file__).parents[2]
     if not root.joinpath(".git").exists():
         pytest.skip("not a git checkout")
 
-    data = root / "rc_repro" / "data"
+    data = root / "houston" / "data"
     files = [p for p in data.rglob("*") if p.is_file()]
     assert files, "no package data found at all — the layout changed"
     res = subprocess.run(
@@ -14665,7 +15005,7 @@ def test_a_cluster_can_be_named_by_the_name_people_actually_call_it(monkeypatch)
     pasting the wrong one is the failure this whole feature guards against everywhere
     else.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     A = "arn:aws:eks:us-east-1:1:cluster/support"
     B = "arn:aws:eks:eu-west-1:1:cluster/perf"
@@ -14689,7 +15029,7 @@ def test_the_same_cluster_name_in_two_places_refuses_instead_of_picking_one(monk
     refuses and names both, the way every other ambiguous-destructive decision here
     does.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     A = "arn:aws:eks:us-east-1:1:cluster/support"
     B = "arn:aws:eks:eu-west-1:1:cluster/support"
@@ -14707,7 +15047,7 @@ def test_the_same_cluster_name_in_two_places_refuses_instead_of_picking_one(monk
 
 def test_an_unreadable_kubeconfig_still_does_not_turn_a_real_name_into_a_typo(monkeypatch):
     """The rule the short-name path must not break: "I could not ask" is not "absent"."""
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     monkeypatch.setattr(k8s, "contexts", lambda: ([], "permission denied"))
     resolved, why = k8s.assert_context_known("support")
@@ -14718,7 +15058,7 @@ def test_an_unreadable_kubeconfig_still_does_not_turn_a_real_name_into_a_typo(mo
 def test_no_hint_tells_somebody_to_pass_a_runtime_a_context_already_implies():
     """These are the lines people copy out of the terminal.
 
-    `cluster create` finished by printing `rc-repro up --runtime kubernetes --context
+    `cluster create` finished by printing `houston up --runtime kubernetes --context
     arn:aws:eks:us-east-1:533674205877:cluster/rc-final --version 8.5.1` -- the two
     most awkward forms of the command at once, from the one place a first-timer is
     most likely to copy. `--context` has implied Kubernetes since `infer_runtime`
@@ -14727,7 +15067,7 @@ def test_no_hint_tells_somebody_to_pass_a_runtime_a_context_already_implies():
     """
     from pathlib import Path
 
-    from rc_repro import cli
+    from houston import cli
 
     text = Path(cli.__file__).read_text(encoding="utf-8")
     # Only strings that are printed, and only where both appear together.
@@ -14758,16 +15098,16 @@ def test_a_managed_clusters_name_is_not_routed_through_this_machines_edge(monkey
     workspace's name resolves to the cluster's own load balancer, so no packet for it
     ever arrives on this machine; the edge could not serve it however it were set up.
 
-    MEASURED against a real EKS cluster: `up --domain rc-repro-test-1.kestron.org`
+    MEASURED against a real EKS cluster: `up --domain houston-test-1.kestron.org`
     announced "the http-01 challenge arrives on the edge's :80", went to start an edge
     it had no use for, and refused the entire create because a different
-    RC_REPRO_HOME on the box already owned one. A shared support server -- several
+    HOUSTON_HOME on the box already owned one. A shared support server -- several
     people, one machine, one cluster in AWS -- is exactly the arrangement this feature
     exists for, and it could not create a workspace there at all.
     """
-    from rc_repro import tls as tlsmod
-    from rc_repro.services import k8s
-    from rc_repro.services import lifecycle as lc
+    from houston import tls as tlsmod
+    from houston.services import k8s
+    from houston.services import lifecycle as lc
 
     HOST = "t1.rc.example.com"
 
@@ -14830,10 +15170,10 @@ def test_one_cluster_with_two_context_names_is_one_row_and_one_bill(monkeypatch,
     says which account and which region -- the two facts the eksctl alias omits and the
     two that matter when acting on the wrong cluster.
     """
-    from rc_repro.services import cluster as clustersvc
-    from rc_repro.services import k8s
+    from houston.services import cluster as clustersvc
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     ARN = "arn:aws:eks:us-east-1:1:cluster/support"
     ALIAS = "iam-root-account@support.us-east-1.eksctl.io"
     SERVER = "https://ABC123.gr7.us-east-1.eks.amazonaws.com"
@@ -14874,12 +15214,12 @@ def test_a_cluster_aws_says_is_gone_is_reported_gone_but_an_unreachable_one_is_n
     cloud cluster on a four-second poll is what made the page slow enough to be
     reported. Its own test holds that line; this one holds the behaviour.
     """
-    from rc_repro import config
-    from rc_repro.services import cluster as clustersvc
-    from rc_repro.services import eks as ekssvc
-    from rc_repro.services import k8s
+    from houston import config
+    from houston.services import cluster as clustersvc
+    from houston.services import eks as ekssvc
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     ARN = "arn:aws:eks:us-east-1:1:cluster/support"
     cfg = config.load_config(); cfg[config.KUBE_CONTEXT_KEY] = ARN; config.save_config(cfg)
     monkeypatch.setattr(k8s, "assert_context_known", lambda c: (c, ""))
@@ -14916,16 +15256,16 @@ def test_forgetting_a_context_also_clears_a_pointer_left_at_it(monkeypatch, tmp_
     MEASURED on this box after a real `cluster delete`: `contexts()` answered
     ['default'] and `active_context()` answered the deleted cluster's ARN. Everything
     that asks "which cluster is kubectl on" got a name with nothing behind it, and
-    rc-repro reported "pointed at <arn>, which is not answering" -- about a cluster
+    houston reported "pointed at <arn>, which is not answering" -- about a cluster
     that had been deleted, whose entry had been removed, and which the context list
     correctly no longer showed. Six unrelated Kubernetes tests failed on it.
 
     A pointer at nothing is the worst-behaved litter of the three, because it is the
     one thing a context LIST cannot show you.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     ARN = "arn:aws:eks:us-east-1:1:cluster/support"
     ran: list[list[str]] = []
 
@@ -14949,9 +15289,9 @@ def test_forgetting_a_context_leaves_a_pointer_at_a_different_one_alone(monkeypa
     an unconditional one would answer "no cluster" on a box whose kubectl was pointed
     at a perfectly good cluster that simply was not this one.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     ran: list[list[str]] = []
 
     def fake_run(cmd, **kw):
@@ -14968,7 +15308,7 @@ def test_forgetting_a_context_leaves_a_pointer_at_a_different_one_alone(monkeypa
 
 
 def test_a_step_that_is_not_the_end_does_not_announce_done_at_a_hundred_percent():
-    """`wait_and_finalize` is the whole of `rc-repro ready` and one step of `up`.
+    """`wait_and_finalize` is the whole of `houston ready` and one step of `up`.
 
     MEASURED on a real EKS create: `done: ready` at 100% at 414s, then 46 more seconds
     of seeding, then a second `done`. In the GUI that is a progress bar that fills up
@@ -14980,7 +15320,7 @@ def test_a_step_that_is_not_the_end_does_not_announce_done_at_a_hundred_percent(
     """
     import inspect
 
-    from rc_repro.services import lifecycle as lcmod
+    from houston.services import lifecycle as lcmod
 
     said: list = []
     lcmod._say_ready(lambda e: said.append((e.phase, e.pct)), False)
@@ -14993,7 +15333,7 @@ def test_a_step_that_is_not_the_end_does_not_announce_done_at_a_hundred_percent(
     assert said == [("done", 100.0)], said
 
     # AND `final` DEFAULTS TO THE END, because the caller that forgets to think about
-    # it is `rc-repro ready`, for which the default is right.
+    # it is `houston ready`, for which the default is right.
     sig = inspect.signature(lcmod.wait_and_finalize)
     assert sig.parameters["final"].default is True
 
@@ -15052,7 +15392,7 @@ def test_the_longest_step_of_a_create_says_what_it_is_waiting_for(monkeypatch):
     """
     import time as _time
 
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     monkeypatch.setattr(k8s, "INSTALL_QUIET_S", 1)
     monkeypatch.setattr(k8s, "INSTALL_REPORT_EVERY_S", 1)
@@ -15077,7 +15417,7 @@ def test_a_fast_install_does_not_narrate_a_step_that_is_already_over(monkeypatch
     """The quiet window is the point: a warm cluster installs in seconds and a line
     saying "still installing" about a step that has finished is noise, not progress.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     monkeypatch.setattr(k8s, "clear_pending_release", lambda *a, **k: None)
     monkeypatch.setattr(k8s, "_pods_waiting",
@@ -15094,20 +15434,20 @@ def test_an_empty_cloud_record_beside_working_credentials_says_so_rather_than_no
         monkeypatch, tmp_path):
     """Silence from the local pointer means one of two very different things.
 
-    OBSERVED during an audit of this branch: an EKS cluster tagged `rc-repro`, ACTIVE,
-    expiring the next day, while the owner's `~/.rc-repro/clusters/` did not exist at
+    OBSERVED during an audit of this branch: an EKS cluster tagged `houston`, ACTIVE,
+    expiring the next day, while the owner's `~/.houston/clusters/` did not exist at
     all -- so `doctor` on that box said nothing about it. The pointer is deliberately
     "best effort, never load-bearing", and CLAUDE.md tells anyone writing a script to
-    `export RC_REPRO_HOME=$(mktemp -d)`, so following this project's own instructions
+    `export HOUSTON_HOME=$(mktemp -d)`, so following this project's own instructions
     produces a create whose reminder is discarded.
 
     `doctor` is the command people run out of habit and `cluster list` is the one that
     actually asks AWS. Nothing routed the first to the second.
     """
-    from rc_repro.services import doctor as doctorsvc
-    from rc_repro.services import eks, k8s
+    from houston.services import doctor as doctorsvc
+    from houston.services import eks, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "which", lambda t: "/usr/bin/" + t)
     monkeypatch.setattr(k8s, "preflight", lambda context="": k8s.Preflight(tools={
         "kubectl": k8s.Tool(name="kubectl", path="/k", version=(1, 36)),
@@ -15156,15 +15496,15 @@ def test_a_mongodb_operator_somebody_else_installed_is_adopted_not_installed_ove
     cert-manager is keyed on `certificates.cert-manager.io` and ingress on any existing
     IngressClass, so both ADOPT a foreign install -- `cert_manager_installed`'s docstring
     states the reason: "the release can be named anything". The MongoDB operator asked
-    instead whether rc-repro's OWN release existed in rc-repro's OWN namespace, so a
+    instead whether houston's OWN release existed in houston's OWN namespace, so a
     platform team's operator was invisible and `helm upgrade --install` ran regardless.
 
     On a shared cluster that is a second cluster-scoped controller with
     `watchNamespace=*` reconciling `MongoDBCommunity` resources belonging to workloads
-    rc-repro knows nothing about, and a chart-version difference reaching cluster-scoped
+    houston knows nothing about, and a chart-version difference reaching cluster-scoped
     CRDs another install owns.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     ran: list = []
     monkeypatch.setattr(k8s, "run", lambda argv, **kw: ran.append(list(argv)) or
@@ -15174,7 +15514,7 @@ def test_a_mongodb_operator_somebody_else_installed_is_adopted_not_installed_ove
                         lambda ctx: k8s.Answer(k8s.PRESENT,
                                                _crd("mongodb-operator", "platform")))
     said: list = []
-    k8s.ensure_operator(context="c", namespace="rc-repro-t1",
+    k8s.ensure_operator(context="c", namespace="houston-t1",
                         emit=lambda e: said.append(e.message))
     assert not [a for a in ran if a[:2] == ["helm", "upgrade"]], \
         "it installed a second cluster-scoped operator over somebody else's"
@@ -15184,17 +15524,17 @@ def test_a_mongodb_operator_somebody_else_installed_is_adopted_not_installed_ove
     # ordinary case -- an empty cluster -- silently stops working.
     ran.clear()
     monkeypatch.setattr(k8s, "operator_presence", lambda ctx: k8s.Answer(k8s.ABSENT))
-    k8s.ensure_operator(context="c", namespace="rc-repro-t1")
+    k8s.ensure_operator(context="c", namespace="houston-t1")
     assert [a for a in ran if a[:2] == ["helm", "upgrade"]], ran
 
     # AND A CRD THAT IS OUR OWN RELEASE IS UPGRADED, not adopted -- that is every
-    # workspace after the first on rc-repro's own cluster.
+    # workspace after the first on houston's own cluster.
     ran.clear()
     monkeypatch.setattr(k8s, "operator_presence",
                         lambda ctx: k8s.Answer(k8s.PRESENT,
                                                _crd(k8s.OPERATOR_RELEASE,
                                                     k8s.OPERATOR_NAMESPACE)))
-    k8s.ensure_operator(context="c", namespace="rc-repro-t1")
+    k8s.ensure_operator(context="c", namespace="houston-t1")
     assert [a for a in ran if a[:2] == ["helm", "upgrade"]], ran
 
 
@@ -15207,8 +15547,8 @@ def test_an_unreadable_crd_refuses_rather_than_installing_cluster_scoped_resourc
     listed and say it could not be read. Here the safe response is a refusal, because
     guessing "no operator" reaches other people's databases.
     """
-    from rc_repro import errors
-    from rc_repro.services import k8s
+    from houston import errors
+    from houston.services import k8s
 
     ran: list = []
     monkeypatch.setattr(k8s, "run", lambda argv, **kw: ran.append(list(argv)) or
@@ -15217,7 +15557,7 @@ def test_an_unreadable_crd_refuses_rather_than_installing_cluster_scoped_resourc
         k8s.REFUSED, None,
         subprocess.CompletedProcess([], 1, "", "forbidden: crds")))
     with pytest.raises(errors.PreflightError) as exc:
-        k8s.ensure_operator(context="c", namespace="rc-repro-t1")
+        k8s.ensure_operator(context="c", namespace="houston-t1")
     assert "forbidden" in str(exc.value), "the refusal must say what the cluster said"
     assert "customresourcedefinitions" in str(exc.value), \
         "and name the permission that would fix it"
@@ -15234,8 +15574,8 @@ def test_an_operator_that_does_not_watch_this_namespace_is_refused_not_waited_on
     conservative action, and refusing on ignorance would break every cluster whose
     operator simply could not be introspected.
     """
-    from rc_repro import errors
-    from rc_repro.services import k8s
+    from houston import errors
+    from houston.services import k8s
 
     ran: list = []
     monkeypatch.setattr(k8s, "run", lambda argv, **kw: ran.append(list(argv)) or
@@ -15244,14 +15584,14 @@ def test_an_operator_that_does_not_watch_this_namespace_is_refused_not_waited_on
                         lambda ctx: k8s.Answer(k8s.PRESENT, _crd("theirs", "platform")))
     monkeypatch.setattr(k8s, "operator_watch_scope", lambda ctx: ("platform,apps", ""))
     with pytest.raises(errors.PreflightError) as exc:
-        k8s.ensure_operator(context="c", namespace="rc-repro-t1")
-    assert "rc-repro-t1" in str(exc.value) and "platform,apps" in str(exc.value)
+        k8s.ensure_operator(context="c", namespace="houston-t1")
+    assert "houston-t1" in str(exc.value) and "platform,apps" in str(exc.value)
     assert not ran
 
     # Unreadable scope -> adopt anyway, and say the scope was not read.
     monkeypatch.setattr(k8s, "operator_watch_scope", lambda ctx: ("", "RBAC denied"))
     said: list = []
-    k8s.ensure_operator(context="c", namespace="rc-repro-t1",
+    k8s.ensure_operator(context="c", namespace="houston-t1",
                         emit=lambda e: said.append(e.message))
     assert any("adopting" in m and "RBAC denied" in m for m in said), said
     assert not [a for a in ran if a[:2] == ["helm", "upgrade"]], ran
@@ -15261,9 +15601,9 @@ def test_the_operator_scope_reader_tells_own_namespace_from_unreadable(monkeypat
     """`WATCH_NAMESPACE` unset via a fieldRef is the chart's single-namespace default.
 
     That is a real answer -- own namespace only -- and reporting it as unreadable would
-    make rc-repro adopt an operator it has just been told does not cover it.
+    make houston adopt an operator it has just been told does not cover it.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     dep = {"metadata": {"namespace": "platform"},
            "spec": {"template": {"spec": {"containers": [
@@ -15278,9 +15618,9 @@ def test_the_operator_scope_reader_tells_own_namespace_from_unreadable(monkeypat
     scope, unreadable = k8s.operator_watch_scope("c")
     assert scope == "" and unreadable, "a refusal is not an empty scope"
 
-    assert k8s.operator_watches("*", "rc-repro-t1")
-    assert k8s.operator_watches("a,rc-repro-t1", "rc-repro-t1")
-    assert not k8s.operator_watches("a,b", "rc-repro-t1")
+    assert k8s.operator_watches("*", "houston-t1")
+    assert k8s.operator_watches("a,houston-t1", "houston-t1")
+    assert not k8s.operator_watches("a,b", "houston-t1")
 
 
 def test_a_load_balancer_with_both_an_ip_and_a_hostname_yields_one_of_them(monkeypatch):
@@ -15295,7 +15635,7 @@ def test_a_load_balancer_with_both_an_ip_and_a_hostname_yields_one_of_them(monke
     Hostname wins where both exist: a CNAME target has to be a name, and an ELB's
     addresses change under it.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     def svc(name, **ingress):
         return {"metadata": {"name": name}, "spec": {"type": "LoadBalancer"},
@@ -15335,7 +15675,7 @@ def test_prepare_waits_for_the_load_balancer_address_it_is_asked_for(monkeypatch
     help, because this cluster has no load-balancing ingress). Nothing in the result
     distinguished them, so the CLI advised re-running in both cases.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     # Pending for two ticks, then an address.
     seq = [("", "", 1), ("", "", 1), ("traefik", "a.elb.aws", 0)]
@@ -15365,7 +15705,7 @@ def test_a_refused_service_read_is_not_a_cluster_without_load_balancers(monkeypa
     returns immediately, and the empty address is reported as the honest "no address"
     it already was rather than becoming a new claim.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     monkeypatch.setattr(k8s, "ask_list", lambda *a, **k: k8s.Answer(
         k8s.REFUSED, None, subprocess.CompletedProcess([], 1, "", "denied")))
@@ -15384,9 +15724,9 @@ def test_the_ingress_class_adopted_is_the_clusters_own_default_not_the_first_lis
     discovery, so that is a real difference decided by nothing. Kubernetes already has
     an answer -- `ingressclass.kubernetes.io/is-default-class` is how a cluster says
     which controller an unclassed Ingress gets -- so somebody has stated a preference
-    and rc-repro should not overrule it.
+    and houston should not overrule it.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     def klass(name, default=False):
         meta = {"name": name}
@@ -15420,8 +15760,8 @@ def test_naming_an_ingress_class_is_obeyed_or_refused_never_quietly_ignored(monk
     And when several exist and none was named, the choice is stated: it is a decision,
     and this emit is the only place it is visible.
     """
-    from rc_repro import errors
-    from rc_repro.services import k8s
+    from houston import errors
+    from houston.services import k8s
 
     monkeypatch.setattr(k8s, "ingress_classes", lambda ctx: ["nginx", "alb"])
     said: list = []
@@ -15456,15 +15796,15 @@ def test_a_chart_from_another_era_is_refused_rather_than_installed(monkeypatch):
     exactly one — 0.1.0, appVersion 1.16.0 — with nothing in between. So every request
     below chart 3.0.0's appVersion landed on a 1.16-era chart that predates `extraEnv`,
     `microservices.*`, `mongodb.enabled` and the security-context handling: every
-    values key rc-repro sets. It would render something, and not a working workspace.
+    values key houston sets. It would render something, and not a working workspace.
 
     Refusing beats that and beats a pod that never starts, because the tool HAS an
     answer for these versions — the Docker runtime supports them natively.
     """
     import json as _json
 
-    from rc_repro import errors
-    from rc_repro.services import k8s
+    from houston import errors
+    from houston.services import k8s
 
     # The real shape of the index at its old end, from the live repository.
     index = [{"version": "0.1.0", "app_version": "1.16.0"},
@@ -15525,10 +15865,10 @@ def test_an_amd64_only_rocket_chat_is_refused_on_an_arm64_only_cluster():
     and 7.10.0 return a single `manifest.v2+json` — amd64 alone — while 8.0.0 and 8.5.1
     return a manifest list carrying amd64 and arm64.
 
-    The irony is the point: the amd64-only range is precisely the range rc-repro exists
+    The irony is the point: the amd64-only range is precisely the range houston exists
     for, and a Graviton node group is an ordinary way to run EKS cheaply.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     arm = k8s.Preflight(cluster_reachable=True, architectures=["arm64"])
     said = k8s.architecture_blocker(arm, "6.5.0")
@@ -15562,7 +15902,7 @@ def test_env_reports_what_the_container_is_running_not_what_it_was_asked_to_run(
     OBSERVED: an `env` apply interrupted mid-recreate (a SIGPIPE from a truncating pipe
     is an ordinary way for that to happen) left
     `OVERWRITE_SETTING_Accounts_RegistrationForm=Disabled` in the compose file and in
-    `repro.json`, and absent from the container. `rc-repro env` then displayed it as
+    `repro.json`, and absent from the container. `houston env` then displayed it as
     `<- yours` while Rocket.Chat served the old value — a confirming display for a
     setting that was not in effect. Neither `start`, `restart` nor a re-run `up`
     reconverged it.
@@ -15571,10 +15911,10 @@ def test_env_reports_what_the_container_is_running_not_what_it_was_asked_to_run(
     comment says why: "strictly more accurate". Compose could answer from the document
     it generated, so it did.
     """
-    from rc_repro import runner
-    from rc_repro.services import envvars, lifecycle as lcmod, topology
+    from houston import runner
+    from houston.services import envvars, lifecycle as lcmod, topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(lcmod, "resolve_name", lambda n: "drift")
     monkeypatch.setattr(topology, "of_repro", lambda n: topology.DOCKER)
     meta = type("M", (), {"extra": {"env": {"OVERWRITE_SETTING_Accounts_RegistrationForm":
@@ -15621,10 +15961,10 @@ def test_an_interrupted_env_apply_is_healed_by_the_next_one(monkeypatch, tmp_pat
     Forcing it is scoped to the one service — Mongo and its volume are untouched, which
     is the reason recreating here is safe at all.
     """
-    from rc_repro import runner
-    from rc_repro.services import envvars, lifecycle as lcmod
+    from houston import runner
+    from houston.services import envvars, lifecycle as lcmod
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(lcmod, "resolve_name", lambda n: "drift")
     meta = type("M", (), {"extra": {}, "rc_version": "8.5.1", "name": "drift"})()
     monkeypatch.setattr(runner, "read_meta", lambda n: meta)
@@ -15650,7 +15990,7 @@ def test_prepare_resolves_a_short_cluster_name_like_every_other_cluster_command(
     and the form the shipped guide teaches. An EKS context is really
     `arn:aws:eks:<region>:<account>:cluster/support`, which nobody types.
 
-    MEASURED on a freshly built cluster: `rc-repro cluster prepare --context support`
+    MEASURED on a freshly built cluster: `houston cluster prepare --context support`
     failed in 0.27 seconds — far too fast to have asked AWS anything — with "could not
     read the StorageClasses in 'support' ... This is a permissions problem on the
     credential in your kubeconfig". A confident and completely wrong diagnosis that
@@ -15660,9 +16000,9 @@ def test_prepare_resolves_a_short_cluster_name_like_every_other_cluster_command(
     argument straight to kubectl. Two commands in the same group disagreeing about
     what a cluster may be called is the kind of thing only a live run finds.
     """
-    from rc_repro.services import eks, k8s
+    from houston.services import eks, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     ARN = "arn:aws:eks:us-east-1:1:cluster/support"
     seen: dict = {}
 
@@ -15703,8 +16043,8 @@ def test_a_default_certificate_before_issuance_is_not_blamed_on_a_proxy(monkeypa
     It is the whole difference between "not issued yet" and "issued, and somebody else
     is answering for this name".
     """
-    from rc_repro.services import lifecycle as lcmod
-    from rc_repro import tls as tlsmod
+    from houston.services import lifecycle as lcmod
+    from houston import tls as tlsmod
 
     ktls = lcmod._KubeTls(host="x.example.com", ingress_class="traefik",
                           endpoint=None, context="c", issuer=None)
@@ -15720,7 +16060,7 @@ def test_a_default_certificate_before_issuance_is_not_blamed_on_a_proxy(monkeypa
     assert "has not issued one yet" in joined, said
     assert "something in front" not in joined, \
         "a certificate that is still coming is not a proxy stealing the name"
-    assert "rc-repro doctor" not in joined, \
+    assert "houston doctor" not in joined, \
         "and it must not send somebody hunting a port conflict that does not exist"
 
     # ISSUED, and the name still answers with somebody else's default certificate.
@@ -15731,7 +16071,7 @@ def test_a_default_certificate_before_issuance_is_not_blamed_on_a_proxy(monkeypa
                                    sleep=lambda _s: None)
     joined = " ".join(said)
     assert "something in front is terminating TLS" in joined, said
-    assert "rc-repro doctor" in joined, said
+    assert "houston doctor" in joined, said
 
 
 def test_the_agent_skill_does_not_claim_a_refusal_the_code_stopped_making():
@@ -15751,7 +16091,7 @@ def test_the_agent_skill_does_not_claim_a_refusal_the_code_stopped_making():
     """
     import pathlib
 
-    from rc_repro.services import lifecycle as lcmod
+    from houston.services import lifecycle as lcmod
 
     text = (pathlib.Path(lcmod.__file__).parent.parent
             / "data" / "skill" / "SKILL.md").read_text()
@@ -15788,11 +16128,11 @@ def test_every_service_module_is_named_in_the_map():
     table, so the map for anyone arriving at this repo had no cloud in it at all.
 
     The file says the list IS the map, so a module missing from it is the bug rather
-    than an omission somebody chose. `ls rc_repro/services/` is the authority.
+    than an omission somebody chose. `ls houston/services/` is the authority.
     """
     import pathlib
 
-    from rc_repro import services
+    from houston import services
 
     root = pathlib.Path(services.__file__).parent
     text = (root.parent.parent / "CLAUDE.md").read_text()
@@ -15817,7 +16157,7 @@ def test_tls_status_probes_the_name_when_tls_terminates_in_the_cluster(monkeypat
     a real Let's Encrypt certificate for the name from this very box, `curl` reported
     `ssl_verify_result: 0`, and `tls-status` answered "the ingress controller's
     built-in placeholder certificate ... the ACME order is stuck". Loopback had reached
-    rc-repro's OWN edge, a Traefik that has never heard of the name. A healthy
+    houston's OWN edge, a Traefik that has never heard of the name. A healthy
     workspace reported as broken is the exact failure this command exists to prevent.
 
     `tls_terminates` is recorded on the workspace by `_create_kubernetes`, so the
@@ -15826,8 +16166,8 @@ def test_tls_status_probes_the_name_when_tls_terminates_in_the_cluster(monkeypat
     import ast
     import pathlib
 
-    from rc_repro import cli as climod
-    from rc_repro.web import app as webmod
+    from houston import cli as climod
+    from houston.web import app as webmod
 
     for mod, where in ((climod, "the CLI's tls-status"), (webmod, "the GUI's /tls")):
         src = pathlib.Path(mod.__file__).read_text()

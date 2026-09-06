@@ -22,8 +22,8 @@ import pytest
 from conftest import source_of
 from typer.testing import CliRunner
 
-from rc_repro import cli, errors, jsonout, ui
-from rc_repro.services import lifecycle as lc
+from houston import cli, errors, jsonout, ui
+from houston.services import lifecycle as lc
 
 runner_ = CliRunner()
 
@@ -67,21 +67,45 @@ def test_every_phase_the_code_emits_is_in_the_published_vocabulary():
 
 def test_the_envelope_has_the_keys_the_contract_names():
     env = jsonout.envelope("info", {"a": 1}, warnings=[{"code": "X", "message": "m"}])
-    assert env["schema"] == "rc-repro.info.v1"
+    assert env["schema"] == "houston.info.v1"
     assert env["contract"] == jsonout.CONTRACT
     assert env["ok"] is True and env["error"] is None
     assert env["data"] == {"a": 1}
     assert env["warnings"] == [{"code": "X", "message": "m"}]
-    assert env["rc_repro_version"] and env["generated_at"]
+    assert env["houston_version"] and env["generated_at"]
     # Never null, so a caller iterates without a None check.
     assert jsonout.envelope("list")["warnings"] == []
+
+
+def test_the_envelope_still_answers_to_its_pre_rename_names():
+    """A script written against rc-repro reads `rc_repro_version` and matches
+    `rc-repro.<kind>.v1`. Renaming both without keeping the old spellings would have
+    broken it at the moment it mattered, and broken it silently -- the envelope still
+    parses, the key is simply gone.
+
+    So both are emitted. `contract` deliberately does NOT bump: nothing was removed
+    or redefined, so a reader of contract 1 is still correct about every field it
+    already knew, and bumping would tell every caller to re-check a contract that did
+    not change under them. One field cannot hold two values, so `schema` carries the
+    new name and `schema_legacy` the old.
+    """
+    env = jsonout.envelope("info", {"x": 1})
+    assert env["schema"] == "houston.info.v1"
+    assert env["schema_legacy"] == "rc-repro.info.v1"
+    assert env["rc_repro_version"] == env["houston_version"]
+    assert env["contract"] == 1
+
+    err = jsonout.error_envelope(errors.NotReadyError("still booting"))
+    assert err["schema"] == "houston.error.v1"
+    assert err["schema_legacy"] == "rc-repro.error.v1"
+    assert err["rc_repro_version"] == err["houston_version"]
 
 
 def test_an_error_envelope_carries_the_stable_code_not_the_class_name():
     env = jsonout.error_envelope(errors.NotReadyError("still booting"))
     assert env["ok"] is False and env["data"] is None
     assert env["error"]["code"] == "NOT_READY"
-    assert env["schema"] == "rc-repro.error.v1"
+    assert env["schema"] == "houston.error.v1"
     # An exception from outside the taxonomy is reported as unclassified rather
     # than dressed up as something a caller would act on.
     assert jsonout.error_envelope(RuntimeError("boom"))["error"]["code"] == "REPRO_ERROR"
@@ -120,11 +144,11 @@ def test_list_json_reports_an_empty_box_as_a_success(tmp_path, monkeypatch):
     """`No repros yet.` is the right answer for a person and the wrong shape for a
     script: a caller asking what is on this box and finding nothing has its answer,
     and it is not an error."""
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     res = runner_.invoke(cli.app, ["list", "--json"])
     assert res.exit_code == 0
     env = _lines(res.stdout)[-1]
-    assert env["schema"] == "rc-repro.list.v1"
+    assert env["schema"] == "houston.list.v1"
     assert env["ok"] is True and env["data"] == {"count": 0, "repros": []}
     assert "No repros yet" not in res.stdout
 
@@ -135,7 +159,7 @@ def test_list_json_answers_a_failure_with_an_envelope_not_a_traceback(
     it is not the obviously-safe line it looks like. Unguarded, a ReproError here
     reached a --json caller as a traceback with nothing on stdout -- which is the
     one thing an envelope exists to prevent."""
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
 
     def boom():
         raise errors.DockerError("docker is not running")
@@ -150,7 +174,7 @@ def test_list_json_answers_a_failure_with_an_envelope_not_a_traceback(
 
 def test_info_json_on_a_missing_name_is_an_envelope_with_the_right_exit(
         tmp_path, monkeypatch):
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     res = runner_.invoke(cli.app, ["info", "--name", "nope", "--json"])
     env = _lines(res.stdout)[-1]
     assert env["error"]["code"] == "NOT_FOUND"
@@ -161,12 +185,12 @@ def test_doctor_json_gives_every_row_a_declared_check_id(tmp_path, monkeypatch):
     """The published half of the report. Without an id a caller can count failures
     and nothing else; it cannot watch ONE check, which is the thing a CI step or a
     dashboard actually wants."""
-    from rc_repro.services import doctor as doctorsvc
+    from houston.services import doctor as doctorsvc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     res = runner_.invoke(cli.app, ["doctor", "--json"])
     env = _lines(res.stdout)[-1]
-    assert env["schema"] == "rc-repro.doctor.v1"
+    assert env["schema"] == "houston.doctor.v1"
     rows = env["data"]["checks"]
     assert rows, "an empty report would pass every assertion below"
     for row in rows:
@@ -179,7 +203,7 @@ def test_a_doctor_check_id_does_not_change_with_its_own_outcome(monkeypatch):
     `port-3000-free` when the port is free and `port-3000-in` when it is not, so an
     agent watching one id never sees the other state. One check, one id, whatever it
     finds."""
-    from rc_repro.services import doctor as doctorsvc
+    from houston.services import doctor as doctorsvc
 
     seen: dict[str, set[str]] = {}
     for free in (True, False):
@@ -199,7 +223,7 @@ def test_down_volumes_json_refuses_rather_than_keeping_the_data_quietly(
     the data unasked and quietly doing something other than what was typed; for an
     irreversible verb neither is acceptable, so it asks for the confirmation to be
     explicit."""
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     ws = tmp_path / "repros" / "r"
     ws.mkdir(parents=True)
     (ws / "repro.json").write_text(json.dumps({
@@ -222,14 +246,14 @@ def test_down_volumes_json_refuses_rather_than_keeping_the_data_quietly(
 
 def test_json_mode_keeps_stdout_a_document_and_moves_prose_to_stderr(
         tmp_path, monkeypatch):
-    """`rc-repro info --json > case.json` has to produce a valid document, and the
+    """`houston info --json > case.json` has to produce a valid document, and the
     person who ran it should still see what happened. Two streams answer both;
     silence would answer only the first.
 
     Asserted on a command whose HUMAN output is a panel of boxes, so anything left
     behind on stdout would be unmissable.
     """
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     res = runner_.invoke(cli.app, ["info", "--name", "nope", "--json"])
     for line in res.stdout.splitlines():
         json.loads(line)          # raises if a single prose line got through
@@ -245,7 +269,7 @@ def test_the_error_paths_that_predate_the_contract_still_answer_in_it(
 
     `up --set` with no `=` is one of them, and it never touches a service.
     """
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     res = runner_.invoke(cli.app, ["up", "--version", "8.5.1", "--set", "nonsense",
                                    "--json"])
     env = _lines(res.stdout)[-1]
@@ -278,7 +302,7 @@ def test_capabilities_reports_exactly_the_commands_that_really_speak_json():
     A caller reads this to avoid hardcoding a flag list; if it can advertise a
     command that does not answer in JSON, it has moved the same guess one level up
     and made it authoritative. The version borrowed from elsewhere advertised
-    `rc-repro.loadtest.v1` and `rc-repro.capacity.v1` for two commands that printed
+    `houston.loadtest.v1` and `houston.capacity.v1` for two commands that printed
     a bare payload, so an agent reaching for `.data` got nothing.
 
     Derived from the registered app on BOTH sides -- the truth is the `--json`
@@ -359,12 +383,12 @@ def test_capabilities_says_which_commands_stream_by_looking_at_them():
 
 def test_capabilities_needs_no_engine_and_no_home(tmp_path, monkeypatch):
     """It is asked BEFORE anybody knows whether the environment works."""
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path / "nothing-here"))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path / "nothing-here"))
     monkeypatch.setattr(cli.runner, "docker_available",
                         lambda **_k: pytest.fail("capabilities asked docker"))
     res = runner_.invoke(cli.app, ["capabilities"])
     assert res.exit_code == 0
-    assert json.loads(res.stdout.strip())["data"]["rc_repro_version"]
+    assert json.loads(res.stdout.strip())["data"]["houston_version"]
 
 
 # --- the invariant that closes the contract -------------------------------------
@@ -415,15 +439,15 @@ def test_every_json_command_answers_with_exactly_one_envelope(
     error happens somewhere nobody remembered to wrap, and the caller gets an empty
     stdout with a non-zero exit.
     """
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("RC_REPRO_SKILL_HOME", str(tmp_path / "skills"))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("HOUSTON_SKILL_HOME", str(tmp_path / "skills"))
     # THE ENGINE, MADE DETERMINISTIC. `want_ok` below is a fact about the contract,
     # not about this machine -- and `doctor` and `capacity` legitimately answer
     # ok=false/exit 3 on a box with no Docker, so the table was only true where one
     # happened to be installed. CLAUDE.md says nothing in the suite needs Docker;
     # this is what makes that so for these two rather than hoping for it. Stubbed at
     # the seam every path funnels through, so the command still runs end to end.
-    from rc_repro import runner as _runner
+    from houston import runner as _runner
     monkeypatch.setattr(_runner, "docker_available", lambda **k: True)
     monkeypatch.setattr(_runner, "compose_version", lambda **k: "2.29.0")
     argv, want_ok = JSON_COMMANDS[name]
@@ -434,7 +458,7 @@ def test_every_json_command_answers_with_exactly_one_envelope(
     objs = []
     for ln in lines:
         objs.append(json.loads(ln))          # every line is JSON, or this raises
-    envelopes = [o for o in objs if o.get("schema", "").startswith("rc-repro.")
+    envelopes = [o for o in objs if o.get("schema", "").startswith("houston.")
                  and "ok" in o]
     assert len(envelopes) == 1, f"{name} wrote {len(envelopes)} envelopes"
     assert objs[-1] is envelopes[0], f"{name}'s envelope is not the last line"
@@ -451,7 +475,7 @@ def test_every_json_command_answers_with_exactly_one_envelope(
 
 
 def test_a_workspace_that_is_not_answering_yet_exits_five_not_one(monkeypatch, tmp_path):
-    """Every REST command's failure message told the reader to run `rc-repro ready`, and
+    """Every REST command's failure message told the reader to run `houston ready`, and
     every one of them exited 1 -- the code that tells a script not to bother polling. And
     `services/monitor.py` raises NotReadyError for the identical condition, so an
     unreachable workspace answered differently depending on which verb you reached for.
@@ -464,9 +488,9 @@ def test_a_workspace_that_is_not_answering_yet_exits_five_not_one(monkeypatch, t
     import requests
     from typer.testing import CliRunner
 
-    from rc_repro import cli, errors, rcapi
+    from houston import cli, errors, rcapi
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     (tmp_path / "repros" / "w").mkdir(parents=True)
     (tmp_path / "repros" / "w" / "repro.json").write_text(_json.dumps({
         "name": "w", "project": "p", "rc_version": "8.5.1", "rc_image": "i",
@@ -511,14 +535,14 @@ def test_no_private_function_is_registered_as_a_command():
     """A guard against a real accident. Inserting a helper directly above a decorated
     command puts it BETWEEN `@app.command(...)` and its function, so the decorator binds
     the HELPER and the real command is orphaned -- silently. It happened to `edge`:
-    `rc-repro edge --help` started reporting `Usage: rc-repro edge [OPTIONS] {domain}`
+    `houston edge --help` started reporting `Usage: houston edge [OPTIONS] {domain}`
     with a `--tries` option, `edge status` stopped existing, and `edge logs --tail 2`
     answered "No such option: --tail". Nothing failed; the command was simply somebody
     else's function.
 
     Naming is the invariant that catches it: every callback registered with Typer is a
     command somebody types, so none of them may be private."""
-    from rc_repro import cli
+    from houston import cli
 
     bound = [(c.name or c.callback.__name__, c.callback.__name__)
              for c in cli.app.registered_commands]
@@ -531,7 +555,7 @@ def test_no_private_function_is_registered_as_a_command():
 def test_every_documented_edge_action_is_reachable():
     """The same accident again, from the user's side: `edge` advertises five actions in
     its own help, and all five have to exist."""
-    from rc_repro import cli
+    from houston import cli
 
     edge = next(c for c in cli.app.registered_commands if (c.name or "") == "edge")
     assert edge.callback.__name__ == "edge_cmd", edge.callback.__name__
@@ -557,7 +581,7 @@ def test_every_advertised_error_code_can_actually_be_raised():
     import ast
     import pathlib
 
-    from rc_repro import errors, jsonout
+    from houston import errors, jsonout
 
     root = pathlib.Path(errors.__file__).parent
     raised: set[str] = set()
@@ -590,7 +614,7 @@ def test_every_advertised_error_code_can_actually_be_raised():
     # than by name, so it is always producible.
     unraisable = advertised - raised - {errors.ReproError.code}
     assert not unraisable, (
-        f"capabilities advertises {sorted(unraisable)}, which nothing in rc_repro/ "
+        f"capabilities advertises {sorted(unraisable)}, which nothing in houston/ "
         f"raises — a caller told to expect it would write a branch that never runs")
 
     # THE CONVERSE, and it is now general rather than one hardcoded class name. It
@@ -607,7 +631,7 @@ def test_every_advertised_error_code_can_actually_be_raised():
 
     # And the reachable gate codes are exactly what `errors` says they are.
     assert set(errors.RAISED_GATE_CODES) == raised & set(errors.GATE_CODES), (
-        "RAISED_GATE_CODES has drifted from the `code=` literals in rc_repro/")
+        "RAISED_GATE_CODES has drifted from the `code=` literals in houston/")
 
 
 def test_an_unhandled_exception_is_still_one_envelope_on_stdout():
@@ -617,7 +641,7 @@ def test_an_unhandled_exception_is_still_one_envelope_on_stdout():
     A workspace directory with a docker-compose.yml and no repro.json
     (FileNotFoundError -- what an interrupted create leaves between the two
     atomic_writes), a repro.json missing fields (TypeError), a malformed config.yaml
-    (yaml.parser.ParserError) and a non-writable RC_REPRO_HOME (PermissionError) each
+    (yaml.parser.ParserError) and a non-writable HOUSTON_HOME (PermissionError) each
     produced a traceback, exit 1, and ZERO BYTES of stdout under `--json`. The contract
     held until the moment a caller needed it.
 
@@ -650,9 +674,9 @@ def test_an_unhandled_exception_is_still_one_envelope_on_stdout():
             argv = build(home)
             proc = subprocess.run(
                 [sys.executable, "-c",
-                 "from rc_repro.cli import main; main()", *argv],
+                 "from houston.cli import main; main()", *argv],
                 capture_output=True, text=True, timeout=120,
-                env={"PATH": "/usr/bin:/bin", "RC_REPRO_HOME": str(home),
+                env={"PATH": "/usr/bin:/bin", "HOUSTON_HOME": str(home),
                      "HOME": str(home), "PYTHONPATH": str(Path(__file__).parent.parent)},
             )
             lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
@@ -685,10 +709,10 @@ def test_the_envelope_warnings_array_is_actually_populated():
 
     with tempfile.TemporaryDirectory() as tmp:
         proc = subprocess.run(
-            [sys.executable, "-c", "from rc_repro.cli import app; app()",
+            [sys.executable, "-c", "from houston.cli import app; app()",
              "doctor", "--json"],
             capture_output=True, text=True, timeout=180,
-            env={"PATH": "/usr/bin:/bin", "RC_REPRO_HOME": tmp, "HOME": tmp,
+            env={"PATH": "/usr/bin:/bin", "HOUSTON_HOME": tmp, "HOME": tmp,
                  "PYTHONPATH": str(Path(__file__).parent.parent)},
         )
     lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
@@ -733,10 +757,10 @@ def test_a_domain_error_escaping_a_command_exits_with_its_own_code_and_no_traceb
     root = str(Path(__file__).parent.parent)
     with tempfile.TemporaryDirectory() as tmp:
         proc = subprocess.run(
-            [sys.executable, "-c", "from rc_repro.cli import main; main()",
+            [sys.executable, "-c", "from houston.cli import main; main()",
              "env", "--name", "definitely-not-a-repro"],
             capture_output=True, text=True, timeout=120,
-            env={"PATH": "/usr/bin:/bin", "RC_REPRO_HOME": tmp, "HOME": tmp,
+            env={"PATH": "/usr/bin:/bin", "HOUSTON_HOME": tmp, "HOME": tmp,
                  "PYTHONPATH": root},
         )
     assert proc.returncode == 4, (
@@ -749,7 +773,7 @@ def test_a_failure_before_any_command_still_writes_one_envelope():
     -- and some failures happen before any command does.
 
     `_before_any_command` is the sharp one: it reads the accounts file on EVERY
-    invocation, so an unreadable or wrong-type `~/.rc-repro/users` -- a stale
+    invocation, so an unreadable or wrong-type `~/.houston/users` -- a stale
     directory, or a file owned by another user on the shared box this tool is built
     for -- failed there and left a `--json` caller with a traceback and ZERO BYTES of
     stdout. That is the fifth member of the crash-class family v0.73.0 closed four of.
@@ -764,10 +788,10 @@ def test_a_failure_before_any_command_still_writes_one_envelope():
     with tempfile.TemporaryDirectory() as tmp:
         (Path(tmp) / "users").mkdir()          # a DIRECTORY where a file belongs
         proc = subprocess.run(
-            [sys.executable, "-c", "from rc_repro.cli import main; main()",
+            [sys.executable, "-c", "from houston.cli import main; main()",
              "list", "--json"],
             capture_output=True, text=True, timeout=120,
-            env={"PATH": "/usr/bin:/bin", "RC_REPRO_HOME": tmp, "HOME": tmp,
+            env={"PATH": "/usr/bin:/bin", "HOUSTON_HOME": tmp, "HOME": tmp,
                  "PYTHONPATH": root},
         )
     lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
@@ -803,7 +827,7 @@ def test_no_json_command_writes_a_payload_outside_the_envelope():
     import ast
     import pathlib as _pl
 
-    from rc_repro import cli
+    from houston import cli
 
     tree = ast.parse(_pl.Path(cli.__file__).read_text())
     offenders: list[str] = []

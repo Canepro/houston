@@ -14,9 +14,9 @@ import pytest
 from conftest import source_index, source_of
 import yaml
 
-from rc_repro import config
-from rc_repro.errors import ValidationError
-from rc_repro.services import edge as fd
+from houston import config
+from houston.errors import ValidationError
+from houston.services import edge as fd
 
 def _ok_compose(*a, **k):
     """A successful `docker compose` run. `edge.up()` returns the CompletedProcess now,
@@ -29,7 +29,7 @@ def _ok_compose(*a, **k):
 
 @pytest.fixture(autouse=True)
 def _home(tmp_path, monkeypatch):
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     return tmp_path
 
 
@@ -54,7 +54,7 @@ def test_the_project_name_cannot_collide_with_a_repro():
     sanitize() maps everything outside [a-z0-9-] to "-", so no repro name can
     ever produce this project name -- but PROJECT_PREFIX + "edge" would.
     """
-    from rc_repro.services.lifecycle import sanitize
+    from houston.services.lifecycle import sanitize
 
     assert "_" in fd.PROJECT
     assert fd.PROJECT != config.PROJECT_PREFIX + "edge"
@@ -81,7 +81,7 @@ def test_it_does_not_mount_the_docker_socket():
 def test_acme_storage_is_shared_with_workspaces():
     """§6: existing certificates are reused, so only NEW names cost against the
     50-per-domain-per-week limit. A private store would re-request every name."""
-    from rc_repro import tls
+    from houston import tls
 
     vols = _doc()["services"]["edge"]["volumes"]
     assert any(v.startswith(f"{tls.acme_dir()}:") for v in vols)
@@ -90,7 +90,7 @@ def test_acme_storage_is_shared_with_workspaces():
 def test_the_challenge_flags_come_from_the_workspace_code_path():
     """One implementation, so the two cannot drift on the thing that decides
     whether issuance works at all."""
-    from rc_repro import tls
+    from houston import tls
 
     door = fd.Edge(domain="support.xyz.com", acme_email="ops@xyz.com")
     cmd = fd.compose_doc(door)["services"]["edge"]["command"]
@@ -123,7 +123,7 @@ def test_the_edge_project_is_valid_compose(tmp_path, monkeypatch):
     an invalid PROJECT is exactly the failure the networks key produced."""
     import subprocess
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     fd.write(fd.Edge(domain="support.xyz.com", acme_email="ops@xyz.com"))
     # THE SKIP HAS TO CATCH THE RIGHT FAILURE. This looked for returncode 127, which
     # is what a SHELL reports for "command not found" -- Python's subprocess raises
@@ -158,7 +158,7 @@ def test_host_ports_are_overridable_but_container_ports_are_not():
 
 
 def test_the_document_is_valid_yaml():
-    from rc_repro import compose
+    from houston import compose
 
     assert yaml.safe_load(compose.to_yaml(_doc()))["services"]["edge"]
 
@@ -173,7 +173,7 @@ def test_a_workspace_backend_is_not_addressed_by_its_service_name():
     """
     route = fd.workspace_route_yml("alice-rc8-5-1", "t1.support.xyz.com")
     assert "http://rocketchat:3000" not in route
-    assert "http://rcrepro-alice-rc8-5-1-rocketchat-1:3000" in route
+    assert "http://houston-alice-rc8-5-1-rocketchat-1:3000" in route
 
 
 def test_two_workspaces_get_distinct_backends():
@@ -196,7 +196,7 @@ def test_the_router_rule_names_the_host():
 def test_multi_instance_workspaces_list_every_backend():
     route = fd.workspace_route_yml("w", "h", instances=3)
     for i in (1, 2, 3):
-        assert f"http://rcrepro-w-rocketchat-{i}-1:3000" in route
+        assert f"http://houston-w-rocketchat-{i}-1:3000" in route
     assert "sticky" in route, "DDP websockets must not be bounced mid-session"
 
 
@@ -252,9 +252,9 @@ def test_a_passthrough_route_does_not_decrypt_and_names_no_resolver():
     not present a certificate for.
     """
     doc = yaml.safe_load(fd.passthrough_route_yml(
-        "kws", "kws.rcrepro.localhost", "172.16.0.2:443"))
+        "kws", "kws.houston.localhost", "172.16.0.2:443"))
     router = doc["tcp"]["routers"]["kws"]
-    assert router["rule"] == "HostSNI(`kws.rcrepro.localhost`)"
+    assert router["rule"] == "HostSNI(`kws.houston.localhost`)"
     assert router["tls"] == {"passthrough": True}, router
     assert doc["tcp"]["services"]["kws"]["loadBalancer"]["servers"] == \
         [{"address": "172.16.0.2:443"}]
@@ -355,10 +355,10 @@ def test_the_served_domain_is_readable_by_another_process():
 
 def _spec(tls_on: bool):
     """A compose.Spec with and without TLS -- they must produce the same document."""
-    from rc_repro import compose, presets, tls
+    from houston import compose, presets, tls
 
     return compose.Spec(
-        project_name="rcrepro-alice-rc8-5-1", rc_image="rc", rc_tag="8.5.1",
+        project_name="houston-alice-rc8-5-1", rc_image="rc", rc_tag="8.5.1",
         mongo_tag="6.0", mongo_flavor="official", mongo_shell="mongosh",
         oplog=True, root_url="http://localhost:3000", host_port=3000,
         reg_token=None, preset=presets.load("default"),
@@ -371,13 +371,13 @@ def test_a_workspaces_compose_is_identical_with_and_without_tls():
     change, adding or removing a name is a route file appearing or disappearing --
     no container is ever rebuilt to gain or lose HTTPS, which is what made
     migrating twenty workspaces a recreate-everything operation before."""
-    from rc_repro import compose
+    from houston import compose
 
     assert compose.build(_spec(True)) == compose.build(_spec(False))
 
 
 def test_a_workspace_runs_no_traefik_and_publishes_no_443():
-    from rc_repro import compose, tls
+    from houston import compose, tls
 
     doc = compose.build(_spec(True))
     assert tls.SERVICE not in doc["services"]
@@ -388,7 +388,7 @@ def test_a_workspace_runs_no_traefik_and_publishes_no_443():
 def test_a_workspace_keeps_its_own_private_network():
     """No shared network anywhere in the document: that is what stops workspaces
     reaching each other, and the edge joins THEM instead."""
-    from rc_repro import compose
+    from houston import compose
 
     doc = compose.build(_spec(True))
     assert "networks" not in doc
@@ -399,7 +399,7 @@ def test_a_workspace_keeps_its_own_private_network():
 
 def _resolve(monkeypatch, *, running: bool = True, https: bool = False,
              emitted: list | None = None):
-    from rc_repro.services import lifecycle as lc
+    from houston.services import lifecycle as lc
 
     monkeypatch.setattr(fd, "running", lambda: running)
     monkeypatch.setattr(fd, "issue_local_cert", lambda host: None)
@@ -423,7 +423,7 @@ def test_a_workspace_is_never_published_publicly_for_a_challenge(monkeypatch):
     """TLS-ALPN used to force --domain onto 0.0.0.0 so Let's Encrypt could connect.
     Nothing connects to the workspace now -- the edge answers the challenge -- so
     widening the bind on a repro running fixed weak credentials buys nothing."""
-    from rc_repro.services import lifecycle as lc
+    from houston.services import lifecycle as lc
 
     req = lc.CreateReq(version="8.5.1", domain="t1.support.xyz.com",
                        acme_email="ops@xyz.com")
@@ -437,7 +437,7 @@ def test_local_https_takes_the_same_path_as_a_real_domain(monkeypatch):
     ate ten ports and each got a different URL. Now every name answers on 443."""
     spec = _resolve(monkeypatch, https=True)
     assert spec.port == 443
-    assert spec.host.endswith(".rcrepro.localhost")
+    assert spec.host.endswith(".houston.localhost")
 
 
 def test_an_edge_with_no_domain_still_serves_local_names():
@@ -455,8 +455,8 @@ def _doctor(monkeypatch, *, running=True, meta=()):
     """run_checks() with the network probes stubbed out."""
     import requests
 
-    from rc_repro import runner
-    from rc_repro.services import doctor, lifecycle as lc
+    from houston import runner
+    from houston.services import doctor, lifecycle as lc
 
     monkeypatch.setattr(runner, "docker_available", lambda **_k: True)
     monkeypatch.setattr(runner, "docker_server_version", lambda: "29.0")
@@ -526,14 +526,14 @@ def _acme_workspace(name: str, host: str, tmp_path):
     import dataclasses
     import json
 
-    from rc_repro import runner
+    from houston import runner
 
     doc = ("services:\n"
            "  rocketchat:\n    image: rc\n    ports: ['0.0.0.0:3000:3000']\n"
            "  mongodb:\n    image: mongo\n"
            "  traefik:\n    image: traefik\n    ports: ['443:443', '80:80']\n")
     f = {x.name: "" for x in dataclasses.fields(runner.Metadata)}
-    f.update(name=name, project=f"rcrepro-{name}", rc_version="8.5.1",
+    f.update(name=name, project=f"houston-{name}", rc_version="8.5.1",
              mongo_tag="8.0", host_port=3000, preset="email",
              root_url="http://localhost:3000", public_url=f"https://{host}",
              extra={"tls": "acme", "tls_ports": [443], "tls_email": "o@e.com"})
@@ -549,7 +549,7 @@ def test_a_pre_edge_workspace_is_found(tmp_path):
 
 
 def test_adopting_drops_the_workspaces_own_traefik(tmp_path, monkeypatch):
-    from rc_repro import runner, tls
+    from houston import runner, tls
 
     _acme_workspace("w", "t1.kestron.org", tmp_path)
     monkeypatch.setattr(fd, "attach", lambda name: True)
@@ -564,7 +564,7 @@ def test_adopting_drops_the_workspaces_own_traefik(tmp_path, monkeypatch):
 
 
 def test_adopting_registers_the_route_and_drops_the_port_claim(tmp_path, monkeypatch):
-    from rc_repro import runner
+    from houston import runner
 
     _acme_workspace("w", "t1.kestron.org", tmp_path)
     monkeypatch.setattr(fd, "attach", lambda name: True)
@@ -584,7 +584,7 @@ def test_adopting_registers_the_route_and_drops_the_port_claim(tmp_path, monkeyp
 def test_adopting_keeps_the_data_volume(tmp_path, monkeypatch):
     """The whole point of transforming the compose file rather than recreating
     from scratch: `down -v` is never involved."""
-    from rc_repro import runner
+    from houston import runner
 
     _acme_workspace("w", "t1.kestron.org", tmp_path)
     monkeypatch.setattr(fd, "attach", lambda name: True)
@@ -605,11 +605,11 @@ def test_a_local_https_workspace_is_not_adoptable(tmp_path, monkeypatch):
     import dataclasses
     import json
 
-    from rc_repro import runner
-    from rc_repro.errors import ValidationError
+    from houston import runner
+    from houston.errors import ValidationError
 
     f = {x.name: "" for x in dataclasses.fields(runner.Metadata)}
-    f.update(name="l", project="rcrepro-l", rc_version="8.5.1", mongo_tag="8.0",
+    f.update(name="l", project="houston-l", rc_version="8.5.1", mongo_tag="8.0",
              host_port=3000, preset="default", root_url="http://localhost:3000",
              extra={"tls": "local", "tls_ports": [8443]})
     ws = runner.workspace("l")
@@ -657,19 +657,95 @@ def test_a_failed_start_names_what_holds_the_port(monkeypatch):
     assert "some-other-traefik" in fd.port_holder(443)
 
 
+def test_an_edge_holding_no_ports_is_not_running(tmp_path, monkeypatch):
+    """Up is not the same as serving, and Docker will happily run a container whose
+    port bindings could not be established because something else owns them.
+
+    That is a Traefik answering on nothing -- it cannot serve one name -- and it was
+    reported as a working edge: `edge status` said "State running" while every https
+    name on the box was dead. Nothing else in the tool contradicts this component, so
+    a false green here is the whole answer a person gets. Pre-fix `running()` is True;
+    False is the finding.
+    """
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+
+    def fake(*a, **k):
+        argv = " ".join(str(x) for x in a)
+        if argv.startswith("ps"):
+            out = "c0ffee\n"
+        elif "working_dir" in argv:
+            out = str(fd.edge_dir())
+        elif "NetworkSettings.Ports" in argv:
+            out = '{"443/tcp": null, "80/tcp": null}'      # up, holding nothing
+        else:
+            out = ""
+        return type("P", (), {"returncode": 0, "stdout": out})()
+
+    monkeypatch.setattr(fd, "_docker", fake)
+    # The behavioural claim FIRST, so this fails on the behaviour against the pre-fix
+    # code rather than on a helper that did not exist yet.
+    assert fd.running() is False, "up but holding nothing is not running"
+    assert fd.our_container() == "c0ffee", "...though the container really is up"
+
+
+def test_an_edge_actually_holding_its_ports_is_running(tmp_path, monkeypatch):
+    """The other half: the strictness must not break the normal case."""
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+
+    def fake(*a, **k):
+        argv = " ".join(str(x) for x in a)
+        if argv.startswith("ps"):
+            out = "c0ffee\n"
+        elif "working_dir" in argv:
+            out = str(fd.edge_dir())
+        elif "NetworkSettings.Ports" in argv:
+            out = ('{"443/tcp": [{"HostIp": "0.0.0.0", "HostPort": "443"}],'
+                   ' "80/tcp": [{"HostIp": "0.0.0.0", "HostPort": "80"}]}')
+        else:
+            out = ""
+        return type("P", (), {"returncode": 0, "stdout": out})()
+
+    monkeypatch.setattr(fd, "_docker", fake)
+    assert fd.running() is True
+
+
+def test_the_port_holder_names_the_project_that_can_free_it(monkeypatch):
+    """`docker compose -p <project> down` is the command, so the PROJECT is the
+    actionable half.
+
+    Naming only the container sent somebody at our own project -- the one `-p` value
+    that cannot possibly free the port -- which is exactly what happened when a
+    pre-rename edge outlived the rename.
+    """
+    def fake(*a, **k):
+        argv = " ".join(str(x) for x in a)
+        if argv.startswith("ps"):
+            out = "rcrepro_edge-edge-1\t0.0.0.0:443->443/tcp\n"
+        elif "com.docker.compose.project" in argv:
+            out = "rcrepro_edge"
+        else:
+            out = ""
+        return type("P", (), {"returncode": 0, "stdout": out})()
+
+    monkeypatch.setattr(fd, "_docker", fake)
+    said = fd.port_holder(443)
+    assert "rcrepro_edge-edge-1" in said
+    assert "rcrepro_edge'" in said, f"the project has to be named too: {said}"
+
+
 def test_a_bare_edge_writes_no_gui_route(tmp_path, monkeypatch):
     """`up --https` on a box with no public name starts a bare edge. Writing the
     GUI route anyway produced Host(``), which Traefik rejects at load -- "empty
     args for matcher Host" -- plus a certResolver a bare edge never declares. Two
     errors on every start, for a route that cannot work."""
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     fd.write(fd.Edge())
     assert not fd.route_path("_gui").exists()
     assert fd.registered() == []
 
 
 def test_giving_the_edge_a_domain_later_adds_the_gui_route(tmp_path, monkeypatch):
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     fd.write(fd.Edge())
     fd.write(fd.Edge(domain="gui.example.com", acme_email="o@e.com"))
     assert 'Host(`gui.example.com`)' in fd.route_path("_gui").read_text()
@@ -679,8 +755,8 @@ def test_resolving_tls_never_starts_a_container(tmp_path, monkeypatch):
     """A resolve function that starts docker made the TEST SUITE stand up a real
     edge holding :443, which then broke a live run on the same box. Docker work
     belongs in the create path."""
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
-    from rc_repro.services import lifecycle as lc
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
+    from houston.services import lifecycle as lc
 
     def boom(*a, **k):
         raise AssertionError("_resolve_tls started a container")
@@ -694,16 +770,16 @@ def test_resolving_tls_never_starts_a_container(tmp_path, monkeypatch):
 def test_the_recorded_spec_survives_a_round_trip(tmp_path, monkeypatch):
     """`current()` reconstructed only the domain and the wildcard flag -- it dropped the
     email, the GUI host and the GUI port. So nothing but `serve --domain` could rebuild
-    this edge, and `rc-repro edge start` therefore could not apply a changed
+    this edge, and `houston edge start` therefore could not apply a changed
     `acme.challenge`: regenerating the compose file would have pointed the front door at
     a GUI it no longer knew the address of.
 
     Measured consequence: `config set acme.challenge http` followed by `edge restart`
     kept validating over TLS-ALPN against the production CA, and the log went on
     reporting the identical failure."""
-    from rc_repro.services import edge as fd
+    from houston.services import edge as fd
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     fd.write(fd.Edge.resolve("gui.example.test", "who@example.test",
                              gui_host="172.17.0.1", gui_port=9944))
     back = fd.current()
@@ -725,7 +801,7 @@ def test_the_recorded_spec_survives_a_round_trip(tmp_path, monkeypatch):
 
 
 def test_http_01_is_selectable_and_frees_the_challenge_path(tmp_path, monkeypatch):
-    """rc-repro offered exactly two challenges, derived and never asked for: dns-01 when
+    """houston offered exactly two challenges, derived and never asked for: dns-01 when
     credentials exist, TLS-ALPN otherwise. A real box had NEITHER available -- TLS-ALPN
     validation failed on every attempt with `remote error: tls: unrecognized name`, and
     dns-01 was impossible because the operator had the machine and not the DNS zone. With
@@ -736,10 +812,10 @@ def test_http_01_is_selectable_and_frees_the_challenge_path(tmp_path, monkeypatc
     middleware on the entrypoint applied to every router on it -- measured: an explicit
     router for `/.well-known/acme-challenge/` on `web` still answered 301 -- so leaving
     it on would redirect Let's Encrypt away from the challenge it came to fetch."""
-    from rc_repro import config as cfgmod
-    from rc_repro.services import edge as fd
+    from houston import config as cfgmod
+    from houston.services import edge as fd
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
 
     cfgmod.save_config({"acme_challenge": "http"})
     door = fd.Edge.resolve("gui.example.test", "a@b.test")
@@ -777,10 +853,10 @@ def test_the_staging_switch_actually_reaches_the_edge(tmp_path, monkeypatch):
     name per hour, a support server has a name per ticket, and every restart abandons an
     in-flight challenge -- so a handful of restarts spends the hour's budget and staging
     is the only safe way left to test the plumbing."""
-    from rc_repro import config as cfgmod
-    from rc_repro.services import edge as fd
+    from houston import config as cfgmod
+    from houston.services import edge as fd
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     cfgmod.save_config({"acme_staging": True})
     door = fd.Edge.resolve("gui.example.test", "a@b.test")
     assert door.acme_staging is True
@@ -812,9 +888,9 @@ def test_a_running_edge_still_gets_a_changed_config_applied(tmp_path, monkeypatc
     Found on a box whose `acme.json` held an ACME account for a mistyped address while
     the corrected one was being passed on every restart."""
     import subprocess
-    from rc_repro.services import edge as fd
+    from houston.services import edge as fd
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(fd, "installed", lambda: True)
     monkeypatch.setattr(fd, "has_acme", lambda: True)
     monkeypatch.setattr(fd, "served_domain", lambda: "gui.example.test")
@@ -841,7 +917,7 @@ def test_a_running_edge_still_gets_a_changed_config_applied(tmp_path, monkeypatc
 
 
 def test_the_edge_logs_at_info_so_acme_is_visible(tmp_path, monkeypatch):
-    """Traefik's default log level is ERROR, and rc-repro set none -- so a Traefik that
+    """Traefik's default log level is ERROR, and houston set none -- so a Traefik that
     is healthy but has NOT yet obtained a certificate logged nothing at all. That is
     exactly the state people get stuck in: the name serves Traefik's own default
     certificate, `docker logs` comes back empty, and an empty log reads as "nothing is
@@ -850,9 +926,9 @@ def test_the_edge_logs_at_info_so_acme_is_visible(tmp_path, monkeypatch):
     Measured on two boxes on the same day. The one with a real DNS failure had nine ERR
     lines and no INF lines; the one mid-issuance had an empty log and a default
     certificate. Diagnosis needs the second one to talk."""
-    from rc_repro.services import edge as fd
+    from houston.services import edge as fd
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     args = fd.compose_doc(fd.Edge.resolve("g.example.test", "a@b.test"))["services"]["edge"]["command"]
     assert "--log.level=INFO" in args, args
     # Before the file provider, so a provider that cannot start says so.
@@ -870,9 +946,9 @@ def test_a_failed_start_says_what_docker_said(tmp_path, monkeypatch):
     `up()` returned only a return code, so both failure sites could do nothing but guess.
     """
     import subprocess
-    from rc_repro.services import edge as fd
+    from houston.services import edge as fd
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(fd, "foreign_edge", lambda: "")
     monkeypatch.setattr(fd, "running", lambda: False)
     monkeypatch.setattr(fd, "holders_of_443", lambda: [])
@@ -909,16 +985,16 @@ def test_a_certificate_that_cannot_be_written_is_refused_not_declared(tmp_path, 
     input", once a second, serving nothing for that name. Two such orphans were found on
     a live box."""
     import os
-    from rc_repro import errors
-    from rc_repro.services import edge as fd
+    from houston import errors
+    from houston.services import edge as fd
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     fd.certs_dir().mkdir(parents=True, exist_ok=True)
     fd.dynamic_dir().mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(os, "access", lambda p, mode: False)
 
     try:
-        fd.issue_local_cert("w.rcrepro.localhost")
+        fd.issue_local_cert("w.houston.localhost")
     except errors.ReproError as exc:
         assert "not writable" in str(exc), exc
         assert "chown" in str(exc), "give the fix, not just the fault"
@@ -932,9 +1008,9 @@ def test_a_certificate_that_cannot_be_written_is_refused_not_declared(tmp_path, 
 def test_orphaned_declarations_are_reportable(tmp_path, monkeypatch):
     """The state above, once it exists: a declaration with no certificate. Silent apart
     from a log nobody was pointed at, so `edge status` has to be able to see it."""
-    from rc_repro.services import edge as fd
+    from houston.services import edge as fd
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     fd.certs_dir().mkdir(parents=True, exist_ok=True)
     fd.dynamic_dir().mkdir(parents=True, exist_ok=True)
     (fd.dynamic_dir() / "_cert-a.localhost.yml").write_text("tls: {}\n")
@@ -950,7 +1026,7 @@ def test_ensure_running_writes_a_bare_config_when_there_is_none(tmp_path, monkey
     has to produce a working edge. (That it is CALLED from the create path, and
     not from _resolve_tls, is pinned by test_resolving_tls_never_starts_a_container
     above; the container-level start is verified live, not here.)"""
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(fd, "running", lambda: False)
     monkeypatch.setattr(fd, "up", lambda pull=True: _ok_compose())
     assert fd.ensure_running()
@@ -1006,8 +1082,8 @@ def test_reusing_a_workspace_restores_its_https_name(tmp_path, monkeypatch):
     data. It printed "URL https://…" from the record while the name served
     NOTHING: teardown removed the route and the reuse path never resolved TLS, so
     nothing rewrote it. Found by running the round trip, not by any test."""
-    from rc_repro import runner
-    from rc_repro.services import lifecycle as lc
+    from houston import runner
+    from houston.services import lifecycle as lc
 
     _acme_workspace("w", "t1.example.com", tmp_path)
     fd.write(fd.Edge())
@@ -1024,8 +1100,8 @@ def test_reusing_a_workspace_restores_its_https_name(tmp_path, monkeypatch):
 def test_restoring_a_name_never_fails_the_workspace(tmp_path, monkeypatch):
     """The workspace is up and usable either way; failing a reuse over the
     ingress would be the wrong trade."""
-    from rc_repro import runner
-    from rc_repro.services import lifecycle as lc
+    from houston import runner
+    from houston.services import lifecycle as lc
 
     _acme_workspace("w", "t1.example.com", tmp_path)
     monkeypatch.setattr(fd, "running", lambda: True)
@@ -1035,8 +1111,8 @@ def test_restoring_a_name_never_fails_the_workspace(tmp_path, monkeypatch):
 
 
 def test_a_workspace_with_no_name_restores_nothing(tmp_path, monkeypatch):
-    from rc_repro import runner
-    from rc_repro.services import lifecycle as lc
+    from houston import runner
+    from houston.services import lifecycle as lc
 
     _acme_workspace("w", "t1.example.com", tmp_path)
     meta = runner.read_meta("w")
@@ -1052,12 +1128,12 @@ def test_a_local_certificate_can_be_issued_before_any_edge_exists(tmp_path, monk
     directory yet, and atomic_write puts its temp file beside the target -- so a
     missing parent was a FileNotFoundError and `up --https` crashed outright.
     Found by running it, in an audit, not by any test."""
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     assert not fd.dynamic_dir().exists(), "precondition: no edge yet"
 
-    fd.issue_local_cert("w.rcrepro.localhost")
-    assert (fd.certs_dir() / "w.rcrepro.localhost.crt").is_file()
-    decl = fd.dynamic_dir() / "_cert-w.rcrepro.localhost.yml"
+    fd.issue_local_cert("w.houston.localhost")
+    assert (fd.certs_dir() / "w.houston.localhost.crt").is_file()
+    decl = fd.dynamic_dir() / "_cert-w.houston.localhost.yml"
     assert decl.is_file() and "certFile:" in decl.read_text()
 
 
@@ -1067,7 +1143,7 @@ def test_the_edge_attaches_after_the_workspace_is_up_not_before(tmp_path, monkey
     could not resolve, so the name answered 502 -- and a 502 is not an error
     anyone sees, it just looks like a broken workspace."""
 
-    from rc_repro.services import lifecycle as lc
+    from houston.services import lifecycle as lc
 
     src = source_of(lc._create_repro_locked)
     up_at = source_index(src, "rc = _up(repro_name")
@@ -1086,8 +1162,8 @@ def test_the_edge_mounts_the_local_certificate_directory():
 
 def test_writing_the_edge_creates_the_certs_directory(tmp_path, monkeypatch):
     """Before compose mounts it: a bind-mount source that does not exist is
-    created by Docker as root, and rc-repro then cannot write certificates in."""
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    created by Docker as root, and houston then cannot write certificates in."""
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     fd.write(fd.Edge())
     assert fd.certs_dir().is_dir()
 
@@ -1095,10 +1171,10 @@ def test_writing_the_edge_creates_the_certs_directory(tmp_path, monkeypatch):
 def test_tls_status_survives_a_workspace_with_no_port_of_its_own(tmp_path, monkeypatch):
     """Adoption clears tls_ports, and `[0]` on the empty list was an IndexError --
     a traceback from `tls-status` on exactly the workspaces the edge serves."""
-    from rc_repro import cli, runner
+    from houston import cli, runner
     from typer.testing import CliRunner
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     _acme_workspace("w", "t1.example.com", tmp_path)
     meta = runner.read_meta("w")
     meta.extra["tls_ports"] = []
@@ -1117,11 +1193,11 @@ def test_a_certificate_with_no_subject_still_says_what_it_is_for():
     already says why the SANs are the field that matters: browsers have ignored
     commonName since Chrome 58, so a certificate with only a CN is rejected outright.
     """
-    from rc_repro import tls as tlsmod
-    from rc_repro import tls_local
+    from houston import tls as tlsmod
+    from houston import tls_local
 
-    crt, _ = tls_local.issue_leaf("probe.rcrepro.localhost")
-    assert "probe.rcrepro.localhost" in tlsmod.cert_names(crt)
+    crt, _ = tls_local.issue_leaf("probe.houston.localhost")
+    assert "probe.houston.localhost" in tlsmod.cert_names(crt)
     assert "localhost" in tlsmod.cert_names(crt), "the leaf carries both"
     # Anything unparseable is an empty list, never an exception: this feeds a report.
     assert tlsmod.cert_names("not a certificate") == []
@@ -1131,14 +1207,14 @@ def test_tls_status_reports_the_names_when_there_is_no_subject(tmp_path, monkeyp
     """The row a reader checks to confirm the certificate is for the right name."""
     from typer.testing import CliRunner
 
-    from rc_repro import cli, runner
-    from rc_repro import tls as tlsmod
+    from houston import cli, runner
+    from houston import tls as tlsmod
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     _acme_workspace("w", "t1.example.com", tmp_path)
     monkeypatch.setattr(runner, "docker_available", lambda **k: True)
     monkeypatch.setattr(tlsmod, "verify", lambda *a, **k: {
-        "serving": True, "fallback": False, "issuer": "CN = rc-repro local CA",
+        "serving": True, "fallback": False, "issuer": "CN = houston local CA",
         "subject": "", "dates": "notAfter=Nov 23 2026", "names": ["t1.example.com"],
         "trusted": True, "trusted_via_ca": True, "error": ""})
     r = CliRunner().invoke(cli.app, ["tls-status", "--name", "w"])
@@ -1150,22 +1226,22 @@ def test_tls_status_reports_the_names_when_there_is_no_subject(tmp_path, monkeyp
 def test_tls_troubleshooting_on_kubernetes_does_not_send_you_to_the_edge(tmp_path,
                                                                         monkeypatch):
     """A Kubernetes workspace's certificate is not the edge's, and every line of this
-    advice named Traefik and `rc-repro logs` -- which on that runtime shows
+    advice named Traefik and `houston logs` -- which on that runtime shows
     Rocket.Chat, not a proxy. The tlsalpn/Cloudflare branch is about a challenge
     cert-manager does not implement at all.
 
     Sending someone to `edge logs` for a certificate the edge never saw is the entire
     reason this branch exists.
     """
-    from rc_repro import cli, runner
-    from rc_repro.services import topology
+    from houston import cli, runner
+    from houston.services import topology
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     _acme_workspace("kws", "k1.example.com", tmp_path)
     _acme_workspace("w", "t1.example.com", tmp_path)      # the Compose control
     meta = runner.read_meta("kws")
     topology.stamp(meta.extra, topology.KUBERNETES)
-    meta.extra["namespace"] = "rc-repro-kws"
+    meta.extra["namespace"] = "houston-kws"
     runner.write("kws", "", meta)
 
     said: list[str] = []
@@ -1196,13 +1272,13 @@ def test_verifying_tls_never_raises_when_the_ca_file_is_absent(tmp_path):
     Found live, after the workspace had been built and its certificate issued: `up`
     ended in a Python traceback about a missing file.
     """
-    from rc_repro import tls as tlsmod
+    from houston import tls as tlsmod
 
     import socket
     import ssl
     import threading
 
-    from rc_repro import tls_local
+    from houston import tls_local
 
     # A REAL TLS server, because the bug is only reachable once the handshake has
     # succeeded: `verify` returns early when nothing answers, so pointing it at a dead
@@ -1247,15 +1323,15 @@ def test_verifying_tls_never_raises_when_the_ca_file_is_absent(tmp_path):
 
 def test_the_kubernetes_proof_checks_the_right_trust_store(monkeypatch, tmp_path):
     """A Let's Encrypt certificate is checked against the SYSTEM store -- that is the
-    whole claim being made about it -- and rc-repro's own CA is not involved and may
+    whole claim being made about it -- and houston's own CA is not involved and may
     not exist. `cli.tls_status` already makes this distinction; the create path did
     not, and passed a CA file unconditionally."""
-    from rc_repro import tls as tlsmod
-    from rc_repro.services import edge as edgesvc
-    from rc_repro.services import k8s
-    from rc_repro.services import lifecycle as lc
+    from houston import tls as tlsmod
+    from houston.services import edge as edgesvc
+    from houston.services import k8s
+    from houston.services import lifecycle as lc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(edgesvc, "installed", lambda: True)
     seen: list = []
     monkeypatch.setattr(tlsmod, "verify", lambda *a, **kw: seen.append(kw.get("cafile"))
@@ -1287,14 +1363,14 @@ def test_the_staging_switch_can_be_turned_back_off(tmp_path, monkeypatch):
     that had rehearsed against staging could never be promoted to a real certificate.
 
     Both sides are asserted: what `config set` writes, and what a reader does with a
-    config an OLDER rc-repro already wrote as a string.
+    config an OLDER houston already wrote as a string.
     """
     from typer.testing import CliRunner
 
-    from rc_repro import cli, config as cfgmod
-    from rc_repro.services import edge as fd
+    from houston import cli, config as cfgmod
+    from houston.services import edge as fd
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     run = CliRunner()
 
     assert run.invoke(cli.app, ["config", "set", "acme.staging", "true"]).exit_code == 0
@@ -1302,7 +1378,7 @@ def test_the_staging_switch_can_be_turned_back_off(tmp_path, monkeypatch):
     assert run.invoke(cli.app, ["config", "set", "acme.staging", "false"]).exit_code == 0
     assert cfgmod.load_config()["acme_staging"] is False, "and it can be turned off"
 
-    # A config written by an OLDER rc-repro holds the string. Every box that ever ran
+    # A config written by an OLDER houston holds the string. Every box that ever ran
     # `config set acme.staging false` has one, so the read has to cope.
     cfgmod.save_config({"acme_staging": "false"})
     assert cfgmod.truthy(cfgmod.load_config().get("acme_staging")) is False
@@ -1349,10 +1425,10 @@ def test_two_workspaces_cannot_claim_the_same_hostname():
 
 def test_resolving_tls_refuses_a_hostname_another_workspace_holds(tmp_path, monkeypatch):
     """Refused where BOTH runtimes pass, so neither can grow its own answer."""
-    from rc_repro import errors
-    from rc_repro.services import lifecycle as lc
+    from houston import errors
+    from houston.services import lifecycle as lc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     fd.register("first", "taken.example.com")
 
     req = lc.CreateReq(version="8.5.1", name="second",
@@ -1360,7 +1436,7 @@ def test_resolving_tls_refuses_a_hostname_another_workspace_holds(tmp_path, monk
     with pytest.raises(errors.ConflictError) as exc:
         lc._resolve_tls(req, "second", "127.0.0.1", exclude="second")
     assert "already served for workspace 'first'" in str(exc.value)
-    assert "rc-repro down --name first" in str(exc.value), "say how to free it"
+    assert "houston down --name first" in str(exc.value), "say how to free it"
 
     # And the workspace that owns it can still be brought back up.
     again = lc.CreateReq(version="8.5.1", name="first",
@@ -1375,7 +1451,7 @@ def test_stopping_an_edge_that_was_never_set_up_is_not_a_traceback(tmp_path,
     traceback:
 
         error: FileNotFoundError: [Errno 2] No such file or directory:
-        PosixPath('/home/ubuntu/.rc-repro/edge') - this is unhandled
+        PosixPath('/home/ubuntu/.houston/edge') - this is unhandled
 
     `cwd` for the compose seam is `edge_dir()`, and a home that has never had an edge
     has no such directory. `_docker` one function above it carries an explicit NEVER
@@ -1386,9 +1462,9 @@ def test_stopping_an_edge_that_was_never_set_up_is_not_a_traceback(tmp_path,
     """
     from typer.testing import CliRunner
 
-    from rc_repro import cli
+    from houston import cli
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     assert not fd.edge_dir().exists(), "the point of the test"
 
     r = CliRunner().invoke(cli.app, ["edge", "stop"])
@@ -1403,7 +1479,7 @@ def test_the_compose_seam_never_raises(tmp_path, monkeypatch):
     """The seam itself, not just the command that found it. A seam that raises for one
     caller raises for the next, and every caller here treats it as returning a
     result."""
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path / "never-made"))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path / "never-made"))
     assert not fd.edge_dir().exists()
     res = fd._compose("ps")
     assert res.returncode == 127, "127 is 'could not run it'"
@@ -1420,10 +1496,10 @@ def test_edge_stop_reports_a_compose_that_could_not_run(tmp_path, monkeypatch):
     reported-success-without-reading-the-answer shape this codebase keeps finding."""
     from typer.testing import CliRunner
 
-    from rc_repro import cli
-    from rc_repro.services import edge as edgesvc
+    from houston import cli
+    from houston.services import edge as edgesvc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     edgesvc.write(edgesvc.Edge())                      # so `installed()` is True
     monkeypatch.setattr(edgesvc, "down", lambda: 1)
     r = CliRunner().invoke(cli.app, ["edge", "stop"])
@@ -1432,11 +1508,11 @@ def test_edge_stop_reports_a_compose_that_could_not_run(tmp_path, monkeypatch):
 
 
 def test_a_broken_gui_route_from_an_older_version_is_repaired(tmp_path, monkeypatch):
-    """An older rc-repro wrote a GUI route even with no domain, producing
+    """An older houston wrote a GUI route even with no domain, producing
     `Host(``)` -- rejected at every reload with "empty args for matcher Host".
     Not writing it any more does nothing for the edges that already have one, and
     nobody would think to look in a generated directory. Found on a real box."""
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     fd.write(fd.Edge())
     fd.route_path("_gui").write_text('rule: "Host(``)"\n')   # as the old code left it
     monkeypatch.setattr(fd, "running", lambda: True)
@@ -1451,7 +1527,7 @@ def test_a_broken_gui_route_from_an_older_version_is_repaired(tmp_path, monkeypa
 
 
 def test_a_real_gui_route_is_left_alone(tmp_path, monkeypatch):
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     fd.write(fd.Edge(domain="gui.example.com", acme_email="o@e.com"))
     monkeypatch.setattr(fd, "running", lambda: True)
     monkeypatch.setattr(fd, "foreign_edge", lambda: "")
@@ -1462,13 +1538,13 @@ def test_a_real_gui_route_is_left_alone(tmp_path, monkeypatch):
 
 
 def test_another_homes_edge_is_not_mistaken_for_this_one(tmp_path, monkeypatch):
-    """Every RC_REPRO_HOME uses the same compose project name, so a container
+    """Every HOUSTON_HOME uses the same compose project name, so a container
     started from a DIFFERENT home matched the label filter and running() said
     True while installed() said False. ensure_running() then wrote no
     configuration at all, routes went into a directory nothing watched, and every
     name 404'd while `edge status` reported "no edge yet" beside a running edge.
     """
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     calls = []
 
     def fake_docker(*args, **kw):
@@ -1477,7 +1553,7 @@ def test_another_homes_edge_is_not_mistaken_for_this_one(tmp_path, monkeypatch):
         if args[:1] == ("ps",):
             out = "deadbeef\n"
         elif args[:1] == ("inspect",):
-            out = "/somebody/elses/.rc-repro/edge\n"      # a different home
+            out = "/somebody/elses/.houston/edge\n"      # a different home
         return type("P", (), {"returncode": 0, "stdout": out})()
 
     monkeypatch.setattr(fd, "_docker", fake_docker)
@@ -1485,7 +1561,7 @@ def test_another_homes_edge_is_not_mistaken_for_this_one(tmp_path, monkeypatch):
 
 
 def test_this_homes_edge_is_recognised(tmp_path, monkeypatch):
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
 
     def fake_docker(*args, **kw):
         out = ""
@@ -1501,9 +1577,9 @@ def test_this_homes_edge_is_recognised(tmp_path, monkeypatch):
 
 def test_a_foreign_edge_holding_443_is_named_as_such(tmp_path, monkeypatch):
     """Skipping by container NAME alone hid the most confusing case: an edge from
-    a different RC_REPRO_HOME has exactly our name, so it was excluded as "us"
+    a different HOUSTON_HOME has exactly our name, so it was excluded as "us"
     and reported as "something outside Docker"."""
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
 
     def fake_docker(*args, **kw):
         out = ""
@@ -1512,22 +1588,22 @@ def test_a_foreign_edge_holding_443_is_named_as_such(tmp_path, monkeypatch):
         elif args[:1] == ("ps",):
             out = "deadbeef\n"
         elif args[:1] == ("inspect",):
-            out = "/somebody/elses/.rc-repro/edge\n"
+            out = "/somebody/elses/.houston/edge\n"
         return type("P", (), {"returncode": 0, "stdout": out})()
 
     monkeypatch.setattr(fd, "_docker", fake_docker)
-    assert "another RC_REPRO_HOME" in fd.port_holder(443)
+    assert "another HOUSTON_HOME" in fd.port_holder(443)
 
 
 def test_starting_an_edge_never_replaces_another_homes(tmp_path, monkeypatch):
     """Compose keys a project by NAME and every home uses the same one, so
     `up -d` REPLACED the other home's container rather than failing -- silently
     taking down every https name it served. Observed doing exactly that. It
-    matters because the DEFAULT home is ~/.rc-repro: on a shared box, the second
+    matters because the DEFAULT home is ~/.houston: on a shared box, the second
     person's `up --https` steals the first person's ingress."""
-    from rc_repro.errors import ConflictError
+    from houston.errors import ConflictError
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     started = []
 
     def fake_docker(*args, **kw):
@@ -1535,7 +1611,7 @@ def test_starting_an_edge_never_replaces_another_homes(tmp_path, monkeypatch):
         if args[:1] == ("ps",):
             out = "deadbeef\n"
         elif args[:1] == ("inspect",):
-            out = "/home/someone-else/.rc-repro/edge\n"
+            out = "/home/someone-else/.houston/edge\n"
         return type("P", (), {"returncode": 0, "stdout": out})()
 
     monkeypatch.setattr(fd, "_docker", fake_docker)
@@ -1544,12 +1620,12 @@ def test_starting_an_edge_never_replaces_another_homes(tmp_path, monkeypatch):
 
     with pytest.raises(ConflictError) as exc:
         fd.up(pull=False)
-    assert "/home/someone-else/.rc-repro/edge" in str(exc.value)
+    assert "/home/someone-else/.houston/edge" in str(exc.value)
     assert started == [], "it must not have run compose at all"
 
 
 def test_our_own_edge_is_not_treated_as_foreign(tmp_path, monkeypatch):
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
 
     def fake_docker(*args, **kw):
         out = ""
@@ -1578,10 +1654,10 @@ def test_edge_start_does_not_claim_success_while_a_cluster_holds_the_ports(
 
     from typer.testing import CliRunner
 
-    from rc_repro import cli
-    from rc_repro.services import edge as edgesvc, k8s
+    from houston import cli
+    from houston.services import edge as edgesvc, k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     edgesvc.write(edgesvc.Edge())
     monkeypatch.setattr(edgesvc, "up", lambda **k: subprocess.CompletedProcess(
         args=[], returncode=0, stdout="", stderr=""))
@@ -1613,10 +1689,10 @@ def test_the_tls_verdict_stops_waiting_when_no_challenge_can_reach_the_host(
     for the certificate…" and then a message saying issuance "may still complete",
     which is how a reader learns to ignore the line that mattered.
     """
-    from rc_repro import cli
-    from rc_repro.services import k8s
+    from houston import cli
+    from houston.services import k8s
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(k8s, "port_claiming_cluster",
                         lambda *a, **k: k8s.PortClaim(
                             context="default", service="kube-system/traefik",
@@ -1645,7 +1721,7 @@ def test_the_port_claim_probe_costs_nothing_on_a_box_with_no_kubectl(monkeypatch
     whose kubeconfig points at an unreachable remote cluster, which is an ordinary
     laptop. A Docker-only box must not pay for a Kubernetes check at all.
     """
-    from rc_repro.services import k8s
+    from houston.services import k8s
 
     monkeypatch.setattr(k8s.shutil, "which", lambda name: None)
     called = []
@@ -1690,7 +1766,7 @@ _ACME = {
 def _write_acme(staging: bool = False, doc: dict | None = None) -> None:
     import json as _json
 
-    from rc_repro import tls
+    from houston import tls
     tls.acme_dir().mkdir(parents=True, exist_ok=True)
     (tls.acme_dir() / tls.acme_storage_name(staging)).write_text(
         _json.dumps(doc if doc is not None else _ACME), encoding="utf-8")
@@ -1699,7 +1775,7 @@ def _write_acme(staging: bool = False, doc: dict | None = None) -> None:
 def _read_acme(staging: bool = False) -> dict:
     import json as _json
 
-    from rc_repro import tls
+    from houston import tls
     return _json.loads((tls.acme_dir() / tls.acme_storage_name(staging)).read_text())
 
 
@@ -1713,7 +1789,7 @@ def test_a_teardown_leaves_the_certificate_and_its_private_key(tmp_path):
     is present, valid, and unreachable. The visible symptom is a TLS handshake that
     succeeds, with a genuine certificate for the name, into a 404.
     """
-    host = "t-1234.rcrepro.localhost"
+    host = "t-1234.houston.localhost"
     fd.write(fd.Edge(acme_email="ops@xyz.com"))
     fd.register("t-1234", host, local=True)
     fd.issue_local_cert(host)
@@ -1730,7 +1806,7 @@ def test_a_teardown_leaves_the_certificate_and_its_private_key(tmp_path):
 
 
 def test_delete_host_removes_everything_a_teardown_left(tmp_path):
-    host = "t-1234.rcrepro.localhost"
+    host = "t-1234.houston.localhost"
     fd.write(fd.Edge(acme_email="ops@xyz.com"))
     fd.register("t-1234", host, local=True)
     fd.issue_local_cert(host)
@@ -1786,8 +1862,8 @@ def test_delete_host_finds_every_route_claiming_the_name(tmp_path):
 def test_delete_host_refuses_while_a_live_workspace_claims_the_name(tmp_path):
     """Deleting the certificate under a running workspace would leave one that
     cannot serve its own name. The workspace is NAMED, with the command."""
-    from rc_repro import runner
-    from rc_repro.errors import ConflictError
+    from houston import runner
+    from houston.errors import ConflictError
 
     fd.write(fd.Edge(acme_email="ops@xyz.com"))
     fd.register("live", "live.example.org", local=True)
@@ -1816,7 +1892,7 @@ def test_a_route_whose_workspace_is_gone_is_exactly_the_case_it_serves(tmp_path)
 def test_delete_host_refuses_the_guis_own_name(tmp_path):
     """It would take `serve` off HTTPS while the operator is probably using it to
     run the command."""
-    from rc_repro.errors import ConflictError
+    from houston.errors import ConflictError
 
     fd.write(fd.Edge(domain="support.xyz.com", acme_email="ops@xyz.com"))
     with pytest.raises(ConflictError) as exc:
@@ -1881,7 +1957,7 @@ def test_the_rewritten_acme_store_is_still_0600(tmp_path):
     the umask, which is how a fix for one exposure becomes another."""
     import stat
 
-    from rc_repro import tls
+    from houston import tls
     fd.write(fd.Edge(acme_email="ops@xyz.com"))
     _write_acme()
     fd.delete_host("gone.example.org", confirm=True, restart=False)
@@ -1892,7 +1968,7 @@ def test_the_rewritten_acme_store_is_still_0600(tmp_path):
 def test_a_garbage_acme_store_is_not_an_exception(tmp_path):
     """A half-written or hand-edited store means "no certificate for that host in
     here", which is the only question being asked of it."""
-    from rc_repro import tls
+    from houston import tls
     fd.write(fd.Edge(acme_email="ops@xyz.com"))
     tls.acme_dir().mkdir(parents=True, exist_ok=True)
     (tls.acme_dir() / tls.ACME_FILE).write_text("{not json", encoding="utf-8")
@@ -1911,7 +1987,7 @@ def test_the_issuance_ledger_is_kept(tmp_path):
     """`acme/issued.json` is the rate-limit history `tls-status` counts against
     Let's Encrypt's five-a-week duplicate limit. Deleting a certificate does not
     give the budget back, so erasing the record would make the count LIE."""
-    from rc_repro import tls
+    from houston import tls
     fd.write(fd.Edge(acme_email="ops@xyz.com"))
     tls.record_issuance("gone.example.org")
     _write_acme()
@@ -1970,7 +2046,7 @@ def test_a_stopped_edge_is_not_started_just_to_delete(tmp_path, monkeypatch):
 def test_edge_delete_from_the_cli(tmp_path):
     from typer.testing import CliRunner
 
-    from rc_repro import cli
+    from houston import cli
     fd.write(fd.Edge(acme_email="ops@xyz.com"))
     fd.register("x", "x.example.org", local=True)
     fd.issue_local_cert("x.example.org")
@@ -1984,7 +2060,7 @@ def test_edge_delete_from_the_cli(tmp_path):
 def test_edge_delete_without_a_host_says_which_command_lists_them(tmp_path):
     from typer.testing import CliRunner
 
-    from rc_repro import cli
+    from houston import cli
     fd.write(fd.Edge(acme_email="ops@xyz.com"))
     r = CliRunner().invoke(cli.app, ["edge", "delete", "--yes"])
     assert r.exit_code != 0
@@ -1996,7 +2072,7 @@ def test_edge_delete_renders_a_refusal_rather_than_raising(tmp_path):
     it -- the exact failure `edge start` shipped with."""
     from typer.testing import CliRunner
 
-    from rc_repro import cli
+    from houston import cli
     fd.write(fd.Edge(domain="support.xyz.com", acme_email="ops@xyz.com"))
     r = CliRunner().invoke(cli.app, ["edge", "delete", "support.xyz.com", "--yes"])
     assert r.exit_code != 0
@@ -2009,7 +2085,7 @@ def test_edge_status_names_a_certificate_with_no_route(tmp_path):
     for a customer-shaped hostname in acme.json was invisible to every command."""
     from typer.testing import CliRunner
 
-    from rc_repro import cli
+    from houston import cli
     fd.write(fd.Edge(acme_email="ops@xyz.com"))
     _write_acme()
     r = CliRunner().invoke(cli.app, ["edge", "status"])
@@ -2019,8 +2095,8 @@ def test_edge_status_names_a_certificate_with_no_route(tmp_path):
 
 
 def test_a_foreign_edge_is_reported_and_never_restarted(tmp_path, monkeypatch):
-    """Every home names its compose project `rcrepro_edge`, so a naive restart would
-    stop whichever container carries that label -- another RC_REPRO_HOME's included.
+    """Every home names its compose project `houston_edge`, so a naive restart would
+    stop whichever container carries that label -- another HOUSTON_HOME's included.
     `running()` is home-aware and already prevents that; what was missing was the
     SENTENCE. A foreign edge reads its own ACME store, so the certificate deleted
     here is this home's copy and the name is still being served with the other one.
@@ -2031,13 +2107,13 @@ def test_a_foreign_edge_is_reported_and_never_restarted(tmp_path, monkeypatch):
     fd.write(fd.Edge(acme_email="ops@xyz.com"))
     _write_acme()
     monkeypatch.setattr(fd, "running", lambda: False)      # not OURS
-    monkeypatch.setattr(fd, "foreign_edge", lambda: "/home/someone/.rc-repro/edge")
+    monkeypatch.setattr(fd, "foreign_edge", lambda: "/home/someone/.houston/edge")
     monkeypatch.setattr(fd, "down", lambda: pytest.fail("would stop another home's edge"))
     monkeypatch.setattr(fd, "up", lambda pull=True: pytest.fail("nor start ours over it"))
 
     gone = fd.delete_host("gone.example.org", confirm=True)
     assert gone["restarted"] is None
-    assert gone["foreign"] == "/home/someone/.rc-repro/edge"
+    assert gone["foreign"] == "/home/someone/.houston/edge"
     # The deletion itself still happened -- the key came off THIS disk, which is
     # what was asked for.
     assert gone["acme"] == ["acme.json"]
@@ -2049,16 +2125,16 @@ def test_the_cli_says_the_deleted_key_was_not_the_one_being_served(tmp_path,
     would claim a name stopped being served when nothing changed for it."""
     from typer.testing import CliRunner
 
-    from rc_repro import cli
+    from houston import cli
     fd.write(fd.Edge(acme_email="ops@xyz.com"))
     _write_acme()
-    monkeypatch.setattr(fd, "foreign_edge", lambda: "/home/someone/.rc-repro/edge")
+    monkeypatch.setattr(fd, "foreign_edge", lambda: "/home/someone/.houston/edge")
     monkeypatch.setattr(fd, "running", lambda: False)
 
     r = CliRunner().invoke(cli.app, ["edge", "delete", "gone.example.org", "--yes"])
     assert r.exit_code == 0, r.output
-    assert "another RC_REPRO_HOME" in r.output
-    assert "/home/someone/.rc-repro/edge" in r.output
+    assert "another HOUSTON_HOME" in r.output
+    assert "/home/someone/.houston/edge" in r.output
     # Collapsed: ui wraps, so the sentence is asserted on the unwrapped text.
     flat = " ".join(r.output.split())
     assert "reads its OWN certificate store" in flat, flat
@@ -2078,10 +2154,10 @@ def test_tls_status_does_not_report_a_cluster_placeholder_as_this_workspaces_cer
     """
     from typer.testing import CliRunner
 
-    from rc_repro import cli, runner
-    from rc_repro import tls as tlsmod
+    from houston import cli, runner
+    from houston import tls as tlsmod
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     _acme_workspace("w", "t1.example.com", tmp_path)
     monkeypatch.setattr(runner, "docker_available", lambda **k: True)
 
@@ -2095,14 +2171,14 @@ def test_tls_status_does_not_report_a_cluster_placeholder_as_this_workspaces_cer
                     "subject": "CN = TRAEFIK DEFAULT CERT", "dates": "", "names": [],
                     "trusted": False, "trusted_via_ca": False, "error": ""}
         return {"serving": True, "fallback": False,
-                "issuer": "CN = rc-repro local CA", "subject": "CN = t1.example.com",
+                "issuer": "CN = houston local CA", "subject": "CN = t1.example.com",
                 "dates": "notAfter=Nov 23 2026", "names": ["t1.example.com"],
                 "trusted": True, "trusted_via_ca": True, "error": ""}
     monkeypatch.setattr(tlsmod, "verify", fake_verify)
 
     r = CliRunner().invoke(cli.app, ["tls-status", "--name", "w"])
     assert "::1" in asked, f"the other loopback family was never tried: {asked}"
-    assert "rc-repro local CA" in (r.output or ""), r.output
+    assert "houston local CA" in (r.output or ""), r.output
     assert "TRAEFIK DEFAULT CERT" not in (r.output or ""), \
         "another program's placeholder was reported as this workspace's certificate"
 
@@ -2113,10 +2189,10 @@ def test_tls_status_still_reports_a_placeholder_when_every_family_serves_one(
     placeholder IS the finding, and must not be hidden by the family sweep."""
     from typer.testing import CliRunner
 
-    from rc_repro import cli, runner
-    from rc_repro import tls as tlsmod
+    from houston import cli, runner
+    from houston import tls as tlsmod
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     _acme_workspace("w", "t1.example.com", tmp_path)
     monkeypatch.setattr(runner, "docker_available", lambda **k: True)
     monkeypatch.setattr(tlsmod, "verify", lambda *a, **k: {
@@ -2138,9 +2214,9 @@ def test_config_get_and_list_tell_false_apart_from_unset(tmp_path, monkeypatch):
     """
     from typer.testing import CliRunner
 
-    from rc_repro import cli
+    from houston import cli
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     run = CliRunner()
 
     assert run.invoke(cli.app, ["config", "set", "acme.staging", "false"]).exit_code == 0
@@ -2169,15 +2245,15 @@ def test_a_passthrough_route_is_not_reported_unreachable(tmp_path, monkeypatch):
     learned this; the CLI had not, which is the same two-front-ends drift as the
     `Host(` / `HostSNI(` parser.
     """
-    from rc_repro.services import edge as edgesvc
+    from houston.services import edge as edgesvc
 
-    monkeypatch.setenv("RC_REPRO_HOME", str(tmp_path))
+    monkeypatch.setenv("HOUSTON_HOME", str(tmp_path))
     monkeypatch.setattr(edgesvc, "is_passthrough", lambda n: n == "kube")
     monkeypatch.setattr(edgesvc, "workspace_network",
-                        lambda n: f"rcrepro-{n}_default")
+                        lambda n: f"houston-{n}_default")
 
     # A passthrough forwards raw TCP to a NodePort; there is no network to join.
     assert edgesvc.route_reachable("kube", set()) is True
     # An HTTP route still needs the edge to have joined its network.
     assert edgesvc.route_reachable("cmp", set()) is False
-    assert edgesvc.route_reachable("cmp", {"rcrepro-cmp_default"}) is True
+    assert edgesvc.route_reachable("cmp", {"houston-cmp_default"}) is True
