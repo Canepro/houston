@@ -16135,7 +16135,16 @@ def test_every_service_module_is_named_in_the_map():
     from houston import services
 
     root = pathlib.Path(services.__file__).parent
-    text = (root.parent.parent / "CLAUDE.md").read_text()
+    guide = root.parent.parent / "CLAUDE.md"
+    if not guide.is_file():
+        # UNTRACKED ON PURPOSE (see "Untrack the local Claude Code config"), so it is
+        # absent from every fresh clone -- which is every CI run. Reading it
+        # unconditionally made this fail with a FileNotFoundError that says nothing
+        # about the map it guards, on the one machine least able to fix it. The guard
+        # belongs where a module actually gets added: a developer's checkout, which
+        # has the file.
+        pytest.skip("CLAUDE.md is untracked and absent here (a fresh clone or CI)")
+    text = guide.read_text()
     modules = sorted(p.stem for p in root.glob("*.py") if p.stem != "__init__")
     assert modules, "found no service modules — this walk would prove nothing"
 

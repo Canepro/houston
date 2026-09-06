@@ -4082,9 +4082,18 @@ def cluster_cmd(
             jsonout.warn_once(f"CLUSTER_UNREADABLE_{missing.upper()}",
                               f"{missing} could not be read; it is reported as "
                               f"unknown rather than as none")
-        jsonout.reply("cluster", report)
         if unusable:
-            raise typer.Exit(errors.PreflightError.exit_code)
+            # A SUCCESS ENVELOPE FOLLOWED BY A NON-ZERO EXIT is the one thing the
+            # contract cannot survive: `ok` is the field a caller is told to read, and
+            # it said true while the process exited 3. Where kubectl exists this path
+            # is never reached -- `status()` refuses an unknown context with a typed
+            # error -- so the disagreement only appeared on a machine without it,
+            # which is every CI runner and no developer's box.
+            _fail(errors.PreflightError(
+                f"cluster {report['context'] or '(none)'} is not usable from here: "
+                + ("no context is configured" if not report["context"]
+                   else "it is not reachable")))
+        jsonout.reply("cluster", report)
         return
 
     def q(value, suffix: str = "") -> str:
