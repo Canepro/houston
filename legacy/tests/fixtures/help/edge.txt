@@ -1,0 +1,28 @@
+
+ Usage: houston edge [OPTIONS] [action] [host]
+
+ The shared Traefik that serves every HTTPS name on this box.
+
+ It is not a workspace, so it never appears in `list` and `prune`/`down` cannot
+ touch it — but something holding :443 and routing your traffic should be
+ answerable, and this is where it answers.
+
+ It starts by itself when the first workspace needs a name. `stop` frees :80
+ and :443 for something else; routes are files, so starting it again restores
+ every name with no re-registration.
+
+ `delete <host>` forgets a name completely — its route, its certificate, its
+ private key and its Let's Encrypt entry. `down --volumes` removes the route
+ and stops there, so the certificate material for a name you are finished with
+ outlives the workspace it was issued for; this is how it goes.
+
+╭─ Arguments ──╮
+   action      <str>  status | start | stop | restart | logs | delete [default: status]
+   host        <str>  the hostname, for `delete`
+╰──╯
+╭─ Options ──╮
+ --follow  -f             follow the log (logs)
+ --tail            <int>  how many lines of log to show [default: 200]
+ --yes     -y             skip the confirmation prompt (delete)
+ --help                   Show this message and exit.
+╰──╯

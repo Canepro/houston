@@ -1,0 +1,301 @@
+{
+  "names": {
+    "services": [
+      "prometheus",
+      "grafana",
+      "node-exporter",
+      "mongodb-exporter",
+      "loki",
+      "opentelemetry-logs-collector"
+    ],
+    "volumes": [
+      "prometheus_tsdb",
+      "grafana_data",
+      "loki_data"
+    ],
+    "setting": "Prometheus_Enabled",
+    "env": "OVERWRITE_SETTING_Prometheus_Enabled"
+  },
+  "volumes": {
+    "prometheus_tsdb": {
+      "driver": "local"
+    },
+    "grafana_data": {
+      "driver": "local"
+    },
+    "loki_data": {
+      "driver": "local"
+    }
+  },
+  "services": {
+    "prometheus": {
+      "image": "docker.io/prom/prometheus:v3.4.2",
+      "command": [
+        "--config.file=/etc/prometheus/prometheus.yml",
+        "--web.enable-lifecycle",
+        "--storage.tsdb.retention.time=15d",
+        "--web.enable-remote-write-receiver"
+      ],
+      "volumes": [
+        "./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro",
+        "./monitoring/file_sd_configs:/etc/prometheus/file_sd_configs:ro",
+        "prometheus_tsdb:/prometheus"
+      ],
+      "ports": [
+        "9090:9090"
+      ],
+      "restart": "unless-stopped"
+    },
+    "grafana": {
+      "image": "docker.io/grafana/grafana:12.0.2",
+      "environment": {
+        "GF_SECURITY_ADMIN_USER": "admin",
+        "GF_SECURITY_ADMIN_PASSWORD": "admin",
+        "GF_AUTH_ANONYMOUS_ENABLED": "true",
+        "GF_AUTH_ANONYMOUS_ORG_ROLE": "Viewer",
+        "GF_SECURITY_ALLOW_EMBEDDING": "true"
+      },
+      "volumes": [
+        "./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro",
+        "./monitoring/grafana/dashboards:/dashboards:ro",
+        "grafana_data:/var/lib/grafana"
+      ],
+      "ports": [
+        "5050:3000"
+      ],
+      "depends_on": [
+        "prometheus"
+      ],
+      "restart": "unless-stopped"
+    },
+    "node-exporter": {
+      "image": "docker.io/prom/node-exporter:v1.9.1",
+      "command": [
+        "--path.procfs=/host/proc",
+        "--path.sysfs=/host/sys",
+        "--path.rootfs=/rootfs",
+        "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+      ],
+      "volumes": [
+        "/proc:/host/proc:ro",
+        "/sys:/host/sys:ro",
+        "/:/rootfs:ro"
+      ],
+      "restart": "unless-stopped"
+    },
+    "mongodb-exporter": {
+      "image": "docker.io/percona/mongodb_exporter:0.43.1",
+      "command": [
+        "--mongodb.uri=mongodb://mongodb:27017/?directConnection=true",
+        "--collect-all",
+        "--compatible-mode"
+      ],
+      "depends_on": [
+        "mongodb"
+      ],
+      "restart": "unless-stopped"
+    },
+    "loki": {
+      "image": "docker.io/grafana/loki:3.6",
+      "command": "-config.file=/etc/loki/config.yaml -config.expand-env=true",
+      "user": "0",
+      "volumes": [
+        "./monitoring/loki/config.yaml:/etc/loki/config.yaml:ro",
+        "loki_data:/data/loki:rw"
+      ],
+      "restart": "unless-stopped"
+    },
+    "opentelemetry-logs-collector": {
+      "image": "docker.io/otel/opentelemetry-collector-contrib:0.143.0",
+      "command": [
+        "--config=/etc/otel-collector-config.yaml"
+      ],
+      "user": "0",
+      "volumes": [
+        "./monitoring/otel/config.yaml:/etc/otel-collector-config.yaml:ro",
+        "/var/run/docker.sock:/var/run/docker.sock:ro",
+        "/var/lib/docker/containers:/hostfs/storage:ro"
+      ],
+      "depends_on": [
+        "loki"
+      ],
+      "restart": "unless-stopped"
+    }
+  },
+  "bound_ports": {
+    "prometheus": {
+      "image": "docker.io/prom/prometheus:v3.4.2",
+      "command": [
+        "--config.file=/etc/prometheus/prometheus.yml",
+        "--web.enable-lifecycle",
+        "--storage.tsdb.retention.time=15d",
+        "--web.enable-remote-write-receiver"
+      ],
+      "volumes": [
+        "./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro",
+        "./monitoring/file_sd_configs:/etc/prometheus/file_sd_configs:ro",
+        "prometheus_tsdb:/prometheus"
+      ],
+      "ports": [
+        "127.0.0.1:9090:9090"
+      ],
+      "restart": "unless-stopped"
+    },
+    "grafana": {
+      "image": "docker.io/grafana/grafana:12.0.2",
+      "environment": {
+        "GF_SECURITY_ADMIN_USER": "admin",
+        "GF_SECURITY_ADMIN_PASSWORD": "admin",
+        "GF_AUTH_ANONYMOUS_ENABLED": "true",
+        "GF_AUTH_ANONYMOUS_ORG_ROLE": "Viewer",
+        "GF_SECURITY_ALLOW_EMBEDDING": "true"
+      },
+      "volumes": [
+        "./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro",
+        "./monitoring/grafana/dashboards:/dashboards:ro",
+        "grafana_data:/var/lib/grafana"
+      ],
+      "ports": [
+        "127.0.0.1:5050:3000"
+      ],
+      "depends_on": [
+        "prometheus"
+      ],
+      "restart": "unless-stopped"
+    },
+    "node-exporter": {
+      "image": "docker.io/prom/node-exporter:v1.9.1",
+      "command": [
+        "--path.procfs=/host/proc",
+        "--path.sysfs=/host/sys",
+        "--path.rootfs=/rootfs",
+        "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+      ],
+      "volumes": [
+        "/proc:/host/proc:ro",
+        "/sys:/host/sys:ro",
+        "/:/rootfs:ro"
+      ],
+      "restart": "unless-stopped"
+    },
+    "mongodb-exporter": {
+      "image": "docker.io/percona/mongodb_exporter:0.43.1",
+      "command": [
+        "--mongodb.uri=mongodb://mongodb:27017/?directConnection=true",
+        "--collect-all",
+        "--compatible-mode"
+      ],
+      "depends_on": [
+        "mongodb"
+      ],
+      "restart": "unless-stopped"
+    },
+    "loki": {
+      "image": "docker.io/grafana/loki:3.6",
+      "command": "-config.file=/etc/loki/config.yaml -config.expand-env=true",
+      "user": "0",
+      "volumes": [
+        "./monitoring/loki/config.yaml:/etc/loki/config.yaml:ro",
+        "loki_data:/data/loki:rw"
+      ],
+      "restart": "unless-stopped"
+    },
+    "opentelemetry-logs-collector": {
+      "image": "docker.io/otel/opentelemetry-collector-contrib:0.143.0",
+      "command": [
+        "--config=/etc/otel-collector-config.yaml"
+      ],
+      "user": "0",
+      "volumes": [
+        "./monitoring/otel/config.yaml:/etc/otel-collector-config.yaml:ro",
+        "/var/run/docker.sock:/var/run/docker.sock:ro",
+        "/var/lib/docker/containers:/hostfs/storage:ro"
+      ],
+      "depends_on": [
+        "loki"
+      ],
+      "restart": "unless-stopped"
+    }
+  },
+  "paths": [
+    "monitoring/prometheus.yml",
+    "monitoring/file_sd_configs/rocketchat.yml",
+    "monitoring/file_sd_configs/mongo.yml",
+    "monitoring/file_sd_configs/node-exporter.yml",
+    "monitoring/grafana/provisioning/datasources/prometheus.yml",
+    "monitoring/grafana/provisioning/datasources/loki.yml",
+    "monitoring/grafana/provisioning/dashboards/from-dir.yml",
+    "monitoring/grafana/dashboards/rocketchat-metrics.json",
+    "monitoring/grafana/dashboards/node-exporter-full.json",
+    "monitoring/grafana/dashboards/mongodb-exporter.json",
+    "monitoring/grafana/dashboards/k6-loadtest.json",
+    "monitoring/grafana/dashboards/houston-logs.json",
+    "monitoring/loki/config.yaml",
+    "monitoring/otel/config.yaml"
+  ],
+  "content_sha256": [
+    [
+      "monitoring/prometheus.yml",
+      "50b1a8a7c3a299f3d0780a0cf8bd374875f132a89b7716b2377af49ed158ac79"
+    ],
+    [
+      "monitoring/file_sd_configs/rocketchat.yml",
+      "8db0339114293633612db2da2281db298e10f9983adc8c5a138b943442d0c663"
+    ],
+    [
+      "monitoring/file_sd_configs/mongo.yml",
+      "3e0f2be7d5ca5f4689167193586b0d2875b3ab0ad6331ca489a593b40114b9ca"
+    ],
+    [
+      "monitoring/file_sd_configs/node-exporter.yml",
+      "075e939aab2ea21a3ed3cd87a02acbc543c6c053428379e1499d26a294ca5f43"
+    ],
+    [
+      "monitoring/grafana/provisioning/datasources/prometheus.yml",
+      "4dd18d63480a218b0e0b1e26a14951c66e24c851e31cd7ff7e7a61562c08a3b2"
+    ],
+    [
+      "monitoring/grafana/provisioning/datasources/loki.yml",
+      "b4b31f543bac00ea3dc7d66db017f7fa9e04610822de3138e2836d0909699090"
+    ],
+    [
+      "monitoring/grafana/provisioning/dashboards/from-dir.yml",
+      "adb141996a481452a1e4d6b299fe248fc298d5951a31262399b28f875bdf8f53"
+    ],
+    [
+      "monitoring/grafana/dashboards/rocketchat-metrics.json",
+      "4d33a2e5e5a390f913874f649208a23085730af6c3911c49742eb0c2e7dfa072"
+    ],
+    [
+      "monitoring/grafana/dashboards/node-exporter-full.json",
+      "6e5b9662816bef2a01c09763585759e19303bdced3df2d427df57562bf72ba39"
+    ],
+    [
+      "monitoring/grafana/dashboards/mongodb-exporter.json",
+      "edbc3c2f190bcf0b47e2bd74eba7d0d5ee53df2c9b52e047e325c6b8c65ea66c"
+    ],
+    [
+      "monitoring/grafana/dashboards/k6-loadtest.json",
+      "f1a21e5ea935fb470199a854760637b344acea389b7a447ab62c3dbde737ee82"
+    ],
+    [
+      "monitoring/grafana/dashboards/houston-logs.json",
+      "36e4419f4a48692bf9c71d9e47ad243638150f46573f2e47738de5fd0d2c13a7"
+    ],
+    [
+      "monitoring/loki/config.yaml",
+      "85dd96436f38525387c673cba5413d2b318e6d94321aa9ed4c6d97970c67fb47"
+    ],
+    [
+      "monitoring/otel/config.yaml",
+      "104ca3e8a8431661f2dfc72f502ef36a31356194bf2b60fca17e105a4ff919f0"
+    ]
+  ],
+  "notes": [
+    "Grafana:    http://localhost:5050  (admin/admin; anonymous view enabled)",
+    "Prometheus: http://localhost:9090  (Status -> Targets: rocketchat, mongodb, node-exporter)",
+    "Dashboards auto-provisioned: Rocket.Chat Metrics, MongoDB, Node Exporter Full.",
+    "k6 Load Test dashboard is provisioned too; it fills in while a `loadtest --live` run streams metrics.",
+    "Container logs -> Loki: open the 'Rocket.Chat Logs' dashboard in Grafana (http://localhost:5050/d/houston-logs) - no login needed."
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "refusals": [
+    [
+      [
+        "DockerError",
+        "could not ask cluster 'kind-houston-local' for 'beta''s Rocket.Chat pod: Error: forbidden"
+      ],
+      [
+        "DockerError",
+        "could not ask cluster 'kind-houston-local' whether 'beta' is running: Error: forbidden"
+      ]
+    ],
+    [
+      [
+        "NotReadyError",
+        "no Rocket.Chat pod in houston-beta to read the environment from — is 'beta' running? (`houston start --name beta`)"
+      ],
+      null
+    ],
+    [
+      [
+        "DockerError",
+        "could not ask cluster \"o'brien\" for 'beta''s Rocket.Chat pod: Error: forbidden"
+      ],
+      [
+        "DockerError",
+        "could not ask cluster \"o'brien\" whether 'beta' is running: Error: forbidden"
+      ]
+    ],
+    [
+      [
+        "NotReadyError",
+        "no Rocket.Chat pod in houston-beta to read the environment from — is 'beta' running? (`houston start --name beta`)"
+      ],
+      null
+    ],
+    [
+      [
+        "DockerError",
+        "could not ask cluster 'a\\\\b' for 'it-s''s Rocket.Chat pod: Error: forbidden"
+      ],
+      ["DockerError", "could not ask cluster 'a\\\\b' whether 'it-s' is running: Error: forbidden"]
+    ],
+    [
+      [
+        "NotReadyError",
+        "no Rocket.Chat pod in houston-it-s to read the environment from — is 'it-s' running? (`houston start --name it-s`)"
+      ],
+      null
+    ]
+  ]
+}

@@ -1,0 +1,52 @@
+
+ Usage: houston loadtest [OPTIONS]
+
+ Drive real HTTP load at a repro with k6 and check it against an SLO.
+
+ Load is spread across seeded users when available (--users, default 10) so
+ it carries real per-user identity; the journey scenario times each step of a
+ realistic session. --save/--compare give before/after deltas across runs.
+ k6 runs on the repro's docker network (works with loopback-only binds); the
+ REST rate limiter is disabled for the run and restored after. Exits non-zero
+ if a --slo rule is not met — usable as a CI gate.
+
+╭─ Options ──╮
+ --name         -n               <str>
+ --scenario                      <str>  messages | login | read | mixed | journey | webhook |
+                                        badbot | custom
+                                        [default: messages]
+ --endpoint                      <str>  custom scenario: the call to hit, e.g. "GET
+                                        /api/v1/channels.list?count=100"
+ --body                          <str>  custom scenario: JSON request body for POST/PUT/PATCH
+ --vus                           <int>  virtual users (k6 concurrent workers — not RC accounts)
+                                        [default: 10]
+ --users                         <int>  spread load across up to N seeded users (alice, bob, …);
+                                        0 = admin token only
+                                        [default: 10]
+ --duration                      <str>  test duration, e.g. 60s, 2m [default: 30s]
+ --ramp                          <str>  ramp VUs start:end over --duration, e.g. 10:200
+ --spike                         <str>  spike test base:peak over --duration (base 1/3, peak 1/3,
+                                        recovery 1/3), e.g. 10:100 — reports recovery time
+ --live                                 stream k6 metrics into the attached monitoring stack's
+                                        Prometheus (watch live in Grafana)
+ --slo                           <str>  pass/fail gate, e.g. p95=300ms,error=1%,rps=100
+ --constrain                     <str>  cap services to customer-sized hardware for the test,
+                                        e.g. "rc=2cpu/2g,mongo=1cpu/1g" (live docker update;
+                                        restored after)
+ --diag             --no-diag           server-side diagnosis: RC event-loop lag, Mongo slow
+                                        queries, latency-over-time, verdict
+                                        [default: diag]
+ --slowms                        <int>  Mongo profiler threshold in ms (queries slower than this
+                                        are captured)
+                                        [default: 100]
+ --stats                                also report container CPU/RAM during the test
+ --save                          <str>  save this run as a named baseline (~/.houston/loadtests/)
+ --compare                       <str>  compare this run against a saved baseline
+ --json                                 print the result as JSON (for CI/scripts); suppresses
+                                        pretty output
+ --report                               write a markdown report to
+                                        $HOUSTON_HOME/reports
+ --report-path                   <str>  write the report to this file/dir instead (implies
+                                        --report)
+ --help                                 Show this message and exit.
+╰──╯

@@ -1,0 +1,313 @@
+{
+  "edge": {
+    "edge status, none installed": {
+      "code": 0,
+      "stdout": "no edge yet — it starts with the first `--https` or `--domain` workspace.\n",
+      "stderr": "",
+      "dialled": []
+    },
+    "edge status, running, no names, a GUI name": {
+      "code": 0,
+      "stdout": "+- houston edge --------------------------------------------+\n|  State     running                                        |\n|  Project   houston_edge (<home>/edge)  |\n|  GUI name  gui.example.com                                |\n+-----------------------------------------------------------+\n  no names registered yet.\n",
+      "stderr": "",
+      "dialled": []
+    },
+    "edge status, stopped, routes, strays": {
+      "code": 0,
+      "stdout": "+- houston edge -------------------------------------------+\n|  State    STOPPED                                        |\n|  Project  houston_edge (<home>/edge)  |\n+----------------------------------------------------------+\n  ⚠ every https name on this box is unreachable while it is stopped — `houston edge start`\n  ⚠ 4 name(s) declared with no certificate file — x.example.com, y.example.com, z.example.com…. Traefik logs 'failed to find any PEM data' for each, once a second, and serves none of them. `houston edge logs`; if <home>/edge/certs is root-owned (Docker creates a missing bind-mount target that way), `sudo chown -R $(id -u):$(id -g) <home>/edge/certs` and re-run `up` for those workspaces.\n  ⚠ 1 certificate(s) held with no route — stale.example.com. Each is a Let's Encrypt certificate AND private key on this disk for a name nothing serves. `houston edge delete <host>` removes one.\n\nNAME                         SERVES                                 REACHABLE\na                            a.example.com                          yes\nb                            ?                                      NO (502)\n",
+      "stderr": "",
+      "dialled": []
+    },
+    "edge stop, compose fails": {
+      "code": 1,
+      "stdout": "",
+      "stderr": "error: could not stop the edge — `docker compose -p houston_edge ps` says what is still there.\n",
+      "dialled": []
+    },
+    "edge stop, nothing installed": {
+      "code": 0,
+      "stdout": "no edge is set up in this home — nothing to stop. If a name is still being served, the edge belongs to another HOUSTON_HOME; `houston edge status` says so.\n",
+      "stderr": "",
+      "dialled": []
+    },
+    "edge start, installed": {
+      "code": 0,
+      "stdout": "✓ edge running — every registered name is served again.\n",
+      "stderr": "",
+      "dialled": []
+    },
+    "edge start, first ever": {
+      "code": 0,
+      "stdout": "✓ edge running — every registered name is served again.\n",
+      "stderr": "",
+      "dialled": []
+    },
+    "edge restart, start fails": {
+      "code": 1,
+      "stdout": "✓ edge stopped; it no longer holds :80 or :443.\n",
+      "stderr": "error: the edge did not start. Check nothing else holds :80 or :443:\n    sudo lsof -i :443\n",
+      "dialled": []
+    },
+    "edge delete, nothing there": {
+      "code": 0,
+      "stdout": "nothing here for h.example.com — no route, no certificate, no ACME entry. Already clean, or the name belongs to another HOUSTON_HOME.\n",
+      "stderr": "",
+      "dialled": []
+    },
+    "edge delete, everything went and the edge restarted": {
+      "code": 0,
+      "stdout": "✓ route w removed\n✓ route k removed (passthrough — its certificate is in the cluster, and went with the namespace)\n✓ certificate and key for h.example.com removed\n✓ certificate declaration for h.example.com removed\n✓ Let's Encrypt certificate removed from acme.json\nthe edge was restarted so Traefik reloads the store — it holds it in memory and rewrites the whole file, so an edit made underneath it comes back. Every other name is served again; routes are files.\nkept acme/issued.json — the issuance ledger is what `tls-status` counts against Let's Encrypt's five-a-week duplicate limit. Deleting the certificate does NOT give the budget back; re-issuing the same name still counts.\n",
+      "stderr": "",
+      "dialled": []
+    },
+    "edge delete, a foreign edge serves the name": {
+      "code": 0,
+      "stdout": "✓ Let's Encrypt certificate removed from acme.json\nthe edge holding :443 belongs to another HOUSTON_HOME (/elsewhere/.houston/edge), and it reads its OWN certificate store — so what was just deleted is this home's copy, not the certificate that name is being served with. Run this there, with that HOUSTON_HOME.\n",
+      "stderr": "",
+      "dialled": []
+    },
+    "edge delete, the edge did not come back": {
+      "code": 0,
+      "stdout": "✓ Let's Encrypt certificate removed from acme.json\nthe edge did not come back cleanly — `houston edge status`. Until it restarts, Traefik may write the deleted entry back from memory.\n",
+      "stderr": "",
+      "dialled": []
+    },
+    "edge delete, no host": {
+      "code": 1,
+      "stdout": "",
+      "stderr": "error: name the host: `houston edge delete <host>`. `houston edge status` lists what this edge routes and what it holds a certificate for.\n",
+      "dialled": []
+    },
+    "edge delete, nothing installed": {
+      "code": 0,
+      "stdout": "no edge in this home, so it holds no names — nothing to delete.\n",
+      "stderr": "",
+      "dialled": []
+    },
+    "edge delete, declined": {
+      "code": 1,
+      "stdout": "delete h.example.com — its route, its certificate, its PRIVATE KEY and its Let's Encrypt entry? This cannot be undone [y/N]: n\n",
+      "stderr": "Aborted.\n",
+      "dialled": []
+    },
+    "edge logs, nothing installed": {
+      "code": 0,
+      "stdout": "no edge yet — nothing to show. It starts with the first `--https` or `--domain` workspace, or `serve --domain`.\n",
+      "stderr": "",
+      "dialled": []
+    },
+    "edge logs, stopped": {
+      "code": 3,
+      "stdout": "the edge is STOPPED — this is whatever it said before it stopped. `houston edge start`\n",
+      "stderr": "",
+      "dialled": []
+    },
+    "edge, an unknown action": {
+      "code": 1,
+      "stdout": "",
+      "stderr": "error: unknown action 'bogus' (want: status | start | stop | restart | logs | delete <host>)\n",
+      "dialled": []
+    },
+    "cluster, an unknown action": {
+      "code": 2,
+      "stdout": "",
+      "stderr": "error: unknown action 'bogus'. Want: status | list | guide | iam-policy | create | prepare | delete | forget.\n",
+      "dialled": []
+    },
+    "cluster, an unknown action with a quote in it": {
+      "code": 2,
+      "stdout": "",
+      "stderr": "error: unknown action \"it's\". Want: status | list | guide | iam-policy | create | prepare | delete | forget.\n",
+      "dialled": []
+    },
+    "tls-status, trusted": {
+      "code": 0,
+      "stdout": "Checking https://t1.example.com ...\n+- TLS: w ---------------------------+\n|  Endpoint   t1.example.com:443     |\n|  Issuer     CN = houston local CA  |\n|  Valid for  t1.example.com         |\n|  Expires    Nov 23 2026            |\n+------------------------------------+\n  ✓ serving HTTPS with a certificate this machine trusts.\n",
+      "stderr": "",
+      "dialled": [
+        "127.0.0.1",
+        "t1.example.com"
+      ]
+    },
+    "tls-status, nothing serving": {
+      "code": 1,
+      "stdout": "Checking https://t1.example.com ...\n  ✗ nothing is serving TLS on this host's port 443 - connection refused\n  Rocket.Chat itself is fine at http://localhost:3000 - this is the TLS layer.\n  Most likely, in order:\n    1. inbound TCP/443 not reachable from the internet (cloud security group / host firewall)\n    2. DNS: `dig +short t1.example.com` must return this host's PUBLIC IP\n    3. behind Cloudflare's orange cloud? it terminates TLS, so tlsalpn cannot work - put a provider token in ~/.houston/acme/dns.env to switch to dns-01\n  What Traefik says:  houston logs --name w | grep -i acme\n  Debug on staging (--acme-staging): production allows only 5 failed validations per hour for t1.example.com.\n",
+      "stderr": "",
+      "dialled": [
+        "127.0.0.1",
+        "::1"
+      ]
+    },
+    "tls-status, a squatter on IPv4 and the real one on ::1": {
+      "code": 0,
+      "stdout": "Checking https://t1.example.com ...\n+- TLS: w ---------------------------+\n|  Endpoint   t1.example.com:443     |\n|  Issuer     CN = houston local CA  |\n|  Valid for  t1.example.com         |\n|  Expires    Nov 23 2026            |\n+------------------------------------+\n  ✓ serving HTTPS with a certificate this machine trusts.\n",
+      "stderr": "",
+      "dialled": [
+        "127.0.0.1",
+        "::1",
+        "t1.example.com"
+      ]
+    },
+    "tls-status, every family serves a placeholder": {
+      "code": 1,
+      "stdout": "Checking https://t1.example.com ...\n+- TLS: w -------------------------------+\n|  Endpoint   t1.example.com:443         |\n|  Issuer     CN = TRAEFIK DEFAULT CERT  |\n|  Valid for  CN = TRAEFIK DEFAULT CERT  |\n|  Expires                               |\n+----------------------------------------+\n  ✗ this is the ingress controller's built-in placeholder certificate — cert-manager has not issued one for this name yet.\n    On a fresh cluster that is normal for the first minute or three. Run this again; if it persists, the ACME order is stuck.\n  Rocket.Chat itself is fine at http://localhost:3000 - this is the TLS layer.\n  Most likely, in order:\n    1. inbound TCP/443 not reachable from the internet (cloud security group / host firewall)\n    2. DNS: `dig +short t1.example.com` must return this host's PUBLIC IP\n    3. behind Cloudflare's orange cloud? it terminates TLS, so tlsalpn cannot work - put a provider token in ~/.houston/acme/dns.env to switch to dns-01\n  What Traefik says:  houston logs --name w | grep -i acme\n  Debug on staging (--acme-staging): production allows only 5 failed validations per hour for t1.example.com.\n",
+      "stderr": "",
+      "dialled": [
+        "127.0.0.1",
+        "::1"
+      ]
+    },
+    "tls-status, a workspace with no port of its own": {
+      "code": 0,
+      "stdout": "Checking https://t1.example.com ...\n+- TLS: w ---------------------------+\n|  Endpoint   t1.example.com:443     |\n|  Issuer     CN = houston local CA  |\n|  Valid for  t1.example.com         |\n|  Expires    Nov 23 2026            |\n+------------------------------------+\n  ✓ serving HTTPS with a certificate this machine trusts.\n",
+      "stderr": "",
+      "dialled": [
+        "127.0.0.1",
+        "t1.example.com"
+      ]
+    },
+    "tls-status, local CA, not ours": {
+      "code": 1,
+      "stdout": "Checking https://l.houston.localhost ...\n+- TLS: l -----------------------------+\n|  Endpoint   l.houston.localhost:443  |\n|  Issuer     CN = houston local CA    |\n|  Valid for  t1.example.com           |\n|  Expires    Nov 23 2026              |\n+--------------------------------------+\n  ✗ serving a certificate that does not chain to houston's CA.\n  Rocket.Chat itself is fine at http://localhost:3000 - this is the TLS layer.\n  Check Traefik started:  houston logs --name l | grep -i traefik\n",
+      "stderr": "",
+      "dialled": [
+        "127.0.0.1"
+      ]
+    },
+    "tls-status, local CA, not trusted yet": {
+      "code": 0,
+      "stdout": "Checking https://l.houston.localhost ...\n+- TLS: l -----------------------------+\n|  Endpoint   l.houston.localhost:443  |\n|  Issuer     CN = houston local CA    |\n|  Valid for  t1.example.com           |\n|  Expires    Nov 23 2026              |\n+--------------------------------------+\n  ✓ serving HTTPS with houston's local CA.\n  Not trusted by this machine yet. Run `houston trust-ca` once to silence browser warnings (the warning itself is harmless locally).\n",
+      "stderr": "",
+      "dialled": [
+        "127.0.0.1"
+      ]
+    },
+    "tls-status, staging": {
+      "code": 0,
+      "stdout": "Checking https://t1.example.com ...\n+- TLS: w ---------------------------+\n|  Endpoint   t1.example.com:443     |\n|  Issuer     CN = houston local CA  |\n|  Valid for  t1.example.com         |\n|  Expires    Nov 23 2026            |\n+------------------------------------+\n  ✓ serving HTTPS with a real Let's Encrypt-issued certificate.\n  Not trusted here, which is normal for --acme-staging: DNS and the challenge both worked.\n  For a trusted certificate, re-run the SAME command without --acme-staging:\n    houston up -v 8.5.1 --name w --domain t1.example.com --email o@e.com --force --wait\n",
+      "stderr": "",
+      "dialled": [
+        "127.0.0.1",
+        "t1.example.com"
+      ]
+    },
+    "tls-status, self-signed": {
+      "code": 0,
+      "stdout": "Checking https://t1.example.com ...\n+- TLS: w ---------------------------+\n|  Endpoint   t1.example.com:443     |\n|  Issuer     CN = houston local CA  |\n|  Valid for  t1.example.com         |\n|  Expires    Nov 23 2026            |\n+------------------------------------+\n  ✗ serving a self-signed certificate — nothing has issued one yet.\n  On Kubernetes the ingress serves its own until cert-manager finishes, which is a minute or three after the workspace answers.\n  kubectl -n houston-w describe certificate w-tls\n",
+      "stderr": "",
+      "dialled": [
+        "127.0.0.1",
+        "t1.example.com"
+      ]
+    },
+    "tls-status, fronted by a proxy": {
+      "code": 0,
+      "stdout": "Checking https://t1.example.com ...\n+- TLS: w ---------------------------+\n|  Endpoint   t1.example.com:443     |\n|  Issuer     CN = houston local CA  |\n|  Valid for  t1.example.com         |\n|  Expires    Nov 23 2026            |\n+------------------------------------+\n  ⚠ t1.example.com is fronted by something else: it serves a certificate issued by \"CN = Cloudflare's edge\", not the one this host serves ('CN = houston local CA').\n  That is what an orange-clouded Cloudflare record looks like. Clients get the proxy's certificate, not this one.\n  ✓ serving HTTPS with a certificate this machine trusts.\n",
+      "stderr": "",
+      "dialled": [
+        "127.0.0.1",
+        "t1.example.com"
+      ]
+    },
+    "tls-status, Kubernetes, nothing serving": {
+      "code": 1,
+      "stdout": "Checking https://k1.example.com ...\n  ✗ nothing is serving TLS on this host's port 443 - connection refused\n  Rocket.Chat itself is fine at http://localhost:3000 - this is the TLS layer.\n  TLS terminates in the cluster, from a Secret cert-manager filled — the edge only forwards the raw connection, so its log has nothing about this name.\n  Most likely, in order:\n    1. the Certificate is not Ready yet, or says why it is not\n    2. the ClusterIssuer is not Ready (created before cert-manager, or no egress for an ACME order)\n    3. nothing routes to the ingress — `houston doctor` names a cluster holding this host's ports\n  What cert-manager says:\n    kubectl -n houston-kws describe certificate kws-tls\n    kubectl describe clusterissuer houston-acme\n    kubectl -n houston-kws get order,challenge\n  Debug on staging (`houston config set acme.staging true`): production allows only 5 failed validations per hour for k1.example.com.\n",
+      "stderr": "",
+      "dialled": [
+        "127.0.0.1",
+        "::1"
+      ]
+    },
+    "tls-status, not an https workspace": {
+      "code": 1,
+      "stdout": "  ⚠ 'p' was not created with --https - it serves plain HTTP at http://localhost:3000.\n",
+      "stderr": "",
+      "dialled": []
+    },
+    "tls-status, no such workspace": {
+      "code": 4,
+      "stdout": "",
+      "stderr": "error: no repro named 'nope' (run `houston list`)\n",
+      "dialled": []
+    },
+    "tls-status, no name: the GUI's own": {
+      "code": 0,
+      "stdout": "Checking the GUI's own name, gui.example.com (no workspace given; `--name <n>` for one)\nhttps://gui.example.com is serving a real certificate (CN = houston local CA\n",
+      "stderr": "",
+      "dialled": [
+        "127.0.0.1"
+      ]
+    }
+  },
+  "trust": {
+    "trust-ca, the install fails": {
+      "code": 0,
+      "stdout": "  ⚠ could not install it automatically on this platform (/usr/local/share/ca-certificates (need sudo: sudo: a password is required)).\n\n  Install this file by hand:\n    <home>/ca/ca.crt\n\n  macOS:          Keychain Access -> System -> drag it in -> set to Always Trust\n  Debian/Ubuntu:  sudo cp it into /usr/local/share/ca-certificates/ && sudo update-ca-certificates\n  Fedora/RHEL:    sudo cp it into /etc/pki/ca-trust/source/anchors/ && sudo update-ca-trust extract\n  Windows:        certutil -addstore -f Root <path>\n  Firefox:        Settings -> Privacy & Security -> Certificates -> View Certificates -> Authorities -> Import\n\n  Or skip it: the browser warning is safe to click through for a local repro.\n\n",
+      "stderr": "",
+      "calls": [
+        [
+          "<home>/ca/ca.crt",
+          false
+        ]
+      ],
+      "openssl": "<never ran>"
+    },
+    "trust-ca --uninstall, the removal fails": {
+      "code": 0,
+      "stdout": "  ⚠ could not remove it automatically on this platform (/usr/local/share/ca-certificates (need sudo: sudo: a password is required)).\n\n  Remove this file by hand:\n    <home>/ca/ca.crt\n\n  macOS:          Keychain Access -> System -> drag it in -> set to Always Trust\n  Debian/Ubuntu:  sudo cp it into /usr/local/share/ca-certificates/ && sudo update-ca-certificates\n  Fedora/RHEL:    sudo cp it into /etc/pki/ca-trust/source/anchors/ && sudo update-ca-trust extract\n  Windows:        certutil -addstore -f Root <path>\n  Firefox:        Settings -> Privacy & Security -> Certificates -> View Certificates -> Authorities -> Import\n\n  Or skip it: the browser warning is safe to click through for a local repro.\n\n",
+      "stderr": "",
+      "calls": [
+        [
+          "<home>/ca/ca.crt",
+          true
+        ]
+      ],
+      "openssl": "<never ran>"
+    },
+    "trust-ca, installed": {
+      "code": 0,
+      "stdout": "✓ CA installed into the system trust store (/usr/local/share/ca-certificates).\n  Restart the browser to pick it up. Firefox keeps its own store — if it still warns, import the CA under Settings → Privacy → Certificates.\n",
+      "stderr": "",
+      "calls": [
+        [
+          "<home>/ca/ca.crt",
+          false
+        ]
+      ],
+      "openssl": "<never ran>"
+    },
+    "trust-ca --uninstall, removed": {
+      "code": 0,
+      "stdout": "✓ CA removed from the system trust store (/usr/local/share/ca-certificates).\n  Restart the browser to pick it up. Firefox keeps its own store — if it still warns, import the CA under Settings → Privacy → Certificates.\n",
+      "stderr": "",
+      "calls": [
+        [
+          "<home>/ca/ca.crt",
+          true
+        ]
+      ],
+      "openssl": "<never ran>"
+    },
+    "trust-ca --show": {
+      "code": 0,
+      "stdout": "CA certificate: <home>/ca/ca.crt\nCA key:         <home>/ca/ca.key  (keep private)\n  subject=CN = houston local CA\n  sha256 Fingerprint=AB:CD\n  notBefore=Jan  1\n",
+      "stderr": "",
+      "calls": [],
+      "openssl": "x509 -in <home>/ca/ca.crt -noout -subject -fingerprint -sha256 -dates\n"
+    },
+    "trust-ca --show --uninstall": {
+      "code": 0,
+      "stdout": "CA certificate: <home>/ca/ca.crt\nCA key:         <home>/ca/ca.key  (keep private)\n  subject=CN = houston local CA\n  sha256 Fingerprint=AB:CD\n  notBefore=Jan  1\n",
+      "stderr": "",
+      "calls": [],
+      "openssl": "x509 -in <home>/ca/ca.crt -noout -subject -fingerprint -sha256 -dates\n"
+    },
+    "trust-ca --show, no openssl on PATH": {
+      "code": 0,
+      "stdout": "CA certificate: <home>/ca/ca.crt\nCA key:         <home>/ca/ca.key  (keep private)\n  ⚠ openssl failed: openssl: No such file or directory\n",
+      "stderr": "",
+      "calls": [],
+      "openssl": "<never ran>"
+    }
+  }
+}

@@ -1,0 +1,166 @@
+{
+  "composeLsRows": [
+    {
+      "project_states": {
+        "value": {
+          "houston-a": "running(3)"
+        }
+      },
+      "project_config_files": {
+        "value": {
+          "houston-a": "/a/c.yml"
+        }
+      }
+    },
+    {
+      "project_states": {
+        "error": "TypeError: expected an object, got a list"
+      },
+      "project_config_files": {
+        "error": "TypeError: expected an object, got a list"
+      }
+    },
+    {
+      "project_states": {
+        "error": "TypeError: expected an object, got an integer"
+      },
+      "project_config_files": {
+        "error": "TypeError: expected an object, got an integer"
+      }
+    },
+    {
+      "project_states": {
+        "error": "TypeError: expected an object, got an integer"
+      },
+      "project_config_files": {
+        "error": "TypeError: expected an object, got an integer"
+      }
+    },
+    {
+      "project_states": {
+        "value": {
+          "houston-a": "running(1)"
+        }
+      },
+      "project_config_files": {
+        "value": {
+          "houston-a": ""
+        }
+      }
+    },
+    {
+      "project_states": {
+        "error": "TypeError: expected an object, got null"
+      },
+      "project_config_files": {
+        "error": "TypeError: expected an object, got null"
+      }
+    },
+    {
+      "project_states": {
+        "error": "TypeError: expected an object, got a list"
+      },
+      "project_config_files": {
+        "error": "TypeError: expected an object, got a list"
+      }
+    },
+    {
+      "project_states": {
+        "error": "TypeError: a list cannot be a key"
+      },
+      "project_config_files": {
+        "error": "TypeError: a list cannot be a key"
+      }
+    },
+    {
+      "project_states": {
+        "value": {
+          "": "running(2)",
+          "houston-alpha": ""
+        }
+      },
+      "project_config_files": {
+        "value": {
+          "": "",
+          "houston-alpha": ""
+        }
+      }
+    },
+    {
+      "project_states": {
+        "value": null
+      },
+      "project_config_files": {
+        "value": null
+      }
+    },
+    {
+      "project_states": {
+        "value": {}
+      },
+      "project_config_files": {
+        "value": {}
+      }
+    },
+    {
+      "project_states": {
+        "error": "TypeError: expected a list, got an integer"
+      },
+      "project_config_files": {
+        "error": "TypeError: expected a list, got an integer"
+      }
+    },
+    {
+      "project_states": {
+        "error": "TypeError: expected a list, got a boolean"
+      },
+      "project_config_files": {
+        "error": "TypeError: expected a list, got a boolean"
+      }
+    },
+    {
+      "project_states": {
+        "error": "TypeError: expected a list, got a number"
+      },
+      "project_config_files": {
+        "error": "TypeError: expected a list, got a number"
+      }
+    },
+    {
+      "project_states": {
+        "error": "TypeError: expected an object, got a string"
+      },
+      "project_config_files": {
+        "error": "TypeError: expected an object, got a string"
+      }
+    },
+    {
+      "project_states": {
+        "value": {}
+      },
+      "project_config_files": {
+        "value": {}
+      }
+    },
+    {
+      "project_states": {
+        "value": {}
+      },
+      "project_config_files": {
+        "value": {}
+      }
+    },
+    {
+      "project_states": {
+        "value": {
+          "houston-a": "exited(1)"
+        }
+      },
+      "project_config_files": {
+        "value": {
+          "houston-a": ""
+        }
+      }
+    }
+  ]
+}

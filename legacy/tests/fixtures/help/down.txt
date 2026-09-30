@@ -1,0 +1,12 @@
+
+ Usage: houston down [OPTIONS]
+
+ Remove a repro's containers. Keeps data (and the record) unless --volumes.
+
+╭─ Options ──╮
+ --name     -n      <str>
+ --volumes                 also delete the data volume and forget the repro
+ --yes      -y             skip the confirmation prompt (for scripts/CI)
+ --json                    print the result as one JSON envelope; --volumes then requires --yes
+ --help                    Show this message and exit.
+╰──╯

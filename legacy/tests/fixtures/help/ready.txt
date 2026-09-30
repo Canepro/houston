@@ -1,0 +1,11 @@
+
+ Usage: houston ready [OPTIONS]
+
+ Block until Rocket.Chat is serving (polls /api/info).
+
+╭─ Options ──╮
+ --name     -n      <str>
+ --timeout          <float>  seconds to wait [default: 300.0]
+ --json                      NDJSON progress on stdout, then one final JSON envelope
+ --help                      Show this message and exit.
+╰──╯

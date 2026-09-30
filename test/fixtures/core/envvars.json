@@ -1,0 +1,839 @@
+{
+  "names": {
+    "parse": [
+      { "value": { "A": "1", "B_2": "x=y" } },
+      { "value": {} },
+      {
+        "kind": "ValidationError",
+        "message": "--set 'JUST_A_KEY' is not KEY=VALUE (to remove a key, use --unset JUST_A_KEY)"
+      },
+      {
+        "kind": "ValidationError",
+        "message": "'2LEADING' is not a valid environment variable name (letters, digits and underscore; not starting with a digit)"
+      },
+      {
+        "kind": "ValidationError",
+        "message": "'has-hyphen' is not a valid environment variable name (letters, digits and underscore; not starting with a digit)"
+      },
+      {
+        "kind": "ValidationError",
+        "message": "'has space' is not a valid environment variable name (letters, digits and underscore; not starting with a digit)"
+      },
+      {
+        "kind": "ValidationError",
+        "message": "'' is not a valid environment variable name (letters, digits and underscore; not starting with a digit)"
+      },
+      { "value": { "PADDED": "v" } },
+      { "value": { "A": "" } },
+      { "value": { "__proto__": "x", "constructor": "c", "toString": "t", "hasOwnProperty": "h" } }
+    ],
+    "settings": [
+      { "value": { "OVERWRITE_SETTING_Message_AllowEditing": "false" } },
+      { "value": { "OVERWRITE_SETTING_A_B": "x=y" } },
+      { "value": {} },
+      {
+        "kind": "ValidationError",
+        "message": "--set 'Message_AllowEditing' is not KEY=VALUE (to remove a key, use --unset Message_AllowEditing)"
+      },
+      { "value": { "OVERWRITE_SETTING_Message_AllowEditing": "false" } },
+      { "value": { "OVERWRITE_SETTING_Already_Prefixed": "1" } },
+      { "value": { "OVERWRITE_SETTING_Spaced_Id": "v" } },
+      { "value": { "OVERWRITE_SETTING___proto__": "1" } }
+    ],
+    "names": [
+      {
+        "kind": "ValidationError",
+        "message": "'has-hyphen' is not a valid environment variable name"
+      },
+      { "value": null },
+      { "kind": "ValidationError", "message": "'2lead' is not a valid environment variable name" },
+      { "kind": "ValidationError", "message": "'' is not a valid environment variable name" }
+    ],
+    "prefix": "OVERWRITE_SETTING_"
+  },
+  "strip": {
+    "parse": [
+      { "value": { "FOO": "1" } },
+      {
+        "kind": "ValidationError",
+        "message": "'\\ufeffFOO' is not a valid environment variable name (letters, digits and underscore; not starting with a digit)"
+      },
+      { "value": { "FOO": "1" } },
+      { "value": { "FOO": "1" } }
+    ],
+    "settings": [
+      { "value": { "OVERWRITE_SETTING_Id": "1" } },
+      {
+        "kind": "ValidationError",
+        "message": "'\\ufeffId' is not a valid environment variable name (letters, digits and underscore; not starting with a digit)"
+      }
+    ],
+    "prefix": [
+      { "value": { "OVERWRITE_SETTING_Id": "1" } },
+      {
+        "kind": "ValidationError",
+        "message": "'\\ufeffId' is not a valid environment variable name"
+      },
+      { "value": { "OVERWRITE_SETTING_Id": "1" } }
+    ],
+    "names": [
+      { "value": null },
+      {
+        "kind": "ValidationError",
+        "message": "'\\ufeffok' is not a valid environment variable name"
+      },
+      { "value": null }
+    ]
+  },
+  "rows": {
+    "rows": [
+      { "key": "EMPTY", "value": "", "override": false },
+      { "key": "GONE", "value": "x", "override": false, "drift": true, "live": "" },
+      { "key": "KEEP", "value": "1", "override": true, "drift": true, "live": "changed" },
+      { "key": "PORT", "value": "3000", "override": false },
+      { "key": "constructor", "value": "c", "override": false },
+      { "key": "toString", "value": "t", "override": false }
+    ],
+    "drift": ["GONE", "KEEP"],
+    "live_read": true,
+    "single": [
+      { "key": "EMPTY", "value": "", "override": false },
+      { "key": "GONE", "value": "x", "override": false },
+      { "key": "KEEP", "value": "1", "override": true },
+      { "key": "PORT", "value": "3000", "override": false },
+      { "key": "constructor", "value": "c", "override": false },
+      { "key": "toString", "value": "t", "override": false }
+    ]
+  },
+  "current": {
+    "name": "s",
+    "env": [
+      { "key": "BLANK", "value": "old", "override": false, "drift": true, "live": "" },
+      { "key": "KEEP", "value": "1", "override": true, "drift": true, "live": "" },
+      { "key": "PORT", "value": "3000", "override": false }
+    ],
+    "overrides": ["KEEP", "MY"],
+    "drift": ["BLANK", "KEEP"],
+    "live_read": true
+  },
+  "nosvc": "DockerError: 'nosvc' has no rocketchat service to change",
+  "runs": [
+    {
+      "result": {
+        "name": "e",
+        "restarted": true,
+        "overrides": [
+          { "key": "BLANK", "removed": false, "value": "" },
+          { "key": "KEEP", "removed": true, "value": "" },
+          { "key": "MONGO_URL", "removed": false, "value": "mongodb://elsewhere" },
+          { "key": "MY", "removed": false, "value": "v" }
+        ]
+      },
+      "error": null,
+      "doc": {
+        "services": {
+          "rocketchat": {
+            "environment": {
+              "PORT": "3000",
+              "BLANK": "",
+              "MONGO_URL": "mongodb://elsewhere",
+              "MY": "v"
+            }
+          },
+          "rocketchat-2": {
+            "environment": {
+              "PORT": "3000",
+              "BLANK": "",
+              "MONGO_URL": "mongodb://elsewhere",
+              "MY": "v"
+            }
+          }
+        },
+        "volumes": {}
+      },
+      "env": { "KEEP": null, "MONGO_URL": "mongodb://elsewhere", "MY": "v", "BLANK": "" },
+      "up": ["e", false, "rocketchat"],
+      "events": [
+        {
+          "message": "MONGO_URL is load-bearing: houston's Mongo connection; Rocket.Chat will not start if it is wrong. Setting it anyway.",
+          "phase": "config",
+          "level": "warn"
+        },
+        {
+          "message": "env updated on 'e': BLANK, KEEP, MONGO_URL, MY",
+          "phase": "config",
+          "level": "info"
+        },
+        {
+          "message": "recreating the Rocket.Chat container (data is kept)...",
+          "phase": "boot",
+          "level": "info"
+        },
+        { "message": "'e' restarted with the new environment", "phase": "done", "level": "info" }
+      ]
+    },
+    {
+      "result": {
+        "name": "e",
+        "restarted": false,
+        "overrides": [{ "key": "A", "removed": false, "value": "1" }]
+      },
+      "error": null,
+      "doc": {
+        "services": {
+          "rocketchat": {
+            "environment": { "PORT": "3000", "KEEP": "1", "BLANK": "old", "A": "1" }
+          },
+          "rocketchat-2": {
+            "environment": { "PORT": "3000", "KEEP": "1", "BLANK": "old", "A": "1" }
+          }
+        },
+        "volumes": {}
+      },
+      "env": { "A": "1" },
+      "up": null,
+      "events": [
+        { "message": "env updated on 'e': A", "phase": "config", "level": "info" },
+        {
+          "message": "not restarting; the change applies next time the container is recreated (`houston up --name e`)",
+          "phase": "done",
+          "level": "info"
+        }
+      ]
+    },
+    {
+      "result": {
+        "name": "e",
+        "restarted": true,
+        "overrides": [
+          { "key": "ADDED", "removed": false, "value": "x" },
+          { "key": "KEEP", "removed": true, "value": "" },
+          { "key": "OLD", "removed": false, "value": "kept" }
+        ]
+      },
+      "error": null,
+      "doc": {
+        "services": {
+          "rocketchat": {
+            "environment": { "PORT": "3000", "BLANK": "old", "OLD": "kept", "ADDED": "x" }
+          },
+          "rocketchat-2": {
+            "environment": { "PORT": "3000", "BLANK": "old", "OLD": "kept", "ADDED": "x" }
+          }
+        },
+        "volumes": {}
+      },
+      "env": { "KEEP": null, "OLD": "kept", "ADDED": "x" },
+      "up": ["e", false, "rocketchat"],
+      "events": [
+        { "message": "env updated on 'e': ADDED", "phase": "config", "level": "info" },
+        {
+          "message": "recreating the Rocket.Chat container (data is kept)...",
+          "phase": "boot",
+          "level": "info"
+        },
+        { "message": "'e' restarted with the new environment", "phase": "done", "level": "info" }
+      ]
+    },
+    {
+      "result": {
+        "name": "e",
+        "restarted": true,
+        "overrides": [
+          { "key": "MONGO_URL", "removed": false, "value": "y" },
+          { "key": "constructor", "removed": false, "value": "x" }
+        ]
+      },
+      "error": null,
+      "doc": {
+        "services": {
+          "rocketchat": {
+            "environment": {
+              "PORT": "3000",
+              "KEEP": "1",
+              "BLANK": "old",
+              "constructor": "x",
+              "MONGO_URL": "y"
+            }
+          },
+          "rocketchat-2": {
+            "environment": {
+              "PORT": "3000",
+              "KEEP": "1",
+              "BLANK": "old",
+              "constructor": "x",
+              "MONGO_URL": "y"
+            }
+          }
+        },
+        "volumes": {}
+      },
+      "env": { "constructor": "x", "MONGO_URL": "y" },
+      "up": ["e", false, "rocketchat"],
+      "events": [
+        {
+          "message": "MONGO_URL is load-bearing: houston's Mongo connection; Rocket.Chat will not start if it is wrong. Setting it anyway.",
+          "phase": "config",
+          "level": "warn"
+        },
+        {
+          "message": "env updated on 'e': MONGO_URL, constructor",
+          "phase": "config",
+          "level": "info"
+        },
+        {
+          "message": "recreating the Rocket.Chat container (data is kept)...",
+          "phase": "boot",
+          "level": "info"
+        },
+        { "message": "'e' restarted with the new environment", "phase": "done", "level": "info" }
+      ]
+    },
+    {
+      "result": {
+        "name": "e",
+        "restarted": true,
+        "overrides": [
+          { "key": "A", "removed": false, "value": "1" },
+          { "key": "FLAG", "removed": false, "value": "True" },
+          { "key": "NUM", "removed": false, "value": "8080" }
+        ]
+      },
+      "error": null,
+      "doc": {
+        "services": {
+          "rocketchat": {
+            "environment": {
+              "PORT": "3000",
+              "KEEP": "1",
+              "BLANK": "old",
+              "NUM": "8080",
+              "FLAG": "True",
+              "A": "1"
+            }
+          },
+          "rocketchat-2": {
+            "environment": {
+              "PORT": "3000",
+              "KEEP": "1",
+              "BLANK": "old",
+              "NUM": "8080",
+              "FLAG": "True",
+              "A": "1"
+            }
+          }
+        },
+        "volumes": {}
+      },
+      "env": { "NUM": 8080, "FLAG": true, "A": "1" },
+      "up": ["e", false, "rocketchat"],
+      "events": [
+        { "message": "env updated on 'e': A", "phase": "config", "level": "info" },
+        {
+          "message": "recreating the Rocket.Chat container (data is kept)...",
+          "phase": "boot",
+          "level": "info"
+        },
+        { "message": "'e' restarted with the new environment", "phase": "done", "level": "info" }
+      ]
+    },
+    {
+      "result": {
+        "name": "e",
+        "restarted": false,
+        "overrides": [
+          { "key": "__proto__", "removed": false, "value": "x" },
+          { "key": "constructor", "removed": false, "value": "c" },
+          { "key": "hasOwnProperty", "removed": true, "value": "" },
+          { "key": "toString", "removed": false, "value": "t" }
+        ]
+      },
+      "error": null,
+      "doc": {
+        "services": {
+          "rocketchat": {
+            "environment": {
+              "PORT": "3000",
+              "KEEP": "1",
+              "BLANK": "old",
+              "__proto__": "x",
+              "constructor": "c",
+              "toString": "t"
+            }
+          },
+          "rocketchat-2": {
+            "environment": {
+              "PORT": "3000",
+              "KEEP": "1",
+              "BLANK": "old",
+              "__proto__": "x",
+              "constructor": "c",
+              "toString": "t"
+            }
+          }
+        },
+        "volumes": {}
+      },
+      "env": { "hasOwnProperty": null, "__proto__": "x", "constructor": "c", "toString": "t" },
+      "up": null,
+      "events": [
+        {
+          "message": "env updated on 'e': __proto__, constructor, hasOwnProperty, toString",
+          "phase": "config",
+          "level": "info"
+        },
+        {
+          "message": "not restarting; the change applies next time the container is recreated (`houston up --name e`)",
+          "phase": "done",
+          "level": "info"
+        }
+      ]
+    },
+    {
+      "result": {
+        "name": "e",
+        "restarted": false,
+        "overrides": [{ "key": "A", "removed": false, "value": "1" }]
+      },
+      "error": null,
+      "doc": {
+        "services": {
+          "rocketchat": { "environment": { "PORT": "3000", "__proto__": "old", "A": "1" } },
+          "rocketchat-2": { "environment": { "PORT": "3000", "__proto__": "old", "A": "1" } }
+        },
+        "volumes": {}
+      },
+      "env": { "A": "1" },
+      "up": null,
+      "events": [
+        { "message": "env updated on 'e': A", "phase": "config", "level": "info" },
+        {
+          "message": "not restarting; the change applies next time the container is recreated (`houston up --name e`)",
+          "phase": "done",
+          "level": "info"
+        }
+      ]
+    },
+    {
+      "result": {
+        "name": "e",
+        "restarted": false,
+        "overrides": [
+          { "key": "A", "removed": false, "value": "1" },
+          { "key": "__proto__", "removed": true, "value": "" }
+        ]
+      },
+      "error": null,
+      "doc": {
+        "services": {
+          "rocketchat": {
+            "environment": { "PORT": "3000", "KEEP": "1", "BLANK": "old", "A": "1" }
+          },
+          "rocketchat-2": {
+            "environment": { "PORT": "3000", "KEEP": "1", "BLANK": "old", "A": "1" }
+          }
+        },
+        "volumes": {}
+      },
+      "env": { "__proto__": null, "A": "1" },
+      "up": null,
+      "events": [
+        { "message": "env updated on 'e': A, __proto__", "phase": "config", "level": "info" },
+        {
+          "message": "not restarting; the change applies next time the container is recreated (`houston up --name e`)",
+          "phase": "done",
+          "level": "info"
+        }
+      ]
+    }
+  ],
+  "shapes": [
+    {
+      "result": {
+        "name": "e",
+        "restarted": false,
+        "overrides": [
+          { "key": "A", "removed": false, "value": "1" },
+          { "key": "FOO", "removed": false, "value": "5" },
+          { "key": "KEEP", "removed": true, "value": "" },
+          { "key": "NEW", "removed": false, "value": "1" }
+        ]
+      },
+      "error": null,
+      "doc": {
+        "services": {
+          "rocketchat": {
+            "environment": { "PORT": "3000", "BLANK": "old", "A": "1", "FOO": "5", "NEW": "1" }
+          },
+          "rocketchat-2": {
+            "environment": { "PORT": "3000", "BLANK": "old", "A": "1", "FOO": "5", "NEW": "1" }
+          }
+        },
+        "volumes": {}
+      },
+      "env": { "A": "1", "KEEP": null, "FOO": 5, "NEW": "1" },
+      "up": null,
+      "events": [
+        { "message": "env updated on 'e': KEEP, NEW", "phase": "config", "level": "info" },
+        {
+          "message": "not restarting; the change applies next time the container is recreated (`houston up --name e`)",
+          "phase": "done",
+          "level": "info"
+        }
+      ]
+    },
+    {
+      "result": {
+        "name": "e",
+        "restarted": false,
+        "overrides": [
+          { "key": "A", "removed": false, "value": "B" },
+          { "key": "C", "removed": false, "value": "D" },
+          { "key": "KEEP", "removed": true, "value": "" },
+          { "key": "NEW", "removed": false, "value": "1" }
+        ]
+      },
+      "error": null,
+      "doc": {
+        "services": {
+          "rocketchat": {
+            "environment": { "PORT": "3000", "BLANK": "old", "A": "B", "C": "D", "NEW": "1" }
+          },
+          "rocketchat-2": {
+            "environment": { "PORT": "3000", "BLANK": "old", "A": "B", "C": "D", "NEW": "1" }
+          }
+        },
+        "volumes": {}
+      },
+      "env": { "A": "B", "C": "D", "KEEP": null, "NEW": "1" },
+      "up": null,
+      "events": [
+        { "message": "env updated on 'e': KEEP, NEW", "phase": "config", "level": "info" },
+        {
+          "message": "not restarting; the change applies next time the container is recreated (`houston up --name e`)",
+          "phase": "done",
+          "level": "info"
+        }
+      ]
+    },
+    {
+      "result": {
+        "name": "e",
+        "restarted": false,
+        "overrides": [
+          { "key": "K", "removed": false, "value": "V" },
+          { "key": "KEEP", "removed": true, "value": "" },
+          { "key": "NEW", "removed": false, "value": "1" }
+        ]
+      },
+      "error": null,
+      "doc": {
+        "services": {
+          "rocketchat": { "environment": { "PORT": "3000", "BLANK": "old", "K": "V", "NEW": "1" } },
+          "rocketchat-2": {
+            "environment": { "PORT": "3000", "BLANK": "old", "K": "V", "NEW": "1" }
+          }
+        },
+        "volumes": {}
+      },
+      "env": { "K": "V", "KEEP": null, "NEW": "1" },
+      "up": null,
+      "events": [
+        { "message": "env updated on 'e': KEEP, NEW", "phase": "config", "level": "info" },
+        {
+          "message": "not restarting; the change applies next time the container is recreated (`houston up --name e`)",
+          "phase": "done",
+          "level": "info"
+        }
+      ]
+    },
+    {
+      "result": {
+        "name": "e",
+        "restarted": false,
+        "overrides": [
+          { "key": "A", "removed": false, "value": "2" },
+          { "key": "KEEP", "removed": true, "value": "" },
+          { "key": "NEW", "removed": false, "value": "1" }
+        ]
+      },
+      "error": null,
+      "doc": {
+        "services": {
+          "rocketchat": { "environment": { "PORT": "3000", "BLANK": "old", "A": "2", "NEW": "1" } },
+          "rocketchat-2": {
+            "environment": { "PORT": "3000", "BLANK": "old", "A": "2", "NEW": "1" }
+          }
+        },
+        "volumes": {}
+      },
+      "env": { "A": "2", "KEEP": null, "NEW": "1" },
+      "up": null,
+      "events": [
+        { "message": "env updated on 'e': KEEP, NEW", "phase": "config", "level": "info" },
+        {
+          "message": "not restarting; the change applies next time the container is recreated (`houston up --name e`)",
+          "phase": "done",
+          "level": "info"
+        }
+      ]
+    },
+    {
+      "result": null,
+      "error": {
+        "kind": "InvalidValue",
+        "message": "env entry #0 has 1 item; a KEY/VALUE pair has 2"
+      },
+      "doc": null,
+      "env": null,
+      "up": null,
+      "events": []
+    },
+    {
+      "result": null,
+      "error": { "kind": "TypeError", "message": "expected an object or a list of KEY/VALUE pairs, got an integer" },
+      "doc": null,
+      "env": null,
+      "up": null,
+      "events": []
+    },
+    {
+      "result": null,
+      "error": { "kind": "TypeError", "message": "expected an object or a list of KEY/VALUE pairs, got a number" },
+      "doc": null,
+      "env": null,
+      "up": null,
+      "events": []
+    },
+    {
+      "result": null,
+      "error": { "kind": "TypeError", "message": "expected an object or a list of KEY/VALUE pairs, got a boolean" },
+      "doc": null,
+      "env": null,
+      "up": null,
+      "events": []
+    },
+    {
+      "result": null,
+      "error": {
+        "kind": "TypeError",
+        "message": "env entry #0 is an integer, not a KEY/VALUE pair"
+      },
+      "doc": null,
+      "env": null,
+      "up": null,
+      "events": []
+    },
+    {
+      "result": null,
+      "error": {
+        "kind": "TypeError",
+        "message": "env entry #0 is null, not a KEY/VALUE pair"
+      },
+      "doc": null,
+      "env": null,
+      "up": null,
+      "events": []
+    },
+    {
+      "result": null,
+      "error": {
+        "kind": "InvalidValue",
+        "message": "env entry #0 has 1 item; a KEY/VALUE pair has 2"
+      },
+      "doc": null,
+      "env": null,
+      "up": null,
+      "events": []
+    },
+    {
+      "result": null,
+      "error": {
+        "kind": "InvalidValue",
+        "message": "env entry #1 has 3 items; a KEY/VALUE pair has 2"
+      },
+      "doc": null,
+      "env": null,
+      "up": null,
+      "events": []
+    },
+    {
+      "result": null,
+      "error": { "kind": "TypeError", "message": "a list cannot be a key" },
+      "doc": null,
+      "env": null,
+      "up": null,
+      "events": []
+    },
+    {
+      "result": null,
+      "error": { "kind": "TypeError", "message": "an object cannot be a key" },
+      "doc": null,
+      "env": null,
+      "up": null,
+      "events": []
+    },
+    {
+      "result": {
+        "name": "e",
+        "restarted": false,
+        "overrides": [
+          { "key": "KEEP", "removed": true, "value": "" },
+          { "key": "NEW", "removed": false, "value": "1" }
+        ]
+      },
+      "error": null,
+      "doc": {
+        "services": {
+          "rocketchat": { "environment": { "PORT": "3000", "BLANK": "old", "NEW": "1" } },
+          "rocketchat-2": { "environment": { "PORT": "3000", "BLANK": "old", "NEW": "1" } }
+        },
+        "volumes": {}
+      },
+      "env": { "KEEP": null, "NEW": "1" },
+      "up": null,
+      "events": [
+        { "message": "env updated on 'e': KEEP, NEW", "phase": "config", "level": "info" },
+        {
+          "message": "not restarting; the change applies next time the container is recreated (`houston up --name e`)",
+          "phase": "done",
+          "level": "info"
+        }
+      ]
+    },
+    {
+      "result": {
+        "name": "e",
+        "restarted": false,
+        "overrides": [
+          { "key": "KEEP", "removed": true, "value": "" },
+          { "key": "NEW", "removed": false, "value": "1" }
+        ]
+      },
+      "error": null,
+      "doc": {
+        "services": {
+          "rocketchat": { "environment": { "PORT": "3000", "BLANK": "old", "NEW": "1" } },
+          "rocketchat-2": { "environment": { "PORT": "3000", "BLANK": "old", "NEW": "1" } }
+        },
+        "volumes": {}
+      },
+      "env": { "KEEP": null, "NEW": "1" },
+      "up": null,
+      "events": [
+        { "message": "env updated on 'e': KEEP, NEW", "phase": "config", "level": "info" },
+        {
+          "message": "not restarting; the change applies next time the container is recreated (`houston up --name e`)",
+          "phase": "done",
+          "level": "info"
+        }
+      ]
+    },
+    {
+      "result": {
+        "name": "e",
+        "restarted": false,
+        "overrides": [
+          { "key": "KEEP", "removed": true, "value": "" },
+          { "key": "NEW", "removed": false, "value": "1" }
+        ]
+      },
+      "error": null,
+      "doc": {
+        "services": {
+          "rocketchat": { "environment": { "PORT": "3000", "BLANK": "old", "NEW": "1" } },
+          "rocketchat-2": { "environment": { "PORT": "3000", "BLANK": "old", "NEW": "1" } }
+        },
+        "volumes": {}
+      },
+      "env": { "KEEP": null, "NEW": "1" },
+      "up": null,
+      "events": [
+        { "message": "env updated on 'e': KEEP, NEW", "phase": "config", "level": "info" },
+        {
+          "message": "not restarting; the change applies next time the container is recreated (`houston up --name e`)",
+          "phase": "done",
+          "level": "info"
+        }
+      ]
+    },
+    {
+      "result": null,
+      "error": {
+        "kind": "TypeError",
+        "message": "expected an object, got null"
+      },
+      "doc": null,
+      "env": null,
+      "up": null,
+      "events": []
+    },
+    {
+      "result": null,
+      "error": {
+        "kind": "TypeError",
+        "message": "expected an object, got a list"
+      },
+      "doc": null,
+      "env": null,
+      "up": null,
+      "events": []
+    },
+    {
+      "result": null,
+      "error": { "kind": "TypeError", "message": "expected an object, got a string" },
+      "doc": null,
+      "env": null,
+      "up": null,
+      "events": []
+    },
+    {
+      "result": null,
+      "error": { "kind": "TypeError", "message": "expected an object, got an integer" },
+      "doc": null,
+      "env": null,
+      "up": null,
+      "events": []
+    },
+    {
+      "result": null,
+      "error": { "kind": "TypeError", "message": "expected an object, got a boolean" },
+      "doc": null,
+      "env": null,
+      "up": null,
+      "events": []
+    },
+    {
+      "result": {
+        "name": "e",
+        "restarted": false,
+        "overrides": [
+          { "key": "A", "removed": false, "value": "1" },
+          { "key": "KEEP", "removed": true, "value": "" },
+          { "key": "NEW", "removed": false, "value": "1" }
+        ]
+      },
+      "error": null,
+      "doc": {
+        "services": {
+          "rocketchat": { "environment": { "PORT": "3000", "BLANK": "old", "A": "1", "NEW": "1" } },
+          "rocketchat-2": {
+            "environment": { "PORT": "3000", "BLANK": "old", "A": "1", "NEW": "1" }
+          }
+        },
+        "volumes": {}
+      },
+      "env": { "A": "1", "KEEP": null, "NEW": "1" },
+      "up": null,
+      "events": [
+        { "message": "env updated on 'e': KEEP, NEW", "phase": "config", "level": "info" },
+        {
+          "message": "not restarting; the change applies next time the container is recreated (`houston up --name e`)",
+          "phase": "done",
+          "level": "info"
+        }
+      ]
+    }
+  ],
+  "record": "{\n  \"name\": \"alpha\",\n  \"project\": \"houston-alpha\",\n  \"rc_version\": \"8.5.1\",\n  \"rc_image\": \"rocketchat/rocket.chat:8.5.1\",\n  \"mongo_tag\": \"8.0\",\n  \"mongo_flavor\": \"community\",\n  \"preset\": \"\",\n  \"root_url\": \"http://localhost:3100\",\n  \"host_port\": 3100,\n  \"version_source\": \"offline\",\n  \"pinned\": false,\n  \"created_at\": \"\",\n  \"public_url\": \"\",\n  \"admin_password\": \"\",\n  \"extra\": {\n    \"runtime\": \"docker\",\n    \"env\": {\n      \"FOO\": \"bar\",\n      \"7\": \"seven\",\n      \"N\": 12345678901234567890,\n      \"F\": 2.0,\n      \"NEW\": \"1\"\n    },\n    \"10\": \"numeric-key\",\n    \"b\": 1,\n    \"x\": NaN,\n    \"y\": 1e-07,\n    \"z\": 1e+16,\n    \"big\": 123456789012345678901234567890\n  }\n}"
+}

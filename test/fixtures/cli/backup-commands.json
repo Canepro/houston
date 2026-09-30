@@ -1,0 +1,202 @@
+{
+  "backupRestore": [
+    {
+      "argv": [
+        "backup",
+        "--name",
+        "alpha",
+        "--out",
+        "b.rcbak"
+      ],
+      "stdout": "✓ backed up 'alpha' (8.5.1) — 20.0 KB\n    b.rcbak\n  restore it:  houston restore b.rcbak\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "backup",
+        "--name",
+        "alpha",
+        "--out",
+        "b.rcbak"
+      ],
+      "stdout": "✓ backed up 'alpha' (8.5.1) — 20.0 KB\n    /home/u/.houston/backups/alpha.rcbak\n  sidecar data is NOT included: grafana_data, minio_data\n  restore it:  houston restore /home/u/.houston/backups/alpha.rcbak\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "restore",
+        "sub/b.rcbak"
+      ],
+      "stdout": "✓ restored 'alpha' from b.rcbak in 2.5s\n  http://localhost:3000\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "restore",
+        "~/bk/old.rcbak"
+      ],
+      "stdout": "✓ created and restored 'alpha' from old.rcbak in 2.5s\n  8.4.0 data now runs on 8.5.1 — Rocket.Chat has migrated it\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "restore",
+        "sub/b.rcbak/"
+      ],
+      "stdout": "✓ restored 'alpha' from b.rcbak in 2.5s\n  http://localhost:3000\n",
+      "stderr": ""
+    }
+  ],
+  "upgrade": [
+    {
+      "argv": [
+        "upgrade",
+        "--name",
+        "alpha"
+      ],
+      "code": 1,
+      "stdout": "",
+      "stderr": "error: no target version given — use `--to 8.6.1` (or `--rollback` to undo)\n"
+    },
+    {
+      "argv": [
+        "upgrade",
+        "--name",
+        "alpha",
+        "--to",
+        "8.6.1",
+        "--dry-run"
+      ],
+      "code": 0,
+      "stdout": "+- upgrade: alpha ----------------+\n|  Rocket.Chat  8.5.1  ->  8.6.1  |\n|  MongoDB      8.0               |\n|  image        img:8.6.1         |\n|  source       map               |\n+---------------------------------+\n  --dry-run: nothing changed\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "upgrade",
+        "--name",
+        "alpha",
+        "--to",
+        "8.5.1",
+        "--dry-run"
+      ],
+      "code": 0,
+      "stdout": "+- upgrade: alpha ----------------+\n|  Rocket.Chat  8.1.0  ->  8.5.1  |\n|  MongoDB      8.2  ->  8.0      |\n|  image        img:8.5.1         |\n|  source       map               |\n+---------------------------------+\n  MongoDB minor moves 8.2 -> 8.0; the container keeps its data volume\n  TLS\n  --dry-run: nothing changed\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "upgrade",
+        "--name",
+        "alpha",
+        "--to",
+        "8.5.1"
+      ],
+      "code": 1,
+      "stdout": "+- upgrade: alpha ----------------+\n|  Rocket.Chat  8.5.1  ->  8.5.1  |\n|  MongoDB      8.0               |\n|  image        img:8.5.1         |\n|  source       map               |\n+---------------------------------+\n  --force overrides this, but expect it to fail\n",
+      "stderr": "  'alpha' is already at 8.5.1\n"
+    },
+    {
+      "argv": [
+        "upgrade",
+        "--name",
+        "alpha",
+        "--to",
+        "8.5.1",
+        "--dry-run"
+      ],
+      "code": 1,
+      "stdout": "+- upgrade: alpha ----------------+\n|  Rocket.Chat  8.5.1  ->  8.5.1  |\n|  MongoDB      8.0               |\n|  image        img:8.5.1         |\n|  source       map               |\n+---------------------------------+\n  --force overrides this, but expect it to fail\n",
+      "stderr": "  'alpha' is already at 8.5.1\n"
+    },
+    {
+      "argv": [
+        "upgrade",
+        "--name",
+        "alpha",
+        "--to",
+        "8.5.1",
+        "--dry-run",
+        "--force"
+      ],
+      "code": 0,
+      "stdout": "+- upgrade: alpha ----------------+\n|  Rocket.Chat  8.5.1  ->  8.5.1  |\n|  MongoDB      8.0               |\n|  image        img:8.5.1         |\n|  source       map               |\n+---------------------------------+\n  'alpha' is already at 8.5.1\n  --dry-run: nothing changed\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "upgrade",
+        "--name",
+        "alpha",
+        "--to",
+        "8.6.1"
+      ],
+      "code": 0,
+      "stdout": "+- upgrade: alpha ----------------+\n|  Rocket.Chat  8.5.1  ->  8.6.1  |\n|  MongoDB      8.0               |\n|  image        img:8.6.1         |\n|  source       map               |\n+---------------------------------+\n  this repro terminates TLS\n✓ 'alpha' upgraded 8.5.1 -> 8.6.1 in 41.3s\n  roll back:  houston upgrade --rollback --name alpha\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "upgrade",
+        "--name",
+        "alpha",
+        "--to",
+        "8.6.1",
+        "--no-backup"
+      ],
+      "code": 0,
+      "stdout": "+- upgrade: alpha ----------------+\n|  Rocket.Chat  8.5.1  ->  8.6.1  |\n|  MongoDB      8.0               |\n|  image        img:8.6.1         |\n|  source       map               |\n+---------------------------------+\n✓ 'alpha' upgraded 8.5.1 -> 8.6.1 in 41.3s\n    but Rocket.Chat reports 8.5.1 — the upgrade did not land the image you asked for\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "upgrade",
+        "--name",
+        "alpha",
+        "--to",
+        "8.6.1",
+        "--no-backup"
+      ],
+      "code": 0,
+      "stdout": "+- upgrade: alpha ----------------+\n|  Rocket.Chat  8.5.1  ->  8.6.1  |\n|  MongoDB      8.0               |\n|  image        img:8.6.1         |\n|  source       map               |\n+---------------------------------+\n✓ 'alpha' upgraded 8.5.1 -> 8.6.1 in 41.3s\n  2 migration error(s) in the boot log:\n      rocketchat  | Migration 312 failed\n      rocketchat  | FATAL migration\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "upgrade",
+        "--name",
+        "alpha",
+        "--to",
+        "8.6.1"
+      ],
+      "code": 0,
+      "stdout": "+- upgrade: alpha ----------------+\n|  Rocket.Chat  8.5.1  ->  8.6.1  |\n|  MongoDB      8.0               |\n|  image        img:8.6.1         |\n|  source       map               |\n+---------------------------------+\n✓ 'alpha' upgraded 8.5.1 -> 8.6.1 in 41.3s\n  roll back:  houston upgrade --rollback --name alpha\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "upgrade",
+        "--name",
+        "alpha",
+        "--to",
+        "8.6.1"
+      ],
+      "code": 0,
+      "stdout": "+- upgrade: alpha ----------------+\n|  Rocket.Chat  8.5.1  ->  8.6.1  |\n|  MongoDB      8.0               |\n|  image        img:8.6.1         |\n|  source       map               |\n+---------------------------------+\n✓ 'alpha' upgraded 8.5.1 -> 8.6.1 in 3.0s\n  roll back:  houston upgrade --rollback --name alpha\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "upgrade",
+        "--name",
+        "alpha",
+        "--to",
+        "8.5.1",
+        "--force"
+      ],
+      "code": 0,
+      "stdout": "+- upgrade: alpha ----------------+\n|  Rocket.Chat  8.5.1  ->  8.5.1  |\n|  MongoDB      8.0               |\n|  image        img:8.5.1         |\n|  source       map               |\n+---------------------------------+\n  'alpha' is already at 8.5.1\n✓ 'alpha' upgraded 8.5.1 -> 8.5.1 in 41.3s\n  roll back:  houston upgrade --rollback --name alpha\n",
+      "stderr": ""
+    }
+  ]
+}

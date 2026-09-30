@@ -1,0 +1,316 @@
+{
+  "realm_json": "{\n  \"realm\": \"houston\",\n  \"enabled\": true,\n  \"sslRequired\": \"none\",\n  \"clients\": [\n    {\n      \"clientId\": \"houston-saml-sp\",\n      \"protocol\": \"saml\",\n      \"enabled\": true\n    }\n  ],\n  \"users\": [\n    {\n      \"username\": \"user1\",\n      \"enabled\": true,\n      \"emailVerified\": true,\n      \"email\": \"user1@example.com\",\n      \"firstName\": \"User\",\n      \"lastName\": \"1\",\n      \"credentials\": [\n        {\n          \"type\": \"password\",\n          \"value\": \"user1\",\n          \"temporary\": false\n        }\n      ]\n    },\n    {\n      \"username\": \"user2\",\n      \"enabled\": true,\n      \"emailVerified\": true,\n      \"email\": \"user2@example.com\",\n      \"firstName\": \"User\",\n      \"lastName\": \"2\",\n      \"credentials\": [\n        {\n          \"type\": \"password\",\n          \"value\": \"user2\",\n          \"temporary\": false\n        }\n      ]\n    },\n    {\n      \"username\": \"user3\",\n      \"enabled\": true,\n      \"emailVerified\": true,\n      \"email\": \"user3@example.com\",\n      \"firstName\": \"User\",\n      \"lastName\": \"3\",\n      \"credentials\": [\n        {\n          \"type\": \"password\",\n          \"value\": \"user3\",\n          \"temporary\": false\n        }\n      ]\n    }\n  ]\n}",
+  "service": [
+    {
+      "image": "quay.io/keycloak/keycloak:26.0",
+      "command": [
+        "start-dev",
+        "--import-realm"
+      ],
+      "environment": {
+        "KC_BOOTSTRAP_ADMIN_USERNAME": "admin",
+        "KC_BOOTSTRAP_ADMIN_PASSWORD": "admin",
+        "KC_PROXY_HEADERS": "xforwarded"
+      },
+      "volumes": [
+        "./saml/keycloak-realm.json:/opt/keycloak/data/import/houston-realm.json:ro"
+      ],
+      "ports": [
+        "8081:8080"
+      ],
+      "restart": "unless-stopped"
+    },
+    {
+      "image": "quay.io/keycloak/keycloak:26.0",
+      "command": [
+        "start-dev",
+        "--import-realm"
+      ],
+      "environment": {
+        "KC_BOOTSTRAP_ADMIN_USERNAME": "admin",
+        "KC_BOOTSTRAP_ADMIN_PASSWORD": "admin",
+        "KC_PROXY_HEADERS": "xforwarded",
+        "KC_HTTP_PORT": "8085"
+      },
+      "volumes": [
+        "./oidc/keycloak-realm.json:/opt/keycloak/data/import/houston-realm.json:ro"
+      ],
+      "ports": [
+        "8085:8085"
+      ],
+      "restart": "unless-stopped"
+    }
+  ],
+  "manifests": [
+    [
+      {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+          "name": "keycloak-realm",
+          "labels": {
+            "app": "houston-keycloak",
+            "app.kubernetes.io/managed-by": "houston",
+            "houston.io/component": "keycloak",
+            "houston.io/repro": "__HOUSTON_NAME__",
+            "houston.io/ui-port": "8085"
+          }
+        },
+        "data": {
+          "houston-realm.json": "{\n  \"realm\": \"houston\",\n  \"enabled\": true,\n  \"sslRequired\": \"none\",\n  \"clients\": [\n    {\n      \"clientId\": \"houston-saml-sp\",\n      \"protocol\": \"saml\",\n      \"enabled\": true\n    }\n  ],\n  \"users\": [\n    {\n      \"username\": \"user1\",\n      \"enabled\": true,\n      \"emailVerified\": true,\n      \"email\": \"user1@example.com\",\n      \"firstName\": \"User\",\n      \"lastName\": \"1\",\n      \"credentials\": [\n        {\n          \"type\": \"password\",\n          \"value\": \"user1\",\n          \"temporary\": false\n        }\n      ]\n    },\n    {\n      \"username\": \"user2\",\n      \"enabled\": true,\n      \"emailVerified\": true,\n      \"email\": \"user2@example.com\",\n      \"firstName\": \"User\",\n      \"lastName\": \"2\",\n      \"credentials\": [\n        {\n          \"type\": \"password\",\n          \"value\": \"user2\",\n          \"temporary\": false\n        }\n      ]\n    }\n  ]\n}"
+        }
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "name": "keycloak",
+          "labels": {
+            "app": "houston-keycloak",
+            "app.kubernetes.io/managed-by": "houston",
+            "houston.io/component": "keycloak",
+            "houston.io/repro": "__HOUSTON_NAME__",
+            "houston.io/ui-port": "8085"
+          }
+        },
+        "spec": {
+          "replicas": 1,
+          "selector": {
+            "matchLabels": {
+              "app": "houston-keycloak"
+            }
+          },
+          "template": {
+            "metadata": {
+              "labels": {
+                "app": "houston-keycloak",
+                "app.kubernetes.io/managed-by": "houston",
+                "houston.io/component": "keycloak",
+                "houston.io/repro": "__HOUSTON_NAME__",
+                "houston.io/ui-port": "8085"
+              }
+            },
+            "spec": {
+              "containers": [
+                {
+                  "name": "keycloak",
+                  "image": "quay.io/keycloak/keycloak:26.0",
+                  "args": [
+                    "start-dev",
+                    "--import-realm"
+                  ],
+                  "env": [
+                    {
+                      "name": "KC_BOOTSTRAP_ADMIN_USERNAME",
+                      "value": "admin"
+                    },
+                    {
+                      "name": "KC_BOOTSTRAP_ADMIN_PASSWORD",
+                      "value": "admin"
+                    },
+                    {
+                      "name": "KC_PROXY_HEADERS",
+                      "value": "xforwarded"
+                    }
+                  ],
+                  "ports": [
+                    {
+                      "containerPort": 8080
+                    }
+                  ],
+                  "readinessProbe": {
+                    "httpGet": {
+                      "path": "/realms/master",
+                      "port": 8080
+                    },
+                    "initialDelaySeconds": 10,
+                    "periodSeconds": 5,
+                    "failureThreshold": 60
+                  },
+                  "volumeMounts": [
+                    {
+                      "name": "realm",
+                      "mountPath": "/opt/keycloak/data/import/houston-realm.json",
+                      "subPath": "houston-realm.json"
+                    }
+                  ]
+                }
+              ],
+              "volumes": [
+                {
+                  "name": "realm",
+                  "configMap": {
+                    "name": "keycloak-realm"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+          "name": "keycloak",
+          "labels": {
+            "app": "houston-keycloak",
+            "app.kubernetes.io/managed-by": "houston",
+            "houston.io/component": "keycloak",
+            "houston.io/repro": "__HOUSTON_NAME__",
+            "houston.io/ui-port": "8085"
+          }
+        },
+        "spec": {
+          "selector": {
+            "app": "houston-keycloak"
+          },
+          "ports": [
+            {
+              "name": "http",
+              "port": 8085,
+              "targetPort": 8080
+            }
+          ]
+        }
+      }
+    ],
+    [
+      {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+          "name": "keycloak-realm",
+          "labels": {
+            "app": "houston-keycloak",
+            "app.kubernetes.io/managed-by": "houston",
+            "houston.io/component": "keycloak",
+            "houston.io/repro": "__HOUSTON_NAME__",
+            "houston.io/ui-port": "8085"
+          }
+        },
+        "data": {
+          "houston-realm.json": "{\n  \"realm\": \"houston\",\n  \"enabled\": true,\n  \"sslRequired\": \"none\",\n  \"clients\": [\n    {\n      \"clientId\": \"houston-saml-sp\",\n      \"protocol\": \"saml\",\n      \"enabled\": true\n    }\n  ],\n  \"users\": [\n    {\n      \"username\": \"user1\",\n      \"enabled\": true,\n      \"emailVerified\": true,\n      \"email\": \"user1@example.com\",\n      \"firstName\": \"User\",\n      \"lastName\": \"1\",\n      \"credentials\": [\n        {\n          \"type\": \"password\",\n          \"value\": \"user1\",\n          \"temporary\": false\n        }\n      ]\n    },\n    {\n      \"username\": \"user2\",\n      \"enabled\": true,\n      \"emailVerified\": true,\n      \"email\": \"user2@example.com\",\n      \"firstName\": \"User\",\n      \"lastName\": \"2\",\n      \"credentials\": [\n        {\n          \"type\": \"password\",\n          \"value\": \"user2\",\n          \"temporary\": false\n        }\n      ]\n    }\n  ]\n}"
+        }
+      },
+      {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "name": "keycloak",
+          "labels": {
+            "app": "houston-keycloak",
+            "app.kubernetes.io/managed-by": "houston",
+            "houston.io/component": "keycloak",
+            "houston.io/repro": "__HOUSTON_NAME__",
+            "houston.io/ui-port": "8085"
+          }
+        },
+        "spec": {
+          "replicas": 1,
+          "selector": {
+            "matchLabels": {
+              "app": "houston-keycloak"
+            }
+          },
+          "template": {
+            "metadata": {
+              "labels": {
+                "app": "houston-keycloak",
+                "app.kubernetes.io/managed-by": "houston",
+                "houston.io/component": "keycloak",
+                "houston.io/repro": "__HOUSTON_NAME__",
+                "houston.io/ui-port": "8085"
+              }
+            },
+            "spec": {
+              "containers": [
+                {
+                  "name": "keycloak",
+                  "image": "quay.io/keycloak/keycloak:26.0",
+                  "args": [
+                    "start-dev",
+                    "--import-realm"
+                  ],
+                  "env": [
+                    {
+                      "name": "KC_BOOTSTRAP_ADMIN_USERNAME",
+                      "value": "admin"
+                    },
+                    {
+                      "name": "KC_BOOTSTRAP_ADMIN_PASSWORD",
+                      "value": "admin"
+                    },
+                    {
+                      "name": "KC_PROXY_HEADERS",
+                      "value": "xforwarded"
+                    },
+                    {
+                      "name": "KC_HTTP_PORT",
+                      "value": "8085"
+                    }
+                  ],
+                  "ports": [
+                    {
+                      "containerPort": 8085
+                    }
+                  ],
+                  "readinessProbe": {
+                    "httpGet": {
+                      "path": "/realms/master",
+                      "port": 8085
+                    },
+                    "initialDelaySeconds": 10,
+                    "periodSeconds": 5,
+                    "failureThreshold": 60
+                  },
+                  "volumeMounts": [
+                    {
+                      "name": "realm",
+                      "mountPath": "/opt/keycloak/data/import/houston-realm.json",
+                      "subPath": "houston-realm.json"
+                    }
+                  ]
+                }
+              ],
+              "volumes": [
+                {
+                  "name": "realm",
+                  "configMap": {
+                    "name": "keycloak-realm"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+          "name": "keycloak",
+          "labels": {
+            "app": "houston-keycloak",
+            "app.kubernetes.io/managed-by": "houston",
+            "houston.io/component": "keycloak",
+            "houston.io/repro": "__HOUSTON_NAME__",
+            "houston.io/ui-port": "8085"
+          }
+        },
+        "spec": {
+          "selector": {
+            "app": "houston-keycloak"
+          },
+          "ports": [
+            {
+              "name": "http",
+              "port": 8085,
+              "targetPort": 8085
+            }
+          ]
+        }
+      }
+    ]
+  ]
+}

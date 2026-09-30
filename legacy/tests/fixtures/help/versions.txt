@@ -1,0 +1,12 @@
+
+ Usage: houston versions [OPTIONS] {version}
+
+ Show the resolved MongoDB pairing for a Rocket.Chat version.
+
+╭─ Arguments ──╮
+ *    version      <str>  Rocket.Chat version, e.g. 7.4.1 [required]
+╰──╯
+╭─ Options ──╮
+ --offline
+ --help             Show this message and exit.
+╰──╯

@@ -1,0 +1,229 @@
+/**
+ * Bringing houston's OWN cluster into existence, and taking it away.
+ *
+ * Tier k3. The only cluster this package may create is the local one; everything else is
+ * adopted. `deleteCluster` takes NO cluster parameter at all, deliberately -- it can only
+ * ever mean ours, and a parameter would be an invitation to pass somebody else's.
+ */
+import { ConflictError, CreateFailedError, DockerError, PreflightError } from '../../lib/errors';
+import { info, nullEmit, type Emit } from '../../lib/events';
+import { reproLock } from '../runner/locks';
+
+import { why } from './ask';
+import { workspaceNamespaces } from './capabilities';
+import { clusterContext, clusters, type ClusterPlan } from './context';
+import { kube, ownedEnv, ownedKubeconfig } from './exec';
+import { APPLY_TIMEOUT, CLUSTER_NAME, CONTEXT } from './names';
+import { reachable } from './reachability';
+import { which } from './tools';
+
+/**
+ * Lock name for cluster creation. Not a valid repro name (sanitisation strips the
+ * underscores), so it can never collide with a workspace's own lock.
+ */
+export const CLUSTER_LOCK = '__cluster__';
+
+/**
+ * Creating a cluster pulls a node image on first use and waits for the control plane.
+ * Nothing like the 8 s a probe gets.
+ */
+export const CREATE_TIMEOUT = 600.0;
+
+export const DELETE_TIMEOUT = 120.0;
+
+/** Create the shared kind cluster, with one process doing it at a time. */
+async function createUnderLock(emit: Emit, kubeconfig: string): Promise<void> {
+  await reproLock(
+    CLUSTER_LOCK,
+    async () => {
+      if ((await clusters())[0].includes(CLUSTER_NAME)) {
+        info(emit, `reusing cluster ${CLUSTER_NAME}`, { phase: 'provision' });
+        return;
+      }
+      info(
+        emit,
+        `creating cluster ${CLUSTER_NAME} — first time on this machine, so this pulls a ` +
+          'node image',
+        { phase: 'provision', pct: 5 },
+      );
+      ownedEnv(); // make the directories before kind writes into them
+      const res = await kube.run(
+        ['kind', 'create', 'cluster', '--name', CLUSTER_NAME, '--kubeconfig', kubeconfig],
+        { timeout: CREATE_TIMEOUT, own: true },
+      );
+      if (res.returncode !== 0) {
+        const combined = `${res.stdout}\n${res.stderr}`.toLowerCase();
+        // A create that lost a race to something not holding this lock (a manual `kind
+        // create`) is success, not failure.
+        if (!combined.includes('already exist')) {
+          throw new CreateFailedError(`could not create the cluster ${CLUSTER_NAME}: ${why(res)}`);
+        }
+      }
+    },
+    { timeoutMs: CREATE_TIMEOUT * 1000 },
+  );
+}
+
+/**
+ * Create houston's cluster if it is not there, and return its context.
+ *
+ * Serialised with the SAME lock every other mutating operation uses, rather than a second
+ * lock of its own. Two simultaneous `up`s would otherwise both see no cluster and both run
+ * `kind create`, and the second fails with "node(s) already exist". The re-check inside
+ * the lock means the loser of the race reuses rather than retries.
+ *
+ * Nothing about this touches `~/.kube/config`: `--kubeconfig` is passed explicitly AND the
+ * environment is redirected, because kind writes the file it is given and also honours
+ * KUBECONFIG for the context switch.
+ */
+export async function ensureCluster(emit: Emit = nullEmit): Promise<string> {
+  if (which('kind') === '') {
+    throw new PreflightError(
+      'kind is not installed, so houston cannot create a cluster. Install kind, or point ' +
+        'kubectl at a cluster you already have.',
+    );
+  }
+  const kubeconfig = ownedKubeconfig();
+  await createUnderLock(emit, kubeconfig);
+  // ALWAYS export, not only after creating. `kind get clusters` reads Docker, so it sees a
+  // cluster that houston's OWN kubeconfig knows nothing about -- which happens whenever
+  // the cluster outlives the kubeconfig: a different or fresh HOUSTON_HOME, a deleted
+  // config, or a cluster someone made by hand. Then "reusing cluster" is followed by every
+  // kubectl call going to localhost:8080 and the create failing with "the API server is
+  // not answering" about a cluster that is perfectly healthy.
+  const exported = await kube.run(
+    ['kind', 'export', 'kubeconfig', '--name', CLUSTER_NAME, '--kubeconfig', kubeconfig],
+    { timeout: APPLY_TIMEOUT, own: true },
+  );
+  if (exported.returncode !== 0) {
+    throw new CreateFailedError(
+      `cluster ${CLUSTER_NAME} exists but its kubeconfig could not be read: ${why(exported)}`,
+    );
+  }
+  const context = await clusterContext();
+  if (!(await reachable(context))) {
+    throw new CreateFailedError(
+      `cluster ${CLUSTER_NAME} was created but its API server is not answering at ` +
+        `'${context}'. \`kind delete cluster --name ${CLUSTER_NAME}\` and try again.`,
+    );
+  }
+  info(emit, `cluster ${CLUSTER_NAME} ready at ${context}`, { phase: 'provision' });
+  return context;
+}
+
+/**
+ * The context to use, with houston's OWN kubeconfig guaranteed to know it.
+ *
+ * `ensureCluster` was called only when a cluster had to be created -- and the export must
+ * happen either way. With a kind cluster already up and a fresh home, every command failed
+ * with `context was not found for specified context: kind-houston-local` and could not
+ * self-heal, because the only thing that writes that context ran later, or never.
+ *
+ * `CLAUDE.md` tells anyone writing a script to `export HOUSTON_HOME=$(mktemp -d)`, so this
+ * was reachable by following our own instructions once a cluster existed.
+ *
+ * For a cluster houston did not create there is nothing to export: the user's own
+ * kubeconfig already names it, and rewriting it is not ours to do.
+ */
+export async function ensureKubeconfig(plan: ClusterPlan, emit: Emit = nullEmit): Promise<string> {
+  if (plan.create || plan.context === CONTEXT) {
+    // ALREADY DONE IS DONE. Two call sites reach this per create, so the banner appeared
+    // twice and, worse, the cluster lock was taken twice, doubling the window a concurrent
+    // create waits on provisioning. A fresh HOUSTON_HOME fails both halves and still
+    // exports, which is the case that made this function necessary.
+    if (
+      !plan.create &&
+      (await clusterContext()) === plan.context &&
+      (await reachable(plan.context))
+    ) {
+      return plan.context;
+    }
+    return await ensureCluster(emit);
+  }
+  return plan.context;
+}
+
+/**
+ * Whether houston's own cluster exists and holds nothing of ours.
+ *
+ * UNREACHABLE IS NOT EMPTY. This used to return true for a cluster that exists and does not
+ * answer, reasoning that `kind delete` talks to Docker rather than to the API server so
+ * nothing stops it. That is true and it is the wrong conclusion: a control plane that
+ * cannot be reached is the case where houston knows LEAST about what it would destroy. A
+ * paused container, a Docker restart or a laptop resuming all produce it, and `prune` then
+ * stated the cluster was "empty" and deleted it -- measured, with five Running pods and an
+ * 8 Gi Bound PVC in it.
+ */
+export async function clusterReclaimable(): Promise<boolean> {
+  if (which('kind') === '' || !(await clusters())[0].includes(CLUSTER_NAME)) return false;
+  const ctx = await clusterContext();
+  if (!(await reachable(ctx))) return false;
+  // null (could not ask) must NOT read as "empty and therefore reclaimable".
+  const held = await workspaceNamespaces(ctx);
+  return held !== null && held.length === 0;
+}
+
+/**
+ * Delete houston's own cluster. Returns false if there was nothing to delete.
+ *
+ * Refuses while any workspace namespace is still in it, unless forced. On a shared box the
+ * cluster holds other people's workspaces, and `prune` reclaiming the cluster out from
+ * under a colleague mid-ticket is the failure this guards -- the namespaces carry
+ * `houston.io/owner`, so the refusal can say whose.
+ *
+ * Only ever CLUSTER_NAME. There is no parameter for which cluster to delete, because a
+ * delete that can be pointed anywhere eventually is.
+ */
+export async function deleteCluster({
+  force = false,
+  emit = nullEmit,
+}: { force?: boolean; emit?: Emit } = {}): Promise<boolean> {
+  if (which('kind') === '') return false;
+  return await reproLock(
+    CLUSTER_LOCK,
+    async () => {
+      if (!(await clusters())[0].includes(CLUSTER_NAME)) return false;
+      const context = await clusterContext();
+      // THE GUARD IS NOT INSIDE `reachable()`. It used to be, so an unreachable cluster
+      // skipped the whole ownership check -- including the "could not read" refusal
+      // directly below, which exists for exactly this case and could never fire in it.
+      // `kind delete` talks to Docker, so unreachability was no obstacle: a paused control
+      // plane holding live workspaces was deleted with one `prune --yes`.
+      if (!force) {
+        if (!(await reachable(context))) {
+          throw new ConflictError(
+            `cluster ${CLUSTER_NAME} exists but is not answering, so what it holds cannot ` +
+              "be read — it may hold workspaces, including somebody else's. Start it " +
+              `(\`docker start ${CLUSTER_NAME}-control-plane\`) and try again, or pass ` +
+              '--force to delete it and everything in it unread.',
+          );
+        }
+        const live = await workspaceNamespaces(context);
+        if (live === null) {
+          throw new ConflictError(
+            `cannot tell what cluster ${CLUSTER_NAME} still holds: the namespace list ` +
+              "could not be read. Refusing to delete a cluster that may hold somebody's " +
+              'workspace — check the cluster, or pass --force to take it and everything in it.',
+          );
+        }
+        if (live.length > 0) {
+          throw new ConflictError(
+            `cluster ${CLUSTER_NAME} still holds ${String(live.length)} workspace ` +
+              `namespace(s): ${[...live].sort().slice(0, 5).join(', ')}. Remove those ` +
+              'workspaces first, or pass --force to take the cluster and everything in it.',
+          );
+        }
+      }
+      info(emit, `deleting cluster ${CLUSTER_NAME}`, { phase: 'teardown' });
+      const res = await kube.run(['kind', 'delete', 'cluster', '--name', CLUSTER_NAME], {
+        timeout: DELETE_TIMEOUT,
+        own: true,
+      });
+      if (res.returncode !== 0) {
+        throw new DockerError(`could not delete the cluster ${CLUSTER_NAME}: ${why(res)}`);
+      }
+      return true;
+    },
+    { timeoutMs: DELETE_TIMEOUT * 1000 },
+  );
+}

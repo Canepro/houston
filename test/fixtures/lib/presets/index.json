@@ -1,0 +1,2330 @@
+{
+ "cases": {
+  "scenario_names": [
+   "airgapped",
+   "default",
+   "email",
+   "ldap",
+   "livechat",
+   "oidc",
+   "s3_minio",
+   "saml"
+  ],
+  "load default": "default@144a8989",
+  "load airgapped": "airgapped@d6884c8a",
+  "load email": "email@9f10228f",
+  "load ldap": "ldap@7653f059",
+  "load livechat": "livechat@e11167fd",
+  "load multi-instance": "multi-instance@37fa0975",
+  "load oidc": "oidc@0cde8e5c",
+  "load s3_minio": "s3_minio@8346d99e",
+  "load saml": "saml@034f592b",
+  "load saml {\"users\":\"2\"}": "saml@5e9244db",
+  "load oidc {\"idp_host\":\"box.example\"}": "oidc@1a4d94e6",
+  "load email {\"verification\":\"yes\"}": "email@f1ccbbfb",
+  "load livechat {\"agents\":\"3\",\"registration\":\"1\",\"department\":\"0\"}": "livechat@ce8fff04",
+  "load s3_minio {\"presigned\":\"true\",\"bucket\":\"my.bucket\"}": "s3_minio@15fee594",
+  "load multi-instance {\"instances\":\"9\"}": "multi-instance@ed8281be",
+  "load ldap {\"users\":\"2\",\"domain\":\"a.b.c\"}": "ldap@93ca67b6",
+  "resolve ldap docker": "ldap@7653f059",
+  "resolve ldap kubernetes": "ldap@f8dc919c",
+  "user_path_refusal": "'../etc/passwd' is not a preset name (want lower-case letters, digits, '-' and '_', starting with a letter or digit). A preset is a YAML file in {PRESET_DIR}; it is named, never given as a path.",
+  "user saml": "saml@7b03d42c",
+  "user ldap docker": "ldap@6136a0a9",
+  "catalogue with zzz": [
+   "airgapped@d6884c8a",
+   "broken@c9391d85",
+   "default@144a8989",
+   "email@9f10228f",
+   "fine@cfaeb4f9",
+   "ldap@6136a0a9",
+   "livechat@e11167fd",
+   "multi-instance@37fa0975",
+   "oidc@0cde8e5c",
+   "pinned@3d8c3a71",
+   "s3_minio@8346d99e",
+   "saml@7b03d42c",
+   "zzz@06f92153"
+  ],
+  "catalogue with the sorting files": [
+   ".yaml@a26fce72",
+   "__proto__@e4011d0a",
+   "airgapped@d6884c8a",
+   "broken@c9391d85",
+   "default@144a8989",
+   "email@9f10228f",
+   "fine@cfaeb4f9",
+   "folder@6942ff20",
+   "ldap@6136a0a9",
+   "livechat@e11167fd",
+   "multi-instance@37fa0975",
+   "oidc@0cde8e5c",
+   "ordered@2d4fea70",
+   "pinned@3d8c3a71",
+   "s3_minio@8346d99e",
+   "saml@7b03d42c",
+   "shared@c29b8c42",
+   "zzz@06f92153",
+   "Ａ-fullwidth@c1b2b2a9",
+   "😀-emoji@48d121b1"
+  ],
+  "ordered params_help": [
+   [
+    "users",
+    "u"
+   ],
+   [
+    "10",
+    "ten"
+   ],
+   [
+    "alpha",
+    "a"
+   ],
+   [
+    "0",
+    "zero"
+   ]
+  ],
+  "presets path is a file": [
+   "ok",
+   [
+    "airgapped@d6884c8a",
+    "default@144a8989",
+    "email@9f10228f",
+    "ldap@7653f059",
+    "livechat@e11167fd",
+    "multi-instance@37fa0975",
+    "oidc@0cde8e5c",
+    "s3_minio@8346d99e",
+    "saml@034f592b"
+   ]
+  ],
+  "presets dir unlistable": [
+   "ok",
+   [
+    "airgapped@d6884c8a",
+    "default@144a8989",
+    "email@9f10228f",
+    "ldap@7653f059",
+    "livechat@e11167fd",
+    "multi-instance@37fa0975",
+    "oidc@0cde8e5c",
+    "s3_minio@8346d99e",
+    "saml@034f592b"
+   ]
+  ],
+  "q.yaml license-nan": [
+   "ok",
+   [
+    "airgapped@d6884c8a",
+    "default@144a8989",
+    "email@9f10228f",
+    "ldap@7653f059",
+    "livechat@e11167fd",
+    "multi-instance@37fa0975",
+    "oidc@0cde8e5c",
+    "q@7c7cf6c4",
+    "s3_minio@8346d99e",
+    "saml@034f592b"
+   ]
+  ],
+  "q.yaml license-inf": [
+   "ok",
+   [
+    "airgapped@d6884c8a",
+    "default@144a8989",
+    "email@9f10228f",
+    "ldap@7653f059",
+    "livechat@e11167fd",
+    "multi-instance@37fa0975",
+    "oidc@0cde8e5c",
+    "q@7c7cf6c4",
+    "s3_minio@8346d99e",
+    "saml@034f592b"
+   ]
+  ],
+  "q.yaml license-zero": [
+   "ok",
+   [
+    "airgapped@d6884c8a",
+    "default@144a8989",
+    "email@9f10228f",
+    "ldap@7653f059",
+    "livechat@e11167fd",
+    "multi-instance@37fa0975",
+    "oidc@0cde8e5c",
+    "q@aae5aa38",
+    "s3_minio@8346d99e",
+    "saml@034f592b"
+   ]
+  ],
+  "q.yaml license-empty": [
+   "ok",
+   [
+    "airgapped@d6884c8a",
+    "default@144a8989",
+    "email@9f10228f",
+    "ldap@7653f059",
+    "livechat@e11167fd",
+    "multi-instance@37fa0975",
+    "oidc@0cde8e5c",
+    "q@aae5aa38",
+    "s3_minio@8346d99e",
+    "saml@034f592b"
+   ]
+  ],
+  "q.yaml not-utf8": [
+   "ok",
+   [
+    "airgapped@d6884c8a",
+    "default@144a8989",
+    "email@9f10228f",
+    "ldap@7653f059",
+    "livechat@e11167fd",
+    "multi-instance@37fa0975",
+    "oidc@0cde8e5c",
+    "q@1761587d",
+    "s3_minio@8346d99e",
+    "saml@034f592b"
+   ]
+  ],
+  "q.yaml cut-short": [
+   "ok",
+   [
+    "airgapped@d6884c8a",
+    "default@144a8989",
+    "email@9f10228f",
+    "ldap@7653f059",
+    "livechat@e11167fd",
+    "multi-instance@37fa0975",
+    "oidc@0cde8e5c",
+    "q@51828f43",
+    "s3_minio@8346d99e",
+    "saml@034f592b"
+   ]
+  ],
+  "q.yaml bad-continuation": [
+   "ok",
+   [
+    "airgapped@d6884c8a",
+    "default@144a8989",
+    "email@9f10228f",
+    "ldap@7653f059",
+    "livechat@e11167fd",
+    "multi-instance@37fa0975",
+    "oidc@0cde8e5c",
+    "q@88a46057",
+    "s3_minio@8346d99e",
+    "saml@034f592b"
+   ]
+  ],
+  "q.yaml surrogate": [
+   "ok",
+   [
+    "airgapped@d6884c8a",
+    "default@144a8989",
+    "email@9f10228f",
+    "ldap@7653f059",
+    "livechat@e11167fd",
+    "multi-instance@37fa0975",
+    "oidc@0cde8e5c",
+    "q@4cf3bfcd",
+    "s3_minio@8346d99e",
+    "saml@034f592b"
+   ]
+  ],
+  "q.yaml bom": [
+   "ok",
+   [
+    "airgapped@d6884c8a",
+    "default@144a8989",
+    "email@9f10228f",
+    "ldap@7653f059",
+    "livechat@e11167fd",
+    "multi-instance@37fa0975",
+    "oidc@0cde8e5c",
+    "q@8729ee0a",
+    "s3_minio@8346d99e",
+    "saml@034f592b"
+   ]
+  ],
+  "q.yaml ports-refused": [
+   "ok",
+   [
+    "airgapped@d6884c8a",
+    "default@144a8989",
+    "email@9f10228f",
+    "ldap@7653f059",
+    "livechat@e11167fd",
+    "multi-instance@37fa0975",
+    "oidc@0cde8e5c",
+    "q@db72e2a7",
+    "s3_minio@8346d99e",
+    "saml@034f592b"
+   ]
+  ],
+  "q.yaml ports-read": [
+   "ok",
+   [
+    "airgapped@d6884c8a",
+    "default@144a8989",
+    "email@9f10228f",
+    "ldap@7653f059",
+    "livechat@e11167fd",
+    "multi-instance@37fa0975",
+    "oidc@0cde8e5c",
+    "q@bbed166f",
+    "s3_minio@8346d99e",
+    "saml@034f592b"
+   ]
+  ],
+  "q.yaml ports-string": [
+   "ok",
+   [
+    "airgapped@d6884c8a",
+    "default@144a8989",
+    "email@9f10228f",
+    "ldap@7653f059",
+    "livechat@e11167fd",
+    "multi-instance@37fa0975",
+    "oidc@0cde8e5c",
+    "q@8a3184eb",
+    "s3_minio@8346d99e",
+    "saml@034f592b"
+   ]
+  ],
+  "q.yaml ports-mapping": [
+   "ok",
+   [
+    "airgapped@d6884c8a",
+    "default@144a8989",
+    "email@9f10228f",
+    "ldap@7653f059",
+    "livechat@e11167fd",
+    "multi-instance@37fa0975",
+    "oidc@0cde8e5c",
+    "q@50f55520",
+    "s3_minio@8346d99e",
+    "saml@034f592b"
+   ]
+  ],
+  "q.yaml ports-nan": [
+   "ok",
+   [
+    "airgapped@d6884c8a",
+    "default@144a8989",
+    "email@9f10228f",
+    "ldap@7653f059",
+    "livechat@e11167fd",
+    "multi-instance@37fa0975",
+    "oidc@0cde8e5c",
+    "q@e3a7c15d",
+    "s3_minio@8346d99e",
+    "saml@034f592b"
+   ]
+  ],
+  "q.yaml notes-string": [
+   "ok",
+   [
+    "airgapped@d6884c8a",
+    "default@144a8989",
+    "email@9f10228f",
+    "ldap@7653f059",
+    "livechat@e11167fd",
+    "multi-instance@37fa0975",
+    "oidc@0cde8e5c",
+    "q@0e699354",
+    "s3_minio@8346d99e",
+    "saml@034f592b"
+   ]
+  ],
+  "q.yaml notes-values": [
+   "ok",
+   [
+    "airgapped@d6884c8a",
+    "default@144a8989",
+    "email@9f10228f",
+    "ldap@7653f059",
+    "livechat@e11167fd",
+    "multi-instance@37fa0975",
+    "oidc@0cde8e5c",
+    "q@ac365ab3",
+    "s3_minio@8346d99e",
+    "saml@034f592b"
+   ]
+  ],
+  "q.yaml ports-none": [
+   "raised",
+   "TypeError",
+   "expected an integer, got null"
+  ],
+  "q.yaml ports-scalar": [
+   "raised",
+   "TypeError",
+   "expected a list, got an integer"
+  ],
+  "q.yaml notes-scalar": [
+   "raised",
+   "TypeError",
+   "expected a list, got an integer"
+  ],
+  "parse_refusals": [
+   "preset src.yaml is a list, not a mapping (a preset file is a YAML mapping with a 'name' key)",
+   "preset src.yaml is a string, not a mapping (a preset file is a YAML mapping with a 'name' key)",
+   "preset src.yaml is an integer, not a mapping (a preset file is a YAML mapping with a 'name' key)",
+   "preset src.yaml is missing a 'name' field",
+   "preset src.yaml is missing a 'name' field"
+  ],
+  "parse bare": "bare@fb93c09d"
+ },
+ "presets": {
+  ".yaml@a26fce72": {
+   "name": ".yaml",
+   "description": "UNREADABLE — preset {PRESET_DIR}/.yaml is a list, not a mapping (a preset file is a YAML mapping with a 'name' key)",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "built-in",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": "preset {PRESET_DIR}/.yaml is a list, not a mapping (a preset file is a YAML mapping with a 'name' key)"
+  },
+  "__proto__@e4011d0a": {
+   "name": "__proto__",
+   "description": "a key like any other",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "{PRESET_DIR}/proto.yaml",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": ""
+  },
+  "airgapped@d6884c8a": {
+   "name": "airgapped",
+   "description": "Simulates an air-gapped workspace with no Rocket.Chat Cloud connectivity. The Cloud URL and workspace credentials point at non-routable placeholders, so cloud sync, registration and marketplace calls never reach out. Use to reproduce offline / disconnected-workspace behaviour.",
+   "env": {
+    "OVERWRITE_SETTING_Cloud_Url": "https://airgapped-workspace.rocket.chat",
+    "OVERWRITE_SETTING_Cloud_Workspace_Client_Id": "airgapped",
+    "OVERWRITE_SETTING_Cloud_Workspace_Client_Secret": "airgapped"
+   },
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "built-in",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": ""
+  },
+  "bare@fb93c09d": {
+   "name": "bare",
+   "description": "",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "src.yaml",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": ""
+  },
+  "broken@c9391d85": {
+   "name": "broken",
+   "description": "UNREADABLE — preset {PRESET_DIR}/broken.yaml is a list, not a mapping (a preset file is a YAML mapping with a 'name' key)",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "built-in",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": "preset {PRESET_DIR}/broken.yaml is a list, not a mapping (a preset file is a YAML mapping with a 'name' key)"
+  },
+  "default@144a8989": {
+   "name": "default",
+   "description": "Vanilla Rocket.Chat, ready to use immediately: setup wizard skipped and an admin user auto-created (admin / admin123).",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "built-in",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": ""
+  },
+  "email@9f10228f": {
+   "name": "email",
+   "description": "Mailpit mailcatcher wired to RC's SMTP. Every email RC sends — password resets, invites, verification, notification and 2FA mail — is captured at http://localhost:8025 instead of leaving the machine. Pair with --seed for users with verified emails.",
+   "env": {
+    "OVERWRITE_SETTING_SMTP_Host": "mailpit",
+    "OVERWRITE_SETTING_SMTP_Port": "1025",
+    "OVERWRITE_SETTING_SMTP_Protocol": "smtp",
+    "OVERWRITE_SETTING_SMTP_IgnoreTLS": "true",
+    "OVERWRITE_SETTING_SMTP_Username": "",
+    "OVERWRITE_SETTING_SMTP_Password": "",
+    "OVERWRITE_SETTING_From_Email": "rocketchat@example.com",
+    "OVERWRITE_SETTING_Accounts_TwoFactorAuthentication_By_Email_Enabled": "true"
+   },
+   "services": {
+    "mailpit": {
+     "image": "docker.io/axllent/mailpit:v1.20",
+     "restart": "unless-stopped",
+     "environment": {
+      "MP_SMTP_AUTH_ACCEPT_ANY": "1",
+      "MP_SMTP_AUTH_ALLOW_INSECURE": "1"
+     },
+     "ports": [
+      "8025:8025"
+     ]
+    }
+   },
+   "rocketchat": {},
+   "depends_on": [
+    "mailpit"
+   ],
+   "requires_license": false,
+   "source": "built-in (dynamic)",
+   "files": [],
+   "params_help": {
+    "verification": "require email verification on new accounts (default false)"
+   },
+   "post_ready": [],
+   "notes": [
+    "Mailpit (EVERY email RC sends, for ALL users, lands here): http://localhost:8025",
+    "  — one shared inbox; tell users apart by the To: column.",
+    "Quick SMTP check: Admin → Email → 'Send test email', then open Mailpit.",
+    "Email-2FA is ON globally, but RC only enforces it on VERIFIED emails:",
+    "  seeded users (alice/…) get the OTP flow (code in Mailpit); admin is",
+    "  unverified so it logs in plain. houston's own token/api/seed calls",
+    "  fetch any required code from Mailpit automatically.",
+    "Seeded users (--seed) are created with verified emails, ready for 2FA."
+   ],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {
+    "mailpit_url": "http://localhost:8025"
+   },
+   "volumes": {},
+   "ports": [
+    8025
+   ],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [
+    "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: mailpit\n  labels: &id001\n    app: houston-mailpit\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: mailpit\n    houston.io/repro: __HOUSTON_NAME__\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: houston-mailpit\n  template:\n    metadata:\n      labels: *id001\n    spec:\n      containers:\n      - name: mailpit\n        image: docker.io/axllent/mailpit:v1.20\n        ports:\n        - containerPort: 8025\n        - containerPort: 1025\n        env:\n        - name: MP_SMTP_AUTH_ACCEPT_ANY\n          value: '1'\n        - name: MP_SMTP_AUTH_ALLOW_INSECURE\n          value: '1'\n        readinessProbe:\n          httpGet:\n            path: /\n            port: 8025\n          initialDelaySeconds: 3\n          periodSeconds: 3\n          failureThreshold: 40\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: mailpit\n  labels:\n    app: houston-mailpit\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: mailpit\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '8025'\nspec:\n  selector:\n    app: houston-mailpit\n  ports:\n  - name: p8025\n    port: 8025\n    targetPort: 8025\n  - name: p1025\n    port: 1025\n    targetPort: 1025\n"
+   ],
+   "error": ""
+  },
+  "email@f1ccbbfb": {
+   "name": "email",
+   "description": "Mailpit mailcatcher wired to RC's SMTP. Every email RC sends — password resets, invites, verification, notification and 2FA mail — is captured at http://localhost:8025 instead of leaving the machine. Pair with --seed for users with verified emails.",
+   "env": {
+    "OVERWRITE_SETTING_SMTP_Host": "mailpit",
+    "OVERWRITE_SETTING_SMTP_Port": "1025",
+    "OVERWRITE_SETTING_SMTP_Protocol": "smtp",
+    "OVERWRITE_SETTING_SMTP_IgnoreTLS": "true",
+    "OVERWRITE_SETTING_SMTP_Username": "",
+    "OVERWRITE_SETTING_SMTP_Password": "",
+    "OVERWRITE_SETTING_From_Email": "rocketchat@example.com",
+    "OVERWRITE_SETTING_Accounts_TwoFactorAuthentication_By_Email_Enabled": "true",
+    "OVERWRITE_SETTING_Accounts_EmailVerification": "true"
+   },
+   "services": {
+    "mailpit": {
+     "image": "docker.io/axllent/mailpit:v1.20",
+     "restart": "unless-stopped",
+     "environment": {
+      "MP_SMTP_AUTH_ACCEPT_ANY": "1",
+      "MP_SMTP_AUTH_ALLOW_INSECURE": "1"
+     },
+     "ports": [
+      "8025:8025"
+     ]
+    }
+   },
+   "rocketchat": {},
+   "depends_on": [
+    "mailpit"
+   ],
+   "requires_license": false,
+   "source": "built-in (dynamic)",
+   "files": [],
+   "params_help": {
+    "verification": "require email verification on new accounts (default false)"
+   },
+   "post_ready": [],
+   "notes": [
+    "Mailpit (EVERY email RC sends, for ALL users, lands here): http://localhost:8025",
+    "  — one shared inbox; tell users apart by the To: column.",
+    "Quick SMTP check: Admin → Email → 'Send test email', then open Mailpit.",
+    "Email-2FA is ON globally, but RC only enforces it on VERIFIED emails:",
+    "  seeded users (alice/…) get the OTP flow (code in Mailpit); admin is",
+    "  unverified so it logs in plain. houston's own token/api/seed calls",
+    "  fetch any required code from Mailpit automatically.",
+    "Seeded users (--seed) are created with verified emails, ready for 2FA."
+   ],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {
+    "mailpit_url": "http://localhost:8025"
+   },
+   "volumes": {},
+   "ports": [
+    8025
+   ],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [
+    "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: mailpit\n  labels: &id001\n    app: houston-mailpit\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: mailpit\n    houston.io/repro: __HOUSTON_NAME__\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: houston-mailpit\n  template:\n    metadata:\n      labels: *id001\n    spec:\n      containers:\n      - name: mailpit\n        image: docker.io/axllent/mailpit:v1.20\n        ports:\n        - containerPort: 8025\n        - containerPort: 1025\n        env:\n        - name: MP_SMTP_AUTH_ACCEPT_ANY\n          value: '1'\n        - name: MP_SMTP_AUTH_ALLOW_INSECURE\n          value: '1'\n        readinessProbe:\n          httpGet:\n            path: /\n            port: 8025\n          initialDelaySeconds: 3\n          periodSeconds: 3\n          failureThreshold: 40\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: mailpit\n  labels:\n    app: houston-mailpit\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: mailpit\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '8025'\nspec:\n  selector:\n    app: houston-mailpit\n  ports:\n  - name: p8025\n    port: 8025\n    targetPort: 8025\n  - name: p1025\n    port: 1025\n    targetPort: 1025\n"
+   ],
+   "error": ""
+  },
+  "fine@cfaeb4f9": {
+   "name": "fine",
+   "description": "ok",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "{PRESET_DIR}/fine.yaml",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": ""
+  },
+  "folder@6942ff20": {
+   "name": "folder",
+   "description": "UNREADABLE — {PRESET_DIR}/folder.yaml: Is a directory",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "built-in",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": "{PRESET_DIR}/folder.yaml: Is a directory"
+  },
+  "ldap@6136a0a9": {
+   "name": "ldap",
+   "description": "mine",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "{PRESET_DIR}/ldap.yaml",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": ""
+  },
+  "ldap@7653f059": {
+   "name": "ldap",
+   "description": "OpenLDAP (osixia) seeded with 5 user(s) + group 'rc-users'; RC wired for LDAP login. Log in as user1 / user1.",
+   "env": {
+    "OVERWRITE_SETTING_LDAP_Enable": "true",
+    "OVERWRITE_SETTING_LDAP_Server_Type": "",
+    "OVERWRITE_SETTING_LDAP_Host": "openldap",
+    "OVERWRITE_SETTING_LDAP_Port": "389",
+    "OVERWRITE_SETTING_LDAP_BaseDN": "dc=example,dc=com",
+    "OVERWRITE_SETTING_LDAP_Authentication": "true",
+    "OVERWRITE_SETTING_LDAP_Authentication_UserDN": "cn=admin,dc=example,dc=com",
+    "OVERWRITE_SETTING_LDAP_Authentication_Password": "admin",
+    "OVERWRITE_SETTING_LDAP_User_Search_Filter": "(objectclass=inetOrgPerson)",
+    "OVERWRITE_SETTING_LDAP_User_Search_Field": "uid",
+    "OVERWRITE_SETTING_LDAP_User_Search_Scope": "sub",
+    "OVERWRITE_SETTING_LDAP_Unique_Identifier_Field": "uid",
+    "OVERWRITE_SETTING_LDAP_Login_Fallback": "true",
+    "OVERWRITE_SETTING_Accounts_TwoFactorAuthentication_By_Email_Enabled": "false"
+   },
+   "services": {
+    "openldap": {
+     "image": "osixia/openldap:1.5.0",
+     "command": [
+      "--copy-service"
+     ],
+     "environment": {
+      "LDAP_ORGANISATION": "Houston",
+      "LDAP_DOMAIN": "example.com",
+      "LDAP_BASE_DN": "dc=example,dc=com",
+      "LDAP_ADMIN_PASSWORD": "admin"
+     },
+     "volumes": [
+      "./ldap/50-rc-users.ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom/50-rc-users.ldif:ro"
+     ],
+     "restart": "unless-stopped"
+    },
+    "phpldapadmin": {
+     "image": "osixia/phpldapadmin:0.9.0",
+     "environment": {
+      "PHPLDAPADMIN_LDAP_HOSTS": "openldap",
+      "PHPLDAPADMIN_HTTPS": "false"
+     },
+     "ports": [
+      "8082:80"
+     ],
+     "depends_on": [
+      "openldap"
+     ],
+     "restart": "unless-stopped"
+    }
+   },
+   "rocketchat": {},
+   "depends_on": [
+    "openldap"
+   ],
+   "requires_license": false,
+   "source": "built-in (dynamic)",
+   "files": [
+    [
+     "ldap/50-rc-users.ldif",
+     "dn: ou=Users,dc=example,dc=com\nobjectClass: organizationalUnit\nou: Users\n\ndn: ou=groups,dc=example,dc=com\nobjectClass: organizationalUnit\nou: groups\n\ndn: uid=user1,ou=Users,dc=example,dc=com\nobjectClass: inetOrgPerson\nobjectClass: posixAccount\ncn: User 1\nsn: 1\nuid: user1\nuidNumber: 1001\ngidNumber: 5000\nhomeDirectory: /home/user1\nmail: user1@example.com\nuserPassword: user1\n\ndn: uid=user2,ou=Users,dc=example,dc=com\nobjectClass: inetOrgPerson\nobjectClass: posixAccount\ncn: User 2\nsn: 2\nuid: user2\nuidNumber: 1002\ngidNumber: 5000\nhomeDirectory: /home/user2\nmail: user2@example.com\nuserPassword: user2\n\ndn: uid=user3,ou=Users,dc=example,dc=com\nobjectClass: inetOrgPerson\nobjectClass: posixAccount\ncn: User 3\nsn: 3\nuid: user3\nuidNumber: 1003\ngidNumber: 5000\nhomeDirectory: /home/user3\nmail: user3@example.com\nuserPassword: user3\n\ndn: uid=user4,ou=Users,dc=example,dc=com\nobjectClass: inetOrgPerson\nobjectClass: posixAccount\ncn: User 4\nsn: 4\nuid: user4\nuidNumber: 1004\ngidNumber: 5000\nhomeDirectory: /home/user4\nmail: user4@example.com\nuserPassword: user4\n\ndn: uid=user5,ou=Users,dc=example,dc=com\nobjectClass: inetOrgPerson\nobjectClass: posixAccount\ncn: User 5\nsn: 5\nuid: user5\nuidNumber: 1005\ngidNumber: 5000\nhomeDirectory: /home/user5\nmail: user5@example.com\nuserPassword: user5\n\ndn: cn=rc-users,ou=groups,dc=example,dc=com\nobjectClass: top\nobjectClass: posixGroup\ncn: rc-users\ngidNumber: 5000\nmemberUid: user1\nmemberUid: user2\nmemberUid: user3\nmemberUid: user4\nmemberUid: user5\n\n"
+    ]
+   ],
+   "params_help": {
+    "users": "number of LDAP users to generate (default 5; try 130000 for scale)",
+    "domain": "LDAP domain (default example.com)"
+   },
+   "post_ready": [],
+   "notes": [
+    "phpLDAPadmin: http://localhost:8082",
+    "    log in with DN  cn=admin,dc=example,dc=com  /  admin",
+    "    Rocket.Chat users are user1..user5, password same as name"
+   ],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [
+    8082
+   ],
+   "topology": "",
+   "scenario": "ldap",
+   "scenario_params": {
+    "users": 5,
+    "domain": "example.com",
+    "base_dn": "dc=example,dc=com"
+   },
+   "kubernetes_manifests": [],
+   "error": ""
+  },
+  "ldap@93ca67b6": {
+   "name": "ldap",
+   "description": "OpenLDAP (osixia) seeded with 2 user(s) + group 'rc-users'; RC wired for LDAP login. Log in as user1 / user1.",
+   "env": {
+    "OVERWRITE_SETTING_LDAP_Enable": "true",
+    "OVERWRITE_SETTING_LDAP_Server_Type": "",
+    "OVERWRITE_SETTING_LDAP_Host": "openldap",
+    "OVERWRITE_SETTING_LDAP_Port": "389",
+    "OVERWRITE_SETTING_LDAP_BaseDN": "dc=a,dc=b,dc=c",
+    "OVERWRITE_SETTING_LDAP_Authentication": "true",
+    "OVERWRITE_SETTING_LDAP_Authentication_UserDN": "cn=admin,dc=a,dc=b,dc=c",
+    "OVERWRITE_SETTING_LDAP_Authentication_Password": "admin",
+    "OVERWRITE_SETTING_LDAP_User_Search_Filter": "(objectclass=inetOrgPerson)",
+    "OVERWRITE_SETTING_LDAP_User_Search_Field": "uid",
+    "OVERWRITE_SETTING_LDAP_User_Search_Scope": "sub",
+    "OVERWRITE_SETTING_LDAP_Unique_Identifier_Field": "uid",
+    "OVERWRITE_SETTING_LDAP_Login_Fallback": "true",
+    "OVERWRITE_SETTING_Accounts_TwoFactorAuthentication_By_Email_Enabled": "false"
+   },
+   "services": {
+    "openldap": {
+     "image": "osixia/openldap:1.5.0",
+     "command": [
+      "--copy-service"
+     ],
+     "environment": {
+      "LDAP_ORGANISATION": "Houston",
+      "LDAP_DOMAIN": "a.b.c",
+      "LDAP_BASE_DN": "dc=a,dc=b,dc=c",
+      "LDAP_ADMIN_PASSWORD": "admin"
+     },
+     "volumes": [
+      "./ldap/50-rc-users.ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom/50-rc-users.ldif:ro"
+     ],
+     "restart": "unless-stopped"
+    },
+    "phpldapadmin": {
+     "image": "osixia/phpldapadmin:0.9.0",
+     "environment": {
+      "PHPLDAPADMIN_LDAP_HOSTS": "openldap",
+      "PHPLDAPADMIN_HTTPS": "false"
+     },
+     "ports": [
+      "8082:80"
+     ],
+     "depends_on": [
+      "openldap"
+     ],
+     "restart": "unless-stopped"
+    }
+   },
+   "rocketchat": {},
+   "depends_on": [
+    "openldap"
+   ],
+   "requires_license": false,
+   "source": "built-in (dynamic)",
+   "files": [
+    [
+     "ldap/50-rc-users.ldif",
+     "dn: ou=Users,dc=a,dc=b,dc=c\nobjectClass: organizationalUnit\nou: Users\n\ndn: ou=groups,dc=a,dc=b,dc=c\nobjectClass: organizationalUnit\nou: groups\n\ndn: uid=user1,ou=Users,dc=a,dc=b,dc=c\nobjectClass: inetOrgPerson\nobjectClass: posixAccount\ncn: User 1\nsn: 1\nuid: user1\nuidNumber: 1001\ngidNumber: 5000\nhomeDirectory: /home/user1\nmail: user1@a.b.c\nuserPassword: user1\n\ndn: uid=user2,ou=Users,dc=a,dc=b,dc=c\nobjectClass: inetOrgPerson\nobjectClass: posixAccount\ncn: User 2\nsn: 2\nuid: user2\nuidNumber: 1002\ngidNumber: 5000\nhomeDirectory: /home/user2\nmail: user2@a.b.c\nuserPassword: user2\n\ndn: cn=rc-users,ou=groups,dc=a,dc=b,dc=c\nobjectClass: top\nobjectClass: posixGroup\ncn: rc-users\ngidNumber: 5000\nmemberUid: user1\nmemberUid: user2\n\n"
+    ]
+   ],
+   "params_help": {
+    "users": "number of LDAP users to generate (default 5; try 130000 for scale)",
+    "domain": "LDAP domain (default example.com)"
+   },
+   "post_ready": [],
+   "notes": [
+    "phpLDAPadmin: http://localhost:8082",
+    "    log in with DN  cn=admin,dc=a,dc=b,dc=c  /  admin",
+    "    Rocket.Chat users are user1..user2, password same as name"
+   ],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [
+    8082
+   ],
+   "topology": "",
+   "scenario": "ldap",
+   "scenario_params": {
+    "users": 2,
+    "domain": "a.b.c",
+    "base_dn": "dc=a,dc=b,dc=c"
+   },
+   "kubernetes_manifests": [],
+   "error": ""
+  },
+  "ldap@f8dc919c": {
+   "name": "ldap",
+   "description": "OpenLDAP (osixia) seeded with 5 user(s) + group 'rc-users'; RC wired for LDAP login. Log in as user1 / user1.",
+   "env": {
+    "OVERWRITE_SETTING_LDAP_Enable": "true",
+    "OVERWRITE_SETTING_LDAP_Server_Type": "",
+    "OVERWRITE_SETTING_LDAP_Host": "openldap",
+    "OVERWRITE_SETTING_LDAP_Port": "389",
+    "OVERWRITE_SETTING_LDAP_BaseDN": "dc=example,dc=com",
+    "OVERWRITE_SETTING_LDAP_Authentication": "true",
+    "OVERWRITE_SETTING_LDAP_Authentication_UserDN": "cn=admin,dc=example,dc=com",
+    "OVERWRITE_SETTING_LDAP_Authentication_Password": "admin",
+    "OVERWRITE_SETTING_LDAP_User_Search_Filter": "(objectclass=inetOrgPerson)",
+    "OVERWRITE_SETTING_LDAP_User_Search_Field": "uid",
+    "OVERWRITE_SETTING_LDAP_User_Search_Scope": "sub",
+    "OVERWRITE_SETTING_LDAP_Unique_Identifier_Field": "uid",
+    "OVERWRITE_SETTING_LDAP_Login_Fallback": "true",
+    "OVERWRITE_SETTING_Accounts_TwoFactorAuthentication_By_Email_Enabled": "false"
+   },
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": true,
+   "source": "built-in (scenario)",
+   "files": [],
+   "params_help": {
+    "users": "number of LDAP users to generate (default 5; try 130000 for scale)",
+    "domain": "LDAP domain (default example.com)"
+   },
+   "post_ready": [],
+   "notes": [
+    "phpLDAPadmin: http://localhost:8082",
+    "    log in with DN  cn=admin,dc=example,dc=com  /  admin",
+    "    Rocket.Chat users are user1..user5, password same as name"
+   ],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [
+    8082
+   ],
+   "topology": "kubernetes",
+   "scenario": "ldap",
+   "scenario_params": {
+    "users": 5,
+    "domain": "example.com",
+    "base_dn": "dc=example,dc=com"
+   },
+   "kubernetes_manifests": [
+    "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: openldap-bootstrap\n  labels:\n    app: houston-openldap\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: ldap\n    houston.io/repro: __HOUSTON_NAME__\ndata:\n  50-rc-users.ldif: 'dn: ou=Users,dc=example,dc=com\n\n    objectClass: organizationalUnit\n\n    ou: Users\n\n\n    dn: ou=groups,dc=example,dc=com\n\n    objectClass: organizationalUnit\n\n    ou: groups\n\n\n    dn: uid=user1,ou=Users,dc=example,dc=com\n\n    objectClass: inetOrgPerson\n\n    objectClass: posixAccount\n\n    cn: User 1\n\n    sn: 1\n\n    uid: user1\n\n    uidNumber: 1001\n\n    gidNumber: 5000\n\n    homeDirectory: /home/user1\n\n    mail: user1@example.com\n\n    userPassword: user1\n\n\n    dn: uid=user2,ou=Users,dc=example,dc=com\n\n    objectClass: inetOrgPerson\n\n    objectClass: posixAccount\n\n    cn: User 2\n\n    sn: 2\n\n    uid: user2\n\n    uidNumber: 1002\n\n    gidNumber: 5000\n\n    homeDirectory: /home/user2\n\n    mail: user2@example.com\n\n    userPassword: user2\n\n\n    dn: uid=user3,ou=Users,dc=example,dc=com\n\n    objectClass: inetOrgPerson\n\n    objectClass: posixAccount\n\n    cn: User 3\n\n    sn: 3\n\n    uid: user3\n\n    uidNumber: 1003\n\n    gidNumber: 5000\n\n    homeDirectory: /home/user3\n\n    mail: user3@example.com\n\n    userPassword: user3\n\n\n    dn: uid=user4,ou=Users,dc=example,dc=com\n\n    objectClass: inetOrgPerson\n\n    objectClass: posixAccount\n\n    cn: User 4\n\n    sn: 4\n\n    uid: user4\n\n    uidNumber: 1004\n\n    gidNumber: 5000\n\n    homeDirectory: /home/user4\n\n    mail: user4@example.com\n\n    userPassword: user4\n\n\n    dn: uid=user5,ou=Users,dc=example,dc=com\n\n    objectClass: inetOrgPerson\n\n    objectClass: posixAccount\n\n    cn: User 5\n\n    sn: 5\n\n    uid: user5\n\n    uidNumber: 1005\n\n    gidNumber: 5000\n\n    homeDirectory: /home/user5\n\n    mail: user5@example.com\n\n    userPassword: user5\n\n\n    dn: cn=rc-users,ou=groups,dc=example,dc=com\n\n    objectClass: top\n\n    objectClass: posixGroup\n\n    cn: rc-users\n\n    gidNumber: 5000\n\n    memberUid: user1\n\n    memberUid: user2\n\n    memberUid: user3\n\n    memberUid: user4\n\n    memberUid: user5\n\n\n    '\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: openldap\n  labels: &id001\n    app: houston-openldap\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: ldap\n    houston.io/repro: __HOUSTON_NAME__\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: houston-openldap\n  template:\n    metadata:\n      labels: *id001\n    spec:\n      containers:\n      - name: openldap\n        image: osixia/openldap:1.5.0\n        args:\n        - --copy-service\n        env:\n        - name: LDAP_ORGANISATION\n          value: Houston\n        - name: LDAP_DOMAIN\n          value: example.com\n        - name: LDAP_BASE_DN\n          value: dc=example,dc=com\n        - name: LDAP_ADMIN_PASSWORD\n          value: admin\n        ports:\n        - name: ldap\n          containerPort: 389\n        readinessProbe:\n          tcpSocket:\n            port: 389\n          initialDelaySeconds: 5\n          periodSeconds: 3\n          failureThreshold: 40\n        volumeMounts:\n        - name: bootstrap\n          mountPath: /container/service/slapd/assets/config/bootstrap/ldif/custom/50-rc-users.ldif\n          subPath: 50-rc-users.ldif\n      volumes:\n      - name: bootstrap\n        configMap:\n          name: openldap-bootstrap\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: openldap\n  labels:\n    app: houston-openldap\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: ldap\n    houston.io/repro: __HOUSTON_NAME__\nspec:\n  selector:\n    app: houston-openldap\n  ports:\n  - name: ldap\n    port: 389\n    targetPort: 389\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: phpldapadmin\n  labels: &id001\n    app: houston-phpldapadmin\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: ldap\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '8082'\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: houston-phpldapadmin\n  template:\n    metadata:\n      labels: *id001\n    spec:\n      containers:\n      - name: phpldapadmin\n        image: osixia/phpldapadmin:0.9.0\n        env:\n        - name: PHPLDAPADMIN_LDAP_HOSTS\n          value: openldap\n        - name: PHPLDAPADMIN_HTTPS\n          value: 'false'\n        ports:\n        - containerPort: 80\n        readinessProbe:\n          httpGet:\n            path: /\n            port: 80\n          initialDelaySeconds: 3\n          periodSeconds: 3\n          failureThreshold: 30\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: phpldapadmin\n  labels:\n    app: houston-phpldapadmin\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: ldap\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '8082'\nspec:\n  selector:\n    app: houston-phpldapadmin\n  ports:\n  - name: http\n    port: 80\n    targetPort: 80\n"
+   ],
+   "error": ""
+  },
+  "livechat@ce8fff04": {
+   "name": "livechat",
+   "description": "Rocket.Chat Omnichannel with the Livechat widget embedded on a separate demo website (http://localhost:8090). Reproduce widget-load / CORS / routing / agent-availability tickets. Admin is the agent.",
+   "env": {
+    "OVERWRITE_SETTING_Livechat_enabled": "true",
+    "OVERWRITE_SETTING_API_Enable_CORS": "true",
+    "OVERWRITE_SETTING_API_CORS_Origin": "*",
+    "OVERWRITE_SETTING_Iframe_Restrict_Access": "false",
+    "OVERWRITE_SETTING_Livechat_Routing_Method": "Auto_Selection",
+    "OVERWRITE_SETTING_Accounts_TwoFactorAuthentication_By_Email_Enabled": "false",
+    "OVERWRITE_SETTING_Livechat_registration_form": "true"
+   },
+   "services": {
+    "widget-site": {
+     "image": "docker.io/nginx:alpine",
+     "volumes": [
+      "./livechat/index.html:/usr/share/nginx/html/index.html:ro"
+     ],
+     "ports": [
+      "8090:80"
+     ],
+     "restart": "unless-stopped"
+    }
+   },
+   "rocketchat": {},
+   "depends_on": [
+    "widget-site"
+   ],
+   "requires_license": false,
+   "source": "built-in (dynamic)",
+   "files": [
+    [
+     "livechat/index.html",
+     "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n  <title>Acme Store — Home</title>\n  <style>\n    :root { --ink:#1f2329; --muted:#6b7280; --brand:#1d74f5; --bg:#f7f8fa; --card:#fff; --line:#e6e8eb; }\n    * { box-sizing: border-box; }\n    body { margin:0; font-family: system-ui, -apple-system, \"Segoe UI\", sans-serif; color:var(--ink); background:var(--bg); }\n    a { color: inherit; text-decoration: none; }\n    header { position: sticky; top:0; background:var(--card); border-bottom:1px solid var(--line); }\n    .bar { max-width:1080px; margin:0 auto; display:flex; align-items:center; gap:1.5rem; padding:1rem 1.25rem; }\n    .logo { font-weight:800; font-size:1.35rem; letter-spacing:-.02em; }\n    .logo span { color:var(--brand); }\n    nav { display:flex; gap:1.25rem; color:var(--muted); font-weight:500; font-size:.95rem; }\n    nav a:hover { color:var(--ink); }\n    .cart { margin-left:auto; border:1px solid var(--line); border-radius:8px; padding:.5rem .8rem; font-weight:600; font-size:.9rem; }\n    .hero { max-width:1080px; margin:0 auto; padding:3rem 1.25rem 1rem; }\n    .hero h1 { font-size:2.4rem; margin:0 0 .5rem; letter-spacing:-.03em; }\n    .hero p { color:var(--muted); font-size:1.1rem; margin:0 0 1.25rem; max-width:34rem; }\n    .btn { display:inline-block; background:var(--brand); color:#fff; padding:.7rem 1.3rem; border-radius:8px; font-weight:600; }\n    .grid { max-width:1080px; margin:1.5rem auto 4rem; padding:0 1.25rem; display:grid;\n            grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:1.25rem; }\n    .card { background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; }\n    .thumb { font-size:3.5rem; text-align:center; padding:2rem 0; background:linear-gradient(135deg,#eef2ff,#f7f8fa); }\n    .card .body { padding:1rem; }\n    .card h3 { margin:0 0 .25rem; font-size:1rem; }\n    .card .price { color:var(--brand); font-weight:700; }\n    .card .sub { color:var(--muted); font-size:.85rem; }\n    footer { border-top:1px solid var(--line); background:var(--card); color:var(--muted); font-size:.85rem; }\n    footer div { max-width:1080px; margin:0 auto; padding:1.5rem 1.25rem; }\n    .demo { background:#fffbe6; border:1px solid #ffe58f; border-radius:8px; padding:.6rem .9rem;\n            font-size:.85rem; color:#7a5c00; max-width:1080px; margin:1rem auto 0; }\n  </style>\n</head>\n<body>\n  <header>\n    <div class=\"bar\">\n      <div class=\"logo\">Acme<span>Store</span></div>\n      <nav><a href=\"#\">Shop</a><a href=\"#\">Deals</a><a href=\"#\">New</a><a href=\"#\">Support</a></nav>\n      <div class=\"cart\">🛒 Cart (0)</div>\n    </div>\n  </header>\n\n  <section class=\"hero\">\n    <h1>Gear that just works.</h1>\n    <p>Free shipping over $50. Questions? Tap the chat bubble in the corner and\n       one of our agents will help you out.</p>\n    <a class=\"btn\" href=\"#\">Shop the sale</a>\n  </section>\n\n  <section class=\"grid\">\n    <div class=\"card\"><div class=\"thumb\">🎧</div><div class=\"body\"><h3>Studio Headphones</h3><div class=\"price\">$129</div><div class=\"sub\">Noise cancelling</div></div></div>\n    <div class=\"card\"><div class=\"thumb\">⌚</div><div class=\"body\"><h3>Acme Watch 4</h3><div class=\"price\">$199</div><div class=\"sub\">7-day battery</div></div></div>\n    <div class=\"card\"><div class=\"thumb\">📷</div><div class=\"body\"><h3>Pocket Camera</h3><div class=\"price\">$249</div><div class=\"sub\">4K, tiny</div></div></div>\n    <div class=\"card\"><div class=\"thumb\">⌨️</div><div class=\"body\"><h3>Mech Keyboard</h3><div class=\"price\">$89</div><div class=\"sub\">Hot-swap</div></div></div>\n    <div class=\"card\"><div class=\"thumb\">🔋</div><div class=\"body\"><h3>Power Bank</h3><div class=\"price\">$39</div><div class=\"sub\">20,000 mAh</div></div></div>\n    <div class=\"card\"><div class=\"thumb\">🖱️</div><div class=\"body\"><h3>Wireless Mouse</h3><div class=\"price\">$29</div><div class=\"sub\">Silent click</div></div></div>\n  </section>\n\n  <div class=\"demo\">houston Livechat demo — this storefront (origin\n     <code>http://localhost:8090</code>) embeds your Rocket.Chat Livechat\n     widget cross-origin. Start a chat here, answer it in Rocket.Chat's Omnichannel area.</div>\n\n  <footer><div>© Acme Store — demo site for Rocket.Chat Omnichannel. Not a real shop.</div></footer>\n\n  <script type=\"text/javascript\">\n  (function(w, d, s, u) {\n    w.RocketChat = function(c) { w.RocketChat._.push(c) }; w.RocketChat._ = []; w.RocketChat.url = u;\n    var h = d.getElementsByTagName(s)[0], j = d.createElement(s);\n    j.async = true; j.src = u + '/rocketchat-livechat.min.js?_=' + Math.random();\n    h.parentNode.insertBefore(j, h);\n  })(window, document, 'script', '{{ROOT_URL}}/livechat');\n  </script>\n</body>\n</html>\n"
+    ]
+   ],
+   "params_help": {
+    "agents": "agents to create + assign to the department (default 1; admin is always an agent)",
+    "registration": "show the pre-chat registration form (default false)",
+    "department": "create a 'support' department + assign the agents (default true)"
+   },
+   "post_ready": [
+    {
+     "action": "livechat_setup",
+     "agents": 3,
+     "department": ""
+    }
+   ],
+   "notes": [
+    "Customer website (widget embedded, cross-origin): http://localhost:8090",
+    "Built-in standalone widget (same-origin): <repro-url>/livechat",
+    "admin is an available Omnichannel agent, assigned to the 'support'",
+    "  department. Visitors see 'agents online' once you're logged into RC",
+    "  (that gives you presence); answer chats in RC's Omnichannel area.",
+    "Business hours & canned responses are Enterprise features — pass",
+    "  --reg-token to enable them, else configure manually."
+   ],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [
+    8090
+   ],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [
+    "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: widget-site-files\n  labels:\n    app: houston-widget-site\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: widget-site\n    houston.io/repro: __HOUSTON_NAME__\ndata:\n  index.html: \"<!doctype html>\\n<html lang=\\\"en\\\">\\n<head>\\n  <meta charset=\\\"utf-8\\\"\\\n    >\\n  <meta name=\\\"viewport\\\" content=\\\"width=device-width, initial-scale=1\\\">\\n\\\n    \\  <title>Acme Store \\u2014 Home</title>\\n  <style>\\n    :root { --ink:#1f2329;\\\n    \\ --muted:#6b7280; --brand:#1d74f5; --bg:#f7f8fa; --card:#fff; --line:#e6e8eb;\\\n    \\ }\\n    * { box-sizing: border-box; }\\n    body { margin:0; font-family: system-ui,\\\n    \\ -apple-system, \\\"Segoe UI\\\", sans-serif; color:var(--ink); background:var(--bg);\\\n    \\ }\\n    a { color: inherit; text-decoration: none; }\\n    header { position:\\\n    \\ sticky; top:0; background:var(--card); border-bottom:1px solid var(--line);\\\n    \\ }\\n    .bar { max-width:1080px; margin:0 auto; display:flex; align-items:center;\\\n    \\ gap:1.5rem; padding:1rem 1.25rem; }\\n    .logo { font-weight:800; font-size:1.35rem;\\\n    \\ letter-spacing:-.02em; }\\n    .logo span { color:var(--brand); }\\n    nav {\\\n    \\ display:flex; gap:1.25rem; color:var(--muted); font-weight:500; font-size:.95rem;\\\n    \\ }\\n    nav a:hover { color:var(--ink); }\\n    .cart { margin-left:auto; border:1px\\\n    \\ solid var(--line); border-radius:8px; padding:.5rem .8rem; font-weight:600;\\\n    \\ font-size:.9rem; }\\n    .hero { max-width:1080px; margin:0 auto; padding:3rem\\\n    \\ 1.25rem 1rem; }\\n    .hero h1 { font-size:2.4rem; margin:0 0 .5rem; letter-spacing:-.03em;\\\n    \\ }\\n    .hero p { color:var(--muted); font-size:1.1rem; margin:0 0 1.25rem; max-width:34rem;\\\n    \\ }\\n    .btn { display:inline-block; background:var(--brand); color:#fff; padding:.7rem\\\n    \\ 1.3rem; border-radius:8px; font-weight:600; }\\n    .grid { max-width:1080px;\\\n    \\ margin:1.5rem auto 4rem; padding:0 1.25rem; display:grid;\\n            grid-template-columns:repeat(auto-fill,minmax(220px,1fr));\\\n    \\ gap:1.25rem; }\\n    .card { background:var(--card); border:1px solid var(--line);\\\n    \\ border-radius:12px; overflow:hidden; }\\n    .thumb { font-size:3.5rem; text-align:center;\\\n    \\ padding:2rem 0; background:linear-gradient(135deg,#eef2ff,#f7f8fa); }\\n    .card\\\n    \\ .body { padding:1rem; }\\n    .card h3 { margin:0 0 .25rem; font-size:1rem; }\\n\\\n    \\    .card .price { color:var(--brand); font-weight:700; }\\n    .card .sub { color:var(--muted);\\\n    \\ font-size:.85rem; }\\n    footer { border-top:1px solid var(--line); background:var(--card);\\\n    \\ color:var(--muted); font-size:.85rem; }\\n    footer div { max-width:1080px;\\\n    \\ margin:0 auto; padding:1.5rem 1.25rem; }\\n    .demo { background:#fffbe6; border:1px\\\n    \\ solid #ffe58f; border-radius:8px; padding:.6rem .9rem;\\n            font-size:.85rem;\\\n    \\ color:#7a5c00; max-width:1080px; margin:1rem auto 0; }\\n  </style>\\n</head>\\n\\\n    <body>\\n  <header>\\n    <div class=\\\"bar\\\">\\n      <div class=\\\"logo\\\">Acme<span>Store</span></div>\\n\\\n    \\      <nav><a href=\\\"#\\\">Shop</a><a href=\\\"#\\\">Deals</a><a href=\\\"#\\\">New</a><a\\\n    \\ href=\\\"#\\\">Support</a></nav>\\n      <div class=\\\"cart\\\">\\U0001F6D2 Cart (0)</div>\\n\\\n    \\    </div>\\n  </header>\\n\\n  <section class=\\\"hero\\\">\\n    <h1>Gear that just\\\n    \\ works.</h1>\\n    <p>Free shipping over $50. Questions? Tap the chat bubble in\\\n    \\ the corner and\\n       one of our agents will help you out.</p>\\n    <a class=\\\"\\\n    btn\\\" href=\\\"#\\\">Shop the sale</a>\\n  </section>\\n\\n  <section class=\\\"grid\\\"\\\n    >\\n    <div class=\\\"card\\\"><div class=\\\"thumb\\\">\\U0001F3A7</div><div class=\\\"\\\n    body\\\"><h3>Studio Headphones</h3><div class=\\\"price\\\">$129</div><div class=\\\"\\\n    sub\\\">Noise cancelling</div></div></div>\\n    <div class=\\\"card\\\"><div class=\\\"\\\n    thumb\\\">\\u231A</div><div class=\\\"body\\\"><h3>Acme Watch 4</h3><div class=\\\"price\\\"\\\n    >$199</div><div class=\\\"sub\\\">7-day battery</div></div></div>\\n    <div class=\\\"\\\n    card\\\"><div class=\\\"thumb\\\">\\U0001F4F7</div><div class=\\\"body\\\"><h3>Pocket Camera</h3><div\\\n    \\ class=\\\"price\\\">$249</div><div class=\\\"sub\\\">4K, tiny</div></div></div>\\n  \\\n    \\  <div class=\\\"card\\\"><div class=\\\"thumb\\\">\\u2328\\uFE0F</div><div class=\\\"body\\\"\\\n    ><h3>Mech Keyboard</h3><div class=\\\"price\\\">$89</div><div class=\\\"sub\\\">Hot-swap</div></div></div>\\n\\\n    \\    <div class=\\\"card\\\"><div class=\\\"thumb\\\">\\U0001F50B</div><div class=\\\"body\\\"\\\n    ><h3>Power Bank</h3><div class=\\\"price\\\">$39</div><div class=\\\"sub\\\">20,000 mAh</div></div></div>\\n\\\n    \\    <div class=\\\"card\\\"><div class=\\\"thumb\\\">\\U0001F5B1\\uFE0F</div><div class=\\\"\\\n    body\\\"><h3>Wireless Mouse</h3><div class=\\\"price\\\">$29</div><div class=\\\"sub\\\"\\\n    >Silent click</div></div></div>\\n  </section>\\n\\n  <div class=\\\"demo\\\">houston\\\n    \\ Livechat demo \\u2014 this storefront (origin\\n     <code>http://localhost:8090</code>)\\\n    \\ embeds your Rocket.Chat Livechat\\n     widget cross-origin. Start a chat here,\\\n    \\ answer it in Rocket.Chat's Omnichannel area.</div>\\n\\n  <footer><div>\\xA9 Acme\\\n    \\ Store \\u2014 demo site for Rocket.Chat Omnichannel. Not a real shop.</div></footer>\\n\\\n    \\n  <script type=\\\"text/javascript\\\">\\n  (function(w, d, s, u) {\\n    w.RocketChat\\\n    \\ = function(c) { w.RocketChat._.push(c) }; w.RocketChat._ = []; w.RocketChat.url\\\n    \\ = u;\\n    var h = d.getElementsByTagName(s)[0], j = d.createElement(s);\\n  \\\n    \\  j.async = true; j.src = u + '/rocketchat-livechat.min.js?_=' + Math.random();\\n\\\n    \\    h.parentNode.insertBefore(j, h);\\n  })(window, document, 'script', '{{ROOT_URL}}/livechat');\\n\\\n    \\  </script>\\n</body>\\n</html>\\n\"\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: widget-site\n  labels: &id001\n    app: houston-widget-site\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: widget-site\n    houston.io/repro: __HOUSTON_NAME__\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: houston-widget-site\n  template:\n    metadata:\n      labels: *id001\n    spec:\n      containers:\n      - name: widget-site\n        image: docker.io/nginx:alpine\n        ports:\n        - containerPort: 80\n        readinessProbe:\n          httpGet:\n            path: /\n            port: 80\n          initialDelaySeconds: 2\n          periodSeconds: 3\n          failureThreshold: 30\n        volumeMounts:\n        - name: files\n          mountPath: /usr/share/nginx/html/index.html\n          subPath: index.html\n      volumes:\n      - name: files\n        configMap:\n          name: widget-site-files\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: widget-site\n  labels:\n    app: houston-widget-site\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: widget-site\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '8090'\nspec:\n  selector:\n    app: houston-widget-site\n  ports:\n  - name: p80\n    port: 80\n    targetPort: 80\n"
+   ],
+   "error": ""
+  },
+  "livechat@e11167fd": {
+   "name": "livechat",
+   "description": "Rocket.Chat Omnichannel with the Livechat widget embedded on a separate demo website (http://localhost:8090). Reproduce widget-load / CORS / routing / agent-availability tickets. Admin is the agent.",
+   "env": {
+    "OVERWRITE_SETTING_Livechat_enabled": "true",
+    "OVERWRITE_SETTING_API_Enable_CORS": "true",
+    "OVERWRITE_SETTING_API_CORS_Origin": "*",
+    "OVERWRITE_SETTING_Iframe_Restrict_Access": "false",
+    "OVERWRITE_SETTING_Livechat_Routing_Method": "Auto_Selection",
+    "OVERWRITE_SETTING_Accounts_TwoFactorAuthentication_By_Email_Enabled": "false",
+    "OVERWRITE_SETTING_Livechat_registration_form": "false"
+   },
+   "services": {
+    "widget-site": {
+     "image": "docker.io/nginx:alpine",
+     "volumes": [
+      "./livechat/index.html:/usr/share/nginx/html/index.html:ro"
+     ],
+     "ports": [
+      "8090:80"
+     ],
+     "restart": "unless-stopped"
+    }
+   },
+   "rocketchat": {},
+   "depends_on": [
+    "widget-site"
+   ],
+   "requires_license": false,
+   "source": "built-in (dynamic)",
+   "files": [
+    [
+     "livechat/index.html",
+     "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n  <title>Acme Store — Home</title>\n  <style>\n    :root { --ink:#1f2329; --muted:#6b7280; --brand:#1d74f5; --bg:#f7f8fa; --card:#fff; --line:#e6e8eb; }\n    * { box-sizing: border-box; }\n    body { margin:0; font-family: system-ui, -apple-system, \"Segoe UI\", sans-serif; color:var(--ink); background:var(--bg); }\n    a { color: inherit; text-decoration: none; }\n    header { position: sticky; top:0; background:var(--card); border-bottom:1px solid var(--line); }\n    .bar { max-width:1080px; margin:0 auto; display:flex; align-items:center; gap:1.5rem; padding:1rem 1.25rem; }\n    .logo { font-weight:800; font-size:1.35rem; letter-spacing:-.02em; }\n    .logo span { color:var(--brand); }\n    nav { display:flex; gap:1.25rem; color:var(--muted); font-weight:500; font-size:.95rem; }\n    nav a:hover { color:var(--ink); }\n    .cart { margin-left:auto; border:1px solid var(--line); border-radius:8px; padding:.5rem .8rem; font-weight:600; font-size:.9rem; }\n    .hero { max-width:1080px; margin:0 auto; padding:3rem 1.25rem 1rem; }\n    .hero h1 { font-size:2.4rem; margin:0 0 .5rem; letter-spacing:-.03em; }\n    .hero p { color:var(--muted); font-size:1.1rem; margin:0 0 1.25rem; max-width:34rem; }\n    .btn { display:inline-block; background:var(--brand); color:#fff; padding:.7rem 1.3rem; border-radius:8px; font-weight:600; }\n    .grid { max-width:1080px; margin:1.5rem auto 4rem; padding:0 1.25rem; display:grid;\n            grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:1.25rem; }\n    .card { background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; }\n    .thumb { font-size:3.5rem; text-align:center; padding:2rem 0; background:linear-gradient(135deg,#eef2ff,#f7f8fa); }\n    .card .body { padding:1rem; }\n    .card h3 { margin:0 0 .25rem; font-size:1rem; }\n    .card .price { color:var(--brand); font-weight:700; }\n    .card .sub { color:var(--muted); font-size:.85rem; }\n    footer { border-top:1px solid var(--line); background:var(--card); color:var(--muted); font-size:.85rem; }\n    footer div { max-width:1080px; margin:0 auto; padding:1.5rem 1.25rem; }\n    .demo { background:#fffbe6; border:1px solid #ffe58f; border-radius:8px; padding:.6rem .9rem;\n            font-size:.85rem; color:#7a5c00; max-width:1080px; margin:1rem auto 0; }\n  </style>\n</head>\n<body>\n  <header>\n    <div class=\"bar\">\n      <div class=\"logo\">Acme<span>Store</span></div>\n      <nav><a href=\"#\">Shop</a><a href=\"#\">Deals</a><a href=\"#\">New</a><a href=\"#\">Support</a></nav>\n      <div class=\"cart\">🛒 Cart (0)</div>\n    </div>\n  </header>\n\n  <section class=\"hero\">\n    <h1>Gear that just works.</h1>\n    <p>Free shipping over $50. Questions? Tap the chat bubble in the corner and\n       one of our agents will help you out.</p>\n    <a class=\"btn\" href=\"#\">Shop the sale</a>\n  </section>\n\n  <section class=\"grid\">\n    <div class=\"card\"><div class=\"thumb\">🎧</div><div class=\"body\"><h3>Studio Headphones</h3><div class=\"price\">$129</div><div class=\"sub\">Noise cancelling</div></div></div>\n    <div class=\"card\"><div class=\"thumb\">⌚</div><div class=\"body\"><h3>Acme Watch 4</h3><div class=\"price\">$199</div><div class=\"sub\">7-day battery</div></div></div>\n    <div class=\"card\"><div class=\"thumb\">📷</div><div class=\"body\"><h3>Pocket Camera</h3><div class=\"price\">$249</div><div class=\"sub\">4K, tiny</div></div></div>\n    <div class=\"card\"><div class=\"thumb\">⌨️</div><div class=\"body\"><h3>Mech Keyboard</h3><div class=\"price\">$89</div><div class=\"sub\">Hot-swap</div></div></div>\n    <div class=\"card\"><div class=\"thumb\">🔋</div><div class=\"body\"><h3>Power Bank</h3><div class=\"price\">$39</div><div class=\"sub\">20,000 mAh</div></div></div>\n    <div class=\"card\"><div class=\"thumb\">🖱️</div><div class=\"body\"><h3>Wireless Mouse</h3><div class=\"price\">$29</div><div class=\"sub\">Silent click</div></div></div>\n  </section>\n\n  <div class=\"demo\">houston Livechat demo — this storefront (origin\n     <code>http://localhost:8090</code>) embeds your Rocket.Chat Livechat\n     widget cross-origin. Start a chat here, answer it in Rocket.Chat's Omnichannel area.</div>\n\n  <footer><div>© Acme Store — demo site for Rocket.Chat Omnichannel. Not a real shop.</div></footer>\n\n  <script type=\"text/javascript\">\n  (function(w, d, s, u) {\n    w.RocketChat = function(c) { w.RocketChat._.push(c) }; w.RocketChat._ = []; w.RocketChat.url = u;\n    var h = d.getElementsByTagName(s)[0], j = d.createElement(s);\n    j.async = true; j.src = u + '/rocketchat-livechat.min.js?_=' + Math.random();\n    h.parentNode.insertBefore(j, h);\n  })(window, document, 'script', '{{ROOT_URL}}/livechat');\n  </script>\n</body>\n</html>\n"
+    ]
+   ],
+   "params_help": {
+    "agents": "agents to create + assign to the department (default 1; admin is always an agent)",
+    "registration": "show the pre-chat registration form (default false)",
+    "department": "create a 'support' department + assign the agents (default true)"
+   },
+   "post_ready": [
+    {
+     "action": "livechat_setup",
+     "agents": 1,
+     "department": "support"
+    }
+   ],
+   "notes": [
+    "Customer website (widget embedded, cross-origin): http://localhost:8090",
+    "Built-in standalone widget (same-origin): <repro-url>/livechat",
+    "admin is an available Omnichannel agent, assigned to the 'support'",
+    "  department. Visitors see 'agents online' once you're logged into RC",
+    "  (that gives you presence); answer chats in RC's Omnichannel area.",
+    "Business hours & canned responses are Enterprise features — pass",
+    "  --reg-token to enable them, else configure manually."
+   ],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [
+    8090
+   ],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [
+    "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: widget-site-files\n  labels:\n    app: houston-widget-site\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: widget-site\n    houston.io/repro: __HOUSTON_NAME__\ndata:\n  index.html: \"<!doctype html>\\n<html lang=\\\"en\\\">\\n<head>\\n  <meta charset=\\\"utf-8\\\"\\\n    >\\n  <meta name=\\\"viewport\\\" content=\\\"width=device-width, initial-scale=1\\\">\\n\\\n    \\  <title>Acme Store \\u2014 Home</title>\\n  <style>\\n    :root { --ink:#1f2329;\\\n    \\ --muted:#6b7280; --brand:#1d74f5; --bg:#f7f8fa; --card:#fff; --line:#e6e8eb;\\\n    \\ }\\n    * { box-sizing: border-box; }\\n    body { margin:0; font-family: system-ui,\\\n    \\ -apple-system, \\\"Segoe UI\\\", sans-serif; color:var(--ink); background:var(--bg);\\\n    \\ }\\n    a { color: inherit; text-decoration: none; }\\n    header { position:\\\n    \\ sticky; top:0; background:var(--card); border-bottom:1px solid var(--line);\\\n    \\ }\\n    .bar { max-width:1080px; margin:0 auto; display:flex; align-items:center;\\\n    \\ gap:1.5rem; padding:1rem 1.25rem; }\\n    .logo { font-weight:800; font-size:1.35rem;\\\n    \\ letter-spacing:-.02em; }\\n    .logo span { color:var(--brand); }\\n    nav {\\\n    \\ display:flex; gap:1.25rem; color:var(--muted); font-weight:500; font-size:.95rem;\\\n    \\ }\\n    nav a:hover { color:var(--ink); }\\n    .cart { margin-left:auto; border:1px\\\n    \\ solid var(--line); border-radius:8px; padding:.5rem .8rem; font-weight:600;\\\n    \\ font-size:.9rem; }\\n    .hero { max-width:1080px; margin:0 auto; padding:3rem\\\n    \\ 1.25rem 1rem; }\\n    .hero h1 { font-size:2.4rem; margin:0 0 .5rem; letter-spacing:-.03em;\\\n    \\ }\\n    .hero p { color:var(--muted); font-size:1.1rem; margin:0 0 1.25rem; max-width:34rem;\\\n    \\ }\\n    .btn { display:inline-block; background:var(--brand); color:#fff; padding:.7rem\\\n    \\ 1.3rem; border-radius:8px; font-weight:600; }\\n    .grid { max-width:1080px;\\\n    \\ margin:1.5rem auto 4rem; padding:0 1.25rem; display:grid;\\n            grid-template-columns:repeat(auto-fill,minmax(220px,1fr));\\\n    \\ gap:1.25rem; }\\n    .card { background:var(--card); border:1px solid var(--line);\\\n    \\ border-radius:12px; overflow:hidden; }\\n    .thumb { font-size:3.5rem; text-align:center;\\\n    \\ padding:2rem 0; background:linear-gradient(135deg,#eef2ff,#f7f8fa); }\\n    .card\\\n    \\ .body { padding:1rem; }\\n    .card h3 { margin:0 0 .25rem; font-size:1rem; }\\n\\\n    \\    .card .price { color:var(--brand); font-weight:700; }\\n    .card .sub { color:var(--muted);\\\n    \\ font-size:.85rem; }\\n    footer { border-top:1px solid var(--line); background:var(--card);\\\n    \\ color:var(--muted); font-size:.85rem; }\\n    footer div { max-width:1080px;\\\n    \\ margin:0 auto; padding:1.5rem 1.25rem; }\\n    .demo { background:#fffbe6; border:1px\\\n    \\ solid #ffe58f; border-radius:8px; padding:.6rem .9rem;\\n            font-size:.85rem;\\\n    \\ color:#7a5c00; max-width:1080px; margin:1rem auto 0; }\\n  </style>\\n</head>\\n\\\n    <body>\\n  <header>\\n    <div class=\\\"bar\\\">\\n      <div class=\\\"logo\\\">Acme<span>Store</span></div>\\n\\\n    \\      <nav><a href=\\\"#\\\">Shop</a><a href=\\\"#\\\">Deals</a><a href=\\\"#\\\">New</a><a\\\n    \\ href=\\\"#\\\">Support</a></nav>\\n      <div class=\\\"cart\\\">\\U0001F6D2 Cart (0)</div>\\n\\\n    \\    </div>\\n  </header>\\n\\n  <section class=\\\"hero\\\">\\n    <h1>Gear that just\\\n    \\ works.</h1>\\n    <p>Free shipping over $50. Questions? Tap the chat bubble in\\\n    \\ the corner and\\n       one of our agents will help you out.</p>\\n    <a class=\\\"\\\n    btn\\\" href=\\\"#\\\">Shop the sale</a>\\n  </section>\\n\\n  <section class=\\\"grid\\\"\\\n    >\\n    <div class=\\\"card\\\"><div class=\\\"thumb\\\">\\U0001F3A7</div><div class=\\\"\\\n    body\\\"><h3>Studio Headphones</h3><div class=\\\"price\\\">$129</div><div class=\\\"\\\n    sub\\\">Noise cancelling</div></div></div>\\n    <div class=\\\"card\\\"><div class=\\\"\\\n    thumb\\\">\\u231A</div><div class=\\\"body\\\"><h3>Acme Watch 4</h3><div class=\\\"price\\\"\\\n    >$199</div><div class=\\\"sub\\\">7-day battery</div></div></div>\\n    <div class=\\\"\\\n    card\\\"><div class=\\\"thumb\\\">\\U0001F4F7</div><div class=\\\"body\\\"><h3>Pocket Camera</h3><div\\\n    \\ class=\\\"price\\\">$249</div><div class=\\\"sub\\\">4K, tiny</div></div></div>\\n  \\\n    \\  <div class=\\\"card\\\"><div class=\\\"thumb\\\">\\u2328\\uFE0F</div><div class=\\\"body\\\"\\\n    ><h3>Mech Keyboard</h3><div class=\\\"price\\\">$89</div><div class=\\\"sub\\\">Hot-swap</div></div></div>\\n\\\n    \\    <div class=\\\"card\\\"><div class=\\\"thumb\\\">\\U0001F50B</div><div class=\\\"body\\\"\\\n    ><h3>Power Bank</h3><div class=\\\"price\\\">$39</div><div class=\\\"sub\\\">20,000 mAh</div></div></div>\\n\\\n    \\    <div class=\\\"card\\\"><div class=\\\"thumb\\\">\\U0001F5B1\\uFE0F</div><div class=\\\"\\\n    body\\\"><h3>Wireless Mouse</h3><div class=\\\"price\\\">$29</div><div class=\\\"sub\\\"\\\n    >Silent click</div></div></div>\\n  </section>\\n\\n  <div class=\\\"demo\\\">houston\\\n    \\ Livechat demo \\u2014 this storefront (origin\\n     <code>http://localhost:8090</code>)\\\n    \\ embeds your Rocket.Chat Livechat\\n     widget cross-origin. Start a chat here,\\\n    \\ answer it in Rocket.Chat's Omnichannel area.</div>\\n\\n  <footer><div>\\xA9 Acme\\\n    \\ Store \\u2014 demo site for Rocket.Chat Omnichannel. Not a real shop.</div></footer>\\n\\\n    \\n  <script type=\\\"text/javascript\\\">\\n  (function(w, d, s, u) {\\n    w.RocketChat\\\n    \\ = function(c) { w.RocketChat._.push(c) }; w.RocketChat._ = []; w.RocketChat.url\\\n    \\ = u;\\n    var h = d.getElementsByTagName(s)[0], j = d.createElement(s);\\n  \\\n    \\  j.async = true; j.src = u + '/rocketchat-livechat.min.js?_=' + Math.random();\\n\\\n    \\    h.parentNode.insertBefore(j, h);\\n  })(window, document, 'script', '{{ROOT_URL}}/livechat');\\n\\\n    \\  </script>\\n</body>\\n</html>\\n\"\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: widget-site\n  labels: &id001\n    app: houston-widget-site\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: widget-site\n    houston.io/repro: __HOUSTON_NAME__\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: houston-widget-site\n  template:\n    metadata:\n      labels: *id001\n    spec:\n      containers:\n      - name: widget-site\n        image: docker.io/nginx:alpine\n        ports:\n        - containerPort: 80\n        readinessProbe:\n          httpGet:\n            path: /\n            port: 80\n          initialDelaySeconds: 2\n          periodSeconds: 3\n          failureThreshold: 30\n        volumeMounts:\n        - name: files\n          mountPath: /usr/share/nginx/html/index.html\n          subPath: index.html\n      volumes:\n      - name: files\n        configMap:\n          name: widget-site-files\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: widget-site\n  labels:\n    app: houston-widget-site\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: widget-site\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '8090'\nspec:\n  selector:\n    app: houston-widget-site\n  ports:\n  - name: p80\n    port: 80\n    targetPort: 80\n"
+   ],
+   "error": ""
+  },
+  "multi-instance@37fa0975": {
+   "name": "multi-instance",
+   "description": "2 Rocket.Chat instances behind Traefik, sharing one Mongo replica set and NATS. Reproduce horizontal-scaling / real-time-across-instances tickets.",
+   "env": {},
+   "services": {
+    "nats": {
+     "image": "docker.io/nats:2.11-alpine",
+     "restart": "unless-stopped",
+     "command": [
+      "--http_port",
+      "8222"
+     ]
+    },
+    "traefik": {
+     "image": "docker.io/traefik:v3.4",
+     "restart": "unless-stopped",
+     "command": [
+      "--providers.file.filename=/etc/traefik/dynamic.yml",
+      "--providers.file.watch=true",
+      "--entryPoints.web.address=:80"
+     ],
+     "volumes": [
+      "./traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro"
+     ]
+    }
+   },
+   "rocketchat": {},
+   "depends_on": [
+    "nats"
+   ],
+   "requires_license": false,
+   "source": "built-in (dynamic)",
+   "files": [
+    [
+     "traefik/dynamic.yml",
+     "# Generated by houston. Do not edit by hand -- re-run `houston up`.\n# Traefik file provider: load-balance across the rocketchat-1..N instances.\nhttp:\n  routers:\n    rocketchat:\n      rule: \"PathPrefix(`/`)\"\n      entryPoints: [web]\n      service: rocketchat\n  services:\n    rocketchat:\n      loadBalancer:\n        healthCheck:\n          path: /api/info\n          interval: \"10s\"\n          timeout: \"5s\"\n        sticky:\n          cookie:\n            name: rc_lb\n        servers:\n          - url: \"http://rocketchat-1:3000\"\n          - url: \"http://rocketchat-2:3000\"\n"
+    ]
+   ],
+   "params_help": {
+    "instances": "number of Rocket.Chat instances (default 2, max 5)"
+   },
+   "post_ready": [],
+   "notes": [
+    "Verify the mesh (lists every connected instance):",
+    "    houston api --name <name> GET /api/v1/instances.get",
+    "Open two different instance URLs (shown above) in separate browsers,",
+    "  post in one and watch it arrive in the other (cross-instance real-time)."
+   ],
+   "instances": 2,
+   "entry_service": "traefik",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": ""
+  },
+  "multi-instance@ed8281be": {
+   "name": "multi-instance",
+   "description": "5 Rocket.Chat instances behind Traefik, sharing one Mongo replica set and NATS. Reproduce horizontal-scaling / real-time-across-instances tickets.",
+   "env": {},
+   "services": {
+    "nats": {
+     "image": "docker.io/nats:2.11-alpine",
+     "restart": "unless-stopped",
+     "command": [
+      "--http_port",
+      "8222"
+     ]
+    },
+    "traefik": {
+     "image": "docker.io/traefik:v3.4",
+     "restart": "unless-stopped",
+     "command": [
+      "--providers.file.filename=/etc/traefik/dynamic.yml",
+      "--providers.file.watch=true",
+      "--entryPoints.web.address=:80"
+     ],
+     "volumes": [
+      "./traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro"
+     ]
+    }
+   },
+   "rocketchat": {},
+   "depends_on": [
+    "nats"
+   ],
+   "requires_license": false,
+   "source": "built-in (dynamic)",
+   "files": [
+    [
+     "traefik/dynamic.yml",
+     "# Generated by houston. Do not edit by hand -- re-run `houston up`.\n# Traefik file provider: load-balance across the rocketchat-1..N instances.\nhttp:\n  routers:\n    rocketchat:\n      rule: \"PathPrefix(`/`)\"\n      entryPoints: [web]\n      service: rocketchat\n  services:\n    rocketchat:\n      loadBalancer:\n        healthCheck:\n          path: /api/info\n          interval: \"10s\"\n          timeout: \"5s\"\n        sticky:\n          cookie:\n            name: rc_lb\n        servers:\n          - url: \"http://rocketchat-1:3000\"\n          - url: \"http://rocketchat-2:3000\"\n          - url: \"http://rocketchat-3:3000\"\n          - url: \"http://rocketchat-4:3000\"\n          - url: \"http://rocketchat-5:3000\"\n"
+    ]
+   ],
+   "params_help": {
+    "instances": "number of Rocket.Chat instances (default 2, max 5)"
+   },
+   "post_ready": [],
+   "notes": [
+    "Verify the mesh (lists every connected instance):",
+    "    houston api --name <name> GET /api/v1/instances.get",
+    "Open two different instance URLs (shown above) in separate browsers,",
+    "  post in one and watch it arrive in the other (cross-instance real-time)."
+   ],
+   "instances": 5,
+   "entry_service": "traefik",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": ""
+  },
+  "oidc@0cde8e5c": {
+   "name": "oidc",
+   "description": "Keycloak OIDC IdP (OpenID Connect) with 5 users user1..user5 (password=username). RC logs in via Custom OAuth (popup). Click 'Keycloak (OIDC)', sign in as user1/user1. See the note printed on `up` for how the browser reaches the IdP.",
+   "env": {
+    "OVERWRITE_SETTING_Accounts_TwoFactorAuthentication_By_Email_Enabled": "false"
+   },
+   "services": {
+    "keycloak": {
+     "image": "quay.io/keycloak/keycloak:26.0",
+     "command": [
+      "start-dev",
+      "--import-realm"
+     ],
+     "environment": {
+      "KC_BOOTSTRAP_ADMIN_USERNAME": "admin",
+      "KC_BOOTSTRAP_ADMIN_PASSWORD": "admin",
+      "KC_PROXY_HEADERS": "xforwarded",
+      "KC_HTTP_PORT": "8085"
+     },
+     "volumes": [
+      "./oidc/keycloak-realm.json:/opt/keycloak/data/import/houston-realm.json:ro"
+     ],
+     "ports": [
+      "8085:8085"
+     ],
+     "restart": "unless-stopped"
+    }
+   },
+   "rocketchat": {},
+   "depends_on": [
+    "keycloak"
+   ],
+   "requires_license": false,
+   "source": "built-in (dynamic)",
+   "files": [
+    [
+     "oidc/keycloak-realm.json",
+     "{\n  \"realm\": \"houston\",\n  \"enabled\": true,\n  \"sslRequired\": \"none\",\n  \"clients\": [\n    {\n      \"clientId\": \"rc-oidc\",\n      \"protocol\": \"openid-connect\",\n      \"enabled\": true,\n      \"publicClient\": false,\n      \"secret\": \"rc-oidc-secret\",\n      \"standardFlowEnabled\": true,\n      \"directAccessGrantsEnabled\": true,\n      \"redirectUris\": [\n        \"http://localhost*\",\n        \"http://keycloak:8085/*\",\n        \"http://*\",\n        \"https://*\"\n      ],\n      \"webOrigins\": [\n        \"*\"\n      ]\n    }\n  ],\n  \"users\": [\n    {\n      \"username\": \"user1\",\n      \"enabled\": true,\n      \"emailVerified\": true,\n      \"email\": \"user1@example.com\",\n      \"firstName\": \"User\",\n      \"lastName\": \"1\",\n      \"credentials\": [\n        {\n          \"type\": \"password\",\n          \"value\": \"user1\",\n          \"temporary\": false\n        }\n      ]\n    },\n    {\n      \"username\": \"user2\",\n      \"enabled\": true,\n      \"emailVerified\": true,\n      \"email\": \"user2@example.com\",\n      \"firstName\": \"User\",\n      \"lastName\": \"2\",\n      \"credentials\": [\n        {\n          \"type\": \"password\",\n          \"value\": \"user2\",\n          \"temporary\": false\n        }\n      ]\n    },\n    {\n      \"username\": \"user3\",\n      \"enabled\": true,\n      \"emailVerified\": true,\n      \"email\": \"user3@example.com\",\n      \"firstName\": \"User\",\n      \"lastName\": \"3\",\n      \"credentials\": [\n        {\n          \"type\": \"password\",\n          \"value\": \"user3\",\n          \"temporary\": false\n        }\n      ]\n    },\n    {\n      \"username\": \"user4\",\n      \"enabled\": true,\n      \"emailVerified\": true,\n      \"email\": \"user4@example.com\",\n      \"firstName\": \"User\",\n      \"lastName\": \"4\",\n      \"credentials\": [\n        {\n          \"type\": \"password\",\n          \"value\": \"user4\",\n          \"temporary\": false\n        }\n      ]\n    },\n    {\n      \"username\": \"user5\",\n      \"enabled\": true,\n      \"emailVerified\": true,\n      \"email\": \"user5@example.com\",\n      \"firstName\": \"User\",\n      \"lastName\": \"5\",\n      \"credentials\": [\n        {\n          \"type\": \"password\",\n          \"value\": \"user5\",\n          \"temporary\": false\n        }\n      ]\n    }\n  ]\n}"
+    ]
+   ],
+   "params_help": {
+    "users": "number of Keycloak test users (default 5)",
+    "idp_host": "hostname BOTH your browser and Rocket.Chat reach Keycloak on (default 'keycloak', which needs a hosts entry and only works on this machine)"
+   },
+   "post_ready": [
+    {
+     "action": "keycloak_master_ssl_off",
+     "service": "keycloak",
+     "port": 8085
+    },
+    {
+     "action": "create_oauth_provider",
+     "name": "Keycloak",
+     "settings": {
+      "Accounts_OAuth_Custom-Keycloak": true,
+      "Accounts_OAuth_Custom-Keycloak-url": "http://keycloak:8085/realms/houston",
+      "Accounts_OAuth_Custom-Keycloak-authorize_path": "/protocol/openid-connect/auth",
+      "Accounts_OAuth_Custom-Keycloak-token_path": "/protocol/openid-connect/token",
+      "Accounts_OAuth_Custom-Keycloak-identity_path": "/protocol/openid-connect/userinfo",
+      "Accounts_OAuth_Custom-Keycloak-token_sent_via": "header",
+      "Accounts_OAuth_Custom-Keycloak-scope": "openid profile email",
+      "Accounts_OAuth_Custom-Keycloak-id": "rc-oidc",
+      "Accounts_OAuth_Custom-Keycloak-secret": "rc-oidc-secret",
+      "Accounts_OAuth_Custom-Keycloak-login_style": "popup",
+      "Accounts_OAuth_Custom-Keycloak-username_field": "preferred_username",
+      "Accounts_OAuth_Custom-Keycloak-email_field": "email",
+      "Accounts_OAuth_Custom-Keycloak-name_field": "name",
+      "Accounts_OAuth_Custom-Keycloak-merge_users": true,
+      "Accounts_OAuth_Custom-Keycloak-show_button": true,
+      "Accounts_OAuth_Custom-Keycloak-button_label_text": "Keycloak (OIDC)",
+      "Accounts_OAuth_Custom-Keycloak-button_color": "#1d74f5",
+      "Accounts_OAuth_Custom-Keycloak-button_label_color": "#FFFFFF"
+     }
+    }
+   ],
+   "notes": [
+    "OIDC needs one host entry so your browser can reach Keycloak at the",
+    "same URL RC's backend uses. Add this line to /etc/hosts (needs sudo):",
+    "    127.0.0.1  keycloak",
+    "  That entry points at THIS machine, so the browser has to be on it. From",
+    "  another machine, re-create with:  --bind 0.0.0.0 --set idp_host=<this host>",
+    "  which needs no hosts entry at all.",
+    "Then log in via 'Keycloak (OIDC)' as user1 / user1.",
+    "Keycloak admin console: http://keycloak:8085  (admin/admin, realm 'houston')."
+   ],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [
+    8085
+   ],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [
+    "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: keycloak-realm\n  labels:\n    app: houston-keycloak\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: keycloak\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '8085'\ndata:\n  houston-realm.json: \"{\\n  \\\"realm\\\": \\\"houston\\\",\\n  \\\"enabled\\\": true,\\n  \\\"sslRequired\\\"\\\n    : \\\"none\\\",\\n  \\\"clients\\\": [\\n    {\\n      \\\"clientId\\\": \\\"rc-oidc\\\",\\n     \\\n    \\ \\\"protocol\\\": \\\"openid-connect\\\",\\n      \\\"enabled\\\": true,\\n      \\\"publicClient\\\"\\\n    : false,\\n      \\\"secret\\\": \\\"rc-oidc-secret\\\",\\n      \\\"standardFlowEnabled\\\"\\\n    : true,\\n      \\\"directAccessGrantsEnabled\\\": true,\\n      \\\"redirectUris\\\": [\\n\\\n    \\        \\\"http://localhost*\\\",\\n        \\\"http://keycloak:8085/*\\\",\\n       \\\n    \\ \\\"http://*\\\",\\n        \\\"https://*\\\"\\n      ],\\n      \\\"webOrigins\\\": [\\n  \\\n    \\      \\\"*\\\"\\n      ]\\n    }\\n  ],\\n  \\\"users\\\": [\\n    {\\n      \\\"username\\\"\\\n    : \\\"user1\\\",\\n      \\\"enabled\\\": true,\\n      \\\"emailVerified\\\": true,\\n     \\\n    \\ \\\"email\\\": \\\"user1@example.com\\\",\\n      \\\"firstName\\\": \\\"User\\\",\\n      \\\"\\\n    lastName\\\": \\\"1\\\",\\n      \\\"credentials\\\": [\\n        {\\n          \\\"type\\\": \\\"\\\n    password\\\",\\n          \\\"value\\\": \\\"user1\\\",\\n          \\\"temporary\\\": false\\n\\\n    \\        }\\n      ]\\n    },\\n    {\\n      \\\"username\\\": \\\"user2\\\",\\n      \\\"enabled\\\"\\\n    : true,\\n      \\\"emailVerified\\\": true,\\n      \\\"email\\\": \\\"user2@example.com\\\"\\\n    ,\\n      \\\"firstName\\\": \\\"User\\\",\\n      \\\"lastName\\\": \\\"2\\\",\\n      \\\"credentials\\\"\\\n    : [\\n        {\\n          \\\"type\\\": \\\"password\\\",\\n          \\\"value\\\": \\\"user2\\\"\\\n    ,\\n          \\\"temporary\\\": false\\n        }\\n      ]\\n    },\\n    {\\n      \\\"\\\n    username\\\": \\\"user3\\\",\\n      \\\"enabled\\\": true,\\n      \\\"emailVerified\\\": true,\\n\\\n    \\      \\\"email\\\": \\\"user3@example.com\\\",\\n      \\\"firstName\\\": \\\"User\\\",\\n   \\\n    \\   \\\"lastName\\\": \\\"3\\\",\\n      \\\"credentials\\\": [\\n        {\\n          \\\"type\\\"\\\n    : \\\"password\\\",\\n          \\\"value\\\": \\\"user3\\\",\\n          \\\"temporary\\\": false\\n\\\n    \\        }\\n      ]\\n    },\\n    {\\n      \\\"username\\\": \\\"user4\\\",\\n      \\\"enabled\\\"\\\n    : true,\\n      \\\"emailVerified\\\": true,\\n      \\\"email\\\": \\\"user4@example.com\\\"\\\n    ,\\n      \\\"firstName\\\": \\\"User\\\",\\n      \\\"lastName\\\": \\\"4\\\",\\n      \\\"credentials\\\"\\\n    : [\\n        {\\n          \\\"type\\\": \\\"password\\\",\\n          \\\"value\\\": \\\"user4\\\"\\\n    ,\\n          \\\"temporary\\\": false\\n        }\\n      ]\\n    },\\n    {\\n      \\\"\\\n    username\\\": \\\"user5\\\",\\n      \\\"enabled\\\": true,\\n      \\\"emailVerified\\\": true,\\n\\\n    \\      \\\"email\\\": \\\"user5@example.com\\\",\\n      \\\"firstName\\\": \\\"User\\\",\\n   \\\n    \\   \\\"lastName\\\": \\\"5\\\",\\n      \\\"credentials\\\": [\\n        {\\n          \\\"type\\\"\\\n    : \\\"password\\\",\\n          \\\"value\\\": \\\"user5\\\",\\n          \\\"temporary\\\": false\\n\\\n    \\        }\\n      ]\\n    }\\n  ]\\n}\"\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: keycloak\n  labels: &id001\n    app: houston-keycloak\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: keycloak\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '8085'\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: houston-keycloak\n  template:\n    metadata:\n      labels: *id001\n    spec:\n      containers:\n      - name: keycloak\n        image: quay.io/keycloak/keycloak:26.0\n        args:\n        - start-dev\n        - --import-realm\n        env:\n        - name: KC_BOOTSTRAP_ADMIN_USERNAME\n          value: admin\n        - name: KC_BOOTSTRAP_ADMIN_PASSWORD\n          value: admin\n        - name: KC_PROXY_HEADERS\n          value: xforwarded\n        - name: KC_HTTP_PORT\n          value: '8085'\n        ports:\n        - containerPort: 8085\n        readinessProbe:\n          httpGet:\n            path: /realms/master\n            port: 8085\n          initialDelaySeconds: 10\n          periodSeconds: 5\n          failureThreshold: 60\n        volumeMounts:\n        - name: realm\n          mountPath: /opt/keycloak/data/import/houston-realm.json\n          subPath: houston-realm.json\n      volumes:\n      - name: realm\n        configMap:\n          name: keycloak-realm\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: keycloak\n  labels:\n    app: houston-keycloak\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: keycloak\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '8085'\nspec:\n  selector:\n    app: houston-keycloak\n  ports:\n  - name: http\n    port: 8085\n    targetPort: 8085\n"
+   ],
+   "error": ""
+  },
+  "oidc@1a4d94e6": {
+   "name": "oidc",
+   "description": "Keycloak OIDC IdP (OpenID Connect) with 5 users user1..user5 (password=username). RC logs in via Custom OAuth (popup). Click 'Keycloak (OIDC)', sign in as user1/user1. See the note printed on `up` for how the browser reaches the IdP.",
+   "env": {
+    "OVERWRITE_SETTING_Accounts_TwoFactorAuthentication_By_Email_Enabled": "false"
+   },
+   "services": {
+    "keycloak": {
+     "image": "quay.io/keycloak/keycloak:26.0",
+     "command": [
+      "start-dev",
+      "--import-realm"
+     ],
+     "environment": {
+      "KC_BOOTSTRAP_ADMIN_USERNAME": "admin",
+      "KC_BOOTSTRAP_ADMIN_PASSWORD": "admin",
+      "KC_PROXY_HEADERS": "xforwarded",
+      "KC_HTTP_PORT": "8085"
+     },
+     "volumes": [
+      "./oidc/keycloak-realm.json:/opt/keycloak/data/import/houston-realm.json:ro"
+     ],
+     "ports": [
+      "8085:8085"
+     ],
+     "restart": "unless-stopped"
+    }
+   },
+   "rocketchat": {},
+   "depends_on": [
+    "keycloak"
+   ],
+   "requires_license": false,
+   "source": "built-in (dynamic)",
+   "files": [
+    [
+     "oidc/keycloak-realm.json",
+     "{\n  \"realm\": \"houston\",\n  \"enabled\": true,\n  \"sslRequired\": \"none\",\n  \"clients\": [\n    {\n      \"clientId\": \"rc-oidc\",\n      \"protocol\": \"openid-connect\",\n      \"enabled\": true,\n      \"publicClient\": false,\n      \"secret\": \"rc-oidc-secret\",\n      \"standardFlowEnabled\": true,\n      \"directAccessGrantsEnabled\": true,\n      \"redirectUris\": [\n        \"http://localhost*\",\n        \"http://box.example:8085/*\",\n        \"http://*\",\n        \"https://*\"\n      ],\n      \"webOrigins\": [\n        \"*\"\n      ]\n    }\n  ],\n  \"users\": [\n    {\n      \"username\": \"user1\",\n      \"enabled\": true,\n      \"emailVerified\": true,\n      \"email\": \"user1@example.com\",\n      \"firstName\": \"User\",\n      \"lastName\": \"1\",\n      \"credentials\": [\n        {\n          \"type\": \"password\",\n          \"value\": \"user1\",\n          \"temporary\": false\n        }\n      ]\n    },\n    {\n      \"username\": \"user2\",\n      \"enabled\": true,\n      \"emailVerified\": true,\n      \"email\": \"user2@example.com\",\n      \"firstName\": \"User\",\n      \"lastName\": \"2\",\n      \"credentials\": [\n        {\n          \"type\": \"password\",\n          \"value\": \"user2\",\n          \"temporary\": false\n        }\n      ]\n    },\n    {\n      \"username\": \"user3\",\n      \"enabled\": true,\n      \"emailVerified\": true,\n      \"email\": \"user3@example.com\",\n      \"firstName\": \"User\",\n      \"lastName\": \"3\",\n      \"credentials\": [\n        {\n          \"type\": \"password\",\n          \"value\": \"user3\",\n          \"temporary\": false\n        }\n      ]\n    },\n    {\n      \"username\": \"user4\",\n      \"enabled\": true,\n      \"emailVerified\": true,\n      \"email\": \"user4@example.com\",\n      \"firstName\": \"User\",\n      \"lastName\": \"4\",\n      \"credentials\": [\n        {\n          \"type\": \"password\",\n          \"value\": \"user4\",\n          \"temporary\": false\n        }\n      ]\n    },\n    {\n      \"username\": \"user5\",\n      \"enabled\": true,\n      \"emailVerified\": true,\n      \"email\": \"user5@example.com\",\n      \"firstName\": \"User\",\n      \"lastName\": \"5\",\n      \"credentials\": [\n        {\n          \"type\": \"password\",\n          \"value\": \"user5\",\n          \"temporary\": false\n        }\n      ]\n    }\n  ]\n}"
+    ]
+   ],
+   "params_help": {
+    "users": "number of Keycloak test users (default 5)",
+    "idp_host": "hostname BOTH your browser and Rocket.Chat reach Keycloak on (default 'keycloak', which needs a hosts entry and only works on this machine)"
+   },
+   "post_ready": [
+    {
+     "action": "keycloak_master_ssl_off",
+     "service": "keycloak",
+     "port": 8085
+    },
+    {
+     "action": "create_oauth_provider",
+     "name": "Keycloak",
+     "settings": {
+      "Accounts_OAuth_Custom-Keycloak": true,
+      "Accounts_OAuth_Custom-Keycloak-url": "http://box.example:8085/realms/houston",
+      "Accounts_OAuth_Custom-Keycloak-authorize_path": "/protocol/openid-connect/auth",
+      "Accounts_OAuth_Custom-Keycloak-token_path": "/protocol/openid-connect/token",
+      "Accounts_OAuth_Custom-Keycloak-identity_path": "/protocol/openid-connect/userinfo",
+      "Accounts_OAuth_Custom-Keycloak-token_sent_via": "header",
+      "Accounts_OAuth_Custom-Keycloak-scope": "openid profile email",
+      "Accounts_OAuth_Custom-Keycloak-id": "rc-oidc",
+      "Accounts_OAuth_Custom-Keycloak-secret": "rc-oidc-secret",
+      "Accounts_OAuth_Custom-Keycloak-login_style": "popup",
+      "Accounts_OAuth_Custom-Keycloak-username_field": "preferred_username",
+      "Accounts_OAuth_Custom-Keycloak-email_field": "email",
+      "Accounts_OAuth_Custom-Keycloak-name_field": "name",
+      "Accounts_OAuth_Custom-Keycloak-merge_users": true,
+      "Accounts_OAuth_Custom-Keycloak-show_button": true,
+      "Accounts_OAuth_Custom-Keycloak-button_label_text": "Keycloak (OIDC)",
+      "Accounts_OAuth_Custom-Keycloak-button_color": "#1d74f5",
+      "Accounts_OAuth_Custom-Keycloak-button_label_color": "#FFFFFF"
+     }
+    }
+   ],
+   "notes": [
+    "Your browser AND Rocket.Chat both reach Keycloak at http://box.example:8085.",
+    "  No hosts entry is needed, but the workspace must be bound wide enough",
+    "  for both to get there (`--bind 0.0.0.0`).",
+    "Log in via 'Keycloak (OIDC)' as user1 / user1.",
+    "Keycloak admin console: http://box.example:8085  (admin/admin, realm 'houston')."
+   ],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [
+    8085
+   ],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [
+    "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: keycloak-realm\n  labels:\n    app: houston-keycloak\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: keycloak\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '8085'\ndata:\n  houston-realm.json: \"{\\n  \\\"realm\\\": \\\"houston\\\",\\n  \\\"enabled\\\": true,\\n  \\\"sslRequired\\\"\\\n    : \\\"none\\\",\\n  \\\"clients\\\": [\\n    {\\n      \\\"clientId\\\": \\\"rc-oidc\\\",\\n     \\\n    \\ \\\"protocol\\\": \\\"openid-connect\\\",\\n      \\\"enabled\\\": true,\\n      \\\"publicClient\\\"\\\n    : false,\\n      \\\"secret\\\": \\\"rc-oidc-secret\\\",\\n      \\\"standardFlowEnabled\\\"\\\n    : true,\\n      \\\"directAccessGrantsEnabled\\\": true,\\n      \\\"redirectUris\\\": [\\n\\\n    \\        \\\"http://localhost*\\\",\\n        \\\"http://box.example:8085/*\\\",\\n    \\\n    \\    \\\"http://*\\\",\\n        \\\"https://*\\\"\\n      ],\\n      \\\"webOrigins\\\": [\\n\\\n    \\        \\\"*\\\"\\n      ]\\n    }\\n  ],\\n  \\\"users\\\": [\\n    {\\n      \\\"username\\\"\\\n    : \\\"user1\\\",\\n      \\\"enabled\\\": true,\\n      \\\"emailVerified\\\": true,\\n     \\\n    \\ \\\"email\\\": \\\"user1@example.com\\\",\\n      \\\"firstName\\\": \\\"User\\\",\\n      \\\"\\\n    lastName\\\": \\\"1\\\",\\n      \\\"credentials\\\": [\\n        {\\n          \\\"type\\\": \\\"\\\n    password\\\",\\n          \\\"value\\\": \\\"user1\\\",\\n          \\\"temporary\\\": false\\n\\\n    \\        }\\n      ]\\n    },\\n    {\\n      \\\"username\\\": \\\"user2\\\",\\n      \\\"enabled\\\"\\\n    : true,\\n      \\\"emailVerified\\\": true,\\n      \\\"email\\\": \\\"user2@example.com\\\"\\\n    ,\\n      \\\"firstName\\\": \\\"User\\\",\\n      \\\"lastName\\\": \\\"2\\\",\\n      \\\"credentials\\\"\\\n    : [\\n        {\\n          \\\"type\\\": \\\"password\\\",\\n          \\\"value\\\": \\\"user2\\\"\\\n    ,\\n          \\\"temporary\\\": false\\n        }\\n      ]\\n    },\\n    {\\n      \\\"\\\n    username\\\": \\\"user3\\\",\\n      \\\"enabled\\\": true,\\n      \\\"emailVerified\\\": true,\\n\\\n    \\      \\\"email\\\": \\\"user3@example.com\\\",\\n      \\\"firstName\\\": \\\"User\\\",\\n   \\\n    \\   \\\"lastName\\\": \\\"3\\\",\\n      \\\"credentials\\\": [\\n        {\\n          \\\"type\\\"\\\n    : \\\"password\\\",\\n          \\\"value\\\": \\\"user3\\\",\\n          \\\"temporary\\\": false\\n\\\n    \\        }\\n      ]\\n    },\\n    {\\n      \\\"username\\\": \\\"user4\\\",\\n      \\\"enabled\\\"\\\n    : true,\\n      \\\"emailVerified\\\": true,\\n      \\\"email\\\": \\\"user4@example.com\\\"\\\n    ,\\n      \\\"firstName\\\": \\\"User\\\",\\n      \\\"lastName\\\": \\\"4\\\",\\n      \\\"credentials\\\"\\\n    : [\\n        {\\n          \\\"type\\\": \\\"password\\\",\\n          \\\"value\\\": \\\"user4\\\"\\\n    ,\\n          \\\"temporary\\\": false\\n        }\\n      ]\\n    },\\n    {\\n      \\\"\\\n    username\\\": \\\"user5\\\",\\n      \\\"enabled\\\": true,\\n      \\\"emailVerified\\\": true,\\n\\\n    \\      \\\"email\\\": \\\"user5@example.com\\\",\\n      \\\"firstName\\\": \\\"User\\\",\\n   \\\n    \\   \\\"lastName\\\": \\\"5\\\",\\n      \\\"credentials\\\": [\\n        {\\n          \\\"type\\\"\\\n    : \\\"password\\\",\\n          \\\"value\\\": \\\"user5\\\",\\n          \\\"temporary\\\": false\\n\\\n    \\        }\\n      ]\\n    }\\n  ]\\n}\"\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: keycloak\n  labels: &id001\n    app: houston-keycloak\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: keycloak\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '8085'\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: houston-keycloak\n  template:\n    metadata:\n      labels: *id001\n    spec:\n      containers:\n      - name: keycloak\n        image: quay.io/keycloak/keycloak:26.0\n        args:\n        - start-dev\n        - --import-realm\n        env:\n        - name: KC_BOOTSTRAP_ADMIN_USERNAME\n          value: admin\n        - name: KC_BOOTSTRAP_ADMIN_PASSWORD\n          value: admin\n        - name: KC_PROXY_HEADERS\n          value: xforwarded\n        - name: KC_HTTP_PORT\n          value: '8085'\n        ports:\n        - containerPort: 8085\n        readinessProbe:\n          httpGet:\n            path: /realms/master\n            port: 8085\n          initialDelaySeconds: 10\n          periodSeconds: 5\n          failureThreshold: 60\n        volumeMounts:\n        - name: realm\n          mountPath: /opt/keycloak/data/import/houston-realm.json\n          subPath: houston-realm.json\n      volumes:\n      - name: realm\n        configMap:\n          name: keycloak-realm\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: keycloak\n  labels:\n    app: houston-keycloak\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: keycloak\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '8085'\nspec:\n  selector:\n    app: houston-keycloak\n  ports:\n  - name: http\n    port: 8085\n    targetPort: 8085\n"
+   ],
+   "error": ""
+  },
+  "ordered@2d4fea70": {
+   "name": "ordered",
+   "description": "keys as written",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "{PRESET_DIR}/ordered.yaml",
+   "files": [],
+   "params_help": {
+    "0": "zero",
+    "10": "ten",
+    "users": "u",
+    "alpha": "a"
+   },
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": ""
+  },
+  "pinned@3d8c3a71": {
+   "name": "pinned",
+   "description": "",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "{PRESET_DIR}/pinned.yaml",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "kubernetes",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": ""
+  },
+  "q@0e699354": {
+   "name": "q",
+   "description": "",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "{PRESET_DIR}/q.yaml",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [
+    "a",
+    "b",
+    "c"
+   ],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": ""
+  },
+  "q@1761587d": {
+   "name": "q",
+   "description": "UNREADABLE — {PRESET_DIR}/q.yaml is not valid UTF-8 (byte 0xff at position 23: invalid start byte)",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "built-in",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": "{PRESET_DIR}/q.yaml is not valid UTF-8 (byte 0xff at position 23: invalid start byte)"
+  },
+  "q@4cf3bfcd": {
+   "name": "q",
+   "description": "UNREADABLE — {PRESET_DIR}/q.yaml is not valid UTF-8 (byte 0xed at position 10: invalid continuation byte)",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "built-in",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": "{PRESET_DIR}/q.yaml is not valid UTF-8 (byte 0xed at position 10: invalid continuation byte)"
+  },
+  "q@50f55520": {
+   "name": "q",
+   "description": "",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "{PRESET_DIR}/q.yaml",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [
+    81
+   ],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": ""
+  },
+  "q@51828f43": {
+   "name": "q",
+   "description": "UNREADABLE — {PRESET_DIR}/q.yaml is not valid UTF-8 (bytes at positions 10-11: unexpected end of data)",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "built-in",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": "{PRESET_DIR}/q.yaml is not valid UTF-8 (bytes at positions 10-11: unexpected end of data)"
+  },
+  "q@7c7cf6c4": {
+   "name": "q",
+   "description": "",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": true,
+   "source": "{PRESET_DIR}/q.yaml",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": ""
+  },
+  "q@8729ee0a": {
+   "name": "q",
+   "description": "kept",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "{PRESET_DIR}/q.yaml",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": ""
+  },
+  "q@88a46057": {
+   "name": "q",
+   "description": "UNREADABLE — {PRESET_DIR}/q.yaml is not valid UTF-8 (bytes at positions 10-12: invalid continuation byte)",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "built-in",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": "{PRESET_DIR}/q.yaml is not valid UTF-8 (bytes at positions 10-12: invalid continuation byte)"
+  },
+  "q@8a3184eb": {
+   "name": "q",
+   "description": "",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "{PRESET_DIR}/q.yaml",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [
+    8,
+    0
+   ],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": ""
+  },
+  "q@aae5aa38": {
+   "name": "q",
+   "description": "",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "{PRESET_DIR}/q.yaml",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": ""
+  },
+  "q@ac365ab3": {
+   "name": "q",
+   "description": "",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "{PRESET_DIR}/q.yaml",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [
+    "1",
+    "1.5",
+    "true",
+    "null",
+    "x"
+   ],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": ""
+  },
+  "q@bbed166f": {
+   "name": "q",
+   "description": "",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "{PRESET_DIR}/q.yaml",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [
+    80,
+    7,
+    8080,
+    1,
+    80
+   ],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": ""
+  },
+  "q@db72e2a7": {
+   "name": "q",
+   "description": "UNREADABLE — 'abc' is not an integer",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "built-in",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": "'abc' is not an integer"
+  },
+  "q@e3a7c15d": {
+   "name": "q",
+   "description": "UNREADABLE — NaN is not an integer",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "built-in",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": "NaN is not an integer"
+  },
+  "s3_minio@15fee594": {
+   "name": "s3_minio",
+   "description": "MinIO S3-compatible storage wired as RC's file upload backend (bucket 'my.bucket', console :9001). Default proxies downloads through RC; --set presigned=true for real presigned URLs.",
+   "env": {
+    "OVERWRITE_SETTING_FileUpload_Storage_Type": "AmazonS3",
+    "OVERWRITE_SETTING_FileUpload_S3_Bucket": "my.bucket",
+    "OVERWRITE_SETTING_FileUpload_S3_BucketURL": "http://minio:9000",
+    "OVERWRITE_SETTING_FileUpload_S3_AWSAccessKeyId": "houston",
+    "OVERWRITE_SETTING_FileUpload_S3_AWSSecretAccessKey": "houston-secret",
+    "OVERWRITE_SETTING_FileUpload_S3_Region": "us-east-1",
+    "OVERWRITE_SETTING_FileUpload_S3_ForcePathStyle": "true",
+    "OVERWRITE_SETTING_FileUpload_S3_SignatureVersion": "v2",
+    "OVERWRITE_SETTING_FileUpload_S3_Proxy_Uploads": "false",
+    "OVERWRITE_SETTING_FileUpload_S3_Proxy_Avatars": "false"
+   },
+   "services": {
+    "minio": {
+     "image": "docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z",
+     "restart": "unless-stopped",
+     "command": [
+      "server",
+      "/data",
+      "--console-address",
+      ":9001"
+     ],
+     "environment": {
+      "MINIO_ROOT_USER": "houston",
+      "MINIO_ROOT_PASSWORD": "houston-secret"
+     },
+     "volumes": [
+      "minio_data:/data"
+     ],
+     "ports": [
+      "9000:9000",
+      "9001:9001"
+     ]
+    },
+    "minio-init": {
+     "image": "docker.io/pgsty/mc:RELEASE.2026-08-04T00-00-00Z",
+     "restart": "no",
+     "depends_on": [
+      "minio"
+     ],
+     "entrypoint": [
+      "sh",
+      "-c",
+      "until mc alias set local http://minio:9000 houston houston-secret; do sleep 1; done; mc mb -p local/my.bucket"
+     ]
+    }
+   },
+   "rocketchat": {},
+   "depends_on": [
+    "minio"
+   ],
+   "requires_license": false,
+   "source": "built-in (dynamic)",
+   "files": [],
+   "params_help": {
+    "presigned": "browser fetches presigned MinIO URLs (default false; needs /etc/hosts line)",
+    "bucket": "bucket name (default houston-uploads)",
+    "s3_host": "hostname the BROWSER reaches MinIO on in presigned mode (default 'minio', which needs a hosts entry and only works on this machine)"
+   },
+   "post_ready": [],
+   "notes": [
+    "MinIO console: http://localhost:9001  (houston / houston-secret)",
+    "  — bucket 'my.bucket' is created automatically; watch uploads land in it.",
+    "Upload any file/image in RC; it goes to MinIO instead of GridFS.",
+    "PRESIGNED MODE: the browser fetches files straight from MinIO, so add",
+    "this line to /etc/hosts (needs sudo):",
+    "    127.0.0.1  minio",
+    "  That entry points at THIS machine, so the browser has to be on it. From",
+    "  another machine, re-create with:  --bind 0.0.0.0 --set s3_host=<this host>",
+    "Remove the line to reproduce the classic 'presigned URL unreachable'",
+    "ticket symptom (uploads work, previews/downloads break)."
+   ],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {
+    "minio_data": {
+     "driver": "local"
+    }
+   },
+   "ports": [
+    9000,
+    9001
+   ],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [
+    "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: minio\n  labels: &id001\n    app: houston-minio\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: minio\n    houston.io/repro: __HOUSTON_NAME__\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: houston-minio\n  template:\n    metadata:\n      labels: *id001\n    spec:\n      containers:\n      - name: minio\n        image: docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z\n        ports:\n        - containerPort: 9000\n        - containerPort: 9001\n        env:\n        - name: MINIO_ROOT_USER\n          value: houston\n        - name: MINIO_ROOT_PASSWORD\n          value: houston-secret\n        args:\n        - server\n        - /data\n        - --console-address\n        - :9001\n        readinessProbe:\n          httpGet:\n            path: /minio/health/ready\n            port: 9000\n          initialDelaySeconds: 3\n          periodSeconds: 3\n          failureThreshold: 40\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: minio\n  labels:\n    app: houston-minio\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: minio\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '9000'\nspec:\n  selector:\n    app: houston-minio\n  ports:\n  - name: p9000\n    port: 9000\n    targetPort: 9000\n  - name: p9001\n    port: 9001\n    targetPort: 9001\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: minio-console\n  labels:\n    app: houston-minio\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: minio\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '9001'\n    houston.io/ui-deployment: minio\nspec:\n  selector:\n    app: houston-minio\n  ports:\n  - name: http\n    port: 9001\n    targetPort: 9001\n",
+    "apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: minio-init\n  labels: &id001\n    app: houston-minio-init\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: minio-init\n    houston.io/repro: __HOUSTON_NAME__\nspec:\n  backoffLimit: 10\n  template:\n    metadata:\n      labels: *id001\n    spec:\n      restartPolicy: OnFailure\n      containers:\n      - name: minio-init\n        image: docker.io/pgsty/mc:RELEASE.2026-08-04T00-00-00Z\n        command:\n        - sh\n        - -c\n        - until mc alias set local http://minio:9000 houston houston-secret; do sleep\n          2; done; mc mb -p local/my.bucket\n"
+   ],
+   "error": ""
+  },
+  "s3_minio@8346d99e": {
+   "name": "s3_minio",
+   "description": "MinIO S3-compatible storage wired as RC's file upload backend (bucket 'houston-uploads', console :9001). Default proxies downloads through RC; --set presigned=true for real presigned URLs.",
+   "env": {
+    "OVERWRITE_SETTING_FileUpload_Storage_Type": "AmazonS3",
+    "OVERWRITE_SETTING_FileUpload_S3_Bucket": "houston-uploads",
+    "OVERWRITE_SETTING_FileUpload_S3_BucketURL": "http://minio:9000",
+    "OVERWRITE_SETTING_FileUpload_S3_AWSAccessKeyId": "houston",
+    "OVERWRITE_SETTING_FileUpload_S3_AWSSecretAccessKey": "houston-secret",
+    "OVERWRITE_SETTING_FileUpload_S3_Region": "us-east-1",
+    "OVERWRITE_SETTING_FileUpload_S3_ForcePathStyle": "true",
+    "OVERWRITE_SETTING_FileUpload_S3_SignatureVersion": "v2",
+    "OVERWRITE_SETTING_FileUpload_S3_Proxy_Uploads": "true",
+    "OVERWRITE_SETTING_FileUpload_S3_Proxy_Avatars": "true"
+   },
+   "services": {
+    "minio": {
+     "image": "docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z",
+     "restart": "unless-stopped",
+     "command": [
+      "server",
+      "/data",
+      "--console-address",
+      ":9001"
+     ],
+     "environment": {
+      "MINIO_ROOT_USER": "houston",
+      "MINIO_ROOT_PASSWORD": "houston-secret"
+     },
+     "volumes": [
+      "minio_data:/data"
+     ],
+     "ports": [
+      "9000:9000",
+      "9001:9001"
+     ]
+    },
+    "minio-init": {
+     "image": "docker.io/pgsty/mc:RELEASE.2026-08-04T00-00-00Z",
+     "restart": "no",
+     "depends_on": [
+      "minio"
+     ],
+     "entrypoint": [
+      "sh",
+      "-c",
+      "until mc alias set local http://minio:9000 houston houston-secret; do sleep 1; done; mc mb -p local/houston-uploads"
+     ]
+    }
+   },
+   "rocketchat": {},
+   "depends_on": [
+    "minio"
+   ],
+   "requires_license": false,
+   "source": "built-in (dynamic)",
+   "files": [],
+   "params_help": {
+    "presigned": "browser fetches presigned MinIO URLs (default false; needs /etc/hosts line)",
+    "bucket": "bucket name (default houston-uploads)",
+    "s3_host": "hostname the BROWSER reaches MinIO on in presigned mode (default 'minio', which needs a hosts entry and only works on this machine)"
+   },
+   "post_ready": [],
+   "notes": [
+    "MinIO console: http://localhost:9001  (houston / houston-secret)",
+    "  — bucket 'houston-uploads' is created automatically; watch uploads land in it.",
+    "Upload any file/image in RC; it goes to MinIO instead of GridFS.",
+    "Downloads are proxied through RC (no hosts entry needed). For real",
+    "presigned-URL behaviour: --set presigned=true (reproduces that ticket class)."
+   ],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {
+    "minio_data": {
+     "driver": "local"
+    }
+   },
+   "ports": [
+    9000,
+    9001
+   ],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [
+    "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: minio\n  labels: &id001\n    app: houston-minio\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: minio\n    houston.io/repro: __HOUSTON_NAME__\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: houston-minio\n  template:\n    metadata:\n      labels: *id001\n    spec:\n      containers:\n      - name: minio\n        image: docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z\n        ports:\n        - containerPort: 9000\n        - containerPort: 9001\n        env:\n        - name: MINIO_ROOT_USER\n          value: houston\n        - name: MINIO_ROOT_PASSWORD\n          value: houston-secret\n        args:\n        - server\n        - /data\n        - --console-address\n        - :9001\n        readinessProbe:\n          httpGet:\n            path: /minio/health/ready\n            port: 9000\n          initialDelaySeconds: 3\n          periodSeconds: 3\n          failureThreshold: 40\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: minio\n  labels:\n    app: houston-minio\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: minio\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '9000'\nspec:\n  selector:\n    app: houston-minio\n  ports:\n  - name: p9000\n    port: 9000\n    targetPort: 9000\n  - name: p9001\n    port: 9001\n    targetPort: 9001\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: minio-console\n  labels:\n    app: houston-minio\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: minio\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '9001'\n    houston.io/ui-deployment: minio\nspec:\n  selector:\n    app: houston-minio\n  ports:\n  - name: http\n    port: 9001\n    targetPort: 9001\n",
+    "apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: minio-init\n  labels: &id001\n    app: houston-minio-init\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: minio-init\n    houston.io/repro: __HOUSTON_NAME__\nspec:\n  backoffLimit: 10\n  template:\n    metadata:\n      labels: *id001\n    spec:\n      restartPolicy: OnFailure\n      containers:\n      - name: minio-init\n        image: docker.io/pgsty/mc:RELEASE.2026-08-04T00-00-00Z\n        command:\n        - sh\n        - -c\n        - until mc alias set local http://minio:9000 houston houston-secret; do sleep\n          2; done; mc mb -p local/houston-uploads\n"
+   ],
+   "error": ""
+  },
+  "saml@034f592b": {
+   "name": "saml",
+   "description": "Keycloak IdP with a generated SAML realm (5 users user1..user5, password=username). Click 'Keycloak SSO', log in as user1/user1. Keycloak admin at http://localhost:8081 (admin/admin, realm 'houston').",
+   "env": {
+    "OVERWRITE_SETTING_SAML_Custom_Default": "true",
+    "OVERWRITE_SETTING_SAML_Custom_Default_provider": "keycloak",
+    "OVERWRITE_SETTING_SAML_Custom_Default_entry_point": "http://localhost:8081/realms/houston/protocol/saml",
+    "OVERWRITE_SETTING_SAML_Custom_Default_idp_slo_redirect_url": "http://localhost:8081/realms/houston/protocol/saml",
+    "OVERWRITE_SETTING_SAML_Custom_Default_logout_behaviour": "Local",
+    "OVERWRITE_SETTING_SAML_Custom_Default_issuer": "houston-saml-sp",
+    "OVERWRITE_SETTING_SAML_Custom_Default_button_label_text": "Keycloak SSO",
+    "OVERWRITE_SETTING_SAML_Custom_Default_default_user_role": "user",
+    "OVERWRITE_SETTING_SAML_Custom_Default_name_overwrite": "false",
+    "OVERWRITE_SETTING_SAML_Custom_Default_mail_overwrite": "false",
+    "OVERWRITE_SETTING_SAML_Custom_Default_user_data_fieldmap": "{\"username\":\"username\",\"email\":\"email\",\"name\":\"firstName\"}",
+    "OVERWRITE_SETTING_Accounts_TwoFactorAuthentication_By_Email_Enabled": "false"
+   },
+   "services": {
+    "keycloak": {
+     "image": "quay.io/keycloak/keycloak:26.0",
+     "command": [
+      "start-dev",
+      "--import-realm"
+     ],
+     "environment": {
+      "KC_BOOTSTRAP_ADMIN_USERNAME": "admin",
+      "KC_BOOTSTRAP_ADMIN_PASSWORD": "admin",
+      "KC_PROXY_HEADERS": "xforwarded"
+     },
+     "volumes": [
+      "./saml/keycloak-realm.json:/opt/keycloak/data/import/houston-realm.json:ro"
+     ],
+     "ports": [
+      "8081:8080"
+     ],
+     "restart": "unless-stopped"
+    }
+   },
+   "rocketchat": {},
+   "depends_on": [
+    "keycloak"
+   ],
+   "requires_license": false,
+   "source": "built-in (dynamic)",
+   "files": [
+    [
+     "saml/keycloak-realm.json",
+     "{\n  \"realm\": \"houston\",\n  \"enabled\": true,\n  \"sslRequired\": \"none\",\n  \"clients\": [\n    {\n      \"clientId\": \"houston-saml-sp\",\n      \"protocol\": \"saml\",\n      \"enabled\": true,\n      \"redirectUris\": [\n        \"http://localhost*\"\n      ],\n      \"frontchannelLogout\": true,\n      \"attributes\": {\n        \"saml.assertion.signature\": \"true\",\n        \"saml.server.signature\": \"true\",\n        \"saml.client.signature\": \"false\",\n        \"saml.force.post.binding\": \"true\",\n        \"saml.authnstatement\": \"true\",\n        \"saml_name_id_format\": \"email\",\n        \"saml.signature.algorithm\": \"RSA_SHA256\"\n      },\n      \"protocolMappers\": [\n        {\n          \"name\": \"email\",\n          \"protocol\": \"saml\",\n          \"protocolMapper\": \"saml-user-property-mapper\",\n          \"consentRequired\": false,\n          \"config\": {\n            \"user.attribute\": \"email\",\n            \"attribute.nameformat\": \"Basic\",\n            \"attribute.name\": \"email\"\n          }\n        },\n        {\n          \"name\": \"username\",\n          \"protocol\": \"saml\",\n          \"protocolMapper\": \"saml-user-property-mapper\",\n          \"consentRequired\": false,\n          \"config\": {\n            \"user.attribute\": \"username\",\n            \"attribute.nameformat\": \"Basic\",\n            \"attribute.name\": \"username\"\n          }\n        },\n        {\n          \"name\": \"firstName\",\n          \"protocol\": \"saml\",\n          \"protocolMapper\": \"saml-user-property-mapper\",\n          \"consentRequired\": false,\n          \"config\": {\n            \"user.attribute\": \"firstName\",\n            \"attribute.nameformat\": \"Basic\",\n            \"attribute.name\": \"firstName\"\n          }\n        },\n        {\n          \"name\": \"lastName\",\n          \"protocol\": \"saml\",\n          \"protocolMapper\": \"saml-user-property-mapper\",\n          \"consentRequired\": false,\n          \"config\": {\n            \"user.attribute\": \"lastName\",\n            \"attribute.nameformat\": \"Basic\",\n            \"attribute.name\": \"lastName\"\n          }\n        }\n      ]\n    }\n  ],\n  \"users\": [\n    {\n      \"username\": \"user1\",\n      \"enabled\": true,\n      \"emailVerified\": true,\n      \"email\": \"user1@example.com\",\n      \"firstName\": \"User\",\n      \"lastName\": \"1\",\n      \"credentials\": [\n        {\n          \"type\": \"password\",\n          \"value\": \"user1\",\n          \"temporary\": false\n        }\n      ]\n    },\n    {\n      \"username\": \"user2\",\n      \"enabled\": true,\n      \"emailVerified\": true,\n      \"email\": \"user2@example.com\",\n      \"firstName\": \"User\",\n      \"lastName\": \"2\",\n      \"credentials\": [\n        {\n          \"type\": \"password\",\n          \"value\": \"user2\",\n          \"temporary\": false\n        }\n      ]\n    },\n    {\n      \"username\": \"user3\",\n      \"enabled\": true,\n      \"emailVerified\": true,\n      \"email\": \"user3@example.com\",\n      \"firstName\": \"User\",\n      \"lastName\": \"3\",\n      \"credentials\": [\n        {\n          \"type\": \"password\",\n          \"value\": \"user3\",\n          \"temporary\": false\n        }\n      ]\n    },\n    {\n      \"username\": \"user4\",\n      \"enabled\": true,\n      \"emailVerified\": true,\n      \"email\": \"user4@example.com\",\n      \"firstName\": \"User\",\n      \"lastName\": \"4\",\n      \"credentials\": [\n        {\n          \"type\": \"password\",\n          \"value\": \"user4\",\n          \"temporary\": false\n        }\n      ]\n    },\n    {\n      \"username\": \"user5\",\n      \"enabled\": true,\n      \"emailVerified\": true,\n      \"email\": \"user5@example.com\",\n      \"firstName\": \"User\",\n      \"lastName\": \"5\",\n      \"credentials\": [\n        {\n          \"type\": \"password\",\n          \"value\": \"user5\",\n          \"temporary\": false\n        }\n      ]\n    }\n  ]\n}"
+    ]
+   ],
+   "params_help": {
+    "users": "number of Keycloak test users (default 5)",
+    "idp_host": "hostname YOUR BROWSER reaches Keycloak on (default localhost; set it when the browser is not on this machine)"
+   },
+   "post_ready": [
+    {
+     "action": "saml_idp_cert",
+     "descriptor_url": "http://localhost:8081/realms/houston/protocol/saml/descriptor",
+     "setting": "SAML_Custom_Default_cert",
+     "enable_setting": "SAML_Custom_Default"
+    },
+    {
+     "action": "keycloak_master_ssl_off",
+     "service": "keycloak"
+    }
+   ],
+   "notes": [
+    "SAML sends your BROWSER to http://localhost:8081 — that address has",
+    "  to resolve and be reachable from wherever the browser is running.",
+    "  It is 'localhost', so the browser must be on THIS machine. From another",
+    "  machine, re-create with:  --bind 0.0.0.0 --set idp_host=<this host>",
+    "  (Keycloak refuses a request that arrives on any other name.)",
+    "Keycloak admin console: http://localhost:8081  (admin / admin)",
+    "  Your SAML users live in the 'houston' realm, NOT 'master' (the",
+    "  default view). Switch the realm dropdown (top-left) to 'houston', or open Users directly:",
+    "    http://localhost:8081/admin/master/console/#/houston/users",
+    "  ('temporary admin' banner on master is normal Keycloak dev mode — ignore it)"
+   ],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [
+    8081
+   ],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [
+    "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: keycloak-realm\n  labels:\n    app: houston-keycloak\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: keycloak\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '8081'\ndata:\n  houston-realm.json: \"{\\n  \\\"realm\\\": \\\"houston\\\",\\n  \\\"enabled\\\": true,\\n  \\\"sslRequired\\\"\\\n    : \\\"none\\\",\\n  \\\"clients\\\": [\\n    {\\n      \\\"clientId\\\": \\\"houston-saml-sp\\\"\\\n    ,\\n      \\\"protocol\\\": \\\"saml\\\",\\n      \\\"enabled\\\": true,\\n      \\\"redirectUris\\\"\\\n    : [\\n        \\\"http://localhost*\\\"\\n      ],\\n      \\\"frontchannelLogout\\\": true,\\n\\\n    \\      \\\"attributes\\\": {\\n        \\\"saml.assertion.signature\\\": \\\"true\\\",\\n  \\\n    \\      \\\"saml.server.signature\\\": \\\"true\\\",\\n        \\\"saml.client.signature\\\"\\\n    : \\\"false\\\",\\n        \\\"saml.force.post.binding\\\": \\\"true\\\",\\n        \\\"saml.authnstatement\\\"\\\n    : \\\"true\\\",\\n        \\\"saml_name_id_format\\\": \\\"email\\\",\\n        \\\"saml.signature.algorithm\\\"\\\n    : \\\"RSA_SHA256\\\"\\n      },\\n      \\\"protocolMappers\\\": [\\n        {\\n        \\\n    \\  \\\"name\\\": \\\"email\\\",\\n          \\\"protocol\\\": \\\"saml\\\",\\n          \\\"protocolMapper\\\"\\\n    : \\\"saml-user-property-mapper\\\",\\n          \\\"consentRequired\\\": false,\\n    \\\n    \\      \\\"config\\\": {\\n            \\\"user.attribute\\\": \\\"email\\\",\\n           \\\n    \\ \\\"attribute.nameformat\\\": \\\"Basic\\\",\\n            \\\"attribute.name\\\": \\\"email\\\"\\\n    \\n          }\\n        },\\n        {\\n          \\\"name\\\": \\\"username\\\",\\n    \\\n    \\      \\\"protocol\\\": \\\"saml\\\",\\n          \\\"protocolMapper\\\": \\\"saml-user-property-mapper\\\"\\\n    ,\\n          \\\"consentRequired\\\": false,\\n          \\\"config\\\": {\\n          \\\n    \\  \\\"user.attribute\\\": \\\"username\\\",\\n            \\\"attribute.nameformat\\\": \\\"\\\n    Basic\\\",\\n            \\\"attribute.name\\\": \\\"username\\\"\\n          }\\n        },\\n\\\n    \\        {\\n          \\\"name\\\": \\\"firstName\\\",\\n          \\\"protocol\\\": \\\"saml\\\"\\\n    ,\\n          \\\"protocolMapper\\\": \\\"saml-user-property-mapper\\\",\\n          \\\"\\\n    consentRequired\\\": false,\\n          \\\"config\\\": {\\n            \\\"user.attribute\\\"\\\n    : \\\"firstName\\\",\\n            \\\"attribute.nameformat\\\": \\\"Basic\\\",\\n         \\\n    \\   \\\"attribute.name\\\": \\\"firstName\\\"\\n          }\\n        },\\n        {\\n  \\\n    \\        \\\"name\\\": \\\"lastName\\\",\\n          \\\"protocol\\\": \\\"saml\\\",\\n        \\\n    \\  \\\"protocolMapper\\\": \\\"saml-user-property-mapper\\\",\\n          \\\"consentRequired\\\"\\\n    : false,\\n          \\\"config\\\": {\\n            \\\"user.attribute\\\": \\\"lastName\\\"\\\n    ,\\n            \\\"attribute.nameformat\\\": \\\"Basic\\\",\\n            \\\"attribute.name\\\"\\\n    : \\\"lastName\\\"\\n          }\\n        }\\n      ]\\n    }\\n  ],\\n  \\\"users\\\": [\\n\\\n    \\    {\\n      \\\"username\\\": \\\"user1\\\",\\n      \\\"enabled\\\": true,\\n      \\\"emailVerified\\\"\\\n    : true,\\n      \\\"email\\\": \\\"user1@example.com\\\",\\n      \\\"firstName\\\": \\\"User\\\"\\\n    ,\\n      \\\"lastName\\\": \\\"1\\\",\\n      \\\"credentials\\\": [\\n        {\\n         \\\n    \\ \\\"type\\\": \\\"password\\\",\\n          \\\"value\\\": \\\"user1\\\",\\n          \\\"temporary\\\"\\\n    : false\\n        }\\n      ]\\n    },\\n    {\\n      \\\"username\\\": \\\"user2\\\",\\n \\\n    \\     \\\"enabled\\\": true,\\n      \\\"emailVerified\\\": true,\\n      \\\"email\\\": \\\"\\\n    user2@example.com\\\",\\n      \\\"firstName\\\": \\\"User\\\",\\n      \\\"lastName\\\": \\\"2\\\"\\\n    ,\\n      \\\"credentials\\\": [\\n        {\\n          \\\"type\\\": \\\"password\\\",\\n  \\\n    \\        \\\"value\\\": \\\"user2\\\",\\n          \\\"temporary\\\": false\\n        }\\n  \\\n    \\    ]\\n    },\\n    {\\n      \\\"username\\\": \\\"user3\\\",\\n      \\\"enabled\\\": true,\\n\\\n    \\      \\\"emailVerified\\\": true,\\n      \\\"email\\\": \\\"user3@example.com\\\",\\n   \\\n    \\   \\\"firstName\\\": \\\"User\\\",\\n      \\\"lastName\\\": \\\"3\\\",\\n      \\\"credentials\\\"\\\n    : [\\n        {\\n          \\\"type\\\": \\\"password\\\",\\n          \\\"value\\\": \\\"user3\\\"\\\n    ,\\n          \\\"temporary\\\": false\\n        }\\n      ]\\n    },\\n    {\\n      \\\"\\\n    username\\\": \\\"user4\\\",\\n      \\\"enabled\\\": true,\\n      \\\"emailVerified\\\": true,\\n\\\n    \\      \\\"email\\\": \\\"user4@example.com\\\",\\n      \\\"firstName\\\": \\\"User\\\",\\n   \\\n    \\   \\\"lastName\\\": \\\"4\\\",\\n      \\\"credentials\\\": [\\n        {\\n          \\\"type\\\"\\\n    : \\\"password\\\",\\n          \\\"value\\\": \\\"user4\\\",\\n          \\\"temporary\\\": false\\n\\\n    \\        }\\n      ]\\n    },\\n    {\\n      \\\"username\\\": \\\"user5\\\",\\n      \\\"enabled\\\"\\\n    : true,\\n      \\\"emailVerified\\\": true,\\n      \\\"email\\\": \\\"user5@example.com\\\"\\\n    ,\\n      \\\"firstName\\\": \\\"User\\\",\\n      \\\"lastName\\\": \\\"5\\\",\\n      \\\"credentials\\\"\\\n    : [\\n        {\\n          \\\"type\\\": \\\"password\\\",\\n          \\\"value\\\": \\\"user5\\\"\\\n    ,\\n          \\\"temporary\\\": false\\n        }\\n      ]\\n    }\\n  ]\\n}\"\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: keycloak\n  labels: &id001\n    app: houston-keycloak\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: keycloak\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '8081'\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: houston-keycloak\n  template:\n    metadata:\n      labels: *id001\n    spec:\n      containers:\n      - name: keycloak\n        image: quay.io/keycloak/keycloak:26.0\n        args:\n        - start-dev\n        - --import-realm\n        env:\n        - name: KC_BOOTSTRAP_ADMIN_USERNAME\n          value: admin\n        - name: KC_BOOTSTRAP_ADMIN_PASSWORD\n          value: admin\n        - name: KC_PROXY_HEADERS\n          value: xforwarded\n        ports:\n        - containerPort: 8080\n        readinessProbe:\n          httpGet:\n            path: /realms/master\n            port: 8080\n          initialDelaySeconds: 10\n          periodSeconds: 5\n          failureThreshold: 60\n        volumeMounts:\n        - name: realm\n          mountPath: /opt/keycloak/data/import/houston-realm.json\n          subPath: houston-realm.json\n      volumes:\n      - name: realm\n        configMap:\n          name: keycloak-realm\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: keycloak\n  labels:\n    app: houston-keycloak\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: keycloak\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '8081'\nspec:\n  selector:\n    app: houston-keycloak\n  ports:\n  - name: http\n    port: 8081\n    targetPort: 8080\n"
+   ],
+   "error": ""
+  },
+  "saml@5e9244db": {
+   "name": "saml",
+   "description": "Keycloak IdP with a generated SAML realm (2 users user1..user2, password=username). Click 'Keycloak SSO', log in as user1/user1. Keycloak admin at http://localhost:8081 (admin/admin, realm 'houston').",
+   "env": {
+    "OVERWRITE_SETTING_SAML_Custom_Default": "true",
+    "OVERWRITE_SETTING_SAML_Custom_Default_provider": "keycloak",
+    "OVERWRITE_SETTING_SAML_Custom_Default_entry_point": "http://localhost:8081/realms/houston/protocol/saml",
+    "OVERWRITE_SETTING_SAML_Custom_Default_idp_slo_redirect_url": "http://localhost:8081/realms/houston/protocol/saml",
+    "OVERWRITE_SETTING_SAML_Custom_Default_logout_behaviour": "Local",
+    "OVERWRITE_SETTING_SAML_Custom_Default_issuer": "houston-saml-sp",
+    "OVERWRITE_SETTING_SAML_Custom_Default_button_label_text": "Keycloak SSO",
+    "OVERWRITE_SETTING_SAML_Custom_Default_default_user_role": "user",
+    "OVERWRITE_SETTING_SAML_Custom_Default_name_overwrite": "false",
+    "OVERWRITE_SETTING_SAML_Custom_Default_mail_overwrite": "false",
+    "OVERWRITE_SETTING_SAML_Custom_Default_user_data_fieldmap": "{\"username\":\"username\",\"email\":\"email\",\"name\":\"firstName\"}",
+    "OVERWRITE_SETTING_Accounts_TwoFactorAuthentication_By_Email_Enabled": "false"
+   },
+   "services": {
+    "keycloak": {
+     "image": "quay.io/keycloak/keycloak:26.0",
+     "command": [
+      "start-dev",
+      "--import-realm"
+     ],
+     "environment": {
+      "KC_BOOTSTRAP_ADMIN_USERNAME": "admin",
+      "KC_BOOTSTRAP_ADMIN_PASSWORD": "admin",
+      "KC_PROXY_HEADERS": "xforwarded"
+     },
+     "volumes": [
+      "./saml/keycloak-realm.json:/opt/keycloak/data/import/houston-realm.json:ro"
+     ],
+     "ports": [
+      "8081:8080"
+     ],
+     "restart": "unless-stopped"
+    }
+   },
+   "rocketchat": {},
+   "depends_on": [
+    "keycloak"
+   ],
+   "requires_license": false,
+   "source": "built-in (dynamic)",
+   "files": [
+    [
+     "saml/keycloak-realm.json",
+     "{\n  \"realm\": \"houston\",\n  \"enabled\": true,\n  \"sslRequired\": \"none\",\n  \"clients\": [\n    {\n      \"clientId\": \"houston-saml-sp\",\n      \"protocol\": \"saml\",\n      \"enabled\": true,\n      \"redirectUris\": [\n        \"http://localhost*\"\n      ],\n      \"frontchannelLogout\": true,\n      \"attributes\": {\n        \"saml.assertion.signature\": \"true\",\n        \"saml.server.signature\": \"true\",\n        \"saml.client.signature\": \"false\",\n        \"saml.force.post.binding\": \"true\",\n        \"saml.authnstatement\": \"true\",\n        \"saml_name_id_format\": \"email\",\n        \"saml.signature.algorithm\": \"RSA_SHA256\"\n      },\n      \"protocolMappers\": [\n        {\n          \"name\": \"email\",\n          \"protocol\": \"saml\",\n          \"protocolMapper\": \"saml-user-property-mapper\",\n          \"consentRequired\": false,\n          \"config\": {\n            \"user.attribute\": \"email\",\n            \"attribute.nameformat\": \"Basic\",\n            \"attribute.name\": \"email\"\n          }\n        },\n        {\n          \"name\": \"username\",\n          \"protocol\": \"saml\",\n          \"protocolMapper\": \"saml-user-property-mapper\",\n          \"consentRequired\": false,\n          \"config\": {\n            \"user.attribute\": \"username\",\n            \"attribute.nameformat\": \"Basic\",\n            \"attribute.name\": \"username\"\n          }\n        },\n        {\n          \"name\": \"firstName\",\n          \"protocol\": \"saml\",\n          \"protocolMapper\": \"saml-user-property-mapper\",\n          \"consentRequired\": false,\n          \"config\": {\n            \"user.attribute\": \"firstName\",\n            \"attribute.nameformat\": \"Basic\",\n            \"attribute.name\": \"firstName\"\n          }\n        },\n        {\n          \"name\": \"lastName\",\n          \"protocol\": \"saml\",\n          \"protocolMapper\": \"saml-user-property-mapper\",\n          \"consentRequired\": false,\n          \"config\": {\n            \"user.attribute\": \"lastName\",\n            \"attribute.nameformat\": \"Basic\",\n            \"attribute.name\": \"lastName\"\n          }\n        }\n      ]\n    }\n  ],\n  \"users\": [\n    {\n      \"username\": \"user1\",\n      \"enabled\": true,\n      \"emailVerified\": true,\n      \"email\": \"user1@example.com\",\n      \"firstName\": \"User\",\n      \"lastName\": \"1\",\n      \"credentials\": [\n        {\n          \"type\": \"password\",\n          \"value\": \"user1\",\n          \"temporary\": false\n        }\n      ]\n    },\n    {\n      \"username\": \"user2\",\n      \"enabled\": true,\n      \"emailVerified\": true,\n      \"email\": \"user2@example.com\",\n      \"firstName\": \"User\",\n      \"lastName\": \"2\",\n      \"credentials\": [\n        {\n          \"type\": \"password\",\n          \"value\": \"user2\",\n          \"temporary\": false\n        }\n      ]\n    }\n  ]\n}"
+    ]
+   ],
+   "params_help": {
+    "users": "number of Keycloak test users (default 5)",
+    "idp_host": "hostname YOUR BROWSER reaches Keycloak on (default localhost; set it when the browser is not on this machine)"
+   },
+   "post_ready": [
+    {
+     "action": "saml_idp_cert",
+     "descriptor_url": "http://localhost:8081/realms/houston/protocol/saml/descriptor",
+     "setting": "SAML_Custom_Default_cert",
+     "enable_setting": "SAML_Custom_Default"
+    },
+    {
+     "action": "keycloak_master_ssl_off",
+     "service": "keycloak"
+    }
+   ],
+   "notes": [
+    "SAML sends your BROWSER to http://localhost:8081 — that address has",
+    "  to resolve and be reachable from wherever the browser is running.",
+    "  It is 'localhost', so the browser must be on THIS machine. From another",
+    "  machine, re-create with:  --bind 0.0.0.0 --set idp_host=<this host>",
+    "  (Keycloak refuses a request that arrives on any other name.)",
+    "Keycloak admin console: http://localhost:8081  (admin / admin)",
+    "  Your SAML users live in the 'houston' realm, NOT 'master' (the",
+    "  default view). Switch the realm dropdown (top-left) to 'houston', or open Users directly:",
+    "    http://localhost:8081/admin/master/console/#/houston/users",
+    "  ('temporary admin' banner on master is normal Keycloak dev mode — ignore it)"
+   ],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [
+    8081
+   ],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [
+    "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: keycloak-realm\n  labels:\n    app: houston-keycloak\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: keycloak\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '8081'\ndata:\n  houston-realm.json: \"{\\n  \\\"realm\\\": \\\"houston\\\",\\n  \\\"enabled\\\": true,\\n  \\\"sslRequired\\\"\\\n    : \\\"none\\\",\\n  \\\"clients\\\": [\\n    {\\n      \\\"clientId\\\": \\\"houston-saml-sp\\\"\\\n    ,\\n      \\\"protocol\\\": \\\"saml\\\",\\n      \\\"enabled\\\": true,\\n      \\\"redirectUris\\\"\\\n    : [\\n        \\\"http://localhost*\\\"\\n      ],\\n      \\\"frontchannelLogout\\\": true,\\n\\\n    \\      \\\"attributes\\\": {\\n        \\\"saml.assertion.signature\\\": \\\"true\\\",\\n  \\\n    \\      \\\"saml.server.signature\\\": \\\"true\\\",\\n        \\\"saml.client.signature\\\"\\\n    : \\\"false\\\",\\n        \\\"saml.force.post.binding\\\": \\\"true\\\",\\n        \\\"saml.authnstatement\\\"\\\n    : \\\"true\\\",\\n        \\\"saml_name_id_format\\\": \\\"email\\\",\\n        \\\"saml.signature.algorithm\\\"\\\n    : \\\"RSA_SHA256\\\"\\n      },\\n      \\\"protocolMappers\\\": [\\n        {\\n        \\\n    \\  \\\"name\\\": \\\"email\\\",\\n          \\\"protocol\\\": \\\"saml\\\",\\n          \\\"protocolMapper\\\"\\\n    : \\\"saml-user-property-mapper\\\",\\n          \\\"consentRequired\\\": false,\\n    \\\n    \\      \\\"config\\\": {\\n            \\\"user.attribute\\\": \\\"email\\\",\\n           \\\n    \\ \\\"attribute.nameformat\\\": \\\"Basic\\\",\\n            \\\"attribute.name\\\": \\\"email\\\"\\\n    \\n          }\\n        },\\n        {\\n          \\\"name\\\": \\\"username\\\",\\n    \\\n    \\      \\\"protocol\\\": \\\"saml\\\",\\n          \\\"protocolMapper\\\": \\\"saml-user-property-mapper\\\"\\\n    ,\\n          \\\"consentRequired\\\": false,\\n          \\\"config\\\": {\\n          \\\n    \\  \\\"user.attribute\\\": \\\"username\\\",\\n            \\\"attribute.nameformat\\\": \\\"\\\n    Basic\\\",\\n            \\\"attribute.name\\\": \\\"username\\\"\\n          }\\n        },\\n\\\n    \\        {\\n          \\\"name\\\": \\\"firstName\\\",\\n          \\\"protocol\\\": \\\"saml\\\"\\\n    ,\\n          \\\"protocolMapper\\\": \\\"saml-user-property-mapper\\\",\\n          \\\"\\\n    consentRequired\\\": false,\\n          \\\"config\\\": {\\n            \\\"user.attribute\\\"\\\n    : \\\"firstName\\\",\\n            \\\"attribute.nameformat\\\": \\\"Basic\\\",\\n         \\\n    \\   \\\"attribute.name\\\": \\\"firstName\\\"\\n          }\\n        },\\n        {\\n  \\\n    \\        \\\"name\\\": \\\"lastName\\\",\\n          \\\"protocol\\\": \\\"saml\\\",\\n        \\\n    \\  \\\"protocolMapper\\\": \\\"saml-user-property-mapper\\\",\\n          \\\"consentRequired\\\"\\\n    : false,\\n          \\\"config\\\": {\\n            \\\"user.attribute\\\": \\\"lastName\\\"\\\n    ,\\n            \\\"attribute.nameformat\\\": \\\"Basic\\\",\\n            \\\"attribute.name\\\"\\\n    : \\\"lastName\\\"\\n          }\\n        }\\n      ]\\n    }\\n  ],\\n  \\\"users\\\": [\\n\\\n    \\    {\\n      \\\"username\\\": \\\"user1\\\",\\n      \\\"enabled\\\": true,\\n      \\\"emailVerified\\\"\\\n    : true,\\n      \\\"email\\\": \\\"user1@example.com\\\",\\n      \\\"firstName\\\": \\\"User\\\"\\\n    ,\\n      \\\"lastName\\\": \\\"1\\\",\\n      \\\"credentials\\\": [\\n        {\\n         \\\n    \\ \\\"type\\\": \\\"password\\\",\\n          \\\"value\\\": \\\"user1\\\",\\n          \\\"temporary\\\"\\\n    : false\\n        }\\n      ]\\n    },\\n    {\\n      \\\"username\\\": \\\"user2\\\",\\n \\\n    \\     \\\"enabled\\\": true,\\n      \\\"emailVerified\\\": true,\\n      \\\"email\\\": \\\"\\\n    user2@example.com\\\",\\n      \\\"firstName\\\": \\\"User\\\",\\n      \\\"lastName\\\": \\\"2\\\"\\\n    ,\\n      \\\"credentials\\\": [\\n        {\\n          \\\"type\\\": \\\"password\\\",\\n  \\\n    \\        \\\"value\\\": \\\"user2\\\",\\n          \\\"temporary\\\": false\\n        }\\n  \\\n    \\    ]\\n    }\\n  ]\\n}\"\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: keycloak\n  labels: &id001\n    app: houston-keycloak\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: keycloak\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '8081'\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: houston-keycloak\n  template:\n    metadata:\n      labels: *id001\n    spec:\n      containers:\n      - name: keycloak\n        image: quay.io/keycloak/keycloak:26.0\n        args:\n        - start-dev\n        - --import-realm\n        env:\n        - name: KC_BOOTSTRAP_ADMIN_USERNAME\n          value: admin\n        - name: KC_BOOTSTRAP_ADMIN_PASSWORD\n          value: admin\n        - name: KC_PROXY_HEADERS\n          value: xforwarded\n        ports:\n        - containerPort: 8080\n        readinessProbe:\n          httpGet:\n            path: /realms/master\n            port: 8080\n          initialDelaySeconds: 10\n          periodSeconds: 5\n          failureThreshold: 60\n        volumeMounts:\n        - name: realm\n          mountPath: /opt/keycloak/data/import/houston-realm.json\n          subPath: houston-realm.json\n      volumes:\n      - name: realm\n        configMap:\n          name: keycloak-realm\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: keycloak\n  labels:\n    app: houston-keycloak\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: keycloak\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '8081'\nspec:\n  selector:\n    app: houston-keycloak\n  ports:\n  - name: http\n    port: 8081\n    targetPort: 8080\n"
+   ],
+   "error": ""
+  },
+  "saml@7b03d42c": {
+   "name": "saml",
+   "description": "mine",
+   "env": {
+    "A": "1"
+   },
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "{PRESET_DIR}/saml.yaml",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": ""
+  },
+  "shared@c29b8c42": {
+   "name": "shared",
+   "description": "from the emoji file",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "{PRESET_DIR}/😀.yaml",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": ""
+  },
+  "zzz@06f92153": {
+   "name": "zzz",
+   "description": "last",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "{PRESET_DIR}/zzz.yaml",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": ""
+  },
+  "😀-emoji@48d121b1": {
+   "name": "😀-emoji",
+   "description": "astral",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "{PRESET_DIR}/😀-emoji.yaml",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": ""
+  },
+  "Ａ-fullwidth@c1b2b2a9": {
+   "name": "Ａ-fullwidth",
+   "description": "above the surrogates",
+   "env": {},
+   "services": {},
+   "rocketchat": {},
+   "depends_on": [],
+   "requires_license": false,
+   "source": "{PRESET_DIR}/Ａ-fullwidth.yaml",
+   "files": [],
+   "params_help": {},
+   "post_ready": [],
+   "notes": [],
+   "instances": 1,
+   "entry_service": "",
+   "extra": {},
+   "volumes": {},
+   "ports": [],
+   "topology": "",
+   "scenario": "",
+   "scenario_params": {},
+   "kubernetes_manifests": [],
+   "error": ""
+  }
+ }
+}

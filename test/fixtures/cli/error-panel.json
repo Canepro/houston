@@ -1,0 +1,1406 @@
+{
+  "panels": [
+    {
+      "message": "No such option: --bogus",
+      "width": 10,
+      "panel": "╭─ Error─╮\n│ No     │\n│ such   │\n│ option │\n│ :      │\n│ --bogu │\n│ s      │\n╰────────╯\n"
+    },
+    {
+      "message": "No such option: --bogus",
+      "width": 13,
+      "panel": "╭─ Error ───╮\n│ No such   │\n│ option:   │\n│ --bogus   │\n╰───────────╯\n"
+    },
+    {
+      "message": "No such option: --bogus",
+      "width": 20,
+      "panel": "╭─ Error ──────────╮\n│ No such option:  │\n│ --bogus          │\n╰──────────────────╯\n"
+    },
+    {
+      "message": "No such option: --bogus",
+      "width": 37,
+      "panel": "╭─ Error ───────────────────────────╮\n│ No such option: --bogus           │\n╰───────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such option: --bogus",
+      "width": 50,
+      "panel": "╭─ Error ────────────────────────────────────────╮\n│ No such option: --bogus                        │\n╰────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such option: --bogus",
+      "width": 80,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────╮\n│ No such option: --bogus                                                      │\n╰──────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such option: --bogus",
+      "width": 100,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────────────────────────╮\n│ No such option: --bogus                                                                          │\n╰──────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such option: --bogus",
+      "width": 150,
+      "panel": "╭─ Error ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\n│ No such option: --bogus                                                                                                                            │\n╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such option: --js (Possible options: --json)",
+      "width": 10,
+      "panel": "╭─ Error─╮\n│ No     │\n│ such   │\n│ option │\n│ : --js │\n│ (Possi │\n│ ble    │\n│ option │\n│ s:     │\n│ --json │\n│ )      │\n╰────────╯\n"
+    },
+    {
+      "message": "No such option: --js (Possible options: --json)",
+      "width": 13,
+      "panel": "╭─ Error ───╮\n│ No such   │\n│ option:   │\n│ --js      │\n│ (Possible │\n│ options:  │\n│ --json)   │\n╰───────────╯\n"
+    },
+    {
+      "message": "No such option: --js (Possible options: --json)",
+      "width": 20,
+      "panel": "╭─ Error ──────────╮\n│ No such option:  │\n│ --js (Possible   │\n│ options: --json) │\n╰──────────────────╯\n"
+    },
+    {
+      "message": "No such option: --js (Possible options: --json)",
+      "width": 37,
+      "panel": "╭─ Error ───────────────────────────╮\n│ No such option: --js (Possible    │\n│ options: --json)                  │\n╰───────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such option: --js (Possible options: --json)",
+      "width": 50,
+      "panel": "╭─ Error ────────────────────────────────────────╮\n│ No such option: --js (Possible options:        │\n│ --json)                                        │\n╰────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such option: --js (Possible options: --json)",
+      "width": 80,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────╮\n│ No such option: --js (Possible options: --json)                              │\n╰──────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such option: --js (Possible options: --json)",
+      "width": 100,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────────────────────────╮\n│ No such option: --js (Possible options: --json)                                                  │\n╰──────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such option: --js (Possible options: --json)",
+      "width": 150,
+      "panel": "╭─ Error ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\n│ No such option: --js (Possible options: --json)                                                                                                    │\n╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "Invalid value for '--port': 'abc' is not a valid int.",
+      "width": 10,
+      "panel": "╭─ Error─╮\n│ Invali │\n│ d      │\n│ value  │\n│ for    │\n│ '--por │\n│ t':    │\n│ 'abc'  │\n│ is not │\n│ a      │\n│ valid  │\n│ int.   │\n╰────────╯\n"
+    },
+    {
+      "message": "Invalid value for '--port': 'abc' is not a valid int.",
+      "width": 13,
+      "panel": "╭─ Error ───╮\n│ Invalid   │\n│ value for │\n│ '--port': │\n│ 'abc' is  │\n│ not a     │\n│ valid     │\n│ int.      │\n╰───────────╯\n"
+    },
+    {
+      "message": "Invalid value for '--port': 'abc' is not a valid int.",
+      "width": 20,
+      "panel": "╭─ Error ──────────╮\n│ Invalid value    │\n│ for '--port':    │\n│ 'abc' is not a   │\n│ valid int.       │\n╰──────────────────╯\n"
+    },
+    {
+      "message": "Invalid value for '--port': 'abc' is not a valid int.",
+      "width": 37,
+      "panel": "╭─ Error ───────────────────────────╮\n│ Invalid value for '--port': 'abc' │\n│ is not a valid int.               │\n╰───────────────────────────────────╯\n"
+    },
+    {
+      "message": "Invalid value for '--port': 'abc' is not a valid int.",
+      "width": 50,
+      "panel": "╭─ Error ────────────────────────────────────────╮\n│ Invalid value for '--port': 'abc' is not a     │\n│ valid int.                                     │\n╰────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "Invalid value for '--port': 'abc' is not a valid int.",
+      "width": 80,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────╮\n│ Invalid value for '--port': 'abc' is not a valid int.                        │\n╰──────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "Invalid value for '--port': 'abc' is not a valid int.",
+      "width": 100,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────────────────────────╮\n│ Invalid value for '--port': 'abc' is not a valid int.                                            │\n╰──────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "Invalid value for '--port': 'abc' is not a valid int.",
+      "width": 150,
+      "panel": "╭─ Error ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\n│ Invalid value for '--port': 'abc' is not a valid int.                                                                                              │\n╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such command 'lst'. Did you mean 'list', 'cluster'?",
+      "width": 10,
+      "panel": "╭─ Error─╮\n│ No     │\n│ such   │\n│ comman │\n│ d      │\n│ 'lst'. │\n│ Did    │\n│ you    │\n│ mean   │\n│ 'list' │\n│ ,      │\n│ 'clust │\n│ er'?   │\n╰────────╯\n"
+    },
+    {
+      "message": "No such command 'lst'. Did you mean 'list', 'cluster'?",
+      "width": 13,
+      "panel": "╭─ Error ───╮\n│ No such   │\n│ command   │\n│ 'lst'.    │\n│ Did you   │\n│ mean      │\n│ 'list',   │\n│ 'cluster' │\n│ ?         │\n╰───────────╯\n"
+    },
+    {
+      "message": "No such command 'lst'. Did you mean 'list', 'cluster'?",
+      "width": 20,
+      "panel": "╭─ Error ──────────╮\n│ No such command  │\n│ 'lst'. Did you   │\n│ mean 'list',     │\n│ 'cluster'?       │\n╰──────────────────╯\n"
+    },
+    {
+      "message": "No such command 'lst'. Did you mean 'list', 'cluster'?",
+      "width": 37,
+      "panel": "╭─ Error ───────────────────────────╮\n│ No such command 'lst'. Did you    │\n│ mean 'list', 'cluster'?           │\n╰───────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such command 'lst'. Did you mean 'list', 'cluster'?",
+      "width": 50,
+      "panel": "╭─ Error ────────────────────────────────────────╮\n│ No such command 'lst'. Did you mean 'list',    │\n│ 'cluster'?                                     │\n╰────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such command 'lst'. Did you mean 'list', 'cluster'?",
+      "width": 80,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────╮\n│ No such command 'lst'. Did you mean 'list', 'cluster'?                       │\n╰──────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such command 'lst'. Did you mean 'list', 'cluster'?",
+      "width": 100,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────────────────────────╮\n│ No such command 'lst'. Did you mean 'list', 'cluster'?                                           │\n╰──────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such command 'lst'. Did you mean 'list', 'cluster'?",
+      "width": 150,
+      "panel": "╭─ Error ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\n│ No such command 'lst'. Did you mean 'list', 'cluster'?                                                                                             │\n╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "Got unexpected extra argument(s) (a b c d e f g h i j k l m n o p q r s t u v w x y z)",
+      "width": 10,
+      "panel": "╭─ Error─╮\n│ Got    │\n│ unexpe │\n│ cted   │\n│ extra  │\n│ argume │\n│ nt(s)  │\n│ (a b c │\n│ d e f  │\n│ g h i  │\n│ j k l  │\n│ m n o  │\n│ p q r  │\n│ s t u  │\n│ v w x  │\n│ y z)   │\n╰────────╯\n"
+    },
+    {
+      "message": "Got unexpected extra argument(s) (a b c d e f g h i j k l m n o p q r s t u v w x y z)",
+      "width": 13,
+      "panel": "╭─ Error ───╮\n│ Got       │\n│ unexpecte │\n│ d extra   │\n│ argument( │\n│ s) (a b c │\n│ d e f g h │\n│ i j k l m │\n│ n o p q r │\n│ s t u v w │\n│ x y z)    │\n╰───────────╯\n"
+    },
+    {
+      "message": "Got unexpected extra argument(s) (a b c d e f g h i j k l m n o p q r s t u v w x y z)",
+      "width": 20,
+      "panel": "╭─ Error ──────────╮\n│ Got unexpected   │\n│ extra            │\n│ argument(s) (a b │\n│ c d e f g h i j  │\n│ k l m n o p q r  │\n│ s t u v w x y z) │\n╰──────────────────╯\n"
+    },
+    {
+      "message": "Got unexpected extra argument(s) (a b c d e f g h i j k l m n o p q r s t u v w x y z)",
+      "width": 37,
+      "panel": "╭─ Error ───────────────────────────╮\n│ Got unexpected extra argument(s)  │\n│ (a b c d e f g h i j k l m n o p  │\n│ q r s t u v w x y z)              │\n╰───────────────────────────────────╯\n"
+    },
+    {
+      "message": "Got unexpected extra argument(s) (a b c d e f g h i j k l m n o p q r s t u v w x y z)",
+      "width": 50,
+      "panel": "╭─ Error ────────────────────────────────────────╮\n│ Got unexpected extra argument(s) (a b c d e f  │\n│ g h i j k l m n o p q r s t u v w x y z)       │\n╰────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "Got unexpected extra argument(s) (a b c d e f g h i j k l m n o p q r s t u v w x y z)",
+      "width": 80,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────╮\n│ Got unexpected extra argument(s) (a b c d e f g h i j k l m n o p q r s t u  │\n│ v w x y z)                                                                   │\n╰──────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "Got unexpected extra argument(s) (a b c d e f g h i j k l m n o p q r s t u v w x y z)",
+      "width": 100,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────────────────────────╮\n│ Got unexpected extra argument(s) (a b c d e f g h i j k l m n o p q r s t u v w x y z)           │\n╰──────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "Got unexpected extra argument(s) (a b c d e f g h i j k l m n o p q r s t u v w x y z)",
+      "width": 150,
+      "panel": "╭─ Error ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\n│ Got unexpected extra argument(s) (a b c d e f g h i j k l m n o p q r s t u v w x y z)                                                             │\n╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such option: --xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "width": 10,
+      "panel": "╭─ Error─╮\n│ No     │\n│ such   │\n│ option │\n│ :      │\n│ --xxxx │\n│ xxxxxx │\n│ xxxxxx │\n│ xxxxxx │\n│ xxxxxx │\n│ xxxxxx │\n│ xxxxxx │\n│ xxxxxx │\n│ xxxxxx │\n│ xxxxxx │\n│ xxxxxx │\n│ xxxxxx │\n│ xxxxxx │\n│ xxxxxx │\n│ xxxxxx │\n│ xxxxxx │\n│ xxxxxx │\n│ xxxxxx │\n│ xxxxxx │\n│ xxxxxx │\n│ xxxxxx │\n│ xxxxxx │\n╰────────╯\n"
+    },
+    {
+      "message": "No such option: --xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "width": 13,
+      "panel": "╭─ Error ───╮\n│ No such   │\n│ option:   │\n│ --xxxxxxx │\n│ xxxxxxxxx │\n│ xxxxxxxxx │\n│ xxxxxxxxx │\n│ xxxxxxxxx │\n│ xxxxxxxxx │\n│ xxxxxxxxx │\n│ xxxxxxxxx │\n│ xxxxxxxxx │\n│ xxxxxxxxx │\n│ xxxxxxxxx │\n│ xxxxxxxxx │\n│ xxxxxxxxx │\n│ xxxxxxxxx │\n│ xxxxxx    │\n╰───────────╯\n"
+    },
+    {
+      "message": "No such option: --xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "width": 20,
+      "panel": "╭─ Error ──────────╮\n│ No such option:  │\n│ --xxxxxxxxxxxxxx │\n│ xxxxxxxxxxxxxxxx │\n│ xxxxxxxxxxxxxxxx │\n│ xxxxxxxxxxxxxxxx │\n│ xxxxxxxxxxxxxxxx │\n│ xxxxxxxxxxxxxxxx │\n│ xxxxxxxxxxxxxxxx │\n│ xxxxxxxxxxxxxxxx │\n│ xxxx             │\n╰──────────────────╯\n"
+    },
+    {
+      "message": "No such option: --xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "width": 37,
+      "panel": "╭─ Error ───────────────────────────╮\n│ No such option:                   │\n│ --xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx │\n│ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx │\n│ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx │\n│ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx │\n╰───────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such option: --xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "width": 50,
+      "panel": "╭─ Error ────────────────────────────────────────╮\n│ No such option:                                │\n│ --xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx │\n│ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx │\n│ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx       │\n╰────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such option: --xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "width": 80,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────╮\n│ No such option:                                                              │\n│ --xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx │\n│ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx                     │\n╰──────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such option: --xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "width": 100,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────────────────────────╮\n│ No such option:                                                                                  │\n│ --xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx │\n│ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx                                                             │\n╰──────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such option: --xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "width": 150,
+      "panel": "╭─ Error ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\n│ No such option:                                                                                                                                    │\n│ --xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx               │\n╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such option: --名前はとても長いオプションです",
+      "width": 10,
+      "panel": "╭─ Error─╮\n│ No     │\n│ such   │\n│ option │\n│ :      │\n│ --名前 │\n│ はとて │\n│ も長い │\n│ オプシ │\n│ ョンで │\n│ す     │\n╰────────╯\n"
+    },
+    {
+      "message": "No such option: --名前はとても長いオプションです",
+      "width": 13,
+      "panel": "╭─ Error ───╮\n│ No such   │\n│ option:   │\n│ --名前は  │\n│ とても長  │\n│ いオプシ  │\n│ ョンです  │\n╰───────────╯\n"
+    },
+    {
+      "message": "No such option: --名前はとても長いオプションです",
+      "width": 20,
+      "panel": "╭─ Error ──────────╮\n│ No such option:  │\n│ --名前はとても長 │\n│ いオプションです │\n╰──────────────────╯\n"
+    },
+    {
+      "message": "No such option: --名前はとても長いオプションです",
+      "width": 37,
+      "panel": "╭─ Error ───────────────────────────╮\n│ No such option:                   │\n│ --名前はとても長いオプションです  │\n╰───────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such option: --名前はとても長いオプションです",
+      "width": 50,
+      "panel": "╭─ Error ────────────────────────────────────────╮\n│ No such option:                                │\n│ --名前はとても長いオプションです               │\n╰────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such option: --名前はとても長いオプションです",
+      "width": 80,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────╮\n│ No such option: --名前はとても長いオプションです                             │\n╰──────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such option: --名前はとても長いオプションです",
+      "width": 100,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────────────────────────╮\n│ No such option: --名前はとても長いオプションです                                                 │\n╰──────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such option: --名前はとても長いオプションです",
+      "width": 150,
+      "panel": "╭─ Error ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\n│ No such option: --名前はとても長いオプションです                                                                                                   │\n╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such option: --café and --naïve",
+      "width": 10,
+      "panel": "╭─ Error─╮\n│ No     │\n│ such   │\n│ option │\n│ :      │\n│ --café │\n│ and    │\n│ --naïv │\n│ e      │\n╰────────╯\n"
+    },
+    {
+      "message": "No such option: --café and --naïve",
+      "width": 13,
+      "panel": "╭─ Error ───╮\n│ No such   │\n│ option:   │\n│ --café    │\n│ and       │\n│ --naïve   │\n╰───────────╯\n"
+    },
+    {
+      "message": "No such option: --café and --naïve",
+      "width": 20,
+      "panel": "╭─ Error ──────────╮\n│ No such option:  │\n│ --café and       │\n│ --naïve          │\n╰──────────────────╯\n"
+    },
+    {
+      "message": "No such option: --café and --naïve",
+      "width": 37,
+      "panel": "╭─ Error ───────────────────────────╮\n│ No such option: --café and        │\n│ --naïve                           │\n╰───────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such option: --café and --naïve",
+      "width": 50,
+      "panel": "╭─ Error ────────────────────────────────────────╮\n│ No such option: --café and --naïve             │\n╰────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such option: --café and --naïve",
+      "width": 80,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────╮\n│ No such option: --café and --naïve                                           │\n╰──────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such option: --café and --naïve",
+      "width": 100,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────────────────────────╮\n│ No such option: --café and --naïve                                                               │\n╰──────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "No such option: --café and --naïve",
+      "width": 150,
+      "panel": "╭─ Error ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\n│ No such option: --café and --naïve                                                                                                                 │\n╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "emoji 👨‍👩‍👧 family and ❤️ heart and #️",
+      "width": 10,
+      "panel": "╭─ Error─╮\n│ emoji  │\n│ 👨‍👩‍👧     │\n│ family │\n│ and ❤️ │\n│ heart  │\n│ and #️ │\n╰────────╯\n"
+    },
+    {
+      "message": "emoji 👨‍👩‍👧 family and ❤️ heart and #️",
+      "width": 13,
+      "panel": "╭─ Error ───╮\n│ emoji 👨‍👩‍👧  │\n│ family    │\n│ and ❤️    │\n│ heart and │\n│ #️        │\n╰───────────╯\n"
+    },
+    {
+      "message": "emoji 👨‍👩‍👧 family and ❤️ heart and #️",
+      "width": 20,
+      "panel": "╭─ Error ──────────╮\n│ emoji 👨‍👩‍👧 family  │\n│ and ❤️ heart and │\n│ #️               │\n╰──────────────────╯\n"
+    },
+    {
+      "message": "emoji 👨‍👩‍👧 family and ❤️ heart and #️",
+      "width": 37,
+      "panel": "╭─ Error ───────────────────────────╮\n│ emoji 👨‍👩‍👧 family and ❤️ heart and  │\n│ #️                                │\n╰───────────────────────────────────╯\n"
+    },
+    {
+      "message": "emoji 👨‍👩‍👧 family and ❤️ heart and #️",
+      "width": 50,
+      "panel": "╭─ Error ────────────────────────────────────────╮\n│ emoji 👨‍👩‍👧 family and ❤️ heart and #️            │\n╰────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "emoji 👨‍👩‍👧 family and ❤️ heart and #️",
+      "width": 80,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────╮\n│ emoji 👨‍👩‍👧 family and ❤️ heart and #️                                          │\n╰──────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "emoji 👨‍👩‍👧 family and ❤️ heart and #️",
+      "width": 100,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────────────────────────╮\n│ emoji 👨‍👩‍👧 family and ❤️ heart and #️                                                              │\n╰──────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "emoji 👨‍👩‍👧 family and ❤️ heart and #️",
+      "width": 150,
+      "panel": "╭─ Error ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\n│ emoji 👨‍👩‍👧 family and ❤️ heart and #️                                                                                                                │\n╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "tab\there\tand\t\tthere",
+      "width": 10,
+      "panel": "╭─ Error─╮\n│ tab    │\n│ here   │\n│ and    │\n│ there  │\n╰────────╯\n"
+    },
+    {
+      "message": "tab\there\tand\t\tthere",
+      "width": 13,
+      "panel": "╭─ Error ───╮\n│ tab       │\n│ here      │\n│ and       │\n│ there     │\n╰───────────╯\n"
+    },
+    {
+      "message": "tab\there\tand\t\tthere",
+      "width": 20,
+      "panel": "╭─ Error ──────────╮\n│ tab     here     │\n│ and              │\n│ there            │\n╰──────────────────╯\n"
+    },
+    {
+      "message": "tab\there\tand\t\tthere",
+      "width": 37,
+      "panel": "╭─ Error ───────────────────────────╮\n│ tab     here    and               │\n│ there                             │\n╰───────────────────────────────────╯\n"
+    },
+    {
+      "message": "tab\there\tand\t\tthere",
+      "width": 50,
+      "panel": "╭─ Error ────────────────────────────────────────╮\n│ tab     here    and             there          │\n╰────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "tab\there\tand\t\tthere",
+      "width": 80,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────╮\n│ tab     here    and             there                                        │\n╰──────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "tab\there\tand\t\tthere",
+      "width": 100,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────────────────────────╮\n│ tab     here    and             there                                                            │\n╰──────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "tab\there\tand\t\tthere",
+      "width": 150,
+      "panel": "╭─ Error ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\n│ tab     here    and             there                                                                                                              │\n╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "bell\u0007 back\b vt\u000b ff\f cr\r end",
+      "width": 10,
+      "panel": "╭─ Error─╮\n│ bell   │\n│ back   │\n│ vt ff  │\n│ cr end │\n╰────────╯\n"
+    },
+    {
+      "message": "bell\u0007 back\b vt\u000b ff\f cr\r end",
+      "width": 13,
+      "panel": "╭─ Error ───╮\n│ bell back │\n│ vt ff cr  │\n│ end       │\n╰───────────╯\n"
+    },
+    {
+      "message": "bell\u0007 back\b vt\u000b ff\f cr\r end",
+      "width": 20,
+      "panel": "╭─ Error ──────────╮\n│ bell back vt ff  │\n│ cr end           │\n╰──────────────────╯\n"
+    },
+    {
+      "message": "bell\u0007 back\b vt\u000b ff\f cr\r end",
+      "width": 37,
+      "panel": "╭─ Error ───────────────────────────╮\n│ bell back vt ff cr end            │\n╰───────────────────────────────────╯\n"
+    },
+    {
+      "message": "bell\u0007 back\b vt\u000b ff\f cr\r end",
+      "width": 50,
+      "panel": "╭─ Error ────────────────────────────────────────╮\n│ bell back vt ff cr end                         │\n╰────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "bell\u0007 back\b vt\u000b ff\f cr\r end",
+      "width": 80,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────╮\n│ bell back vt ff cr end                                                       │\n╰──────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "bell\u0007 back\b vt\u000b ff\f cr\r end",
+      "width": 100,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────────────────────────╮\n│ bell back vt ff cr end                                                                           │\n╰──────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "bell\u0007 back\b vt\u000b ff\f cr\r end",
+      "width": 150,
+      "panel": "╭─ Error ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\n│ bell back vt ff cr end                                                                                                                             │\n╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "two\nlines\n\nand a blank",
+      "width": 10,
+      "panel": "╭─ Error─╮\n│ two    │\n│ lines  │\n│        │\n│ and a  │\n│ blank  │\n╰────────╯\n"
+    },
+    {
+      "message": "two\nlines\n\nand a blank",
+      "width": 13,
+      "panel": "╭─ Error ───╮\n│ two       │\n│ lines     │\n│           │\n│ and a     │\n│ blank     │\n╰───────────╯\n"
+    },
+    {
+      "message": "two\nlines\n\nand a blank",
+      "width": 20,
+      "panel": "╭─ Error ──────────╮\n│ two              │\n│ lines            │\n│                  │\n│ and a blank      │\n╰──────────────────╯\n"
+    },
+    {
+      "message": "two\nlines\n\nand a blank",
+      "width": 37,
+      "panel": "╭─ Error ───────────────────────────╮\n│ two                               │\n│ lines                             │\n│                                   │\n│ and a blank                       │\n╰───────────────────────────────────╯\n"
+    },
+    {
+      "message": "two\nlines\n\nand a blank",
+      "width": 50,
+      "panel": "╭─ Error ────────────────────────────────────────╮\n│ two                                            │\n│ lines                                          │\n│                                                │\n│ and a blank                                    │\n╰────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "two\nlines\n\nand a blank",
+      "width": 80,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────╮\n│ two                                                                          │\n│ lines                                                                        │\n│                                                                              │\n│ and a blank                                                                  │\n╰──────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "two\nlines\n\nand a blank",
+      "width": 100,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────────────────────────╮\n│ two                                                                                              │\n│ lines                                                                                            │\n│                                                                                                  │\n│ and a blank                                                                                      │\n╰──────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "two\nlines\n\nand a blank",
+      "width": 150,
+      "panel": "╭─ Error ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\n│ two                                                                                                                                                │\n│ lines                                                                                                                                              │\n│                                                                                                                                                    │\n│ and a blank                                                                                                                                        │\n╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "   leading spaces and trailing   ",
+      "width": 10,
+      "panel": "╭─ Error─╮\n│    lea │\n│ ding   │\n│ spaces │\n│ and    │\n│ traili │\n│ ng     │\n╰────────╯\n"
+    },
+    {
+      "message": "   leading spaces and trailing   ",
+      "width": 13,
+      "panel": "╭─ Error ───╮\n│    leadin │\n│ g spaces  │\n│ and       │\n│ trailing  │\n╰───────────╯\n"
+    },
+    {
+      "message": "   leading spaces and trailing   ",
+      "width": 20,
+      "panel": "╭─ Error ──────────╮\n│    leading       │\n│ spaces and       │\n│ trailing         │\n╰──────────────────╯\n"
+    },
+    {
+      "message": "   leading spaces and trailing   ",
+      "width": 37,
+      "panel": "╭─ Error ───────────────────────────╮\n│    leading spaces and trailing    │\n╰───────────────────────────────────╯\n"
+    },
+    {
+      "message": "   leading spaces and trailing   ",
+      "width": 50,
+      "panel": "╭─ Error ────────────────────────────────────────╮\n│    leading spaces and trailing                 │\n╰────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "   leading spaces and trailing   ",
+      "width": 80,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────╮\n│    leading spaces and trailing                                               │\n╰──────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "   leading spaces and trailing   ",
+      "width": 100,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────────────────────────╮\n│    leading spaces and trailing                                                                   │\n╰──────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "   leading spaces and trailing   ",
+      "width": 150,
+      "panel": "╭─ Error ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\n│    leading spaces and trailing                                                                                                                     │\n╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "a-very-long-hyphenated-word-that-does-not-fit-on-any-line-at-narrow-widths ok",
+      "width": 10,
+      "panel": "╭─ Error─╮\n│ a-very │\n│ -long- │\n│ hyphen │\n│ ated-w │\n│ ord-th │\n│ at-doe │\n│ s-not- │\n│ fit-on │\n│ -any-l │\n│ ine-at │\n│ -narro │\n│ w-widt │\n│ hs ok  │\n╰────────╯\n"
+    },
+    {
+      "message": "a-very-long-hyphenated-word-that-does-not-fit-on-any-line-at-narrow-widths ok",
+      "width": 13,
+      "panel": "╭─ Error ───╮\n│ a-very-lo │\n│ ng-hyphen │\n│ ated-word │\n│ -that-doe │\n│ s-not-fit │\n│ -on-any-l │\n│ ine-at-na │\n│ rrow-widt │\n│ hs ok     │\n╰───────────╯\n"
+    },
+    {
+      "message": "a-very-long-hyphenated-word-that-does-not-fit-on-any-line-at-narrow-widths ok",
+      "width": 20,
+      "panel": "╭─ Error ──────────╮\n│ a-very-long-hyph │\n│ enated-word-that │\n│ -does-not-fit-on │\n│ -any-line-at-nar │\n│ row-widths ok    │\n╰──────────────────╯\n"
+    },
+    {
+      "message": "a-very-long-hyphenated-word-that-does-not-fit-on-any-line-at-narrow-widths ok",
+      "width": 37,
+      "panel": "╭─ Error ───────────────────────────╮\n│ a-very-long-hyphenated-word-that- │\n│ does-not-fit-on-any-line-at-narro │\n│ w-widths ok                       │\n╰───────────────────────────────────╯\n"
+    },
+    {
+      "message": "a-very-long-hyphenated-word-that-does-not-fit-on-any-line-at-narrow-widths ok",
+      "width": 50,
+      "panel": "╭─ Error ────────────────────────────────────────╮\n│ a-very-long-hyphenated-word-that-does-not-fit- │\n│ on-any-line-at-narrow-widths ok                │\n╰────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "a-very-long-hyphenated-word-that-does-not-fit-on-any-line-at-narrow-widths ok",
+      "width": 80,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────╮\n│ a-very-long-hyphenated-word-that-does-not-fit-on-any-line-at-narrow-widths   │\n│ ok                                                                           │\n╰──────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "a-very-long-hyphenated-word-that-does-not-fit-on-any-line-at-narrow-widths ok",
+      "width": 100,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────────────────────────╮\n│ a-very-long-hyphenated-word-that-does-not-fit-on-any-line-at-narrow-widths ok                    │\n╰──────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "a-very-long-hyphenated-word-that-does-not-fit-on-any-line-at-narrow-widths ok",
+      "width": 150,
+      "panel": "╭─ Error ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\n│ a-very-long-hyphenated-word-that-does-not-fit-on-any-line-at-narrow-widths ok                                                                      │\n╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": " ",
+      "width": 10,
+      "panel": "╭─ Error─╮\n│        │\n╰────────╯\n"
+    },
+    {
+      "message": " ",
+      "width": 13,
+      "panel": "╭─ Error ───╮\n│           │\n╰───────────╯\n"
+    },
+    {
+      "message": " ",
+      "width": 20,
+      "panel": "╭─ Error ──────────╮\n│                  │\n╰──────────────────╯\n"
+    },
+    {
+      "message": " ",
+      "width": 37,
+      "panel": "╭─ Error ───────────────────────────╮\n│                                   │\n╰───────────────────────────────────╯\n"
+    },
+    {
+      "message": " ",
+      "width": 50,
+      "panel": "╭─ Error ────────────────────────────────────────╮\n│                                                │\n╰────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": " ",
+      "width": 80,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────╮\n│                                                                              │\n╰──────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": " ",
+      "width": 100,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────────────────────────╮\n│                                                                                                  │\n╰──────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": " ",
+      "width": 150,
+      "panel": "╭─ Error ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\n│                                                                                                                                                    │\n╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "",
+      "width": 10,
+      "panel": "╭─ Error─╮\n│        │\n╰────────╯\n"
+    },
+    {
+      "message": "",
+      "width": 13,
+      "panel": "╭─ Error ───╮\n│           │\n╰───────────╯\n"
+    },
+    {
+      "message": "",
+      "width": 20,
+      "panel": "╭─ Error ──────────╮\n│                  │\n╰──────────────────╯\n"
+    },
+    {
+      "message": "",
+      "width": 37,
+      "panel": "╭─ Error ───────────────────────────╮\n│                                   │\n╰───────────────────────────────────╯\n"
+    },
+    {
+      "message": "",
+      "width": 50,
+      "panel": "╭─ Error ────────────────────────────────────────╮\n│                                                │\n╰────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "",
+      "width": 80,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────╮\n│                                                                              │\n╰──────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "",
+      "width": 100,
+      "panel": "╭─ Error ──────────────────────────────────────────────────────────────────────────────────────────╮\n│                                                                                                  │\n╰──────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    },
+    {
+      "message": "",
+      "width": 150,
+      "panel": "╭─ Error ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\n│                                                                                                                                                    │\n╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\n"
+    }
+  ],
+  "printed": [
+    {
+      "text": "Usage: houston config-import [OPTIONS] {settings_file}",
+      "width": 10,
+      "printed": "Usage: \nhouston \nconfig-imp\nort \n[OPTIONS] \n{settings_\nfile}\n"
+    },
+    {
+      "text": "Usage: houston config-import [OPTIONS] {settings_file}",
+      "width": 13,
+      "printed": "Usage: \nhouston \nconfig-import\n[OPTIONS] \n{settings_fil\ne}\n"
+    },
+    {
+      "text": "Usage: houston config-import [OPTIONS] {settings_file}",
+      "width": 20,
+      "printed": "Usage: houston \nconfig-import \n[OPTIONS] \n{settings_file}\n"
+    },
+    {
+      "text": "Usage: houston config-import [OPTIONS] {settings_file}",
+      "width": 37,
+      "printed": "Usage: houston config-import \n[OPTIONS] {settings_file}\n"
+    },
+    {
+      "text": "Usage: houston config-import [OPTIONS] {settings_file}",
+      "width": 50,
+      "printed": "Usage: houston config-import [OPTIONS] \n{settings_file}\n"
+    },
+    {
+      "text": "Usage: houston config-import [OPTIONS] {settings_file}",
+      "width": 80,
+      "printed": "Usage: houston config-import [OPTIONS] {settings_file}\n"
+    },
+    {
+      "text": "Usage: houston config-import [OPTIONS] {settings_file}",
+      "width": 100,
+      "printed": "Usage: houston config-import [OPTIONS] {settings_file}\n"
+    },
+    {
+      "text": "Usage: houston config-import [OPTIONS] {settings_file}",
+      "width": 150,
+      "printed": "Usage: houston config-import [OPTIONS] {settings_file}\n"
+    },
+    {
+      "text": "Try 'houston skill install --help' for help.",
+      "width": 10,
+      "printed": "Try \n'houston \nskill \ninstall \n--help' \nfor help.\n"
+    },
+    {
+      "text": "Try 'houston skill install --help' for help.",
+      "width": 13,
+      "printed": "Try 'houston \nskill install\n--help' for \nhelp.\n"
+    },
+    {
+      "text": "Try 'houston skill install --help' for help.",
+      "width": 20,
+      "printed": "Try 'houston skill \ninstall --help' for \nhelp.\n"
+    },
+    {
+      "text": "Try 'houston skill install --help' for help.",
+      "width": 37,
+      "printed": "Try 'houston skill install --help' \nfor help.\n"
+    },
+    {
+      "text": "Try 'houston skill install --help' for help.",
+      "width": 50,
+      "printed": "Try 'houston skill install --help' for help.\n"
+    },
+    {
+      "text": "Try 'houston skill install --help' for help.",
+      "width": 80,
+      "printed": "Try 'houston skill install --help' for help.\n"
+    },
+    {
+      "text": "Try 'houston skill install --help' for help.",
+      "width": 100,
+      "printed": "Try 'houston skill install --help' for help.\n"
+    },
+    {
+      "text": "Try 'houston skill install --help' for help.",
+      "width": 150,
+      "printed": "Try 'houston skill install --help' for help.\n"
+    },
+    {
+      "text": "Usage: houston users [OPTIONS] [action] [name] [role]\n                     [role-continued]",
+      "width": 10,
+      "printed": "Usage: \nhouston \nusers \n[OPTIONS] \n[action] \n[name] \n[role]\n          \n          \n [role-con\ntinued]\n"
+    },
+    {
+      "text": "Usage: houston users [OPTIONS] [action] [name] [role]\n                     [role-continued]",
+      "width": 13,
+      "printed": "Usage: \nhouston users\n[OPTIONS] \n[action] \n[name] [role]\n             \n        [role\n-continued]\n"
+    },
+    {
+      "text": "Usage: houston users [OPTIONS] [action] [name] [role]\n                     [role-continued]",
+      "width": 20,
+      "printed": "Usage: houston users\n[OPTIONS] [action] \n[name] [role]\n                    \n [role-continued]\n"
+    },
+    {
+      "text": "Usage: houston users [OPTIONS] [action] [name] [role]\n                     [role-continued]",
+      "width": 37,
+      "printed": "Usage: houston users [OPTIONS] \n[action] [name] [role]\n                     [role-continued]\n"
+    },
+    {
+      "text": "Usage: houston users [OPTIONS] [action] [name] [role]\n                     [role-continued]",
+      "width": 50,
+      "printed": "Usage: houston users [OPTIONS] [action] [name] \n[role]\n                     [role-continued]\n"
+    },
+    {
+      "text": "Usage: houston users [OPTIONS] [action] [name] [role]\n                     [role-continued]",
+      "width": 80,
+      "printed": "Usage: houston users [OPTIONS] [action] [name] [role]\n                     [role-continued]\n"
+    },
+    {
+      "text": "Usage: houston users [OPTIONS] [action] [name] [role]\n                     [role-continued]",
+      "width": 100,
+      "printed": "Usage: houston users [OPTIONS] [action] [name] [role]\n                     [role-continued]\n"
+    },
+    {
+      "text": "Usage: houston users [OPTIONS] [action] [name] [role]\n                     [role-continued]",
+      "width": 150,
+      "printed": "Usage: houston users [OPTIONS] [action] [name] [role]\n                     [role-continued]\n"
+    },
+    {
+      "text": "No such option: --bogus",
+      "width": 10,
+      "printed": "No such \noption: \n--bogus\n"
+    },
+    {
+      "text": "No such option: --bogus",
+      "width": 13,
+      "printed": "No such \noption: \n--bogus\n"
+    },
+    {
+      "text": "No such option: --bogus",
+      "width": 20,
+      "printed": "No such option: \n--bogus\n"
+    },
+    {
+      "text": "No such option: --bogus",
+      "width": 37,
+      "printed": "No such option: --bogus\n"
+    },
+    {
+      "text": "No such option: --bogus",
+      "width": 50,
+      "printed": "No such option: --bogus\n"
+    },
+    {
+      "text": "No such option: --bogus",
+      "width": 80,
+      "printed": "No such option: --bogus\n"
+    },
+    {
+      "text": "No such option: --bogus",
+      "width": 100,
+      "printed": "No such option: --bogus\n"
+    },
+    {
+      "text": "No such option: --bogus",
+      "width": 150,
+      "printed": "No such option: --bogus\n"
+    },
+    {
+      "text": "No such option: --js (Possible options: --json)",
+      "width": 10,
+      "printed": "No such \noption: \n--js \n(Possible \noptions: \n--json)\n"
+    },
+    {
+      "text": "No such option: --js (Possible options: --json)",
+      "width": 13,
+      "printed": "No such \noption: --js \n(Possible \noptions: \n--json)\n"
+    },
+    {
+      "text": "No such option: --js (Possible options: --json)",
+      "width": 20,
+      "printed": "No such option: --js\n(Possible options: \n--json)\n"
+    },
+    {
+      "text": "No such option: --js (Possible options: --json)",
+      "width": 37,
+      "printed": "No such option: --js (Possible \noptions: --json)\n"
+    },
+    {
+      "text": "No such option: --js (Possible options: --json)",
+      "width": 50,
+      "printed": "No such option: --js (Possible options: --json)\n"
+    },
+    {
+      "text": "No such option: --js (Possible options: --json)",
+      "width": 80,
+      "printed": "No such option: --js (Possible options: --json)\n"
+    },
+    {
+      "text": "No such option: --js (Possible options: --json)",
+      "width": 100,
+      "printed": "No such option: --js (Possible options: --json)\n"
+    },
+    {
+      "text": "No such option: --js (Possible options: --json)",
+      "width": 150,
+      "printed": "No such option: --js (Possible options: --json)\n"
+    },
+    {
+      "text": "Invalid value for '--port': 'abc' is not a valid int.",
+      "width": 10,
+      "printed": "Invalid \nvalue for \n'--port': \n'abc' is \nnot a \nvalid int.\n"
+    },
+    {
+      "text": "Invalid value for '--port': 'abc' is not a valid int.",
+      "width": 13,
+      "printed": "Invalid value\nfor '--port':\n'abc' is not \na valid int.\n"
+    },
+    {
+      "text": "Invalid value for '--port': 'abc' is not a valid int.",
+      "width": 20,
+      "printed": "Invalid value for \n'--port': 'abc' is \nnot a valid int.\n"
+    },
+    {
+      "text": "Invalid value for '--port': 'abc' is not a valid int.",
+      "width": 37,
+      "printed": "Invalid value for '--port': 'abc' is \nnot a valid int.\n"
+    },
+    {
+      "text": "Invalid value for '--port': 'abc' is not a valid int.",
+      "width": 50,
+      "printed": "Invalid value for '--port': 'abc' is not a valid \nint.\n"
+    },
+    {
+      "text": "Invalid value for '--port': 'abc' is not a valid int.",
+      "width": 80,
+      "printed": "Invalid value for '--port': 'abc' is not a valid int.\n"
+    },
+    {
+      "text": "Invalid value for '--port': 'abc' is not a valid int.",
+      "width": 100,
+      "printed": "Invalid value for '--port': 'abc' is not a valid int.\n"
+    },
+    {
+      "text": "Invalid value for '--port': 'abc' is not a valid int.",
+      "width": 150,
+      "printed": "Invalid value for '--port': 'abc' is not a valid int.\n"
+    },
+    {
+      "text": "No such command 'lst'. Did you mean 'list', 'cluster'?",
+      "width": 10,
+      "printed": "No such \ncommand \n'lst'. Did\nyou mean \n'list', \n'cluster'?\n"
+    },
+    {
+      "text": "No such command 'lst'. Did you mean 'list', 'cluster'?",
+      "width": 13,
+      "printed": "No such \ncommand \n'lst'. Did \nyou mean \n'list', \n'cluster'?\n"
+    },
+    {
+      "text": "No such command 'lst'. Did you mean 'list', 'cluster'?",
+      "width": 20,
+      "printed": "No such command \n'lst'. Did you mean \n'list', 'cluster'?\n"
+    },
+    {
+      "text": "No such command 'lst'. Did you mean 'list', 'cluster'?",
+      "width": 37,
+      "printed": "No such command 'lst'. Did you mean \n'list', 'cluster'?\n"
+    },
+    {
+      "text": "No such command 'lst'. Did you mean 'list', 'cluster'?",
+      "width": 50,
+      "printed": "No such command 'lst'. Did you mean 'list', \n'cluster'?\n"
+    },
+    {
+      "text": "No such command 'lst'. Did you mean 'list', 'cluster'?",
+      "width": 80,
+      "printed": "No such command 'lst'. Did you mean 'list', 'cluster'?\n"
+    },
+    {
+      "text": "No such command 'lst'. Did you mean 'list', 'cluster'?",
+      "width": 100,
+      "printed": "No such command 'lst'. Did you mean 'list', 'cluster'?\n"
+    },
+    {
+      "text": "No such command 'lst'. Did you mean 'list', 'cluster'?",
+      "width": 150,
+      "printed": "No such command 'lst'. Did you mean 'list', 'cluster'?\n"
+    },
+    {
+      "text": "Got unexpected extra argument(s) (a b c d e f g h i j k l m n o p q r s t u v w x y z)",
+      "width": 10,
+      "printed": "Got \nunexpected\nextra \nargument(s\n) (a b c d\ne f g h i \nj k l m n \no p q r s \nt u v w x \ny z)\n"
+    },
+    {
+      "text": "Got unexpected extra argument(s) (a b c d e f g h i j k l m n o p q r s t u v w x y z)",
+      "width": 13,
+      "printed": "Got \nunexpected \nextra \nargument(s) \n(a b c d e f \ng h i j k l m\nn o p q r s t\nu v w x y z)\n"
+    },
+    {
+      "text": "Got unexpected extra argument(s) (a b c d e f g h i j k l m n o p q r s t u v w x y z)",
+      "width": 20,
+      "printed": "Got unexpected extra\nargument(s) (a b c d\ne f g h i j k l m n \no p q r s t u v w x \ny z)\n"
+    },
+    {
+      "text": "Got unexpected extra argument(s) (a b c d e f g h i j k l m n o p q r s t u v w x y z)",
+      "width": 37,
+      "printed": "Got unexpected extra argument(s) (a b\nc d e f g h i j k l m n o p q r s t u\nv w x y z)\n"
+    },
+    {
+      "text": "Got unexpected extra argument(s) (a b c d e f g h i j k l m n o p q r s t u v w x y z)",
+      "width": 50,
+      "printed": "Got unexpected extra argument(s) (a b c d e f g h \ni j k l m n o p q r s t u v w x y z)\n"
+    },
+    {
+      "text": "Got unexpected extra argument(s) (a b c d e f g h i j k l m n o p q r s t u v w x y z)",
+      "width": 80,
+      "printed": "Got unexpected extra argument(s) (a b c d e f g h i j k l m n o p q r s t u v w \nx y z)\n"
+    },
+    {
+      "text": "Got unexpected extra argument(s) (a b c d e f g h i j k l m n o p q r s t u v w x y z)",
+      "width": 100,
+      "printed": "Got unexpected extra argument(s) (a b c d e f g h i j k l m n o p q r s t u v w x y z)\n"
+    },
+    {
+      "text": "Got unexpected extra argument(s) (a b c d e f g h i j k l m n o p q r s t u v w x y z)",
+      "width": 150,
+      "printed": "Got unexpected extra argument(s) (a b c d e f g h i j k l m n o p q r s t u v w x y z)\n"
+    },
+    {
+      "text": "No such option: --xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "width": 10,
+      "printed": "No such \noption: \n--xxxxxxxx\nxxxxxxxxxx\nxxxxxxxxxx\nxxxxxxxxxx\nxxxxxxxxxx\nxxxxxxxxxx\nxxxxxxxxxx\nxxxxxxxxxx\nxxxxxxxxxx\nxxxxxxxxxx\nxxxxxxxxxx\nxxxxxxxxxx\nxxxxxxxxxx\nxx\n"
+    },
+    {
+      "text": "No such option: --xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "width": 13,
+      "printed": "No such \noption: \n--xxxxxxxxxxx\nxxxxxxxxxxxxx\nxxxxxxxxxxxxx\nxxxxxxxxxxxxx\nxxxxxxxxxxxxx\nxxxxxxxxxxxxx\nxxxxxxxxxxxxx\nxxxxxxxxxxxxx\nxxxxxxxxxxxxx\nxxxxxxxxxxxxx\nxx\n"
+    },
+    {
+      "text": "No such option: --xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "width": 20,
+      "printed": "No such option: \n--xxxxxxxxxxxxxxxxxx\nxxxxxxxxxxxxxxxxxxxx\nxxxxxxxxxxxxxxxxxxxx\nxxxxxxxxxxxxxxxxxxxx\nxxxxxxxxxxxxxxxxxxxx\nxxxxxxxxxxxxxxxxxxxx\nxxxxxxxxxxxx\n"
+    },
+    {
+      "text": "No such option: --xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "width": 37,
+      "printed": "No such option: \n--xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nxxxxxxxxxxxxxxxxxxxxx\n"
+    },
+    {
+      "text": "No such option: --xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "width": 50,
+      "printed": "No such option: \n--xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+    },
+    {
+      "text": "No such option: --xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "width": 80,
+      "printed": "No such option: \n--xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+    },
+    {
+      "text": "No such option: --xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "width": 100,
+      "printed": "No such option: \n--xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+    },
+    {
+      "text": "No such option: --xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "width": 150,
+      "printed": "No such option: --xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+    },
+    {
+      "text": "No such option: --名前はとても長いオプションです",
+      "width": 10,
+      "printed": "No such \noption: \n--名前はと\nても長いオ\nプションで\nす\n"
+    },
+    {
+      "text": "No such option: --名前はとても長いオプションです",
+      "width": 13,
+      "printed": "No such \noption: \n--名前はとて\nも長いオプシ\nョンです\n"
+    },
+    {
+      "text": "No such option: --名前はとても長いオプションです",
+      "width": 20,
+      "printed": "No such option: \n--名前はとても長いオ\nプションです\n"
+    },
+    {
+      "text": "No such option: --名前はとても長いオプションです",
+      "width": 37,
+      "printed": "No such option: \n--名前はとても長いオプションです\n"
+    },
+    {
+      "text": "No such option: --名前はとても長いオプションです",
+      "width": 50,
+      "printed": "No such option: --名前はとても長いオプションです\n"
+    },
+    {
+      "text": "No such option: --名前はとても長いオプションです",
+      "width": 80,
+      "printed": "No such option: --名前はとても長いオプションです\n"
+    },
+    {
+      "text": "No such option: --名前はとても長いオプションです",
+      "width": 100,
+      "printed": "No such option: --名前はとても長いオプションです\n"
+    },
+    {
+      "text": "No such option: --名前はとても長いオプションです",
+      "width": 150,
+      "printed": "No such option: --名前はとても長いオプションです\n"
+    },
+    {
+      "text": "No such option: --café and --naïve",
+      "width": 10,
+      "printed": "No such \noption: \n--café and\n--naïve\n"
+    },
+    {
+      "text": "No such option: --café and --naïve",
+      "width": 13,
+      "printed": "No such \noption: \n--café and \n--naïve\n"
+    },
+    {
+      "text": "No such option: --café and --naïve",
+      "width": 20,
+      "printed": "No such option: \n--café and --naïve\n"
+    },
+    {
+      "text": "No such option: --café and --naïve",
+      "width": 37,
+      "printed": "No such option: --café and --naïve\n"
+    },
+    {
+      "text": "No such option: --café and --naïve",
+      "width": 50,
+      "printed": "No such option: --café and --naïve\n"
+    },
+    {
+      "text": "No such option: --café and --naïve",
+      "width": 80,
+      "printed": "No such option: --café and --naïve\n"
+    },
+    {
+      "text": "No such option: --café and --naïve",
+      "width": 100,
+      "printed": "No such option: --café and --naïve\n"
+    },
+    {
+      "text": "No such option: --café and --naïve",
+      "width": 150,
+      "printed": "No such option: --café and --naïve\n"
+    },
+    {
+      "text": "emoji 👨‍👩‍👧 family and ❤️ heart and #️",
+      "width": 10,
+      "printed": "emoji 👨‍👩‍👧\nfamily and\n❤️ heart \nand #️\n"
+    },
+    {
+      "text": "emoji 👨‍👩‍👧 family and ❤️ heart and #️",
+      "width": 13,
+      "printed": "emoji 👨‍👩‍👧 \nfamily and ❤️\nheart and #️\n"
+    },
+    {
+      "text": "emoji 👨‍👩‍👧 family and ❤️ heart and #️",
+      "width": 20,
+      "printed": "emoji 👨‍👩‍👧 family and\n❤️ heart and #️\n"
+    },
+    {
+      "text": "emoji 👨‍👩‍👧 family and ❤️ heart and #️",
+      "width": 37,
+      "printed": "emoji 👨‍👩‍👧 family and ❤️ heart and #️\n"
+    },
+    {
+      "text": "emoji 👨‍👩‍👧 family and ❤️ heart and #️",
+      "width": 50,
+      "printed": "emoji 👨‍👩‍👧 family and ❤️ heart and #️\n"
+    },
+    {
+      "text": "emoji 👨‍👩‍👧 family and ❤️ heart and #️",
+      "width": 80,
+      "printed": "emoji 👨‍👩‍👧 family and ❤️ heart and #️\n"
+    },
+    {
+      "text": "emoji 👨‍👩‍👧 family and ❤️ heart and #️",
+      "width": 100,
+      "printed": "emoji 👨‍👩‍👧 family and ❤️ heart and #️\n"
+    },
+    {
+      "text": "emoji 👨‍👩‍👧 family and ❤️ heart and #️",
+      "width": 150,
+      "printed": "emoji 👨‍👩‍👧 family and ❤️ heart and #️\n"
+    },
+    {
+      "text": "tab\there\tand\t\tthere",
+      "width": 10,
+      "printed": "tab     \nhere    \nand       \nthere\n"
+    },
+    {
+      "text": "tab\there\tand\t\tthere",
+      "width": 13,
+      "printed": "tab     here \nand          \nthere\n"
+    },
+    {
+      "text": "tab\there\tand\t\tthere",
+      "width": 20,
+      "printed": "tab     here    and \nthere\n"
+    },
+    {
+      "text": "tab\there\tand\t\tthere",
+      "width": 37,
+      "printed": "tab     here    and             there\n"
+    },
+    {
+      "text": "tab\there\tand\t\tthere",
+      "width": 50,
+      "printed": "tab     here    and             there\n"
+    },
+    {
+      "text": "tab\there\tand\t\tthere",
+      "width": 80,
+      "printed": "tab     here    and             there\n"
+    },
+    {
+      "text": "tab\there\tand\t\tthere",
+      "width": 100,
+      "printed": "tab     here    and             there\n"
+    },
+    {
+      "text": "tab\there\tand\t\tthere",
+      "width": 150,
+      "printed": "tab     here    and             there\n"
+    },
+    {
+      "text": "bell\u0007 back\b vt\u000b ff\f cr\r end",
+      "width": 10,
+      "printed": "bell back \nvt ff cr \nend\n"
+    },
+    {
+      "text": "bell\u0007 back\b vt\u000b ff\f cr\r end",
+      "width": 13,
+      "printed": "bell back vt \nff cr end\n"
+    },
+    {
+      "text": "bell\u0007 back\b vt\u000b ff\f cr\r end",
+      "width": 20,
+      "printed": "bell back vt ff cr \nend\n"
+    },
+    {
+      "text": "bell\u0007 back\b vt\u000b ff\f cr\r end",
+      "width": 37,
+      "printed": "bell back vt ff cr end\n"
+    },
+    {
+      "text": "bell\u0007 back\b vt\u000b ff\f cr\r end",
+      "width": 50,
+      "printed": "bell back vt ff cr end\n"
+    },
+    {
+      "text": "bell\u0007 back\b vt\u000b ff\f cr\r end",
+      "width": 80,
+      "printed": "bell back vt ff cr end\n"
+    },
+    {
+      "text": "bell\u0007 back\b vt\u000b ff\f cr\r end",
+      "width": 100,
+      "printed": "bell back vt ff cr end\n"
+    },
+    {
+      "text": "bell\u0007 back\b vt\u000b ff\f cr\r end",
+      "width": 150,
+      "printed": "bell back vt ff cr end\n"
+    },
+    {
+      "text": "two\nlines\n\nand a blank",
+      "width": 10,
+      "printed": "two\nlines\n\nand a \nblank\n"
+    },
+    {
+      "text": "two\nlines\n\nand a blank",
+      "width": 13,
+      "printed": "two\nlines\n\nand a blank\n"
+    },
+    {
+      "text": "two\nlines\n\nand a blank",
+      "width": 20,
+      "printed": "two\nlines\n\nand a blank\n"
+    },
+    {
+      "text": "two\nlines\n\nand a blank",
+      "width": 37,
+      "printed": "two\nlines\n\nand a blank\n"
+    },
+    {
+      "text": "two\nlines\n\nand a blank",
+      "width": 50,
+      "printed": "two\nlines\n\nand a blank\n"
+    },
+    {
+      "text": "two\nlines\n\nand a blank",
+      "width": 80,
+      "printed": "two\nlines\n\nand a blank\n"
+    },
+    {
+      "text": "two\nlines\n\nand a blank",
+      "width": 100,
+      "printed": "two\nlines\n\nand a blank\n"
+    },
+    {
+      "text": "two\nlines\n\nand a blank",
+      "width": 150,
+      "printed": "two\nlines\n\nand a blank\n"
+    },
+    {
+      "text": "   leading spaces and trailing   ",
+      "width": 10,
+      "printed": "   leading\nspaces and\ntrailing  \n"
+    },
+    {
+      "text": "   leading spaces and trailing   ",
+      "width": 13,
+      "printed": "   leading \nspaces and \ntrailing   \n"
+    },
+    {
+      "text": "   leading spaces and trailing   ",
+      "width": 20,
+      "printed": "   leading spaces \nand trailing   \n"
+    },
+    {
+      "text": "   leading spaces and trailing   ",
+      "width": 37,
+      "printed": "   leading spaces and trailing   \n"
+    },
+    {
+      "text": "   leading spaces and trailing   ",
+      "width": 50,
+      "printed": "   leading spaces and trailing   \n"
+    },
+    {
+      "text": "   leading spaces and trailing   ",
+      "width": 80,
+      "printed": "   leading spaces and trailing   \n"
+    },
+    {
+      "text": "   leading spaces and trailing   ",
+      "width": 100,
+      "printed": "   leading spaces and trailing   \n"
+    },
+    {
+      "text": "   leading spaces and trailing   ",
+      "width": 150,
+      "printed": "   leading spaces and trailing   \n"
+    },
+    {
+      "text": "a-very-long-hyphenated-word-that-does-not-fit-on-any-line-at-narrow-widths ok",
+      "width": 10,
+      "printed": "a-very-lon\ng-hyphenat\ned-word-th\nat-does-no\nt-fit-on-a\nny-line-at\n-narrow-wi\ndths ok\n"
+    },
+    {
+      "text": "a-very-long-hyphenated-word-that-does-not-fit-on-any-line-at-narrow-widths ok",
+      "width": 13,
+      "printed": "a-very-long-h\nyphenated-wor\nd-that-does-n\not-fit-on-any\n-line-at-narr\now-widths ok\n"
+    },
+    {
+      "text": "a-very-long-hyphenated-word-that-does-not-fit-on-any-line-at-narrow-widths ok",
+      "width": 20,
+      "printed": "a-very-long-hyphenat\ned-word-that-does-no\nt-fit-on-any-line-at\n-narrow-widths ok\n"
+    },
+    {
+      "text": "a-very-long-hyphenated-word-that-does-not-fit-on-any-line-at-narrow-widths ok",
+      "width": 37,
+      "printed": "a-very-long-hyphenated-word-that-does\n-not-fit-on-any-line-at-narrow-widths\n ok\n"
+    },
+    {
+      "text": "a-very-long-hyphenated-word-that-does-not-fit-on-any-line-at-narrow-widths ok",
+      "width": 50,
+      "printed": "a-very-long-hyphenated-word-that-does-not-fit-on-a\nny-line-at-narrow-widths ok\n"
+    },
+    {
+      "text": "a-very-long-hyphenated-word-that-does-not-fit-on-any-line-at-narrow-widths ok",
+      "width": 80,
+      "printed": "a-very-long-hyphenated-word-that-does-not-fit-on-any-line-at-narrow-widths ok\n"
+    },
+    {
+      "text": "a-very-long-hyphenated-word-that-does-not-fit-on-any-line-at-narrow-widths ok",
+      "width": 100,
+      "printed": "a-very-long-hyphenated-word-that-does-not-fit-on-any-line-at-narrow-widths ok\n"
+    },
+    {
+      "text": "a-very-long-hyphenated-word-that-does-not-fit-on-any-line-at-narrow-widths ok",
+      "width": 150,
+      "printed": "a-very-long-hyphenated-word-that-does-not-fit-on-any-line-at-narrow-widths ok\n"
+    },
+    {
+      "text": " ",
+      "width": 10,
+      "printed": " \n"
+    },
+    {
+      "text": " ",
+      "width": 13,
+      "printed": " \n"
+    },
+    {
+      "text": " ",
+      "width": 20,
+      "printed": " \n"
+    },
+    {
+      "text": " ",
+      "width": 37,
+      "printed": " \n"
+    },
+    {
+      "text": " ",
+      "width": 50,
+      "printed": " \n"
+    },
+    {
+      "text": " ",
+      "width": 80,
+      "printed": " \n"
+    },
+    {
+      "text": " ",
+      "width": 100,
+      "printed": " \n"
+    },
+    {
+      "text": " ",
+      "width": 150,
+      "printed": " \n"
+    },
+    {
+      "text": "",
+      "width": 10,
+      "printed": "\n"
+    },
+    {
+      "text": "",
+      "width": 13,
+      "printed": "\n"
+    },
+    {
+      "text": "",
+      "width": 20,
+      "printed": "\n"
+    },
+    {
+      "text": "",
+      "width": 37,
+      "printed": "\n"
+    },
+    {
+      "text": "",
+      "width": 50,
+      "printed": "\n"
+    },
+    {
+      "text": "",
+      "width": 80,
+      "printed": "\n"
+    },
+    {
+      "text": "",
+      "width": 100,
+      "printed": "\n"
+    },
+    {
+      "text": "",
+      "width": 150,
+      "printed": "\n"
+    }
+  ]
+}

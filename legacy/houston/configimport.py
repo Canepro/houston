@@ -1,0 +1,198 @@
+"""Apply a customer's exported settings to a repro.
+
+Rocket.Chat support dumps contain a `*-settings.json`: a flat list of
+`{_id, value, packageValue, ...}` for every setting (~1000). To reproduce a
+customer's config we import only what they actually CHANGED (value != default),
+minus secrets the dump redacts and a deny-list of settings that are identity- or
+environment-specific and would break/pollute a local repro.
+
+Bypasses nothing dangerous: settings are applied through the same 2FA-guarded
+REST endpoint the admin UI uses.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from houston import config, rcapi
+from houston.services import journal
+
+# Values a support dump uses to mask a secret it won't export (this dump uses
+# "XXXXXXXX"; others use bullets/asterisks/hashes). We can't apply these (they
+# aren't the real value), so skip rather than write the mask as a garbage value.
+#
+# 4+ repeats of ONE character, via a backreference. A character class matched any
+# MIXTURE instead ("x.x.x.x", "*.*.*.*", "Xx.#*"), and "." inside [...] is a
+# literal dot, so a legitimate dotted value was classified as a masked secret:
+# silently dropped from the import AND reported to the operator as "the dump
+# masked this". Case-insensitive so "xxxx" still matches.
+_REDACTED_RE = re.compile(r"^([X*•·●▪#])\1{3,}$", re.IGNORECASE)
+
+# Never import these — they identify the customer's specific install or would
+# break local access. Exact ids and id-prefixes (trailing '*').
+_DENY = {
+    "Site_Url",                          # breaks localhost access to the repro
+    "Enterprise_License",                # their license; invalid here, legally theirs
+    "Enterprise_License_Status",
+    "Deployment_FingerPrint_Hash",       # identity of their deployment
+    "Deployment_FingerPrint_Verified",
+    "uniqueID",
+    "Update_LatestAvailableVersion",     # cloud-reported, not a real preference
+    "Register_Server",                   # would try to register the repro to cloud
+    "Show_Setup_Wizard",                 # controls the repro's own onboarding state
+    "Country", "Industry", "Size",       # org-profile telemetry, not behaviour
+}
+_DENY_PREFIX = ("Assets_", "Cloud_", "Statistics_", "Deployment_")
+
+# The provider name is the segment after "Custom-"; RC uses "-" as the setting-id
+# separator, so custom-provider names never contain a hyphen (they use "_", e.g.
+# Ms_entra_id) — [^-]+ captures the whole name.
+_OAUTH_RE = re.compile(r"^Accounts_OAuth_Custom-([^-]+)")
+
+_UNSET = object()   # "the dump doesn't set this" — distinct from a value of None/False
+
+
+@dataclass
+class Plan:
+    apply: list[tuple[str, object]] = field(default_factory=list)   # (id, value)
+    redacted: list[str] = field(default_factory=list)
+    denied: list[str] = field(default_factory=list)
+    oauth_services: list[str] = field(default_factory=list)          # provider names to pre-create
+
+
+def _denied(sid: str) -> bool:
+    return sid in _DENY or sid.startswith(_DENY_PREFIX)
+
+
+def _is_redacted(v) -> bool:
+    return isinstance(v, str) and bool(_REDACTED_RE.match(v.strip()))
+
+
+def build_plan(settings_json: Path, *, only: set[str] | None = None) -> Plan:
+    """Parse a dump's settings list into an import plan. `only` filters to ids
+    whose prefix (before the first '_') matches, e.g. {'Livechat', 'LDAP'}."""
+    # A CUSTOMER DUMP IS EXACTLY THE FILE THAT ARRIVES WRONG -- truncated by a
+    # download, HTML from an expired share link, or the whole support bundle instead of
+    # the settings file inside it. `json.loads` raised a bare JSONDecodeError, which is
+    # not a ReproError: the CLI printed a traceback and the web layer answered 500,
+    # where every other bad input in this path says what is wrong with the file.
+    raw = settings_json.read_text(encoding="utf-8")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"{settings_json.name} is not valid JSON (line {exc.lineno}, column "
+            f"{exc.colno}: {exc.msg}). A Rocket.Chat support dump's "
+            f"*-settings.json is a JSON array; if this came from a browser it may "
+            f"be an HTML error page.") from exc
+    if not isinstance(data, list):
+        raise ValueError("expected a list of settings (a Rocket.Chat *-settings.json)")
+
+    plan = Plan()
+    services: set[str] = set()
+    for it in data:
+        # Be tolerant of a hand-edited / truncated dump: skip anything that
+        # isn't a {_id: str, value: ...} entry rather than crashing the import.
+        if not isinstance(it, dict):
+            continue
+        sid = it.get("_id")
+        if not isinstance(sid, str) or not sid or "value" not in it:
+            continue
+        # Unchanged-from-default. With no packageValue we can't tell, so skip
+        # rather than import a setting that may just be sitting at its default.
+        if "packageValue" not in it or it["value"] == it["packageValue"]:
+            continue
+        if only and sid.split("_", 1)[0] not in only:
+            continue
+        if _is_redacted(it["value"]):
+            plan.redacted.append(sid)
+            continue
+        if _denied(sid):
+            plan.denied.append(sid)
+            continue
+        m = _OAUTH_RE.match(sid)
+        if m:
+            services.add(m.group(1))
+        plan.apply.append((sid, it["value"]))
+    plan.oauth_services = sorted(services)
+    return plan
+
+
+def _apply_settings(root_url, admin, pw, plan, limiter, failures, log):
+    """Create custom providers first, then apply non-limiter settings."""
+    applied = 0
+    # Custom OAuth providers' settings don't exist until the provider is
+    # created — do that first so its Accounts_OAuth_Custom-*-* PATCHes land.
+    for name in plan.oauth_services:
+        if rcapi.add_oauth_service(root_url, admin, pw, name):
+            log(f"  created custom OAuth provider: {name}")
+    # Apply everything except the limiter (handled last, in finally) so a
+    # dump that re-enables it mid-run can't throttle the rest of the import.
+    for sid, value in plan.apply:
+        if sid == limiter:
+            continue
+        if rcapi.set_setting(root_url, admin, pw, sid, value):
+            applied += 1
+        else:
+            failures.append(sid)
+    return applied
+
+
+def _disable_limiter(root_url, admin, pw, workspace, limiter):
+    """Read and, when enabled, journal and disable the bulk API limiter."""
+    # `is True`, not `not (... is False)`: an UNREADABLE setting must not be treated as
+    # "was on" and forced on afterwards -- the rule seed.py states explicitly and both
+    # files were breaking here.
+    limiter_prev = rcapi.get_setting(root_url, admin, pw, limiter)
+    limiter_note = ""
+    if limiter_prev is True:
+        # JOURNALLED. The `finally` below is the only thing that restores this, and it
+        # is the block a SIGKILL does not run -- so an interrupted import left the rate
+        # limiter off with nothing on disk saying so.
+        if workspace:
+            limiter_note = journal.record(journal.RATE_LIMITER_OFF, workspace)
+        rcapi.set_setting(root_url, admin, pw, limiter, False)
+    return limiter_prev, limiter_note
+
+
+def apply(root_url: str, admin: rcapi.Auth, plan: Plan, *,
+          dry_run: bool = False, log=lambda m: None, workspace: str = "",
+          admin_password: str = "") -> dict:
+    """Apply the plan. Disables the API rate limiter during the bulk PATCH and
+    restores it in a finally. Returns {applied, failed, skipped, failures}."""
+    if dry_run:
+        return {"applied": 0, "failed": 0,
+                "skipped": len(plan.redacted) + len(plan.denied),
+                "failures": []}
+
+    pw = admin_password or config.ADMIN_PASSWORD
+    limiter = "API_Enable_Rate_Limiter"
+    # Disable the rate limiter for the bulk PATCH. But the dump itself may set
+    # this setting — if so its value wins; otherwise restore the prior value.
+    plan_limiter = next((v for sid, v in plan.apply if sid == limiter), _UNSET)
+    limiter_prev, limiter_note = _disable_limiter(
+        root_url, admin, pw, workspace, limiter)
+    applied, failures = 0, []
+    try:
+        applied = _apply_settings(
+            root_url, admin, pw, plan, limiter, failures, log)
+    finally:
+        if plan_limiter is not _UNSET:
+            # The DUMP sets it, so the dump's value wins and the note is closed either
+            # way: the setting is now whatever the customer's workspace had, which is
+            # the point of the import.
+            if rcapi.set_setting(root_url, admin, pw, limiter, plan_limiter):
+                applied += 1
+                journal.clear(limiter_note)
+            else:
+                failures.append(limiter)
+        elif limiter_prev is True:
+            if rcapi.set_setting(root_url, admin, pw, limiter, True):
+                journal.clear(limiter_note)
+
+    return {"applied": applied, "failed": len(failures),
+            "skipped": len(plan.redacted) + len(plan.denied),
+            "failures": failures}

@@ -1,0 +1,27 @@
+
+ Usage: houston upgrade [OPTIONS]
+
+ Upgrade a RUNNING repro to another Rocket.Chat version.
+
+ Rocket.Chat runs its database migrations on boot, so this is the honest way to
+ reproduce "it broke after we upgraded": real data, real migrations. A
+ pre-upgrade backup is taken automatically and `--rollback` restores it.
+
+ The repro has to be running — the backup needs MongoDB up, and the migrations
+ only happen when Rocket.Chat boots.
+
+╭─ Options ──╮
+ --to                   <str>  target Rocket.Chat version, e.g. 8.6.1
+ --name         -n      <str>
+ --dry-run                     show what would happen and stop
+ --no-backup                   skip the automatic pre-upgrade backup (no rollback will be
+                               possible)
+ --no-rollback                 leave a failed upgrade in place instead of rolling it back
+ --rollback                    undo the last upgrade from its pre-upgrade backup
+ --bundle               <str>  with --rollback: restore this bundle instead of the recorded one
+ --offline                     resolve the version from the built-in map, no network (so a
+                               version that was never released still resolves — the map matches
+                               on the series)
+ --force                       ignore refusals (downgrades, MongoDB major changes)
+ --help                        Show this message and exit.
+╰──╯

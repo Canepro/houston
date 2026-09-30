@@ -1,0 +1,62 @@
+#!/bin/sh
+# houston: the TypeScript build's entry.
+#
+# One implementation, so this file only finds the build and EXECS it. Never a spawn: the
+# build becomes this process, so its exit code IS the caller's, a signal sent to this pid
+# reaches it, and stdin, stdout and stderr (a TTY or not) are the descriptors the caller
+# gave. Node cannot execve; a shell can. The environment below is what the build needs
+# from the process that starts it.
+set -u
+
+self=$0
+while [ -h "$self" ]; do
+  link=$(readlink "$self") || break
+  case $link in
+    /*) self=$link ;;
+    *) self=$(dirname -- "$self")/$link ;;
+  esac
+done
+root=$(CDPATH='' cd -P -- "$(dirname -- "$self")/.." && pwd -P) || {
+  printf 'houston: cannot find the directory %s is in. Nothing was run.\n' "$0" >&2
+  exit 252
+}
+
+# This file's own path, absolute and with its symlinks resolved as $root's are: the command
+# the owner installed, which `serve --print-service` names as its unit's ExecStart (systemd
+# refuses a relative one) rather than the build behind it, so the unit keeps working when
+# the build's location changes. Set on every run, so an inherited value never stands in.
+if here=$(CDPATH='' cd -P -- "$(dirname -- "$self")" && pwd -P); then
+  HOUSTON_DISPATCHER=$here/${self##*/}
+  export HOUSTON_DISPATCHER
+else
+  unset HOUSTON_DISPATCHER
+fi
+
+# The network earlier releases reached, by default: they honoured HTTP_PROXY, HTTPS_PROXY
+# and NO_PROXY, and trusted REQUESTS_CA_BUNDLE or CURL_CA_BUNDLE. Node's fetch honours the
+# proxy variables only under NODE_USE_ENV_PROXY, which it reads at startup -- so behind a
+# proxy `versions` fell back to the shipped map where it should have answered from
+# releases.rocket.chat, and doctor called the release endpoint unreachable. A bundle
+# those variables name is added to Node's as NODE_EXTRA_CA_CERTS, which is how a
+# TLS-inspecting proxy's CA reaches both. Either is left as the caller set it.
+NODE_USE_ENV_PROXY=${NODE_USE_ENV_PROXY-1}
+export NODE_USE_ENV_PROXY
+if [ -z "${NODE_EXTRA_CA_CERTS-}" ]; then
+  ca=${REQUESTS_CA_BUNDLE:-${CURL_CA_BUNDLE:-}}
+  if [ -n "$ca" ]; then NODE_EXTRA_CA_CERTS=$ca; export NODE_EXTRA_CA_CERTS; fi
+fi
+
+# A CHECKOUT RUNS ITS SOURCE; AN INSTALLED PACKAGE RUNS THE EMITTED BUILD. The source is
+# what was edited, so on a tree that has src/ it is run through tools/cli.js (swc, no build
+# step); an installed tarball ships dist/ and no src/, so there the emitted build is the
+# only build. Preferring dist/ wherever it existed ran STALE code on a checkout: `yarn
+# build` from before a change left dist/ behind, and a fresh home was claimed with the old
+# marker while `--version`, read from package.json, said the new number. Both are the same
+# code: `tsc` emits dist/ from src/ with no bundler, and the tarball is what `yarn build`
+# is for.
+if [ -f "$root/src/cli/entry.ts" ] && [ -f "$root/tools/cli.js" ]; then
+  exec node "$root/tools/cli.js" "$@"
+fi
+if [ -f "$root/dist/cli/entry.js" ]; then exec node "$root/dist/cli/entry.js" "$@"; fi
+printf 'houston: neither src/cli/entry.ts with tools/cli.js nor dist/cli/entry.js is under %s. Nothing was run.\n' "$root" >&2
+exit 252

@@ -1,0 +1,18 @@
+
+ Usage: houston config-import [OPTIONS] {settings_file}
+
+ Apply a customer's exported settings (from a support dump) to a repro.
+
+ Imports only settings the customer CHANGED from default, skipping secrets the
+ dump redacts and identity/environment settings (license, Site_Url, assets)
+ that would break or pollute a local repro.
+
+╭─ Arguments ──╮
+ *    settings_file      <str>  path to a support-dump *-settings.json [required]
+╰──╯
+╭─ Options ──╮
+ --name     -n      <str>
+ --only             <str>  comma-separated id prefixes, e.g. Livechat,LDAP,Accounts
+ --dry-run                 show the import plan without changing anything
+ --help                    Show this message and exit.
+╰──╯

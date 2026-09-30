@@ -1,0 +1,11 @@
+
+ Usage: houston doctor [OPTIONS]
+
+ Preflight: check Docker, Compose, disk, connectivity and ports.
+
+╭─ Options ──╮
+ --json                  print the report as one JSON envelope; exits 3 on any failing check
+ --context        <str>  report on this Kubernetes cluster by kubeconfig context name, as `up
+                         --context` would use it
+ --help                  Show this message and exit.
+╰──╯

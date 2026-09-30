@@ -1,0 +1,1640 @@
+{
+ "users.list answers a list": {
+  "error": "expected an object, got a list",
+  "asked": [
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "team-chat"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "dev"
+    }
+   ],
+   [
+    "/api/v1/groups.info",
+    {
+     "roomName": "leadership"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "platform"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "platform-planning"
+    }
+   ],
+   [
+    "/api/v1/groups.info",
+    {
+     "roomName": "platform-standup"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "general"
+    }
+   ],
+   [
+    "/api/v1/im.list",
+    {
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/im.list",
+    {
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/users.list",
+    {
+     "count": "0"
+    }
+   ]
+  ]
+ },
+ "users.list answers a bare number": {
+  "error": "expected an object, got an integer",
+  "asked": [
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "team-chat"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "dev"
+    }
+   ],
+   [
+    "/api/v1/groups.info",
+    {
+     "roomName": "leadership"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "platform"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "platform-planning"
+    }
+   ],
+   [
+    "/api/v1/groups.info",
+    {
+     "roomName": "platform-standup"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "general"
+    }
+   ],
+   [
+    "/api/v1/im.list",
+    {
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/im.list",
+    {
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/users.list",
+    {
+     "count": "0"
+    }
+   ]
+  ]
+ },
+ "a threads total that is not a number": {
+  "error": "'abc' is not an integer",
+  "asked": [
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "team-chat"
+    }
+   ],
+   [
+    "/api/v1/channels.messages",
+    {
+     "roomId": "r1",
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/chat.getThreadsList",
+    {
+     "rid": "r1",
+     "count": "100"
+    }
+   ]
+  ]
+ },
+ "a threads total that is NaN": {
+  "error": "NaN is not an integer",
+  "asked": [
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "team-chat"
+    }
+   ],
+   [
+    "/api/v1/channels.messages",
+    {
+     "roomId": "r1",
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/chat.getThreadsList",
+    {
+     "rid": "r1",
+     "count": "100"
+    }
+   ]
+  ]
+ },
+ "a threads total that is a numeric string": {
+  "error": null,
+  "verdict": {
+   "ok": false,
+   "faults": [
+    {
+     "kind": "messages",
+     "room": "team-chat",
+     "want": 6,
+     "got": 0,
+     "detail": ""
+    },
+    {
+     "kind": "threads",
+     "room": "team-chat",
+     "want": 1,
+     "got": 0,
+     "detail": ""
+    },
+    {
+     "kind": "messages",
+     "room": "dev",
+     "want": 6,
+     "got": 0,
+     "detail": ""
+    },
+    {
+     "kind": "threads",
+     "room": "dev",
+     "want": 1,
+     "got": 0,
+     "detail": ""
+    },
+    {
+     "kind": "missing",
+     "room": "leadership",
+     "want": "private",
+     "got": "absent",
+     "detail": ""
+    },
+    {
+     "kind": "messages",
+     "room": "platform",
+     "want": 4,
+     "got": 0,
+     "detail": ""
+    },
+    {
+     "kind": "threads",
+     "room": "platform",
+     "want": 1,
+     "got": 0,
+     "detail": ""
+    },
+    {
+     "kind": "messages",
+     "room": "platform-planning",
+     "want": 4,
+     "got": 0,
+     "detail": ""
+    },
+    {
+     "kind": "threads",
+     "room": "platform-planning",
+     "want": 1,
+     "got": 0,
+     "detail": ""
+    },
+    {
+     "kind": "team",
+     "room": "platform-planning",
+     "want": "in platform",
+     "got": "not in the team",
+     "detail": ""
+    },
+    {
+     "kind": "missing",
+     "room": "platform-standup",
+     "want": "team-channel-private",
+     "got": "absent",
+     "detail": ""
+    },
+    {
+     "kind": "messages",
+     "room": "general",
+     "want": 6,
+     "got": 0,
+     "detail": ""
+    },
+    {
+     "kind": "threads",
+     "room": "general",
+     "want": 1,
+     "got": 0,
+     "detail": ""
+    },
+    {
+     "kind": "missing",
+     "room": "customer escalation 4821",
+     "want": "discussion",
+     "got": "absent",
+     "detail": ""
+    },
+    {
+     "kind": "missing",
+     "room": "rollback plan",
+     "want": "discussion",
+     "got": "absent",
+     "detail": ""
+    }
+   ],
+   "extra": [],
+   "unreadable": [
+    {
+     "what": "users",
+     "why": "<absent>"
+    },
+    {
+     "what": "alice~bob",
+     "why": "<absent>"
+    },
+    {
+     "what": "bob~carol",
+     "why": "<absent>"
+    }
+   ],
+   "checked": 11
+  },
+  "threads": [
+   12,
+   12,
+   0,
+   12,
+   12,
+   0,
+   12,
+   0,
+   0,
+   0,
+   0
+  ],
+  "asked": [
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "team-chat"
+    }
+   ],
+   [
+    "/api/v1/channels.messages",
+    {
+     "roomId": "r1",
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/chat.getThreadsList",
+    {
+     "rid": "r1",
+     "count": "100"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "dev"
+    }
+   ],
+   [
+    "/api/v1/channels.messages",
+    {
+     "roomId": "r1",
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/chat.getThreadsList",
+    {
+     "rid": "r1",
+     "count": "100"
+    }
+   ],
+   [
+    "/api/v1/groups.info",
+    {
+     "roomName": "leadership"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "platform"
+    }
+   ],
+   [
+    "/api/v1/channels.messages",
+    {
+     "roomId": "r1",
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/chat.getThreadsList",
+    {
+     "rid": "r1",
+     "count": "100"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "platform-planning"
+    }
+   ],
+   [
+    "/api/v1/channels.messages",
+    {
+     "roomId": "r1",
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/chat.getThreadsList",
+    {
+     "rid": "r1",
+     "count": "100"
+    }
+   ],
+   [
+    "/api/v1/teams.info",
+    {
+     "teamName": "platform"
+    }
+   ],
+   [
+    "/api/v1/groups.info",
+    {
+     "roomName": "platform-standup"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "general"
+    }
+   ],
+   [
+    "/api/v1/channels.messages",
+    {
+     "roomId": "r1",
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/chat.getThreadsList",
+    {
+     "rid": "r1",
+     "count": "100"
+    }
+   ],
+   [
+    "/api/v1/chat.getDiscussions",
+    {
+     "roomId": "r1",
+     "count": "100"
+    }
+   ],
+   [
+    "/api/v1/chat.getDiscussions",
+    {
+     "roomId": "r1",
+     "count": "100"
+    }
+   ],
+   [
+    "/api/v1/im.list",
+    {
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/im.list",
+    {
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/users.list",
+    {
+     "count": "0"
+    }
+   ]
+  ]
+ },
+ "a threads total that is a list": {
+  "error": "expected an integer, got a list",
+  "asked": [
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "team-chat"
+    }
+   ],
+   [
+    "/api/v1/channels.messages",
+    {
+     "roomId": "r1",
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/chat.getThreadsList",
+    {
+     "rid": "r1",
+     "count": "100"
+    }
+   ]
+  ]
+ },
+ "a message that is not a dict": {
+  "error": "expected an object, got an integer",
+  "asked": [
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "team-chat"
+    }
+   ],
+   [
+    "/api/v1/channels.messages",
+    {
+     "roomId": "r1",
+     "count": "0"
+    }
+   ]
+  ]
+ },
+ "a messages value that is a string": {
+  "error": "expected an object, got a string",
+  "asked": [
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "team-chat"
+    }
+   ],
+   [
+    "/api/v1/channels.messages",
+    {
+     "roomId": "r1",
+     "count": "0"
+    }
+   ]
+  ]
+ },
+ "a message whose t is an empty list": {
+  "error": null,
+  "verdict": {
+   "ok": false,
+   "faults": [
+    {
+     "kind": "messages",
+     "room": "team-chat",
+     "want": 6,
+     "got": 1,
+     "detail": ""
+    },
+    {
+     "kind": "messages",
+     "room": "dev",
+     "want": 6,
+     "got": 1,
+     "detail": ""
+    },
+    {
+     "kind": "missing",
+     "room": "leadership",
+     "want": "private",
+     "got": "absent",
+     "detail": ""
+    },
+    {
+     "kind": "messages",
+     "room": "platform",
+     "want": 4,
+     "got": 1,
+     "detail": ""
+    },
+    {
+     "kind": "messages",
+     "room": "platform-planning",
+     "want": 4,
+     "got": 1,
+     "detail": ""
+    },
+    {
+     "kind": "team",
+     "room": "platform-planning",
+     "want": "in platform",
+     "got": "not in the team",
+     "detail": ""
+    },
+    {
+     "kind": "missing",
+     "room": "platform-standup",
+     "want": "team-channel-private",
+     "got": "absent",
+     "detail": ""
+    },
+    {
+     "kind": "messages",
+     "room": "general",
+     "want": 6,
+     "got": 1,
+     "detail": ""
+    },
+    {
+     "kind": "missing",
+     "room": "customer escalation 4821",
+     "want": "discussion",
+     "got": "absent",
+     "detail": ""
+    },
+    {
+     "kind": "missing",
+     "room": "rollback plan",
+     "want": "discussion",
+     "got": "absent",
+     "detail": ""
+    }
+   ],
+   "extra": [],
+   "unreadable": [
+    {
+     "what": "users",
+     "why": "<absent>"
+    },
+    {
+     "what": "alice~bob",
+     "why": "<absent>"
+    },
+    {
+     "what": "bob~carol",
+     "why": "<absent>"
+    }
+   ],
+   "checked": 11
+  },
+  "threads": [
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "asked": [
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "team-chat"
+    }
+   ],
+   [
+    "/api/v1/channels.messages",
+    {
+     "roomId": "r1",
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/chat.getThreadsList",
+    {
+     "rid": "r1",
+     "count": "100"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "dev"
+    }
+   ],
+   [
+    "/api/v1/channels.messages",
+    {
+     "roomId": "r1",
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/chat.getThreadsList",
+    {
+     "rid": "r1",
+     "count": "100"
+    }
+   ],
+   [
+    "/api/v1/groups.info",
+    {
+     "roomName": "leadership"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "platform"
+    }
+   ],
+   [
+    "/api/v1/channels.messages",
+    {
+     "roomId": "r1",
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/chat.getThreadsList",
+    {
+     "rid": "r1",
+     "count": "100"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "platform-planning"
+    }
+   ],
+   [
+    "/api/v1/channels.messages",
+    {
+     "roomId": "r1",
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/chat.getThreadsList",
+    {
+     "rid": "r1",
+     "count": "100"
+    }
+   ],
+   [
+    "/api/v1/teams.info",
+    {
+     "teamName": "platform"
+    }
+   ],
+   [
+    "/api/v1/groups.info",
+    {
+     "roomName": "platform-standup"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "general"
+    }
+   ],
+   [
+    "/api/v1/channels.messages",
+    {
+     "roomId": "r1",
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/chat.getThreadsList",
+    {
+     "rid": "r1",
+     "count": "100"
+    }
+   ],
+   [
+    "/api/v1/chat.getDiscussions",
+    {
+     "roomId": "r1",
+     "count": "100"
+    }
+   ],
+   [
+    "/api/v1/chat.getDiscussions",
+    {
+     "roomId": "r1",
+     "count": "100"
+    }
+   ],
+   [
+    "/api/v1/im.list",
+    {
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/im.list",
+    {
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/users.list",
+    {
+     "count": "0"
+    }
+   ]
+  ]
+ },
+ "a room not found, answered as a list": {
+  "error": "expected an object, got a list",
+  "asked": [
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "team-chat"
+    }
+   ]
+  ]
+ },
+ "a 500 answered as a list": {
+  "error": null,
+  "verdict": {
+   "ok": false,
+   "faults": [
+    {
+     "kind": "missing",
+     "room": "leadership",
+     "want": "private",
+     "got": "absent",
+     "detail": ""
+    },
+    {
+     "kind": "missing",
+     "room": "platform-standup",
+     "want": "team-channel-private",
+     "got": "absent",
+     "detail": ""
+    }
+   ],
+   "extra": [],
+   "unreadable": [
+    {
+     "what": "users",
+     "why": "<absent>"
+    },
+    {
+     "what": "team-chat",
+     "why": "HTTP 500"
+    },
+    {
+     "what": "dev",
+     "why": "HTTP 500"
+    },
+    {
+     "what": "platform",
+     "why": "HTTP 500"
+    },
+    {
+     "what": "platform-planning",
+     "why": "HTTP 500"
+    },
+    {
+     "what": "general",
+     "why": "HTTP 500"
+    },
+    {
+     "what": "customer escalation 4821",
+     "why": "parent 'team-chat' not readable"
+    },
+    {
+     "what": "rollback plan",
+     "why": "parent 'dev' not readable"
+    },
+    {
+     "what": "alice~bob",
+     "why": "<absent>"
+    },
+    {
+     "what": "bob~carol",
+     "why": "<absent>"
+    }
+   ],
+   "checked": 11
+  },
+  "threads": [
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "asked": [
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "team-chat"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "dev"
+    }
+   ],
+   [
+    "/api/v1/groups.info",
+    {
+     "roomName": "leadership"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "platform"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "platform-planning"
+    }
+   ],
+   [
+    "/api/v1/groups.info",
+    {
+     "roomName": "platform-standup"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "general"
+    }
+   ],
+   [
+    "/api/v1/im.list",
+    {
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/im.list",
+    {
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/users.list",
+    {
+     "count": "0"
+    }
+   ]
+  ]
+ },
+ "a channel that is a list": {
+  "error": "expected an object, got a list",
+  "asked": [
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "team-chat"
+    }
+   ]
+  ]
+ },
+ "an im.list that is a number": {
+  "error": "expected a list, got an integer",
+  "asked": [
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "team-chat"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "dev"
+    }
+   ],
+   [
+    "/api/v1/groups.info",
+    {
+     "roomName": "leadership"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "platform"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "platform-planning"
+    }
+   ],
+   [
+    "/api/v1/groups.info",
+    {
+     "roomName": "platform-standup"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "general"
+    }
+   ],
+   [
+    "/api/v1/im.list",
+    {
+     "count": "0"
+    }
+   ]
+  ]
+ },
+ "DM usernames that are a number": {
+  "error": "expected a list, a string or an object, got an integer",
+  "asked": [
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "team-chat"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "dev"
+    }
+   ],
+   [
+    "/api/v1/groups.info",
+    {
+     "roomName": "leadership"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "platform"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "platform-planning"
+    }
+   ],
+   [
+    "/api/v1/groups.info",
+    {
+     "roomName": "platform-standup"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "general"
+    }
+   ],
+   [
+    "/api/v1/im.list",
+    {
+     "count": "0"
+    }
+   ]
+  ]
+ },
+ "DM usernames that are one string": {
+  "error": null,
+  "verdict": {
+   "ok": false,
+   "faults": [
+    {
+     "kind": "missing",
+     "room": "team-chat",
+     "want": "channel",
+     "got": "absent",
+     "detail": ""
+    },
+    {
+     "kind": "missing",
+     "room": "dev",
+     "want": "channel",
+     "got": "absent",
+     "detail": ""
+    },
+    {
+     "kind": "missing",
+     "room": "leadership",
+     "want": "private",
+     "got": "absent",
+     "detail": ""
+    },
+    {
+     "kind": "missing",
+     "room": "platform",
+     "want": "team",
+     "got": "absent",
+     "detail": ""
+    },
+    {
+     "kind": "missing",
+     "room": "platform-planning",
+     "want": "team-channel",
+     "got": "absent",
+     "detail": ""
+    },
+    {
+     "kind": "missing",
+     "room": "platform-standup",
+     "want": "team-channel-private",
+     "got": "absent",
+     "detail": ""
+    },
+    {
+     "kind": "missing",
+     "room": "general",
+     "want": "general",
+     "got": "absent",
+     "detail": ""
+    },
+    {
+     "kind": "missing",
+     "room": "customer escalation 4821",
+     "want": "discussion",
+     "got": "absent",
+     "detail": ""
+    },
+    {
+     "kind": "missing",
+     "room": "rollback plan",
+     "want": "discussion",
+     "got": "absent",
+     "detail": ""
+    }
+   ],
+   "extra": [],
+   "unreadable": [
+    {
+     "what": "users",
+     "why": "<absent>"
+    },
+    {
+     "what": "alice~bob",
+     "why": "<absent>"
+    },
+    {
+     "what": "bob~carol",
+     "why": "<absent>"
+    }
+   ],
+   "checked": 11
+  },
+  "threads": [
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "asked": [
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "team-chat"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "dev"
+    }
+   ],
+   [
+    "/api/v1/groups.info",
+    {
+     "roomName": "leadership"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "platform"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "platform-planning"
+    }
+   ],
+   [
+    "/api/v1/groups.info",
+    {
+     "roomName": "platform-standup"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "general"
+    }
+   ],
+   [
+    "/api/v1/im.list",
+    {
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/im.messages",
+    {
+     "roomId": "d",
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/im.list",
+    {
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/im.messages",
+    {
+     "roomId": "d",
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/users.list",
+    {
+     "count": "0"
+    }
+   ]
+  ]
+ },
+ "a username that is a list": {
+  "error": "a list cannot be a key",
+  "asked": [
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "team-chat"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "dev"
+    }
+   ],
+   [
+    "/api/v1/groups.info",
+    {
+     "roomName": "leadership"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "platform"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "platform-planning"
+    }
+   ],
+   [
+    "/api/v1/groups.info",
+    {
+     "roomName": "platform-standup"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "general"
+    }
+   ],
+   [
+    "/api/v1/im.list",
+    {
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/im.list",
+    {
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/users.list",
+    {
+     "count": "0"
+    }
+   ]
+  ]
+ },
+ "a teamInfo that is a list": {
+  "error": "expected an object, got a list",
+  "asked": [
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "team-chat"
+    }
+   ],
+   [
+    "/api/v1/channels.messages",
+    {
+     "roomId": "r1",
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/chat.getThreadsList",
+    {
+     "rid": "r1",
+     "count": "100"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "dev"
+    }
+   ],
+   [
+    "/api/v1/channels.messages",
+    {
+     "roomId": "r1",
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/chat.getThreadsList",
+    {
+     "rid": "r1",
+     "count": "100"
+    }
+   ],
+   [
+    "/api/v1/groups.info",
+    {
+     "roomName": "leadership"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "platform"
+    }
+   ],
+   [
+    "/api/v1/channels.messages",
+    {
+     "roomId": "r1",
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/chat.getThreadsList",
+    {
+     "rid": "r1",
+     "count": "100"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "platform-planning"
+    }
+   ],
+   [
+    "/api/v1/channels.messages",
+    {
+     "roomId": "r1",
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/chat.getThreadsList",
+    {
+     "rid": "r1",
+     "count": "100"
+    }
+   ],
+   [
+    "/api/v1/teams.info",
+    {
+     "teamName": "platform"
+    }
+   ]
+  ]
+ },
+ "a room id that is a number": {
+  "error": null,
+  "verdict": {
+   "ok": false,
+   "faults": [
+    {
+     "kind": "missing",
+     "room": "leadership",
+     "want": "private",
+     "got": "absent",
+     "detail": ""
+    },
+    {
+     "kind": "missing",
+     "room": "platform-standup",
+     "want": "team-channel-private",
+     "got": "absent",
+     "detail": ""
+    },
+    {
+     "kind": "missing",
+     "room": "customer escalation 4821",
+     "want": "discussion",
+     "got": "absent",
+     "detail": ""
+    },
+    {
+     "kind": "missing",
+     "room": "rollback plan",
+     "want": "discussion",
+     "got": "absent",
+     "detail": ""
+    }
+   ],
+   "extra": [],
+   "unreadable": [
+    {
+     "what": "users",
+     "why": "<absent>"
+    },
+    {
+     "what": "team-chat",
+     "why": "<absent>"
+    },
+    {
+     "what": "dev",
+     "why": "<absent>"
+    },
+    {
+     "what": "platform",
+     "why": "<absent>"
+    },
+    {
+     "what": "platform-planning",
+     "why": "<absent>"
+    },
+    {
+     "what": "general",
+     "why": "<absent>"
+    },
+    {
+     "what": "alice~bob",
+     "why": "<absent>"
+    },
+    {
+     "what": "bob~carol",
+     "why": "<absent>"
+    }
+   ],
+   "checked": 11
+  },
+  "threads": [
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "asked": [
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "team-chat"
+    }
+   ],
+   [
+    "/api/v1/channels.messages",
+    {
+     "roomId": "7",
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/chat.getThreadsList",
+    {
+     "rid": "7",
+     "count": "100"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "dev"
+    }
+   ],
+   [
+    "/api/v1/channels.messages",
+    {
+     "roomId": "7",
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/chat.getThreadsList",
+    {
+     "rid": "7",
+     "count": "100"
+    }
+   ],
+   [
+    "/api/v1/groups.info",
+    {
+     "roomName": "leadership"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "platform"
+    }
+   ],
+   [
+    "/api/v1/channels.messages",
+    {
+     "roomId": "7",
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/chat.getThreadsList",
+    {
+     "rid": "7",
+     "count": "100"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "platform-planning"
+    }
+   ],
+   [
+    "/api/v1/channels.messages",
+    {
+     "roomId": "7",
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/chat.getThreadsList",
+    {
+     "rid": "7",
+     "count": "100"
+    }
+   ],
+   [
+    "/api/v1/teams.info",
+    {
+     "teamName": "platform"
+    }
+   ],
+   [
+    "/api/v1/groups.info",
+    {
+     "roomName": "platform-standup"
+    }
+   ],
+   [
+    "/api/v1/channels.info",
+    {
+     "roomName": "general"
+    }
+   ],
+   [
+    "/api/v1/channels.messages",
+    {
+     "roomId": "7",
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/chat.getThreadsList",
+    {
+     "rid": "7",
+     "count": "100"
+    }
+   ],
+   [
+    "/api/v1/chat.getDiscussions",
+    {
+     "roomId": "7",
+     "count": "100"
+    }
+   ],
+   [
+    "/api/v1/chat.getDiscussions",
+    {
+     "roomId": "7",
+     "count": "100"
+    }
+   ],
+   [
+    "/api/v1/im.list",
+    {
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/im.list",
+    {
+     "count": "0"
+    }
+   ],
+   [
+    "/api/v1/users.list",
+    {
+     "count": "0"
+    }
+   ]
+  ]
+ }
+}

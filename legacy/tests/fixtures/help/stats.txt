@@ -1,0 +1,11 @@
+
+ Usage: houston stats [OPTIONS]
+
+ Sample a repro's container CPU/RAM (peak over a window, or --watch live).
+
+╭─ Options ──╮
+ --name   -n      <str>
+ --for            <float>  seconds to sample [default: 5.0]
+ --watch  -w               stream live (Ctrl-C to stop)
+ --help                    Show this message and exit.
+╰──╯

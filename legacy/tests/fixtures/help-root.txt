@@ -1,0 +1,51 @@
+
+ Usage: houston [OPTIONS] COMMAND [ARGS]...
+
+ Launch version-matched Rocket.Chat reproduction environments.
+
+╭─ Options ──╮
+ --version  -V        print the installed houston version and exit
+ --help               Show this message and exit.
+╰──╯
+╭─ Commands ──╮
+ up             Create and start a version-matched Rocket.Chat repro.
+ ready          Block until Rocket.Chat is serving (polls /api/info).
+ down           Remove a repro's containers. Keeps data (and the record) unless --volumes.
+ monitor        Attach (or --off to detach) Prometheus + Grafana on a running repro.
+ prune          Delete every `down` repro — INCLUDING its data volume and record. Skips pinned
+                and running ones.
+ start          Resume a stopped repro (fast, no rebuild).
+ stop           Pause a repro, keeping its containers and data.
+ restart        Restart a repro.
+ use            Set the default repro for name-less commands.
+ list           List all repros with version, port, status and URL.
+ info           Show a repro's URL, admin credentials and a curl snippet.
+ users          Manage who can sign in to the web GUI.
+ edge           The shared Traefik that serves every HTTPS name on this box.
+ config         Read or write remembered settings, so they need not be retyped every run.
+ env            Show or change a repro's Rocket.Chat environment variables.
+ tls-status     Report what is ACTUALLY being served over HTTPS for a repro.
+ trust-ca       Install houston's local CA so `--https` repros are trusted without warnings.
+ token          Mint an API auth token (X-Auth-Token / X-User-Id headers).
+ api            Make an authenticated REST call against a repro and print the response.
+ pat            Mint a Personal Access Token and print ready-to-use headers (curl/Postman).
+ seed           Populate a repro with sample users, channels, DMs and messages.
+ config-import  Apply a customer's exported settings (from a support dump) to a repro.
+ backup         Back up a repro's Rocket.Chat database into a restorable bundle.
+ backups        List backup bundles in ~/.houston/backups/, newest first.
+ restore        Restore a backup bundle into a repro.
+ upgrade        Upgrade a RUNNING repro to another Rocket.Chat version.
+ stats          Sample a repro's container CPU/RAM (peak over a window, or --watch live).
+ loadtest       Drive real HTTP load at a repro with k6 and check it against an SLO.
+ capacity       Find how much concurrency a repro sustains before the SLO breaks.
+ logs           Tail a repro's logs.
+ presets        List available presets.
+ versions       Show the resolved MongoDB pairing for a Rocket.Chat version.
+ audit          Read the activity trail: who did what, and whether it was allowed.
+ chown          Hand a workspace over to somebody else.
+ capabilities   What this build can do, as JSON, for an agent or a script.
+ doctor         Preflight: check Docker, Compose, disk, connectivity and ports.
+ cluster        What a Kubernetes cluster is holding, and what it is costing.
+ serve          Launch the web GUI (needs `pip install 'houston[gui]'`).
+ skill          Install the agent skill that teaches a caller to drive houston.
+╰──╯

@@ -1,0 +1,14 @@
+
+ Usage: houston tls-status [OPTIONS]
+
+ Report what is ACTUALLY being served over HTTPS for a repro.
+
+ `up --wait` only proves Rocket.Chat booted -- it polls the internal http port.
+ Traefik obtains certificates in the background AFTER it starts and falls back
+ to a self-signed dummy when ACME fails, so a repro can look ready while HTTPS
+ serves nothing usable. This makes the real TLS connection and says so.
+
+╭─ Options ──╮
+ --name  -n      <str>
+ --help                 Show this message and exit.
+╰──╯

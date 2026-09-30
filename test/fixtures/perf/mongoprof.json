@@ -1,0 +1,7 @@
+{
+  "profilerJs": [
+    "var prev = db.getProfilingStatus();db.setProfilingLevel(1, 250);print(JSON.stringify({was: prev.was, slowms: prev.slowms}));",
+    "db.setProfilingLevel(1, 50);",
+    "var q = {ts: {$gte: new Date(1735689600000)}, ns: {$ne: \"rocketchat.system.profile\"}};var docs = db.system.profile.find(q).sort({millis: -1}).limit(200).toArray();var out = {total: docs.length, collscan: 0, slow: []};for (var i = 0; i < docs.length; i++) {  var d = docs[i];  var plan = d.planSummary || '';  if (plan.indexOf('COLLSCAN') >= 0) out.collscan++; if (out.slow.length < 3) {    var cmd = '';    try { cmd = JSON.stringify(d.command || d.query || {}).slice(0, 160); } catch (e) {}    out.slow.push({ns: d.ns || '', op: d.op || '', millis: d.millis || 0,      plan: plan, docs: d.docsExamined || 0, keys: d.keysExamined || 0,      ret: d.nreturned || 0, cmd: cmd});  }}print(JSON.stringify(out));"
+  ]
+}

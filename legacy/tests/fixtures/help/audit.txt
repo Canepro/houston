@@ -1,0 +1,27 @@
+
+ Usage: houston audit [OPTIONS]
+
+ Read the activity trail: who did what, and whether it was allowed.
+
+ The log has been written since accounts landed and there was no way to read
+ it -- "who tore down TICKET-1234?" meant ssh and `cat`. Six tab-separated
+ columns: time, who, action, target, origin, outcome.
+
+ `origin` says how the identity was established, which is what makes a line
+ evidence or not:
+
+   session   a signed-in GUI request; the server checked a credential
+   local     the CLI, where the OS login matched a known account
+   asserted  the CLI with HOUSTON_USER set -- honoured as given, so a CLAIM
+   system    houston acting on its own behalf
+
+╭─ Options ──╮
+ --actor           <str>  only this account
+ --kind            <str>  only this action, e.g. down-volumes
+ --since           <str>  only after this ISO date, e.g. 2026-08-01
+ --grep            <str>  substring of the action or its target
+ --lines   -n      <int>  how many to show [default: 50]
+ --denied                 only refusals
+ --tsv                    raw tab-separated, for awk/cut and log shipping
+ --help                   Show this message and exit.
+╰──╯

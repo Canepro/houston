@@ -1,0 +1,9 @@
+
+ Usage: houston stop [OPTIONS]
+
+ Pause a repro, keeping its containers and data.
+
+╭─ Options ──╮
+ --name  -n      <str>
+ --help                 Show this message and exit.
+╰──╯

@@ -1,0 +1,13 @@
+
+ Usage: houston trust-ca [OPTIONS]
+
+ Install houston's local CA so `--https` repros are trusted without warnings.
+
+ Only needed for `up --https` on its own (the local-CA mode). A Let's Encrypt
+ or self-supplied certificate is already trusted, so this does nothing for those.
+
+╭─ Options ──╮
+ --uninstall          remove it again
+ --show               just print the CA path and fingerprint
+ --help               Show this message and exit.
+╰──╯

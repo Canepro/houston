@@ -1,0 +1,9 @@
+
+ Usage: houston token [OPTIONS]
+
+ Mint an API auth token (X-Auth-Token / X-User-Id headers).
+
+╭─ Options ──╮
+ --name  -n      <str>
+ --help                 Show this message and exit.
+╰──╯

@@ -1,0 +1,9 @@
+
+ Usage: houston list [OPTIONS]
+
+ List all repros with version, port, status and URL.
+
+╭─ Options ──╮
+ --json          print the result as one JSON envelope (see `--json` on `info`)
+ --help          Show this message and exit.
+╰──╯

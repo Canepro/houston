@@ -1,0 +1,11 @@
+
+ Usage: houston use [OPTIONS] {name}
+
+ Set the default repro for name-less commands.
+
+╭─ Arguments ──╮
+ *    name      <str>  repro to make the default [required]
+╰──╯
+╭─ Options ──╮
+ --help          Show this message and exit.
+╰──╯

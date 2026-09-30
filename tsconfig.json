@@ -1,0 +1,39 @@
+{
+  "compilerOptions": {
+    // CommonJS, because an in-function `require()` resolves at CALL time exactly like
+    // this package's 259 function-body imports. ESM's read-only live bindings
+    // re-introduce the import-cycle hazard this tree holds at zero, for no benefit.
+    "module": "commonjs",
+    "moduleResolution": "node10",
+    "target": "es2020",
+    "lib": ["es2023"],
+
+    "strict": true,
+    // Both of these are the point of the pin rather than extras on top of `strict`.
+    // `noUncheckedIndexedAccess` makes `doc.services[name]` possibly-undefined, so a missing
+    // key is handled where it is read; without it a missing compose service
+    // is `undefined` flowing silently into the emitted document.
+    "noUncheckedIndexedAccess": true,
+    // `exactOptionalPropertyTypes` keeps "absent" and "present but undefined" apart.
+    // The compose document cares: a key set to undefined serialises differently from
+    // a key that is not there, and the two are not the same document.
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+
+    "types": ["node", "jest"],
+    "skipLibCheck": true
+  },
+  // TESTS INCLUDED. `yarn typecheck` is the gate, and a suite the type checker never
+  // reads is a suite free to assert against a shape that does not exist. The EMIT reads
+  // src/ alone, which is `tsconfig.build.json`'s job.
+  "include": ["src/**/*.ts", "test/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

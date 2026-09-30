@@ -1,0 +1,15 @@
+
+ Usage: houston chown [OPTIONS]
+
+ Hand a workspace over to somebody else.
+
+ Ticket handover is the workflow the shared box is built around, and the record
+ only ever knew who typed `up` -- so "belongs to alice" kept warning the wrong
+ person, which is how people learn to click through warnings. Who CREATED it
+ stays in the record; who owns it now is what moves.
+
+╭─ Options ──╮
+    --name  -n      <str>
+ *  --to            <str>  the account taking it over [required]
+    --help                 Show this message and exit.
+╰──╯

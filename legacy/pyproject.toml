@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "houston"
+version = "2.0.0"
+description = "Launch version-matched Rocket.Chat reproduction environments"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.12",
+    "requests>=2.31",
+    "PyYAML>=6.0",
+    "packaging>=23",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "httpx>=0.27", "ruff>=0.6"]
+gui = ["fastapi>=0.110", "uvicorn>=0.29", "python-multipart>=0.0.9", "websockets>=12"]
+# Browser smoke tests only. Its own extra because it pulls a ~100 MB browser,
+# and tests/test_browser.py importorskips itself when it is absent -- so a
+# machine without it still reports a green suite.
+browser = ["playwright>=1.44"]
+
+[project.scripts]
+# `houston-py` is the oracle's name, and the only one it installs. The `houston` binary is
+# the TypeScript build's (bin/houston at the repository root); a second console script of
+# that name would win or lose on whichever shim PATH resolved first -- silently, and
+# differently on different machines.
+houston-py = "houston.cli:main"
+
+# DISCOVERY, not a hand-kept list. The list said five packages; phase 2a added
+# `houston.cli`, `houston.web.routes`, `houston.services.doctor` and
+# `houston.services.doctor.checks`, and every one of them would have worked under the
+# editable install and been ABSENT FROM THE WHEEL -- the editable finder maps the
+# top-level directory and lets importlib walk down, so a missing nested package is
+# invisible until somebody installs the artifact. `tools/wheel_smoke.py` builds the wheel
+# and imports every package from outside the checkout, which is the only proof that means
+# anything.
+#
+# Constrained to `houston*`: `where = ["."]` with no include would also sweep up `tests`,
+# `tools` and `verify`.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["houston*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+houston = ["data/*.yaml", "data/presets/*.yaml", "data/monitoring/*.json", "data/loadtest/*.js", "data/webui/*", "data/webui/js/*.js", "data/skill/*.md", "data/iam/*.json", "data/iam/*.yaml", "data/docs/*.md"]
+
+# pytest's rootdir is this directory whatever the caller's cwd, so node ids read `tests/...`
+# for `pytest legacy/tests` from the repository root and for the suite tools alike.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+# Real errors only (F = pyflakes: undefined names, unused imports; E9 = syntax/IO).
+# Deliberately not a style gate: the codebase has its own conventions and a
+# formatting sweep would bury behavioural changes in noise.
+select = ["F", "E9"]

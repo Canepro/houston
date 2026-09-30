@@ -1,0 +1,145 @@
+{
+  "derived": {
+    "state": ["running", "restarting", "stopped", "created", "stopped", "down", "running"],
+    "uptime": [
+      ["2 hours", "healthy"],
+      ["3 days", "Paused"],
+      ["", ""],
+      ["", ""],
+      ["", ""],
+      ["", ""],
+      ["5 minutes", "starting"],
+      ["", ""],
+      ["", ""]
+    ],
+    "degraded": ["", "mongodb is exited", "mongodb is restarting", ""],
+    "links": [
+      {
+        "label": "Rocket.Chat",
+        "url": "http://localhost:3100",
+        "kind": "rc"
+      },
+      {
+        "label": "instance 1",
+        "url": "http://localhost:3101",
+        "kind": "rc"
+      },
+      {
+        "label": "instance 2",
+        "url": "http://localhost:3102",
+        "kind": "rc"
+      },
+      {
+        "label": "Grafana",
+        "url": "http://localhost:5050",
+        "kind": "monitor"
+      },
+      {
+        "label": "Prometheus",
+        "url": "http://localhost:9090",
+        "kind": "monitor"
+      }
+    ],
+    "summary": {
+      "notes": [
+        "Monitoring:",
+        "Grafana:    http://localhost:5050  (admin/admin; anonymous view enabled)",
+        "Prometheus: http://localhost:9090  (Status -> Targets: rocketchat, mongodb, node-exporter)",
+        "Dashboards auto-provisioned: Rocket.Chat Metrics, MongoDB, Node Exporter Full.",
+        "k6 Load Test dashboard is provisioned too; it fills in while a `loadtest --live` run streams metrics.",
+        "Container logs -> Loki: open the 'Rocket.Chat Logs' dashboard in Grafana (http://localhost:5050/d/houston-logs) - no login needed."
+      ],
+      "note_groups": [
+        {
+          "title": "Monitoring",
+          "kind": "",
+          "rows": [],
+          "body": [
+            "Grafana:    http://localhost:5050  (admin/admin; anonymous view enabled)",
+            "Prometheus: http://localhost:9090  (Status -> Targets: rocketchat, mongodb, node-exporter)",
+            "Dashboards auto-provisioned: Rocket.Chat Metrics, MongoDB, Node Exporter Full.",
+            "k6 Load Test dashboard is provisioned too; it fills in while a `loadtest --live` run streams metrics.",
+            "Container logs -> Loki: open the 'Rocket.Chat Logs' dashboard in Grafana (http://localhost:5050/d/houston-logs) - no login needed."
+          ],
+          "commands": []
+        }
+      ],
+      "name": "T-1",
+      "rc_version": "8.5.1",
+      "mongo_tag": "8.0",
+      "mongo_flavor": "official",
+      "preset": "default",
+      "root_url": "http://localhost:3100",
+      "host_port": 3100,
+      "login": {
+        "user": "admin",
+        "password": "admin123"
+      },
+      "pinned": false,
+      "runtime": "docker",
+      "deployment": "monolith",
+      "seed": null,
+      "instances": 2,
+      "instance_urls": ["http://localhost:3101", "http://localhost:3102"],
+      "monitoring": true,
+      "grafana_url": "http://localhost:5050"
+    }
+  },
+  "browserFixtureDetail": {
+    "name": "t1234",
+    "state": "running",
+    "rc_version": "7.4.1",
+    "mongo_tag": "7.0",
+    "mongo_flavor": "mongodb",
+    "host_port": 3001,
+    "uptime": "2h",
+    "preset": "base",
+    "health": "healthy",
+    "url": "http://localhost:3001",
+    "root_url": "http://localhost:3001",
+    "public_url": "",
+    "login": {
+      "user": "admin",
+      "password": "admin123"
+    },
+    "degraded": "",
+    "instances": 1,
+    "instance_urls": [],
+    "containers": [
+      {
+        "service": "rocketchat",
+        "state": "running",
+        "status": "Up 2 hours",
+        "health": "healthy"
+      }
+    ],
+    "env": [
+      {
+        "key": "ROOT_URL",
+        "value": "http://localhost:3001",
+        "override": false
+      }
+    ],
+    "links": [],
+    "notes": [],
+    "note_groups": [],
+    "restarts": 0,
+    "monitoring": false,
+    "tls": "",
+    "is_default": false,
+    "created_by": "alice",
+    "owner": "alice",
+    "made_by": "alice",
+    "owner_history": [],
+    "workspace": "/tmp/ws",
+    "default": false,
+    "grafana_url": "",
+    "diag": {},
+    "runtime": "docker",
+    "deployment": "monolith",
+    "bind_host": "127.0.0.1",
+    "seed": null,
+    "pinned": false,
+    "namespace": ""
+  }
+}

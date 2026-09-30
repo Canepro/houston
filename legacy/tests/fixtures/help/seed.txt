@@ -1,0 +1,24 @@
+
+ Usage: houston seed [OPTIONS]
+
+ Populate a repro with sample users, channels, DMs and messages.
+
+ --scale bulk-inserts users/messages straight into MongoDB (orders of
+ magnitude faster than the REST seed) to reproduce SCALE/perf behaviour.
+ Bulk users are credential-less and messages fire no app hooks; use the
+ default REST seed when you need real, loginable users.
+
+╭─ Options ──╮
+ --name         -n      <str>
+ --profile              <str>  small | standard | large [default: small]
+ --users                <int>  override user count
+ --channels             <int>  override channel count
+ --messages             <int>  override messages per channel
+ --stats                       also report CPU/RAM cost of the seed
+ --scale                <str>  bulk Mongo prefill for scale repros, e.g.
+                               users=50000,messages=800000@team-chat
+ --clear-scale                 remove data a prior --scale added, then exit
+ --verify-seed                 fail if the readback disagrees with the plan (the readback runs
+                               and is recorded either way)
+ --help                        Show this message and exit.
+╰──╯

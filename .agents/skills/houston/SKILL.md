@@ -1,26 +1,95 @@
 ---
 name: houston
-description: Use when you need a real, version-matched Rocket.Chat instance to reproduce reported behaviour, check whether a bug is version-specific, or collect evidence for a support case. Creates disposable environments and tears them down.
+description: Use when someone asks to create, spin up, boot or start a Rocket.Chat workspace or server on a given version ("a workspace on 7.4.1"), reproduce a support ticket or reported behaviour, check whether a bug is version-specific, or compare two versions; with LDAP, SAML, OIDC, email, S3/MinIO, livechat or air-gapped; to seed sample data, list what is running, read logs, back up, restore or upgrade a workspace, or tear it down. Drives the `houston` CLI, which runs a version-matched Rocket.Chat and MongoDB on Docker or Kubernetes.
 ---
 
 # houston
 
 houston boots a version-matched Rocket.Chat paired with a compatible MongoDB, on
 Docker Compose or Kubernetes, with optional backing services (LDAP, SAML/OIDC,
-email, S3, multi-instance) and sample data. It is for reproducing a customer's
-issue on their exact version, then binning it.
+email, S3, several instances) and sample data. It is for reproducing a customer's
+issue on their exact version, then removing it.
 
-## When to reach for it
+Do **not** use it to inspect a customer's live workspace, or when the question is about
+documented behaviour rather than observed behaviour.
 
-- A report says "broken in 8.6.1" and you need that exact version running to see
-  whether it reproduces.
-- You need to know whether behaviour is version-specific: boot two versions and
-  compare. Each gets its own name and port, so they coexist.
-- A ticket is about a private team channel, a discussion or a thread, and you need
-  a workspace that actually contains one.
+## Requests and the commands they mean
 
-Do **not** reach for it to inspect a customer's live workspace, or when the
-question is about documented behaviour rather than observed behaviour.
+`<n>` is the workspace's name: what you pass to `--name` when you create it, and
+`data.name` from the `up` reply when you report it (see [Naming](#naming)). Add `--json` where the
+command takes it and read the last line (see [The output contract](#the-output-contract)).
+`houston capabilities` always prints JSON and takes no `--json`.
+
+| The person asks | Run | Then |
+|---|---|---|
+| a workspace on 7.4.1 | `houston up --version 7.4.1 --name <n> --wait --json` | `houston info --name <n> --json`, and report back |
+| the same with LDAP | `houston up --version 7.4.1 --name <n>-ldap --preset ldap --wait --json` | a **new name**: an existing one is reused as it was |
+| SAML, OIDC, email, S3, livechat, offline | `--preset saml`, `oidc`, `email`, `s3_minio`, `livechat` or `airgapped` on `up` | `oidc`: ask the person to add `127.0.0.1 keycloak` to `/etc/hosts` |
+| the customer's MongoDB version too | `houston up --version 7.4.1 --mongo 6.0 --name <n> --wait --json` | only when the ticket names it |
+| several Rocket.Chat instances | `houston up --version 7.4.1 --name <n> --deployment multi-instance --replicas 3 --wait --json` | Docker only |
+| put some data in it | `houston seed --name <n> --profile standard --verify-seed` | exit 0 means the readback matched ([Sample data](#sample-data)) |
+| 50k users, a huge room | `houston seed --name <n> --scale users=50000,messages=800000@general` | undo with `houston seed --name <n> --clear-scale`; Docker only |
+| what's running | `houston list --json` | `data.repros[]`: `name`, `owner`, `rc_version`, `state`, `links[0].url`; every workspace on the machine |
+| show the logs | `houston logs --name <n> --tail 200` | never `-f`: it does not return |
+| is it up yet | `houston ready --name <n> --json` | one call waits up to `--timeout` seconds (300); on exit 5 read `houston logs --name <n> --tail 200` before asking again |
+| upgrade it to 8.0.0 | `houston upgrade --name <n> --to 8.0.0 --dry-run`, then without `--dry-run` | it must be running; if the dry-run refuses, stop and tell the person what it said, otherwise go ahead; it backs up first; `houston upgrade --name <n> --rollback` undoes it; a version needing another MongoDB major is refused |
+| back it up | `houston backup --name <n> --label "<why>"` | `houston backups --name <n>` lists the bundles |
+| restore a bundle | `houston restore <bundle> --new` | restoring in place replaces data: ask first |
+| change a setting | `houston api --name <n> --2fa POST /api/v1/settings/<Id> -d '{"value":<v>}'` | or `houston env --name <n> --setting <Id>=<v>` on Docker |
+| load the customer's settings | `houston config-import <file> --name <n> --dry-run`, then without `--dry-run` | report what was skipped |
+| compare 7.4.1 and 8.0.0 | two `up`s with different names, one after the other | report both, remove both |
+| pause it, resume it | `houston stop --name <n>`, `houston start --name <n>` | |
+| tear it down | `houston down --name <n> --volumes --yes --json` | only workspaces you created; backup bundles in `~/.houston/backups/` are kept |
+| which MongoDB goes with a version | `houston versions 7.4.1` | |
+
+### Naming
+
+- **Always pass `--name`.** Use the ticket id when there is one (`--name TICKET-1234`).
+  Otherwise use `rc` plus the version with dashes, plus the preset: `rc7-4-1-ldap`.
+- Names are lowercased, and anything outside `a-z`, `0-9` and `-` becomes `-`, up to
+  64 characters. With accounts on the machine, houston puts the owner (`HOUSTON_USER`)
+  in front: `lucy-ticket-1234`. Later commands accept the name you typed as well, and
+  `data.name` from the `up` reply is the name to report. Build a new name (`<n>-ldap`)
+  from the name you chose, not from `data.name`, or the owner prefix is applied twice.
+- **An existing name is reused exactly as it was.** A different version or preset is
+  ignored, with a `VERSION_IGNORED_ON_REUSE` warning in the reply. A new preset needs a
+  new name; a new version means `upgrade`.
+
+### Versions
+
+**Never boot a partial version.** "7.4" is not a release: it boots a `7.4` image tag
+that may not be the patch the customer runs. Ask for the full version, or run
+`houston versions 7.4.1`: `resolved via : releases.rocket.chat` is a real release, and
+`map (no such release)` means ask the person. `versions` confirms a version you have; it
+cannot find the customer's patch for you. The same applies to `upgrade --to`.
+
+### What to tell the person afterwards
+
+From `houston info --name <n> --json`:
+
+- the URL: `data.links[0].url`;
+- the admin login: `data.login.user` and `data.login.password`. It is `admin` /
+  `admin123` only for a workspace on loopback; one with `--domain` or a wider `--bind`
+  gets a generated password, so always read it;
+- a preset's own logins and consoles, from `data.notes` (`ldap`, `saml` and `oidc` users
+  are `user1` / `user1`);
+- the Rocket.Chat and MongoDB versions it runs (`data.rc_version`, `data.mongo_tag`);
+- that it is still running, and the command that removes it.
+
+### Ask a person first
+
+- anything that touches a cloud cluster: `cluster create`, `cluster delete`, `up` with
+  `--context` naming a cloud cluster, or `up --runtime kubernetes` without `--context`
+  when `houston doctor --json` names a cloud cluster as the one it would use. If a ticket
+  needs EKS and no cluster exists, say so and ask; never create one. A local Kubernetes
+  workspace is a stand-in only if the person agrees;
+- `--bind` beyond `127.0.0.1`, or `houston config set bind_host`;
+- `--reg-token`: a registration token is a real licence, never paste one into a case;
+- `down --volumes`, `prune`, or an in-place `restore` of a workspace you did not create.
+  `down --volumes`, `prune` and `cluster delete` ask for confirmation; pass `--yes` only
+  once the person has agreed, or for a workspace you created;
+- exit 6: show `error.gate.approve_with` to the person, never run it yourself;
+- `houston trust-ca`, or editing `/etc/hosts`.
 
 ## Three standing rules
 
@@ -31,265 +100,165 @@ question is about documented behaviour rather than observed behaviour.
 2. **Branch on the exit code and `error.code`, never on prose.** Messages get
    reworded between releases; codes do not.
    - `1` internal — an unhandled failure. There is still an envelope on stdout;
-     the traceback is on stderr. Retrying unchanged will not help.
+     the stack trace is on stderr. Retrying unchanged will not help.
    - `2` usage — fix the call; retrying unchanged will not help.
    - `3` preflight — the environment is not usable. Run `houston doctor --json`.
    - `4` not found — no such workspace.
-   - `5` not ready — still unknown, you may poll again.
+   - `5` not ready — from `ready` or `up --wait`, it is still starting: poll again.
+     From `down --volumes`, it is still there: read the warning, do not retry.
+   - `6` gate — an action needs a human decision houston is not authorised to make.
+     Never retryable and never auto-approvable: `error.gate.approve_with` is what to ask a
+     PERSON to run, not something you may run yourself.
    - `7` create failed — known dead. Stop; do not retry in a loop.
    - `8` conflict — the name or port is taken. Pick another.
 
-   `capabilities.exit_codes` is the whole table. It also lists `6` (gate), which
-   nothing in this build raises; treat it as reserved rather than as a gap.
-3. **Never import houston's Python internals and never scrape human output.**
+   `capabilities.exit_codes` is the whole table, and `capabilities.error_codes` says
+   which are advertised.
+3. **Never import houston's internals and never scrape human output.**
    Use `--json` on the commands that have it — `capabilities.commands[].json` says
-   which, and it is a minority, not all of them. For the rest (`seed`, `logs`,
-   `token`, `env`, `backup`, `restore`, `upgrade`, `prune`, …) the **exit code** is
-   the machine-readable part, and every command sets it from the one table above.
-   stdout is the document; anything on stderr is for a person.
+   which, and it is a minority, not all of them: `capabilities`, `capacity`, `cluster`, `doctor`, `down`, `info`, `list`, `loadtest`, `ready`, `skill install`, `skill status`, `up` (`capabilities` prints
+   JSON without the flag). For the rest (`seed`, `logs`,
+   `env`, `backup`, `restore`, `upgrade`, `prune`, `tls-status`, …) the **exit code** is
+   the machine-readable part. stdout is the document; anything on stderr is for a
+   person.
 
 ## The output contract
 
 Every `--json` reply is one envelope:
 
 ```json
-{"schema":"houston.info.v1","contract":1,"houston_version":"1.0.0",
+{"schema":"houston.info.v1","contract":2,"houston_version":"2.0.0",
  "generated_at":"...","ok":true,"data":{...},"warnings":[],"error":null}
 ```
 
-`up` and `ready` **stream**: NDJSON `houston.event.v1` progress lines first, then
-exactly one envelope as the **last line**. So read to end of stream and parse the last
-line — which is the right way to read EVERY reply, streaming or not. A failure is the
-same envelope with `ok: false` and `error.code` set; there is always exactly one,
-including when the failure happened before any work started, and including when the
-failure was an unhandled one (its traceback goes to stderr, never stdout).
+Only `ready` and `up` stream: NDJSON `houston.event.v1` progress lines first, then exactly
+one envelope as the **last line**. Read to the end of the output and parse the last
+line, which is the right way to read every reply. A failure is the same envelope with
+`ok: false` and `error.code` set; there is always exactly one, even when the failure
+was unexpected (its stack trace goes to stderr, never stdout).
 
-Only those two stream. `capabilities.commands[].streams` is derived from the build
-and is the authority — `down` in particular emits the envelope alone, despite being
-the other long-running command.
+`contract` is the wire generation: if you do not recognise it, refuse rather than
+guess. New keys may appear in `data` or `warnings`; ignore ones you do not know.
+`down --volumes --json` needs `--yes`, because there is nobody to prompt.
 
-`contract` is the wire generation — if you do not recognise it, refuse rather than
-guess. `schema` versions each payload separately. New keys may appear in `data` or
-`warnings`; ignore ones you do not know.
+## Details by topic
 
-## Recipes
+### Presets
 
-### Reproduce a report at a specific version
-
-```
-houston capabilities                        # what this build can do
-houston doctor --json                       # is this machine usable
-houston up --version 8.6.1 --name TICKET-1234 --wait --json
-houston info --name TICKET-1234 --json      # URL, admin login, links, pods
-```
-
-`up --wait` blocks until Rocket.Chat serves. Without it, poll `houston ready
---name <n> --json`, which exits 5 while it is still coming up and 0 once it serves.
-
-### Boot the backing service the ticket is about
-
-```
-houston up --version 8.6.1 --name TICKET-1234 --preset ldap --wait --json
-houston up --version 8.6.1 --name TICKET-1235 --preset ldap --set users=130000 --wait --json
-```
-
-`capabilities.presets` lists what this build has: `ldap`, `saml`, `oidc`, `email`,
-`s3_minio`, `livechat`, `airgapped`, `default`. A preset starts the side service,
-wires Rocket.Chat to it, and applies the settings on first boot — so the feature is
-already on when you arrive: an `ldap` workspace has users to log in as, an `email`
-one catches every message Rocket.Chat sends instead of mailing it, `airgapped` has no
-route to Rocket.Chat Cloud.
-
-`--set key=value` tunes one, and `houston presets` prints each preset's own params
-with their defaults. Two worth knowing: `--set users=130000` on `ldap` is the
-directory-scale case, and `--set idp_host=<host>` on `saml`/`oidc` is what makes the
-IdP reachable when the browser is not on this machine.
-
-Three constraints, each of which is a refusal rather than a surprise:
+`capabilities.presets` lists what this build has: `airgapped`, `default`, `email`, `ldap`, `livechat`, `oidc`, `s3_minio`, `saml`. A preset starts the side
+service, wires Rocket.Chat to it and turns the feature on, so it is ready when you
+arrive: an `ldap` workspace has users, an `email` one catches every message Rocket.Chat
+sends, `airgapped` has no route to Rocket.Chat Cloud. `houston presets` prints each
+preset's `--set` parameters; `--set users=130000` on `ldap` is the large-directory case.
 
 - `--preset` takes a **name from that list, never a path**.
-- **One preset per workspace.** A preset is all-or-nothing, not additive — boot two
-  workspaces rather than looking for a way to combine two scenarios.
-- A preset cannot be combined with `--deployment multi-instance` on Docker; the
-  refusal says so instead of silently dropping one of them. `--preset multi-instance`
-  is the old spelling of `--deployment multi-instance` — it still works, and warns.
+- **One preset per workspace.** Boot two workspaces rather than combining scenarios.
+- Several instances is `--deployment multi-instance`, not a preset, and cannot be
+  combined with one. `--preset multi-instance` is the old spelling; it still works,
+  and warns.
 
-### Put realistic content in it
-
-```
-houston up --version 8.6.1 --name t1 --wait --seed --seed-profile standard --verify-seed
-```
-
-Seeding is planned before it runs and checked afterwards. The result carries
-`planned` (what the manifest asked for), the per-room readback, and
-`verification.ok`. **Treat a false or missing `verification.ok` as unproven** — do
-not infer success from a 2xx write or an attempted message count. `--verify-seed`
-makes a mismatch fail the command; without it the check still runs and is recorded
-in the workspace's `repro.json`.
+### Sample data
 
 A profile contains every kind of room, because tickets are rarely about a public
-channel: public and private channels, public and private teams, channels of either
-visibility inside a team, discussions (some anchored to a parent message), direct
-messages, threads and reactions. `standard` is 22 rooms, 287 messages, 48 threads across 20 users.
+channel: channels, teams, discussions, direct messages, threads and reactions.
+`standard` is 22 rooms, 287 messages, 48 threads across 20 users.
 
-In the verification, `faults` means something asked for is not there. Rooms holding
-**more** than planned are reported separately and are not faults — seeding only ever
-adds, so that is a re-seed or a preset that posts on boot. Rooms that could not be
-read are a gap in the check, not a defect in the workspace.
+Seeding reads everything back and checks it against the plan. **Treat a false or
+missing result as unproven**; do not infer success from a 2xx write.
+`--verify-seed` makes a mismatch fail the command. `seed` has no `--json`, so its exit
+code is the answer; afterwards `houston info --name <n> --json` shows `data.seed.ok`.
+Seeded users are `alice`, `bob` and so on, each with the username as the password.
 
-### Choose where and how it runs
-
-Three axes, and `capabilities.runtimes` lists the legal combinations:
-
-```
-houston up --version 8.6.1 --runtime kubernetes --deployment microservices --replicas 2 ...
-```
+### Where it runs
 
 `--runtime` is `docker` (default) or `kubernetes`; `--deployment` is `monolith` or
-`multi-instance` on Docker, `microservices` or `monolith` on Kubernetes. An illegal
-pair is refused with `VALIDATION_FAILED` before anything is created.
+`multi-instance` on Docker, `microservices` (default) or `monolith` on Kubernetes.
+`capabilities.runtimes` lists the legal pairs, and an illegal one is refused before
+anything is created.
 
-### Which cluster it runs in
-
-If `kind` is installed, houston creates and manages its own cluster (`houston-local`;
-`prune` deletes it once no houston namespace is left). If it is not, houston uses the
-cluster `kubectl` already points at and never removes it. With both present, kind wins.
-Provisioning is the only step that differs.
-
-`houston doctor --json` is the authority on which applies and on what the cluster
-provides -- `storage`, `ingress`, `loadbalancer`, `metrics`. Do not infer a capability
-from a distribution name: a stock k3s has all four, a stock kind has storage only, so
-`stats` refuses on one and not the other.
+On Kubernetes: `--context <name>` picks a cluster (and implies `--runtime kubernetes`),
+and the workspace records it, so later commands for that workspace go there. Without
+one, houston uses its own kind cluster if kind is installed, or else the cluster
+`kubectl` points at. `houston doctor --json` names the cluster and what it provides
+(`storage`, `ingress`, `loadbalancer`, `metrics`); do not infer those from the
+distribution's name.
 
 ### What Kubernetes refuses, and why
 
-These are refusals, not gaps — the refusal names the reason and the alternative:
+Each refusal names the reason and the alternative:
 
-- `--fresh`: it means DELETE this workspace's data, and the Kubernetes path keeps the
-  PersistentVolumeClaim. `houston down --name <n> --volumes` does delete it, so the
-  refusal names that.
-- `loadtest` / `capacity`: a Kubernetes workspace is reached through a
-  `kubectl port-forward`, a single userspace relay that saturates long before
-  Rocket.Chat does — the numbers would measure the forward. Run these against a
-  Compose workspace on the same version.
-- `env --set`: an environment variable is a helm value there. The refusal hands
-  over the `helm upgrade` that changes one.
-- `stats`: needs metrics-server in the cluster; the refusal says how to install it.
+- `--fresh`: it means delete this workspace's data, and the Kubernetes path keeps the
+  volume. `houston down --name <n> --volumes` does delete it.
+- `loadtest` and `capacity`: the traffic would pass through one `kubectl port-forward`,
+  and the numbers would measure the forward. Use a Docker workspace on the same version.
+- any `env` change: an environment variable is a Helm value there. Use `houston api` for
+  a setting.
+- `seed --scale`: Docker only. `houston seed` works on both.
 
-`logs`, `env` (read), `upgrade`, `backup`, `restore`, `seed`, `monitor`, `api`,
-`pat` and `token` all work on both runtimes.
+`stats` needs metrics-server and says how to install it. Everything else works on both
+runtimes.
 
-### HTTPS on Kubernetes works — do not send a user to Docker for it
+### HTTPS on Kubernetes works
 
-`--domain` creates an Ingress, cert-manager obtains a real Let's Encrypt certificate,
-and **TLS terminates inside the cluster** rather than at the edge. Verified end to end
-against EKS. What refuses is per CLUSTER, never per runtime, and each refusal names one
-missing thing: no ingress class, no cert-manager, no reachable `:443` Service.
-
-Two things worth knowing before you report a failure:
-
-- A **placeholder certificate** right after a create means cert-manager has not issued
-  yet, not that it failed. On a fresh cluster that is normal for the first minute or
-  three. `houston tls-status --name <n> --json` re-checks; `fallback: true` with the
-  workspace up is "still coming".
-- `--https` (houston's own CA) IS refused on a cluster that is not on this machine,
-  because that private key would leave the box. `--domain` is the answer there, and it
-  works against a cluster anywhere.
+`--domain` cert-manager obtains a Let's Encrypt
+certificate and TLS ends inside the cluster. Right after a create, a placeholder
+certificate means cert-manager has not issued yet, which is normal for a few minutes:
+`houston tls-status --name <n>` re-checks (it has no `--json`; exit 1 naming the
+ingress controller's placeholder, with the workspace up, is "still coming"). `--https`,
+houston's own CA, is refused on a cluster that is not on this machine; `--domain` is the
+answer there.
 
 ### Cloud clusters cost money, and `up` never creates one
 
-Two verbs at two lifetimes, and conflating them is how bills happen:
-
-- `houston cluster create <name> --region <r>` — about twenty minutes, **billing from
-  the first minute whether or not anything runs in it**, roughly $0.35/hr for a
-  two-node EKS cluster. Only `cluster delete` stops it.
-- `houston up ... --context <name>` — per ticket, minutes, free beyond the cluster
-  that was already running.
-
-`up` **cannot** provision a cloud cluster, structurally. If you are asked to reproduce
-something on EKS and no cluster exists, say so and ask — do not create one.
-
-Before reporting that nothing is running: `houston cluster list --force --json` sweeps
-every enabled region by tag. Read `unreadable` in that envelope as carefully as
-`clusters` — a region that could not be asked is NOT covered by the report. A stale
-kubeconfig entry for a cluster deleted elsewhere is cleared with `houston cluster
-forget <context>`, which refuses one that still answers.
+`houston cluster create` takes about twenty minutes and **bills from the first minute
+whether or not anything runs in it**; only `houston cluster delete` stops it. `up`
+cannot create one, structurally. Before saying nothing is running, run `houston cluster
+list --json`: it checks every enabled region, and a region listed under `unreadable` is
+NOT covered by the answer. The whole procedure is `houston cluster guide`.
 
 ### Collect what a case needs
 
 `houston info --name <n> --json` is the record to attach: version, MongoDB pairing,
-runtime and deployment, links, workspace path, and — on Kubernetes — the namespace
-and the pods with the reason any of them cannot start. Credential values in the env
-listing are masked, including passwords embedded in a MongoDB URL.
-
-The admin login it reports (`admin` / `admin123`) is a fixed local sandbox
-credential, not a secret. A registration token is a real licence: never paste one
-into a case, and never pass one you were not given for this purpose.
+runtime and deployment, links, and on Kubernetes the namespace and the pods, with the
+reason any cannot start. Credentials in its env listing are masked.
 
 ### Tear it down
 
-```
-houston down --name <n> --volumes --yes --json
-```
+**Tear down by default.** A workspace costs about 1.1 GB on Docker and more on
+Kubernetes, `up` refuses when the machine lacks room, and too many at once can run a
+machine out of memory. Remove the workspaces you start for your own checks. A workspace
+the person asked for is theirs: leave it running, say so, and give them the command that
+removes it.
 
-**Tear down by default.** A workspace costs about 1.1 GB on Compose and more on
-Kubernetes, `up` refuses when the box lacks headroom, and seven concurrent stacks
-have OOM-killed a 10 GB host. Keep one only when the task says so, and say so when
-you do.
+`--volumes` deletes the data and the record and cannot be undone. Without it the data
+is kept, and the same `up` brings the workspace back.
 
-`--volumes` deletes the data and the record and is irreversible; with `--json` it
-**requires `--yes`**, because there is nobody to prompt. Without `--volumes` the
-data is kept and `houston up --version <same> --name <same>` brings it back.
+`down --volumes` can **refuse** with exit 5 and a warning, keeping the record, so
+`list` still showing the workspace is correct. That 5 means "it is still there, read the
+warning", not "poll again". The usual cause is a Kubernetes namespace that will not
+finish terminating.
 
-`down --volumes` can also **refuse**: exit `5`, a warning naming the reason, and the
-record deliberately kept — so `list` still showing the workspace afterwards is
-correct, not a contradiction. Here `5` means "it is still there, read the warning",
-not "poll again"; retrying the identical command is not the fix. The usual cause is a
-Kubernetes namespace that will not finish terminating.
-
-On Kubernetes, `down` leaves the shared cluster running on purpose — it is shared by
-every workspace. `houston prune` reclaims it **if houston created it**, and refuses
-while any houston-owned namespace remains; a cluster you supplied is never deleted.
-
-`down --volumes` also removes the shared MongoDB operator and the shared
-Prometheus/Grafana stack, once no other workspace still needs them.
+On Kubernetes, `down` leaves the shared cluster running; `houston prune` removes it only
+if houston created it and no houston namespace remains.
 
 ## When the envelope is not enough
 
-Every invocation also appends to `$HOUSTON_HOME/logs/houston.log` (by default
-`~/.houston/logs/houston.log`) — one JSON object per line, mode 0600, with
-credentials dropped rather than masked. Each record carries a `run` id constant for
-one invocation, so
-
-```
-grep '"run":"<id>"' ~/.houston/logs/houston.log
-```
-
-is that command from `start` to `end`, including work a `serve` job did on another
-thread. `actor` is empty until this machine has accounts (`houston users add`) —
-that is attribution being off, not an unrecorded caller.
-
-Reach for it when the envelope's `error.code` tells you *what* failed and you
-need *when* and *in what order* — a create that died three phases in looks identical
-in the envelope whichever phase it was. `HOUSTON_LOG_MAX_MB=0` turns it off.
-
-This file is for reading, not for parsing as a contract: it has no `schema` and no
-`contract` field, and it is not covered by the guarantees above. Branch on the
-envelope; read the log to understand.
+Every command appends to `$HOUSTON_HOME/logs/houston.log` (default
+`~/.houston/logs/houston.log`): one JSON object per line, credentials dropped. Each
+line carries a `run` id for one command, so `grep '"run":"<id>"'` on that file shows it
+from start to end. Use it when `error.code` says what failed and you need when and in
+what order. It is for reading, not a contract.
 
 ## Things that will bite you
 
-- **First run is slow.** Images have to be pulled. Do not treat the first duration
+- **The first run is slow.** Images have to be pulled. Do not treat the first duration
   as typical or kill it early.
-- **`up` can refuse for capacity.** That is a preflight, not a hiccup: it means the
-  box does not have room. Free something rather than retrying.
-- **Version pairs matter.** houston resolves the right MongoDB for a Rocket.Chat
-  version. Do not override it unless you know why.
-- **Kubernetes costs more.** The chart is well over a Compose workspace, and where
-  `kind` is installed the first Kubernetes workspace also creates the cluster
-  (~600 MB more). Against an existing k3s that step is skipped.
-- **Everything binds `127.0.0.1`** unless told otherwise, because repros ship fixed
-  weak credentials. Widening that is a decision for a human on a trusted network.
+- **`up` can refuse for capacity.** That is a preflight, not a hiccup: free something
+  rather than retrying.
+- **Version pairs matter.** houston picks the MongoDB for a Rocket.Chat version. Do not
+  override it unless the ticket names one.
+- **Everything binds `127.0.0.1`** unless told otherwise, because workspaces use weak,
+  well-known credentials. Widening that is a decision for a person.
 
 ## If this skill is stale
 

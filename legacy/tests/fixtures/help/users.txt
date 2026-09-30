@@ -1,0 +1,35 @@
+
+ Usage: houston users [OPTIONS] [action] [name] [role]
+
+ Manage who can sign in to the web GUI.
+
+ A shared `houston serve` needs named accounts rather than one session token:
+ the token is handed to everybody, changes on every restart, and cannot answer
+ "who tore down TICKET-1234?". With users, every job records who ran it.
+
+
+ `add` and `passwd` GENERATE the password and show it once:
+     houston users add bob
+     houston users add bob readonly          # with a role; member by default
+     houston users add bob --ask-password    # type one instead
+
+ The GUI has always minted them, and for two reasons that apply just as much at
+ a terminal. An admin who types a colleague's password also knows it, which
+ makes every audit line signed with that name deniable. And a generated one is
+ ~96 bits, where a typed one clears a twelve-character minimum and is otherwise
+ whatever somebody thought of — which is the only thing standing between an
+ account and a distributed guessing attack, because the sign-in throttle bounds
+ one address and nothing bounds a thousand.
+
+ Either way the password is never an ARGUMENT: `ps` shows command lines to every
+ user on the machine.
+
+╭─ Arguments ──╮
+   action      <str>  list | add | passwd | remove | role [default: list]
+   name        <str>  the user name, for add/passwd/remove/role
+   role        <str>  admin | member | readonly, for `add` and `role`
+╰──╯
+╭─ Options ──╮
+ --ask-password          type a password instead of letting houston generate one
+ --help                  Show this message and exit.
+╰──╯

@@ -1,0 +1,76 @@
+{
+  "parsed": [
+    { "users": 5 },
+    { "messages": [9, "team-chat"] },
+    { "users": 5, "messages": [9, "a-b"] },
+    {},
+    { "users": 5, "messages": [2, "x"] },
+    { "users": 0 },
+    { "messages": [1, "a_b"] }
+  ],
+  "refused": [
+    "bad --scale term 'nope' (want users=N or messages=N@room)",
+    "--scale sets users more than once - give it once",
+    "--scale sets messages more than once - give it once",
+    "users=99,999,999,999 exceeds the 20,000,000 safety cap - a mistyped digit would otherwise insert for hours with no progress output",
+    "messages=30,000,000 exceeds the 20,000,000 safety cap - a mistyped digit would otherwise insert for hours with no progress output",
+    "users=5 does not take a room (@room) - a room only applies to messages=N@room",
+    "messages=N needs a target room: messages=N@room",
+    "bad --scale term 'messages=5@bad room' (want users=N or messages=N@room)",
+    "bad --scale term 'users=' (want users=N or messages=N@room)",
+    "bad --scale term 'users=-1' (want users=N or messages=N@room)",
+    "bad --scale term 'users=abc' (want users=N or messages=N@room)",
+    "bad --scale term 'foo=1' (want users=N or messages=N@room)",
+    "messages=N needs a target room: messages=N@room"
+  ],
+  "unicode": [
+    ["ok", { "messages": [5, "g\u00e9n\u00e9ral"] }],
+    ["ok", { "users": 3 }],
+    ["ok", { "users": 33 }],
+    ["ok", { "messages": [12, "room"] }],
+    ["ok", { "messages": [5, "x\u00b2"] }],
+    ["ok", { "messages": [5, "\u216b"] }],
+    ["ok", { "messages": [5, "team_chat-2"] }],
+    [
+      "refused",
+      "messages=9,007,199,254,740,993 exceeds the 20,000,000 safety cap - a mistyped digit would otherwise insert for hours with no progress output"
+    ],
+    [
+      "refused",
+      "users=99,999,999,999,999,999,999 exceeds the 20,000,000 safety cap - a mistyped digit would otherwise insert for hours with no progress output"
+    ],
+    [
+      "refused",
+      "an integer of 4301 digits is too long (the limit is 4300)"
+    ],
+    ["refused", "bad --scale term 'users=\u00b2' (want users=N or messages=N@room)"],
+    ["refused", "bad --scale term 'messages=5@a\u0301' (want users=N or messages=N@room)"],
+    ["refused", "bad --scale term 'messages=5@\\u{116d0}' (want users=N or messages=N@room)"],
+    ["refused", "bad --scale term 'users=\\u{116d0}' (want users=N or messages=N@room)"],
+    ["refused", "bad --scale term '\\ufeffusers=5' (want users=N or messages=N@room)"],
+    ["ok", { "users": 5 }]
+  ],
+  "scripts": [
+    [
+      "mongosh",
+      "--quiet",
+      "mongodb://localhost:27017/rocketchat",
+      "--eval",
+      "try {\n\n    var TOTAL = 7, BATCH = 3, made = 0;\n    var start = db['users'].countDocuments({'houston_scale': true});\n    for (var off = 0; off < TOTAL; off += BATCH) {\n      var docs = [];\n      for (var i = off; i < Math.min(off + BATCH, TOTAL); i++) {\n        var n = start + i + 1;\n        docs.push({\n          createdAt: new Date(), _updatedAt: new Date(),\n          username: 'scaleuser' + n, name: 'Scale User ' + n,\n          emails: [{address: 'scaleuser' + n + '@scale.example', verified: true}],\n          type: 'user', status: 'offline', active: true, roles: ['user'],\n          'houston_scale': true\n        });\n      }\n      db['users'].insertMany(docs, {ordered: false});\n      made += docs.length;\n    }\n    print(JSON.stringify({inserted: made}));\n    \n} catch (e) { print(JSON.stringify({error: '' + e})); }"
+    ],
+    [
+      "mongosh",
+      "--quiet",
+      "mongodb://localhost:27017/rocketchat",
+      "--eval",
+      "try {\n\n    var room = db['rocketchat_room'].findOne({$or: [{name: 'team-chat'}, {_id: 'team-chat'}]});\n    if (!room) { print(JSON.stringify({error: 'room not found: ' + 'team-chat'})); } else {\n      var TOTAL = 5, BATCH = 2, made = 0;\n      var author = {_id: 'rocket.cat', username: 'rocket.cat', name: 'Rocket.Cat'};\n      var last = null;\n      for (var off = 0; off < TOTAL; off += BATCH) {\n        var docs = [];\n        for (var i = off; i < Math.min(off + BATCH, TOTAL); i++) {\n          last = {\n            rid: room._id, msg: 'scale message ' + (i + 1),\n            ts: new Date(), _updatedAt: new Date(), u: author,\n            'houston_scale': true\n          };\n          docs.push(last);\n        }\n        var r = db['rocketchat_message'].insertMany(docs, {ordered: false});\n        made += docs.length;\n        // PER BATCH, not once at the end. `clear()` decrements by the number of\n        // TAGGED documents it finds, so a prefill killed after batch 1 of 10 left\n        // 5000 tagged messages with the room counter never incremented -- and the\n        // clear then subtracted 5000 from the room's real count. README says\n        // \"--clear-scale removes exactly what --scale added\"; that only holds if the\n        // counter is advanced as the documents land.\n        db['rocketchat_room'].updateOne({_id: room._id},\n          {$inc: {msgs: docs.length}, $set: {lm: new Date(), lastMessage: last}});\n      }\n      print(JSON.stringify({inserted: made, room: room._id}));\n    }\n    \n} catch (e) { print(JSON.stringify({error: '' + e})); }"
+    ],
+    [
+      "mongosh",
+      "--quiet",
+      "mongodb://localhost:27017/rocketchat",
+      "--eval",
+      "try {\n\n    var perRoom = db['rocketchat_message'].aggregate([\n      {$match: {$or: [{'houston_scale': true}, {'rcrepro_scale': true}]}},\n      {$group: {_id: '$rid', n: {$sum: 1}}}\n    ]).toArray();\n    var u = db['users'].deleteMany({$or: [{'houston_scale': true}, {'rcrepro_scale': true}]}).deletedCount;\n    var m = db['rocketchat_message'].deleteMany({$or: [{'houston_scale': true}, {'rcrepro_scale': true}]}).deletedCount;\n    perRoom.forEach(function (g) {\n      var newest = db['rocketchat_message'].find({rid: g._id}).sort({ts: -1}).limit(1).toArray()[0];\n      var upd = {$inc: {msgs: -g.n}};\n      if (newest) { upd.$set = {lastMessage: newest, lm: newest.ts}; }\n      else { upd.$unset = {lastMessage: '', lm: ''}; }\n      db['rocketchat_room'].updateOne({_id: g._id}, upd);\n    });\n    print(JSON.stringify({users: u, messages: m, rooms: perRoom.length}));\n    \n} catch (e) { print(JSON.stringify({error: '' + e})); }"
+    ]
+  ]
+}

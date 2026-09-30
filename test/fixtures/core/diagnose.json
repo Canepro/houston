@@ -1,0 +1,65 @@
+{
+  "signatures": [
+    [
+      ["toomanyrequests", "unauthenticated pull rate limit", "you have reached your pull rate"],
+      "Docker Hub's anonymous pull rate limit was hit. Run `docker login` (Hub username + a Personal Access Token) and retry. Note: registry.rocket.chat images still count against Docker Hub for anonymous clients."
+    ],
+    [
+      [
+        "kernel versions 6.19",
+        "server-121912",
+        "12257600",
+        "incompatibility with this version of mongodb"
+      ],
+      "MongoDB refused to start: this host's Linux kernel (>= 6.19) is incompatible with MongoDB 8.0 (SERVER-121912) - it is NOT a volume/permission problem. Use an engine/VM on kernel < 6.19 for RC versions that require Mongo 8.0. See https://jira.mongodb.org/browse/SERVER-121912"
+    ],
+    [
+      ["no matching manifest", "no match for platform", "does not match the specified platform"],
+      "The image has no build for this CPU architecture (e.g. arm64). Pick an image/tag that ships this arch, or run the engine with emulation."
+    ],
+    [
+      ["notyetinitialized", "replicasetnoprimary", "topology is closed", "no primary detected"],
+      "MongoDB is up but its replica set never initialised (no primary). This is common under amd64-on-arm64 emulation (e.g. the bitnami/legacy Mongo image); prefer a natively-supported Mongo flavor/version for this host."
+    ],
+    [
+      [
+        "manifest unknown",
+        "not found: manifest",
+        "manifest for",
+        "no such manifest",
+        "failed to resolve reference"
+      ],
+      "The image tag was not found in the registry - check the RC version / Mongo tag actually exists (or use --offline with a cached image)."
+    ],
+    [
+      ["unauthorized", "authentication required", "requested access to the resource is denied"],
+      "The registry rejected the pull as unauthorized - this image likely needs `docker login` first (private / Enterprise image)."
+    ],
+    [
+      [
+        "bind: permission denied",
+        "cannot bind",
+        "rootlessport",
+        "permission denied while trying to connect"
+      ],
+      "Binding the host port was denied - on rootless Podman/Docker, ports below 1024 need privileges. Recreate with a higher --port."
+    ],
+    [
+      ["no space left on device"],
+      "The engine ran out of disk. Free space (RC images are ~1.5 GB each), then retry - e.g. `docker system prune` or `houston prune`."
+    ]
+  ],
+  "matches": [
+    "Docker Hub's anonymous pull rate limit was hit. Run `docker login` (Hub username + a Personal Access Token) and retry. Note: registry.rocket.chat images still count against Docker Hub for anonymous clients.",
+    "MongoDB refused to start: this host's Linux kernel (>= 6.19) is incompatible with MongoDB 8.0 (SERVER-121912) - it is NOT a volume/permission problem. Use an engine/VM on kernel < 6.19 for RC versions that require Mongo 8.0. See https://jira.mongodb.org/browse/SERVER-121912",
+    "The image has no build for this CPU architecture (e.g. arm64). Pick an image/tag that ships this arch, or run the engine with emulation.",
+    "MongoDB is up but its replica set never initialised (no primary). This is common under amd64-on-arm64 emulation (e.g. the bitnami/legacy Mongo image); prefer a natively-supported Mongo flavor/version for this host.",
+    "The image tag was not found in the registry - check the RC version / Mongo tag actually exists (or use --offline with a cached image).",
+    "The registry rejected the pull as unauthorized - this image likely needs `docker login` first (private / Enterprise image).",
+    "Binding the host port was denied - on rootless Podman/Docker, ports below 1024 need privileges. Recreate with a higher --port.",
+    "The engine ran out of disk. Free space (RC images are ~1.5 GB each), then retry - e.g. `docker system prune` or `houston prune`.",
+    null,
+    null,
+    "Docker Hub's anonymous pull rate limit was hit. Run `docker login` (Hub username + a Personal Access Token) and retry. Note: registry.rocket.chat images still count against Docker Hub for anonymous clients."
+  ]
+}

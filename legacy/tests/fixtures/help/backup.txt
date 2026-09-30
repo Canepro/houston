@@ -1,0 +1,19 @@
+
+ Usage: houston backup [OPTIONS]
+
+ Back up a repro's Rocket.Chat database into a restorable bundle.
+
+ Rocket.Chat is stopped for the dump so it is consistent, then started again;
+ MongoDB keeps running throughout and its data volume is untouched.
+
+ The bundle carries the database alongside the repro's version, preset and
+ parameters, so `houston restore --new` can rebuild the whole workspace from
+ it — on this machine or somebody else's.
+
+╭─ Options ──╮
+ --name   -n      <str>
+ --out            <str>  write the bundle here instead of ~/.houston/backups/
+ --label          <str>  a note stored in the bundle, e.g. 'before upgrade'
+ --live                  don't stop Rocket.Chat first (faster, but the dump may be inconsistent)
+ --help                  Show this message and exit.
+╰──╯

@@ -1,0 +1,88 @@
+{
+  "home": {
+    "users": "# houston GUI accounts. Managed by `houston users`.\n# name:hash:created_at[:role]\nalice:scrypt$16384$8$1$6S3YoNHxdTh2bw2gBXU7kw==$7+tPUc78pEQ90IYRRzwiiurnj8tjIbXdxDK9Agt2+MM=:2026-09-29:admin\nbob:scrypt$16384$8$1$Y/NQ6nT1Lz+KOEmbGTgi9w==$u1uceswZGbU+gr+lR+Ai9DMcK+U/2ZKOUnl6DrVQb0o=:2026-09-29:member\nroot:scrypt$16384$8$1$Sw0j0eVi3sM4Y4uX4IFc6w==$xFusOPsXVh+fNupc+FHKT8sLfRozOILF7/fYgcEQFDs=:2026-09-29:admin\n",
+    "audit.log": "2026-09-29T10:00:13+00:00\t-\tuser-add\talice role=admin\t-\tok\n2026-09-29T10:00:13+00:00\t-\tuser-add\tbob role=member\t-\tok\n2026-09-29T10:00:13+00:00\t-\tuser-add\troot role=admin\t-\tok\n"
+  },
+  "cases": {
+    "down --volumes of a colleague's workspace, declined": {
+      "code": 1,
+      "stdout": "'alice-rc8-5-1' belongs to alice, not you.\nThis permanently deletes the data volume and record for alice-rc8-5-1 -- owned by alice. Continue? [y/N]: n\n",
+      "stderr": "Aborted.\n"
+    },
+    "down --volumes of a colleague's workspace, under --yes": {
+      "code": 0,
+      "stdout": "deleting 'alice-rc8-5-1', owned by alice.\n✓ 'alice-rc8-5-1' removed (containers, data volume, and record).\n",
+      "stderr": ""
+    },
+    "down --volumes of your own workspace, under --yes": {
+      "code": 0,
+      "stdout": "✓ 'alice-rc8-5-1' removed (containers, data volume, and record).\n",
+      "stderr": ""
+    },
+    "down --volumes --json without --yes": {
+      "code": 2,
+      "stdout": "{\"contract\": 2, \"data\": null, \"error\": {\"code\": \"VALIDATION_FAILED\", \"message\": \"--volumes deletes the data volume and the record, and --json has nobody to prompt. Add --yes to confirm it in the command.\"}, \"generated_at\": \"<t>\", \"houston_version\": \"2.0.0\", \"ok\": false, \"schema\": \"houston.error.v1\", \"warnings\": []}\n",
+      "stderr": "error: --volumes deletes the data volume and the record, and --json has nobody to prompt. Add --yes to confirm it in the command.\n"
+    },
+    "down, keeping the data": {
+      "code": 0,
+      "stdout": "✓ 'alice-rc8-5-1' down (data kept).\n  bring it back: houston up --version <same> --name alice-rc8-5-1\n  delete for good: add --volumes, or run `houston prune`\n",
+      "stderr": ""
+    },
+    "a bare name finds the workspace its owner made": {
+      "code": 1,
+      "stdout": "  ⚠ 'alice-test' was not created with --https - it serves plain HTTP at http://localhost:3000.\n",
+      "stderr": ""
+    },
+    "a bare name does not find somebody else's": {
+      "code": 4,
+      "stdout": "",
+      "stderr": "error: no repro named 'test' (run `houston list`)\n"
+    },
+    "an unknown name is exit 4 before anything is asked": {
+      "code": 4,
+      "stdout": "",
+      "stderr": "error: no repro named 'nope' (run `houston list`)\n"
+    },
+    "chown of a record whose extra is null": {
+      "code": 0,
+      "stdout": "✓ 'alice-rc8-5-1' now belongs to bob\n",
+      "stderr": ""
+    },
+    "chown by the actor \"123\" of a workspace the int 123 owns": {
+      "code": 8,
+      "stdout": "",
+      "stderr": "error: alice-rc8-5-1 belongs to 123 — only 123 or an admin can hand it over. Taking ownership is what decides who may destroy a workspace, so it is gated the same way as `down --volumes`.\n"
+    },
+    "chown by an admin of a workspace whose owner is true": {
+      "code": 0,
+      "stdout": "✓ 'alice-rc8-5-1' now belongs to bob (was true)\n",
+      "stderr": ""
+    },
+    "down --volumes of a workspace whose owner is a list, under --yes": {
+      "code": 0,
+      "stdout": "deleting 'alice-rc8-5-1', owned by [\"x\"].\n✓ 'alice-rc8-5-1' removed (containers, data volume, and record).\n",
+      "stderr": ""
+    },
+    "chown by HOUSTON_USER=\\x1fbob of what bob owns, which is bob": {
+      "code": 0,
+      "stdout": "✓ 'alice-rc8-5-1' now belongs to alice (was bob)\n",
+      "stderr": ""
+    },
+    "chown by HOUSTON_USER=\\ufeffbob of what bob owns, which is not bob": {
+      "code": 8,
+      "stdout": "",
+      "stderr": "error: alice-rc8-5-1 belongs to bob — only bob or an admin can hand it over. Taking ownership is what decides who may destroy a workspace, so it is gated the same way as `down --volumes`.\n"
+    },
+    "chown --to a name led by \\x1f and closed by NEL": {
+      "code": 0,
+      "stdout": "✓ 'alice-rc8-5-1' now belongs to bob (was alice)\n",
+      "stderr": ""
+    },
+    "chown --to a name led by a BOM": {
+      "code": 0,
+      "stdout": "✓ 'alice-rc8-5-1' now belongs to ﻿bob (was alice)\n",
+      "stderr": ""
+    }
+  }
+}

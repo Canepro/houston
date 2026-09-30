@@ -1,0 +1,216 @@
+{
+  "decoded": [
+    "NotUtf8: {USERS} is not valid UTF-8 (byte 0xff at position 2: invalid start byte)",
+    "NotUtf8: {USERS} is not valid UTF-8 (bytes at positions 25-26: unexpected end of data)",
+    "NotUtf8: {USERS} is not valid UTF-8 (byte 0xc3 at position 2: invalid continuation byte)",
+    "NotUtf8: {USERS} is not valid UTF-8 (byte 0xe9 at position 10: invalid continuation byte)",
+    {
+      "jörg": ["x", "2026-01-01", "member"]
+    }
+  ],
+  "shapesRead": [
+    {
+      "read": [
+        ["alice", "x", "2026-01-02", "admin"],
+        ["bob", "x", "2026-01-03", "member"]
+      ],
+      "list": [
+        ["alice", "2026-01-02", "admin"],
+        ["bob", "2026-01-03", "member"]
+      ],
+      "roles": [
+        ["alice", "admin", "admin"],
+        ["bob", "member", "member"]
+      ],
+      "admins": ["alice"],
+      "implicit": []
+    },
+    {
+      "read": [
+        ["alice", "x", "2026-01-02", "admin"],
+        ["bob", "x", "2026-01-03", "member"]
+      ],
+      "list": [
+        ["alice", "2026-01-02", "admin"],
+        ["bob", "2026-01-03", "member"]
+      ],
+      "roles": [
+        ["alice", "admin", "admin"],
+        ["bob", "member", "member"]
+      ],
+      "admins": ["alice"],
+      "implicit": []
+    },
+    {
+      "read": [
+        ["a", "x", "1", "admin"],
+        ["b", "x", "2", "member"],
+        ["c", "x", "3", "member"],
+        ["d", "x", "4", "member"],
+        ["e", "x", "5", "member"],
+        ["f", "x", "6", "member"],
+        ["g", "x", "7", "member"],
+        ["h", "x", "8", "readonly"]
+      ],
+      "list": [
+        ["a", "1", "admin"],
+        ["b", "2", "member"],
+        ["c", "3", "member"],
+        ["d", "4", "member"],
+        ["e", "5", "member"],
+        ["f", "6", "member"],
+        ["g", "7", "member"],
+        ["h", "8", "readonly"]
+      ],
+      "roles": [
+        ["a", "admin", "admin"],
+        ["b", "member", "member"],
+        ["c", "member", "member"],
+        ["d", "member", "member"],
+        ["e", "member", "member"],
+        ["f", "member", "member"],
+        ["g", "member", "member"],
+        ["h", "readonly", "readonly"]
+      ],
+      "admins": ["a"],
+      "implicit": []
+    },
+    {
+      "read": [
+        ["alice", "x", "2026-01-02", "admin"],
+        ["bob", "x", "2026-01-03", "member"]
+      ],
+      "list": [
+        ["alice", "2026-01-02", "admin"],
+        ["bob", "2026-01-03", "member"]
+      ],
+      "roles": [
+        ["alice", "admin", "admin"],
+        ["bob", "member", "member"]
+      ],
+      "admins": ["alice"],
+      "implicit": []
+    },
+    {
+      "read": [
+        ["﻿alice", "x", "2026-01-02", "admin"],
+        ["bob", "x", "2026-01-03", "member"]
+      ],
+      "list": [
+        ["bob", "2026-01-03", "member"],
+        ["﻿alice", "2026-01-02", "admin"]
+      ],
+      "roles": [
+        ["﻿alice", "", "admin"],
+        ["bob", "member", "member"]
+      ],
+      "admins": ["﻿alice"],
+      "implicit": []
+    },
+    {
+      "read": [
+        ["alice", "x", "2026-01-02", "admin"],
+        ["bob", "x", "2026-01-03", "member"]
+      ],
+      "list": [
+        ["alice", "2026-01-02", "admin"],
+        ["bob", "2026-01-03", "member"]
+      ],
+      "roles": [
+        ["alice", "admin", "admin"],
+        ["bob", "member", "member"]
+      ],
+      "admins": ["alice"],
+      "implicit": []
+    },
+    {
+      "read": [
+        ["alice", "x", "1", "admin"],
+        ["carol", "x", "2", "member\u001f"],
+        ["dave", "x", "3", ""],
+        ["erin", "x", "4", "﻿"]
+      ],
+      "list": [
+        ["alice", "1", "admin"],
+        ["carol", "2", "member\u001f"],
+        ["dave", "3", ""],
+        ["erin", "4", "﻿"]
+      ],
+      "roles": [
+        ["alice", "admin", "admin"],
+        ["carol", "member", "member"],
+        ["dave", "admin", "admin"],
+        ["erin", "admin", "admin"]
+      ],
+      "admins": ["alice", "dave", "erin"],
+      "implicit": ["dave"]
+    },
+    {
+      "read": [
+        ["ａ", "x", "2026-01-02", "admin"],
+        ["𝐀", "x", "2026-01-03", "admin"]
+      ],
+      "list": [
+        ["ａ", "2026-01-02", "admin"],
+        ["𝐀", "2026-01-03", "admin"]
+      ],
+      "roles": [
+        ["ａ", "", "admin"],
+        ["𝐀", "", "admin"]
+      ],
+      "admins": ["ａ", "𝐀"],
+      "implicit": []
+    }
+  ],
+  "shapesRewritten": [
+    "# houston GUI accounts. Managed by `houston users`.\n# name:hash:created_at[:role]\nalice:x:2026-01-02:admin\nbob:x:2026-01-03:member\nzed:scrypt$16384$8$1$5htOkTlSjvGp7w+j8iOX2w==$SY4JGvn1CpVH5BsBatVpErqX//ZsAcVXdwz+6Sut/7g=:2026-09-29:member\n",
+    "# houston GUI accounts. Managed by `houston users`.\n# name:hash:created_at[:role]\nalice:x:2026-01-02:admin\nbob:x:2026-01-03:member\nzed:scrypt$16384$8$1$cBHtI8vxTBzbGKiZhhV/1Q==$E8Jf/46ih9mOXimXrHiW2bymdbJDTQ8F3TDfkQuekDI=:2026-09-29:member\n",
+    "# houston GUI accounts. Managed by `houston users`.\n# name:hash:created_at[:role]\na:x:1:admin\nb:x:2:member\nc:x:3:member\nd:x:4:member\ne:x:5:member\nf:x:6:member\ng:x:7:member\nh:x:8:readonly\nzed:scrypt$16384$8$1$EcTomzkeQZSz4KfA/8wk2A==$xnvhao+gsIJssKlfB7Eb2VXbUCueKXz4q2PUGthdVD0=:2026-09-29:member\n",
+    "# houston GUI accounts. Managed by `houston users`.\n# name:hash:created_at[:role]\nalice:x:2026-01-02:admin\nbob:x:2026-01-03:member\nzed:scrypt$16384$8$1$JlP5JdzLnew+vSfw4tF08w==$U72OTMeQ2g6Mt0Wkz1F/U6WGEEJg1kCRAcfa+GiRvh8=:2026-09-29:member\n",
+    "# houston GUI accounts. Managed by `houston users`.\n# name:hash:created_at[:role]\nbob:x:2026-01-03:member\nzed:scrypt$16384$8$1$bf04pHK8D/bZzk1XUmS26Q==$p2382qskNk0QnaBejQ4AGVgBifD1KVpDOlvKbjnEC3M=:2026-09-29:member\n﻿alice:x:2026-01-02:admin\n",
+    "# houston GUI accounts. Managed by `houston users`.\n# name:hash:created_at[:role]\nalice:x:2026-01-02:admin\nbob:x:2026-01-03:member\nzed:scrypt$16384$8$1$ijDsCqkvOHsPjg7pBSvxrg==$o+nD+XjFyUHlDbP/SlfwGo5Wo30hN/9VtNOYZpQfcYk=:2026-09-29:member\n",
+    "# houston GUI accounts. Managed by `houston users`.\n# name:hash:created_at[:role]\nalice:x:1:admin\ncarol:x:2:member\u001f\ndave:x:3\nerin:x:4:﻿\nzed:scrypt$16384$8$1$QS9OA8Uq/oMqjvHD4zt5bg==$u5nOrLAMfC3+aeAUSbX+4eWIdumrpxqrfadAi7fFDHk=:2026-09-29:member\n",
+    "# houston GUI accounts. Managed by `houston users`.\n# name:hash:created_at[:role]\nzed:scrypt$16384$8$1$Y1qwtJZGSx1+TMGKt6bNKw==$g21AHZIStrY9i4oEGPiHXHoAiJVPA/+iASJ6h8BYspY=:2026-09-29:member\nａ:x:2026-01-02:admin\n𝐀:x:2026-01-03:admin\n"
+  ],
+  "nameAnswers": [
+    "invalid user name '😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀' — lowercase letters, digits and '-', starting with a letter or digit. It becomes part of a workspace name and therefore a DNS label.",
+    "invalid user name 'a😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀' — lowercase letters, digits and '-', starting with a letter or digit. It becomes part of a workspace name and therefore a DNS label.",
+    "user name 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' is 32 characters; the limit is 31, because it becomes part of a workspace name and therefore a DNS label.",
+    "ok"
+  ],
+  "quoting": [
+    [
+      "unknown role \"o'x\" (want: admin, member, readonly)",
+      "invalid user name \"o'x\" — lowercase letters, digits and '-', starting with a letter or digit. It becomes part of a workspace name and therefore a DNS label."
+    ],
+    [
+      "unknown role 'a\\\\b' (want: admin, member, readonly)",
+      "invalid user name 'a\\\\b' — lowercase letters, digits and '-', starting with a letter or digit. It becomes part of a workspace name and therefore a DNS label."
+    ],
+    [
+      "unknown role 'x\\ty' (want: admin, member, readonly)",
+      "invalid user name 'x\\ty' — lowercase letters, digits and '-', starting with a letter or digit. It becomes part of a workspace name and therefore a DNS label."
+    ],
+    [
+      "unknown role '\"q\"' (want: admin, member, readonly)",
+      "invalid user name '\"q\"' — lowercase letters, digits and '-', starting with a letter or digit. It becomes part of a workspace name and therefore a DNS label."
+    ],
+    [
+      "unknown role 'both\\'\"' (want: admin, member, readonly)",
+      "invalid user name 'both\\'\"' — lowercase letters, digits and '-', starting with a letter or digit. It becomes part of a workspace name and therefore a DNS label."
+    ],
+    [
+      "unknown role '' (want: admin, member, readonly)",
+      "a user name needs at least one letter or digit — it becomes part of a workspace name, and therefore a DNS label."
+    ]
+  ],
+  "aliceMember": "# houston GUI accounts. Managed by `houston users`.\n# name:hash:created_at[:role]\nalice:scrypt$16384$8$1$r5Lan2GO+P2vkJFvPnASaA==$njTYt7IpZuBN+8QP3jZlVPddldhGx2B7qlDjaE1o/b4=:2026-09-29:member\n",
+  "bobReadonly": "# houston GUI accounts. Managed by `houston users`.\n# name:hash:created_at[:role]\nbob:scrypt$16384$8$1$+QVK06snyjsi8eNpkqMXcg==$ckcL2tbreDJmeAp1nMTc5uRJ2TsmPq7joo6sGMIumLM=:2026-09-29:readonly\n",
+  "aliceAdminBobMember": "# houston GUI accounts. Managed by `houston users`.\n# name:hash:created_at[:role]\nalice:scrypt$16384$8$1$00I9eo6i46feX7bq29SBFw==$PAR87eG8vYDKZ1CsAaFl7p66HmAQhu5Pbfg1f60vzXk=:2026-09-29:admin\nbob:scrypt$16384$8$1$H7Wa2UYAgTM5gPcdNtq4kg==$QAslnvTi7nHMqWjx65WUSnyHh8bsSS2CSXNXotXfnR8=:2026-09-29:member\n",
+  "concurrentLines": [
+    "proc0:scrypt$16384$8$1$wdXF9rzPFi9AfM+ALTNn4g==$8obF+0D5moaono0vGcNr5KWHt0G3YWk/5SuNsVNDmR8=:2026-09-29:member",
+    "proc1:scrypt$16384$8$1$IpYoYSk00bILLe4aADcP3Q==$iHjONsKCwozqtVSiMUqAOA7r4zIpu85KMsflzokQa6M=:2026-09-29:member",
+    "proc2:scrypt$16384$8$1$BbOtI0iWvOrOZiVGZ7QAdg==$/J5SWnzTY495TC67V2X1kyuN48QNfP22cL/v84EWGKo=:2026-09-29:member",
+    "proc3:scrypt$16384$8$1$652Lz7CcCvD4SsrO3vCdCQ==$RM0hiLRP8jAlSe9/NAN52xA9xPdtbv8QYtZA33F2hBo=:2026-09-29:member"
+  ]
+}

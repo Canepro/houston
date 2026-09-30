@@ -1,0 +1,274 @@
+{
+  "handEditedExtra": [
+    [
+      [
+        "ok",
+        [
+          [true, ""],
+          [true, ""]
+        ]
+      ],
+      [
+        "ok",
+        {
+          "name": "alpha",
+          "from": "",
+          "to": "bob"
+        }
+      ],
+      "{\n  \"name\": \"alpha\",\n  \"project\": \"houston-alpha\",\n  \"rc_version\": \"8.5.1\",\n  \"rc_image\": \"rocketchat/rocket.chat:8.5.1\",\n  \"mongo_tag\": \"8.0\",\n  \"mongo_flavor\": \"community\",\n  \"preset\": \"\",\n  \"root_url\": \"http://localhost:3100\",\n  \"host_port\": 3100,\n  \"version_source\": \"offline\",\n  \"pinned\": false,\n  \"created_at\": \"2026-09-25T10:00:00+00:00\",\n  \"public_url\": \"\",\n  \"admin_password\": \"\",\n  \"extra\": {\n    \"owner\": \"bob\",\n    \"owner_history\": [\n      {\n        \"from\": \"\",\n        \"to\": \"bob\",\n        \"by\": \"\",\n        \"at\": \"AT\"\n      }\n    ]\n  }\n}",
+      ["chown", "alpha - -> bob", "-", "ok"]
+    ],
+    [
+      [
+        "ok",
+        [
+          [true, ""],
+          [true, ""]
+        ]
+      ],
+      [
+        "ok",
+        {
+          "name": "alpha",
+          "from": "",
+          "to": "bob"
+        }
+      ],
+      "{\n  \"name\": \"alpha\",\n  \"project\": \"houston-alpha\",\n  \"rc_version\": \"8.5.1\",\n  \"rc_image\": \"rocketchat/rocket.chat:8.5.1\",\n  \"mongo_tag\": \"8.0\",\n  \"mongo_flavor\": \"community\",\n  \"preset\": \"\",\n  \"root_url\": \"http://localhost:3100\",\n  \"host_port\": 3100,\n  \"version_source\": \"offline\",\n  \"pinned\": false,\n  \"created_at\": \"2026-09-25T10:00:00+00:00\",\n  \"public_url\": \"\",\n  \"admin_password\": \"\",\n  \"extra\": {\n    \"owner\": \"bob\",\n    \"owner_history\": [\n      {\n        \"from\": \"\",\n        \"to\": \"bob\",\n        \"by\": \"\",\n        \"at\": \"AT\"\n      }\n    ]\n  }\n}",
+      ["chown", "alpha - -> bob", "-", "ok"]
+    ],
+    [
+      [
+        "ok",
+        [
+          [true, ""],
+          [true, ""]
+        ]
+      ],
+      [
+        "ok",
+        {
+          "name": "alpha",
+          "from": "",
+          "to": "bob"
+        }
+      ],
+      "{\n  \"name\": \"alpha\",\n  \"project\": \"houston-alpha\",\n  \"rc_version\": \"8.5.1\",\n  \"rc_image\": \"rocketchat/rocket.chat:8.5.1\",\n  \"mongo_tag\": \"8.0\",\n  \"mongo_flavor\": \"community\",\n  \"preset\": \"\",\n  \"root_url\": \"http://localhost:3100\",\n  \"host_port\": 3100,\n  \"version_source\": \"offline\",\n  \"pinned\": false,\n  \"created_at\": \"2026-09-25T10:00:00+00:00\",\n  \"public_url\": \"\",\n  \"admin_password\": \"\",\n  \"extra\": {\n    \"owner\": \"bob\",\n    \"owner_history\": [\n      {\n        \"from\": \"\",\n        \"to\": \"bob\",\n        \"by\": \"\",\n        \"at\": \"AT\"\n      }\n    ]\n  }\n}",
+      ["chown", "alpha - -> bob", "-", "ok"]
+    ],
+    [
+      [
+        "ok",
+        [
+          [
+            false,
+            "alpha belongs to 123 — only 123 or an admin can hand it over. Taking ownership is what decides who may destroy a workspace, so it is gated the same way as `down --volumes`."
+          ],
+          [
+            false,
+            "alpha belongs to 123 — only 123 or an admin can hand it over. Taking ownership is what decides who may destroy a workspace, so it is gated the same way as `down --volumes`."
+          ]
+        ]
+      ],
+      [
+        "ok",
+        {
+          "name": "alpha",
+          "from": 123,
+          "to": "bob"
+        }
+      ],
+      "{\n  \"name\": \"alpha\",\n  \"project\": \"houston-alpha\",\n  \"rc_version\": \"8.5.1\",\n  \"rc_image\": \"rocketchat/rocket.chat:8.5.1\",\n  \"mongo_tag\": \"8.0\",\n  \"mongo_flavor\": \"community\",\n  \"preset\": \"\",\n  \"root_url\": \"http://localhost:3100\",\n  \"host_port\": 3100,\n  \"version_source\": \"offline\",\n  \"pinned\": false,\n  \"created_at\": \"2026-09-25T10:00:00+00:00\",\n  \"public_url\": \"\",\n  \"admin_password\": \"\",\n  \"extra\": {\n    \"owner\": \"bob\",\n    \"owner_history\": [\n      {\n        \"from\": 123,\n        \"to\": \"bob\",\n        \"by\": \"\",\n        \"at\": \"AT\"\n      }\n    ]\n  }\n}",
+      ["chown", "alpha 123 -> bob", "-", "ok"]
+    ],
+    [
+      [
+        "ok",
+        [
+          [true, ""],
+          [true, ""]
+        ]
+      ],
+      [
+        "ok",
+        {
+          "name": "alpha",
+          "from": 0,
+          "to": "bob"
+        }
+      ],
+      "{\n  \"name\": \"alpha\",\n  \"project\": \"houston-alpha\",\n  \"rc_version\": \"8.5.1\",\n  \"rc_image\": \"rocketchat/rocket.chat:8.5.1\",\n  \"mongo_tag\": \"8.0\",\n  \"mongo_flavor\": \"community\",\n  \"preset\": \"\",\n  \"root_url\": \"http://localhost:3100\",\n  \"host_port\": 3100,\n  \"version_source\": \"offline\",\n  \"pinned\": false,\n  \"created_at\": \"2026-09-25T10:00:00+00:00\",\n  \"public_url\": \"\",\n  \"admin_password\": \"\",\n  \"extra\": {\n    \"owner\": \"bob\",\n    \"created_by\": 0,\n    \"owner_history\": [\n      {\n        \"from\": 0,\n        \"to\": \"bob\",\n        \"by\": \"\",\n        \"at\": \"AT\"\n      }\n    ]\n  }\n}",
+      ["chown", "alpha - -> bob", "-", "ok"]
+    ],
+    [
+      [
+        "ok",
+        [
+          [true, ""],
+          [true, ""]
+        ]
+      ],
+      [
+        "ok",
+        {
+          "name": "alpha",
+          "from": null,
+          "to": "bob"
+        }
+      ],
+      "{\n  \"name\": \"alpha\",\n  \"project\": \"houston-alpha\",\n  \"rc_version\": \"8.5.1\",\n  \"rc_image\": \"rocketchat/rocket.chat:8.5.1\",\n  \"mongo_tag\": \"8.0\",\n  \"mongo_flavor\": \"community\",\n  \"preset\": \"\",\n  \"root_url\": \"http://localhost:3100\",\n  \"host_port\": 3100,\n  \"version_source\": \"offline\",\n  \"pinned\": false,\n  \"created_at\": \"2026-09-25T10:00:00+00:00\",\n  \"public_url\": \"\",\n  \"admin_password\": \"\",\n  \"extra\": {\n    \"created_by\": null,\n    \"owner\": \"bob\",\n    \"owner_history\": [\n      {\n        \"from\": null,\n        \"to\": \"bob\",\n        \"by\": \"\",\n        \"at\": \"AT\"\n      }\n    ]\n  }\n}",
+      ["chown", "alpha - -> bob", "-", "ok"]
+    ],
+    [
+      [
+        "ok",
+        [
+          [
+            false,
+            "alpha belongs to true — only true or an admin can hand it over. Taking ownership is what decides who may destroy a workspace, so it is gated the same way as `down --volumes`."
+          ],
+          [
+            false,
+            "alpha belongs to true — only true or an admin can hand it over. Taking ownership is what decides who may destroy a workspace, so it is gated the same way as `down --volumes`."
+          ]
+        ]
+      ],
+      [
+        "ok",
+        {
+          "name": "alpha",
+          "from": true,
+          "to": "bob"
+        }
+      ],
+      "{\n  \"name\": \"alpha\",\n  \"project\": \"houston-alpha\",\n  \"rc_version\": \"8.5.1\",\n  \"rc_image\": \"rocketchat/rocket.chat:8.5.1\",\n  \"mongo_tag\": \"8.0\",\n  \"mongo_flavor\": \"community\",\n  \"preset\": \"\",\n  \"root_url\": \"http://localhost:3100\",\n  \"host_port\": 3100,\n  \"version_source\": \"offline\",\n  \"pinned\": false,\n  \"created_at\": \"2026-09-25T10:00:00+00:00\",\n  \"public_url\": \"\",\n  \"admin_password\": \"\",\n  \"extra\": {\n    \"owner\": \"bob\",\n    \"owner_history\": [\n      {\n        \"from\": true,\n        \"to\": \"bob\",\n        \"by\": \"\",\n        \"at\": \"AT\"\n      }\n    ]\n  }\n}",
+      ["chown", "alpha True -> bob", "-", "ok"]
+    ],
+    [
+      [
+        "ok",
+        [
+          [
+            false,
+            "alpha belongs to [\"x\"] — only [\"x\"] or an admin can hand it over. Taking ownership is what decides who may destroy a workspace, so it is gated the same way as `down --volumes`."
+          ],
+          [
+            false,
+            "alpha belongs to [\"x\"] — only [\"x\"] or an admin can hand it over. Taking ownership is what decides who may destroy a workspace, so it is gated the same way as `down --volumes`."
+          ]
+        ]
+      ],
+      [
+        "ok",
+        {
+          "name": "alpha",
+          "from": ["x"],
+          "to": "bob"
+        }
+      ],
+      "{\n  \"name\": \"alpha\",\n  \"project\": \"houston-alpha\",\n  \"rc_version\": \"8.5.1\",\n  \"rc_image\": \"rocketchat/rocket.chat:8.5.1\",\n  \"mongo_tag\": \"8.0\",\n  \"mongo_flavor\": \"community\",\n  \"preset\": \"\",\n  \"root_url\": \"http://localhost:3100\",\n  \"host_port\": 3100,\n  \"version_source\": \"offline\",\n  \"pinned\": false,\n  \"created_at\": \"2026-09-25T10:00:00+00:00\",\n  \"public_url\": \"\",\n  \"admin_password\": \"\",\n  \"extra\": {\n    \"owner\": \"bob\",\n    \"owner_history\": [\n      {\n        \"from\": [\n          \"x\"\n        ],\n        \"to\": \"bob\",\n        \"by\": \"\",\n        \"at\": \"AT\"\n      }\n    ]\n  }\n}",
+      ["chown", "alpha ['x'] -> bob", "-", "ok"]
+    ],
+    [
+      [
+        "ok",
+        [
+          [
+            false,
+            "alpha belongs to {\"a\": 1} — only {\"a\": 1} or an admin can hand it over. Taking ownership is what decides who may destroy a workspace, so it is gated the same way as `down --volumes`."
+          ],
+          [
+            false,
+            "alpha belongs to {\"a\": 1} — only {\"a\": 1} or an admin can hand it over. Taking ownership is what decides who may destroy a workspace, so it is gated the same way as `down --volumes`."
+          ]
+        ]
+      ],
+      [
+        "ok",
+        {
+          "name": "alpha",
+          "from": {
+            "a": 1
+          },
+          "to": "bob"
+        }
+      ],
+      "{\n  \"name\": \"alpha\",\n  \"project\": \"houston-alpha\",\n  \"rc_version\": \"8.5.1\",\n  \"rc_image\": \"rocketchat/rocket.chat:8.5.1\",\n  \"mongo_tag\": \"8.0\",\n  \"mongo_flavor\": \"community\",\n  \"preset\": \"\",\n  \"root_url\": \"http://localhost:3100\",\n  \"host_port\": 3100,\n  \"version_source\": \"offline\",\n  \"pinned\": false,\n  \"created_at\": \"2026-09-25T10:00:00+00:00\",\n  \"public_url\": \"\",\n  \"admin_password\": \"\",\n  \"extra\": {\n    \"owner\": \"bob\",\n    \"owner_history\": [\n      {\n        \"from\": {\n          \"a\": 1\n        },\n        \"to\": \"bob\",\n        \"by\": \"\",\n        \"at\": \"AT\"\n      }\n    ]\n  }\n}",
+      ["chown", "alpha {'a': 1} -> bob", "-", "ok"]
+    ],
+    [
+      [
+        "ok",
+        [
+          [
+            false,
+            "alpha belongs to alice — only alice or an admin can hand it over. Taking ownership is what decides who may destroy a workspace, so it is gated the same way as `down --volumes`."
+          ],
+          [
+            false,
+            "alpha belongs to alice — only alice or an admin can hand it over. Taking ownership is what decides who may destroy a workspace, so it is gated the same way as `down --volumes`."
+          ]
+        ]
+      ],
+      [
+        "ok",
+        {
+          "name": "alpha",
+          "from": "alice",
+          "to": "bob"
+        }
+      ],
+      "{\n  \"name\": \"alpha\",\n  \"project\": \"houston-alpha\",\n  \"rc_version\": \"8.5.1\",\n  \"rc_image\": \"rocketchat/rocket.chat:8.5.1\",\n  \"mongo_tag\": \"8.0\",\n  \"mongo_flavor\": \"community\",\n  \"preset\": \"\",\n  \"root_url\": \"http://localhost:3100\",\n  \"host_port\": 3100,\n  \"version_source\": \"offline\",\n  \"pinned\": false,\n  \"created_at\": \"2026-09-25T10:00:00+00:00\",\n  \"public_url\": \"\",\n  \"admin_password\": \"\",\n  \"extra\": {\n    \"owner\": \"bob\",\n    \"owner_history\": [\n      \"k\",\n      \"j\",\n      {\n        \"from\": \"alice\",\n        \"to\": \"bob\",\n        \"by\": \"\",\n        \"at\": \"AT\"\n      }\n    ]\n  }\n}",
+      ["chown", "alpha alice -> bob", "-", "ok"]
+    ],
+    [
+      [
+        "ok",
+        [
+          [
+            false,
+            "alpha belongs to alice — only alice or an admin can hand it over. Taking ownership is what decides who may destroy a workspace, so it is gated the same way as `down --volumes`."
+          ],
+          [
+            false,
+            "alpha belongs to alice — only alice or an admin can hand it over. Taking ownership is what decides who may destroy a workspace, so it is gated the same way as `down --volumes`."
+          ]
+        ]
+      ],
+      [
+        "ok",
+        {
+          "name": "alpha",
+          "from": "alice",
+          "to": "bob"
+        }
+      ],
+      "{\n  \"name\": \"alpha\",\n  \"project\": \"houston-alpha\",\n  \"rc_version\": \"8.5.1\",\n  \"rc_image\": \"rocketchat/rocket.chat:8.5.1\",\n  \"mongo_tag\": \"8.0\",\n  \"mongo_flavor\": \"community\",\n  \"preset\": \"\",\n  \"root_url\": \"http://localhost:3100\",\n  \"host_port\": 3100,\n  \"version_source\": \"offline\",\n  \"pinned\": false,\n  \"created_at\": \"2026-09-25T10:00:00+00:00\",\n  \"public_url\": \"\",\n  \"admin_password\": \"\",\n  \"extra\": {\n    \"owner\": \"bob\",\n    \"owner_history\": [\n      \"a\",\n      \"b\",\n      {\n        \"from\": \"alice\",\n        \"to\": \"bob\",\n        \"by\": \"\",\n        \"at\": \"AT\"\n      }\n    ]\n  }\n}",
+      ["chown", "alpha alice -> bob", "-", "ok"]
+    ],
+    [
+      [
+        "ok",
+        [
+          [
+            false,
+            "alpha belongs to alice — only alice or an admin can hand it over. Taking ownership is what decides who may destroy a workspace, so it is gated the same way as `down --volumes`."
+          ],
+          [
+            false,
+            "alpha belongs to alice — only alice or an admin can hand it over. Taking ownership is what decides who may destroy a workspace, so it is gated the same way as `down --volumes`."
+          ]
+        ]
+      ],
+      ["TypeError", "expected a list, got an integer"],
+      "{\n  \"name\": \"alpha\",\n  \"project\": \"houston-alpha\",\n  \"rc_version\": \"8.5.1\",\n  \"rc_image\": \"rocketchat/rocket.chat:8.5.1\",\n  \"mongo_tag\": \"8.0\",\n  \"mongo_flavor\": \"community\",\n  \"preset\": \"\",\n  \"root_url\": \"http://localhost:3100\",\n  \"host_port\": 3100,\n  \"version_source\": \"offline\",\n  \"pinned\": false,\n  \"created_at\": \"2026-09-25T10:00:00+00:00\",\n  \"public_url\": \"\",\n  \"admin_password\": \"\",\n  \"extra\": {\n    \"owner\": \"alice\",\n    \"owner_history\": 5\n  }\n}",
+      []
+    ]
+  ],
+  "keyOrderAndNumbers": [
+    "{\n  \"name\": \"alpha\",\n  \"project\": \"houston-alpha\",\n  \"rc_version\": \"8.5.1\",\n  \"rc_image\": \"rocketchat/rocket.chat:8.5.1\",\n  \"mongo_tag\": \"8.0\",\n  \"mongo_flavor\": \"community\",\n  \"preset\": \"\",\n  \"root_url\": \"http://localhost:3100\",\n  \"host_port\": 3100,\n  \"version_source\": \"offline\",\n  \"pinned\": false,\n  \"created_at\": \"2026-09-25T10:00:00+00:00\",\n  \"public_url\": \"\",\n  \"admin_password\": \"\",\n  \"extra\": {\n    \"env\": {\n      \"b\": \"1\",\n      \"10\": \"2\",\n      \"a\": \"3\",\n      \"2\": \"4\"\n    },\n    \"owner\": \"bob\",\n    \"owner_history\": [\n      {\n        \"from\": \"\",\n        \"to\": \"bob\",\n        \"by\": \"\",\n        \"at\": \"AT\"\n      }\n    ]\n  }\n}",
+    "{\n  \"name\": \"alpha\",\n  \"project\": \"houston-alpha\",\n  \"rc_version\": \"8.5.1\",\n  \"rc_image\": \"rocketchat/rocket.chat:8.5.1\",\n  \"mongo_tag\": \"8.0\",\n  \"mongo_flavor\": \"community\",\n  \"preset\": \"\",\n  \"root_url\": \"http://localhost:3100\",\n  \"host_port\": 3100,\n  \"version_source\": \"offline\",\n  \"pinned\": false,\n  \"created_at\": \"2026-09-25T10:00:00+00:00\",\n  \"public_url\": \"\",\n  \"admin_password\": \"\",\n  \"extra\": {\n    \"seed\": {\n      \"n\": 12345678901234567890\n    },\n    \"owner\": \"bob\",\n    \"owner_history\": [\n      {\n        \"from\": \"\",\n        \"to\": \"bob\",\n        \"by\": \"\",\n        \"at\": \"AT\"\n      }\n    ]\n  }\n}",
+    "{\n  \"name\": \"alpha\",\n  \"project\": \"houston-alpha\",\n  \"rc_version\": \"8.5.1\",\n  \"rc_image\": \"rocketchat/rocket.chat:8.5.1\",\n  \"mongo_tag\": \"8.0\",\n  \"mongo_flavor\": \"community\",\n  \"preset\": \"\",\n  \"root_url\": \"http://localhost:3100\",\n  \"host_port\": 3100,\n  \"version_source\": \"offline\",\n  \"pinned\": false,\n  \"created_at\": \"2026-09-25T10:00:00+00:00\",\n  \"public_url\": \"\",\n  \"admin_password\": \"\",\n  \"extra\": {\n    \"owner\": \"bob\",\n    \"owner_history\": [\n      {\n        \"from\": \"\",\n        \"to\": \"alice\",\n        \"by\": \"\",\n        \"at\": 1e+16\n      },\n      {\n        \"from\": \"alice\",\n        \"to\": \"bob\",\n        \"by\": \"\",\n        \"at\": \"AT\"\n      }\n    ],\n    \"3\": 3.0,\n    \"a\": -9007199254740993\n  }\n}"
+  ]
+}

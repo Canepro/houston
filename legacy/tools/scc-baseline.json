@@ -1,0 +1,49 @@
+{
+  "note": "Import cycles in houston/ that Phase 1 must remove. Regenerate with `.venv/bin/python tools/scc_check.py --baseline tools/scc-baseline.json --update`, which refuses to record a regression. Lines are RAW physical lines; `tools/structure_check.py` counts code lines, for a different job.",
+  "metric": "raw physical lines",
+  "package_init_edges": true,
+  "counts": {
+    "module_level_only": 0,
+    "function_body_only": 1,
+    "combined": 2
+  },
+  "sccs": [
+    {
+      "size": 17,
+      "lines": 19947,
+      "modules": [
+        "jsonout",
+        "perf.mongoprof",
+        "rcapi",
+        "seed",
+        "services",
+        "services.backup",
+        "services.doctor",
+        "services.eks",
+        "services.eventlog",
+        "services.events",
+        "services.journal",
+        "services.k8s",
+        "services.lifecycle",
+        "services.migrate",
+        "services.monitor",
+        "services.postready",
+        "services.users"
+      ]
+    },
+    {
+      "size": 8,
+      "lines": 1657,
+      "modules": [
+        "presets",
+        "presets.email",
+        "presets.ldap",
+        "presets.livechat",
+        "presets.multi_instance",
+        "presets.oidc",
+        "presets.s3_minio",
+        "presets.saml"
+      ]
+    }
+  ]
+}

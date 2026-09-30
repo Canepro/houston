@@ -1,0 +1,452 @@
+{
+  "compare": [
+    [
+      {
+        "metric": "throughput (rps)",
+        "before": 100,
+        "after": 100,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "p50",
+        "before": 100,
+        "after": 100,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "p95",
+        "before": 200,
+        "after": 200,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "p99",
+        "before": 300,
+        "after": 300,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "error rate",
+        "before": 0.001,
+        "after": 0.001,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "step login p95",
+        "before": 50,
+        "after": 50,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "step post p95",
+        "before": 80,
+        "after": 80,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "step extra p95",
+        "before": 10,
+        "after": 10,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      }
+    ],
+    [
+      {
+        "metric": "throughput (rps)",
+        "before": 100,
+        "after": 50,
+        "pct": -50,
+        "worse": true,
+        "flag": true
+      },
+      {
+        "metric": "p50",
+        "before": 100,
+        "after": 100,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "p95",
+        "before": 200,
+        "after": 400,
+        "pct": 100,
+        "worse": true,
+        "flag": true
+      },
+      {
+        "metric": "p99",
+        "before": 300,
+        "after": 300,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "error rate",
+        "before": 0.001,
+        "after": 0.001,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "step login p95",
+        "before": 50,
+        "after": 50,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "step post p95",
+        "before": 80,
+        "after": 80,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "step extra p95",
+        "before": 10,
+        "after": 10,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      }
+    ],
+    [
+      {
+        "metric": "throughput (rps)",
+        "before": 100,
+        "after": 100,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "p50",
+        "before": 100,
+        "after": 100,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "p95",
+        "before": 200,
+        "after": 200,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "p99",
+        "before": 300,
+        "after": 300,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "error rate",
+        "before": 0.001,
+        "after": 0.002,
+        "pct": 100,
+        "worse": true,
+        "flag": false
+      },
+      {
+        "metric": "step login p95",
+        "before": 50,
+        "after": 50,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "step post p95",
+        "before": 80,
+        "after": 80,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "step extra p95",
+        "before": 10,
+        "after": 10,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      }
+    ],
+    [
+      {
+        "metric": "throughput (rps)",
+        "before": 100,
+        "after": 100,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "p50",
+        "before": 100,
+        "after": 100,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "p95",
+        "before": 200,
+        "after": 200,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "p99",
+        "before": 300,
+        "after": 300,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "error rate",
+        "before": 0,
+        "after": 0.05,
+        "pct": 0,
+        "worse": true,
+        "flag": true
+      },
+      {
+        "metric": "step login p95",
+        "before": 50,
+        "after": 50,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "step post p95",
+        "before": 80,
+        "after": 80,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "step extra p95",
+        "before": 10,
+        "after": 10,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      }
+    ],
+    [],
+    [],
+    [
+      {
+        "metric": "throughput (rps)",
+        "before": 100,
+        "after": 100,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "p50",
+        "before": 100,
+        "after": 100,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "p95",
+        "before": 200,
+        "after": 200,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "p99",
+        "before": 300,
+        "after": 300,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "error rate",
+        "before": 0.001,
+        "after": 0.001,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "step login p95",
+        "before": 50,
+        "after": 50,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      }
+    ],
+    [
+      {
+        "metric": "throughput (rps)",
+        "before": 100,
+        "after": 100,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "p50",
+        "before": 100,
+        "after": 100,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "p95",
+        "before": 200,
+        "after": 250,
+        "pct": 25,
+        "worse": true,
+        "flag": false
+      },
+      {
+        "metric": "p99",
+        "before": 300,
+        "after": 300,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "error rate",
+        "before": 0.001,
+        "after": 0.001,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "step login p95",
+        "before": 50,
+        "after": 50,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "step post p95",
+        "before": 80,
+        "after": 80,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "step extra p95",
+        "before": 10,
+        "after": 10,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      }
+    ],
+    [
+      {
+        "metric": "throughput (rps)",
+        "before": 100,
+        "after": 100,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "p50",
+        "before": 100,
+        "after": 100,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "p95",
+        "before": 200,
+        "after": 251,
+        "pct": 25.49999999999999,
+        "worse": true,
+        "flag": true
+      },
+      {
+        "metric": "p99",
+        "before": 300,
+        "after": 300,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "error rate",
+        "before": 0.001,
+        "after": 0.001,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "step login p95",
+        "before": 50,
+        "after": 50,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "step post p95",
+        "before": 80,
+        "after": 80,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      },
+      {
+        "metric": "step extra p95",
+        "before": 10,
+        "after": 10,
+        "pct": 0,
+        "worse": false,
+        "flag": false
+      }
+    ]
+  ]
+}

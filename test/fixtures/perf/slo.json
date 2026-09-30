@@ -1,0 +1,194 @@
+{
+  "evaluate": [
+    [
+      {
+        "key": "p95",
+        "op": "<=",
+        "threshold": 300,
+        "raw": "300ms",
+        "actual": 250,
+        "ok": true,
+        "measured": true
+      },
+      {
+        "key": "error",
+        "op": "<=",
+        "threshold": 1,
+        "raw": "1%",
+        "actual": 0.4,
+        "ok": true,
+        "measured": true
+      },
+      {
+        "key": "rps",
+        "op": ">=",
+        "threshold": 100,
+        "raw": "100",
+        "actual": 120,
+        "ok": true,
+        "measured": true
+      },
+      {
+        "key": "p99",
+        "op": "<=",
+        "threshold": 1000,
+        "raw": "1s",
+        "actual": 0,
+        "ok": false,
+        "measured": false
+      }
+    ],
+    [
+      {
+        "key": "p95",
+        "op": "<=",
+        "threshold": 300,
+        "raw": "300ms",
+        "actual": 0,
+        "ok": false,
+        "measured": false
+      },
+      {
+        "key": "error",
+        "op": "<=",
+        "threshold": 1,
+        "raw": "1%",
+        "actual": 0,
+        "ok": false,
+        "measured": false
+      },
+      {
+        "key": "rps",
+        "op": ">=",
+        "threshold": 100,
+        "raw": "100",
+        "actual": 0,
+        "ok": false,
+        "measured": false
+      },
+      {
+        "key": "p99",
+        "op": "<=",
+        "threshold": 1000,
+        "raw": "1s",
+        "actual": 0,
+        "ok": false,
+        "measured": false
+      }
+    ],
+    [
+      {
+        "key": "p95",
+        "op": "<=",
+        "threshold": 300,
+        "raw": "300ms",
+        "actual": 0,
+        "ok": false,
+        "measured": false
+      },
+      {
+        "key": "error",
+        "op": "<=",
+        "threshold": 1,
+        "raw": "1%",
+        "actual": 0,
+        "ok": false,
+        "measured": false
+      },
+      {
+        "key": "rps",
+        "op": ">=",
+        "threshold": 100,
+        "raw": "100",
+        "actual": 0,
+        "ok": false,
+        "measured": false
+      },
+      {
+        "key": "p99",
+        "op": "<=",
+        "threshold": 1000,
+        "raw": "1s",
+        "actual": 0,
+        "ok": false,
+        "measured": false
+      }
+    ],
+    [
+      {
+        "key": "p95",
+        "op": "<=",
+        "threshold": 300,
+        "raw": "300ms",
+        "actual": 300,
+        "ok": true,
+        "measured": true
+      },
+      {
+        "key": "error",
+        "op": "<=",
+        "threshold": 1,
+        "raw": "1%",
+        "actual": 1,
+        "ok": true,
+        "measured": true
+      },
+      {
+        "key": "rps",
+        "op": ">=",
+        "threshold": 100,
+        "raw": "100",
+        "actual": 100,
+        "ok": true,
+        "measured": true
+      },
+      {
+        "key": "p99",
+        "op": "<=",
+        "threshold": 1000,
+        "raw": "1s",
+        "actual": 0,
+        "ok": false,
+        "measured": false
+      }
+    ],
+    [
+      {
+        "key": "p95",
+        "op": "<=",
+        "threshold": 300,
+        "raw": "300ms",
+        "actual": 300.5,
+        "ok": false,
+        "measured": true
+      },
+      {
+        "key": "error",
+        "op": "<=",
+        "threshold": 1,
+        "raw": "1%",
+        "actual": 1.25,
+        "ok": false,
+        "measured": true
+      },
+      {
+        "key": "rps",
+        "op": ">=",
+        "threshold": 100,
+        "raw": "100",
+        "actual": 99.5,
+        "ok": false,
+        "measured": true
+      },
+      {
+        "key": "p99",
+        "op": "<=",
+        "threshold": 1000,
+        "raw": "1s",
+        "actual": 0,
+        "ok": false,
+        "measured": false
+      }
+    ]
+  ]
+}

@@ -1,0 +1,62 @@
+
+ Usage: houston up [OPTIONS]
+
+ Create and start a version-matched Rocket.Chat repro.
+
+╭─ Options ──╮
+ *  --version         -v      <str>  Rocket.Chat version, e.g. 6.5.3 [required]
+    --preset          -p      <str>  scenario to apply: ldap, saml, oidc, email, s3_minio,
+                                     livechat, airgapped
+                                     [default: default]
+    --runtime                 <str>  where it runs: docker (default) | kubernetes
+    --deployment              <str>  how RC is arranged. docker: monolith (default) |
+                                     multi-instance. kubernetes: microservices (default) |
+                                     monolith
+    --replicas                <int>  Rocket.Chat instances (needs --deployment multi-instance on
+                                     docker)
+                                     [default: 0]
+    --context                 <str>  which Kubernetes cluster — its own name (`support`) or the
+                                     full context name. ADOPTS it; never creates one. Remembered
+                                     after the first use (`houston config set
+                                     kubernetes.context`)
+    --mongo-operator                 kubernetes: manage MongoDB with the official operator (adds
+                                     SCRAM auth; needs MongoDB 6.0+)
+    --name            -n      <str>  repro name (default: derived)
+    --port                    <int>  host port (default: first free >= 3000) [default: 0]
+    --root-url                <str>  override ROOT_URL
+    --bind                    <str>  host interface for published ports (default 127.0.0.1 —
+                                     local only). 0.0.0.0 exposes RC AND sidecars with well-known
+                                     credentials to your whole network — use deliberately
+    --rc-image                <str>  override the RC image repo
+    --mongo                   <str>  override the resolved MongoDB tag
+    --reg-token               <str>  cloud registration token (EE license)
+    --set                     <str>  preset parameter KEY=VALUE (repeatable), e.g. --set users=5
+    --seed                           populate with sample users/channels/messages after boot
+    --seed-profile            <str>  seed size: small | standard | large [default: small]
+    --verify-seed                    with --seed: fail if the readback disagrees with the plan
+    --pin                            mark persistent + set as default
+    --wait                           block until RC is serving
+    --offline                        skip the live version lookup
+    --no-pull                        don't pull images first
+    --fresh                          wipe this repro's volume first
+    --force                          overwrite an existing repro
+    --monitor                        also add Prometheus + Grafana (RC metrics dashboard)
+    --stats                          with --seed: report the CPU/RAM cost of seeding
+    --domain                  <str>  serve HTTPS at this hostname with a Let's Encrypt
+                                     certificate. The domain must already point at this host and
+                                     443 must be reachable
+    --email                   <str>  contact email for Let's Encrypt. Remembered after the first
+                                     use (`houston config set acme.email`)
+    --json                           NDJSON progress on stdout, then one final JSON envelope;
+                                     prose moves to stderr
+    --https                          serve HTTPS with a local certificate instead — no domain
+                                     needed (run `houston trust-ca` once)
+    --ingress-class           <str>  Kubernetes only: which IngressClass to route through, when
+                                     the cluster has more than one (e.g. `alb`, `nginx`).
+                                     Defaults to the cluster's own default class
+    --env             -e      <str>  extra raw env var KEY=VALUE (repeatable). Persisted, so `up
+                                     --force` keeps it; change it later with `houston env`
+    --setting                 <str>  Rocket.Chat SETTING Id=VALUE (repeatable) — adds the
+                                     OVERWRITE_SETTING_ prefix a setting needs
+    --help                           Show this message and exit.
+╰──╯

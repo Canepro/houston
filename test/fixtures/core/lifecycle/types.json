@@ -1,0 +1,66 @@
+{
+  "constants": {
+    "privileged": ["rc_image", "reg_token", "bind", "context"],
+    "billable_prefixes": ["arn:aws:eks:", "gke_"],
+    "actions": ["start", "stop", "restart"],
+    "essential": ["mongodb"],
+    "transient": ["restarting", "created", "paused", "dead"],
+    "billable": ["eks", "gke", "aks"],
+    "name_max": 64,
+    "interactive_wait": 60,
+    "browser_param": {
+      "saml": "idp_host",
+      "oidc": "idp_host",
+      "s3_minio": "s3_host"
+    },
+    "loopback": ["127.0.0.1", "localhost", "::1", ""],
+    "unsupported": [
+      [
+        "fresh",
+        "--fresh means DELETE this workspace's data, and the Kubernetes path keeps the PersistentVolumeClaim — use `houston down --name <n> --volumes` first, which does delete it"
+      ]
+    ],
+    "proof_tries": 8,
+    "proof_pause": 1.5,
+    "strikes": 4,
+    "create_defaults": {
+      "version": "8.5.1",
+      "preset": "default",
+      "name": "",
+      "port": 0,
+      "root_url": "",
+      "bind": "",
+      "rc_image": "",
+      "mongo": "",
+      "reg_token": "",
+      "params": {},
+      "seed": false,
+      "seed_here": false,
+      "seed_profile": "small",
+      "pin": false,
+      "wait": false,
+      "offline": false,
+      "no_pull": false,
+      "fresh": false,
+      "force": false,
+      "monitor": false,
+      "stats": false,
+      "runtime": "",
+      "deployment": "",
+      "replicas": 0,
+      "context": "",
+      "mongo_operator": false,
+      "https": false,
+      "domain": "",
+      "acme_email": "",
+      "acme_staging": false,
+      "acme_challenge": "tlsalpn",
+      "acme_dns_provider": "",
+      "ingress_class": "",
+      "env": {},
+      "actor": "",
+      "bind_public": false
+    },
+    "kernel_bad": [6, 19]
+  }
+}

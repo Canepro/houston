@@ -1,0 +1,9 @@
+
+ Usage: houston restart [OPTIONS]
+
+ Restart a repro.
+
+╭─ Options ──╮
+ --name  -n      <str>
+ --help                 Show this message and exit.
+╰──╯

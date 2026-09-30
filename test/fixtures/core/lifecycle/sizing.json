@@ -1,0 +1,74 @@
+{
+  "engineFloor": [
+    {
+      "force": false,
+      "raised": null,
+      "events": []
+    },
+    {
+      "force": true,
+      "raised": null,
+      "events": []
+    },
+    {
+      "force": false,
+      "raised": {
+        "kind": "PreflightError",
+        "message": "the container engine has 3 CPUs (needs 4). A Kubernetes workspace needs a control plane, MongoDB and the chart, and below this it does not fail cleanly -- pods stay Pending with nothing naming memory. Raise the VM (Docker Desktop: Settings -> Resources; Podman: `podman machine set --cpus 4 --memory 6144`), or use --runtime docker. --force overrides this."
+      },
+      "events": []
+    },
+    {
+      "force": true,
+      "raised": null,
+      "events": [
+        "the container engine is below the Kubernetes floor — 3 CPUs (needs 4). Continuing because --force was given."
+      ]
+    },
+    {
+      "force": false,
+      "raised": {
+        "kind": "PreflightError",
+        "message": "the container engine has 5.2 GiB of memory (needs 6.0). A Kubernetes workspace needs a control plane, MongoDB and the chart, and below this it does not fail cleanly -- pods stay Pending with nothing naming memory. Raise the VM (Docker Desktop: Settings -> Resources; Podman: `podman machine set --cpus 4 --memory 6144`), or use --runtime docker. --force overrides this."
+      },
+      "events": []
+    },
+    {
+      "force": true,
+      "raised": null,
+      "events": [
+        "the container engine is below the Kubernetes floor — 5.2 GiB of memory (needs 6.0). Continuing because --force was given."
+      ]
+    },
+    {
+      "force": false,
+      "raised": {
+        "kind": "PreflightError",
+        "message": "the container engine has 5.5 GiB of memory (needs 6.0). A Kubernetes workspace needs a control plane, MongoDB and the chart, and below this it does not fail cleanly -- pods stay Pending with nothing naming memory. Raise the VM (Docker Desktop: Settings -> Resources; Podman: `podman machine set --cpus 4 --memory 6144`), or use --runtime docker. --force overrides this."
+      },
+      "events": []
+    },
+    {
+      "force": true,
+      "raised": null,
+      "events": [
+        "the container engine is below the Kubernetes floor — 5.5 GiB of memory (needs 6.0). Continuing because --force was given."
+      ]
+    },
+    {
+      "force": false,
+      "raised": {
+        "kind": "PreflightError",
+        "message": "the container engine has 2 CPUs (needs 4) and 4.0 GiB of memory (needs 6.0). A Kubernetes workspace needs a control plane, MongoDB and the chart, and below this it does not fail cleanly -- pods stay Pending with nothing naming memory. Raise the VM (Docker Desktop: Settings -> Resources; Podman: `podman machine set --cpus 4 --memory 6144`), or use --runtime docker. --force overrides this."
+      },
+      "events": []
+    },
+    {
+      "force": true,
+      "raised": null,
+      "events": [
+        "the container engine is below the Kubernetes floor — 2 CPUs (needs 4) and 4.0 GiB of memory (needs 6.0). Continuing because --force was given."
+      ]
+    }
+  ]
+}

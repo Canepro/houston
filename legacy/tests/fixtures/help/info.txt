@@ -1,0 +1,10 @@
+
+ Usage: houston info [OPTIONS]
+
+ Show a repro's URL, admin credentials and a curl snippet.
+
+╭─ Options ──╮
+ --name  -n      <str>
+ --json                 print the result as one JSON envelope on stdout; prose moves to stderr
+ --help                 Show this message and exit.
+╰──╯

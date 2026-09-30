@@ -1,0 +1,11 @@
+
+ Usage: houston logs [OPTIONS]
+
+ Tail a repro's logs.
+
+╭─ Options ──╮
+ --name    -n      <str>
+ --follow  -f             stream logs
+ --tail            <int>  only the last N lines (0 = all) [default: 0]
+ --help                   Show this message and exit.
+╰──╯

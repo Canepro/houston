@@ -1,0 +1,6660 @@
+{
+ "small": {
+  "profile": "small",
+  "users": 5,
+  "channels": 2,
+  "messages": 5,
+  "reactions": false,
+  "dms": 2,
+  "rich": false,
+  "total_messages": 48,
+  "total_replies": 11,
+  "by_kind": {
+   "channel": 2,
+   "private": 1,
+   "team": 1,
+   "team-channel": 1,
+   "team-channel-private": 1,
+   "general": 1,
+   "discussion": 2,
+   "dm": 2
+  },
+  "rooms": [
+   {
+    "kind": "channel",
+    "name": "team-chat",
+    "members": [
+     "alice",
+     "bob",
+     "carol",
+     "dave"
+    ],
+    "messages": 5,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 6
+   },
+   {
+    "kind": "channel",
+    "name": "dev",
+    "members": [
+     "dave",
+     "erin",
+     "alice",
+     "bob"
+    ],
+    "messages": 5,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 6
+   },
+   {
+    "kind": "private",
+    "name": "leadership",
+    "members": [
+     "bob",
+     "carol",
+     "dave"
+    ],
+    "messages": 3,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "",
+    "from_message": -1,
+    "private": true,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 4
+   },
+   {
+    "kind": "team",
+    "name": "platform",
+    "members": [
+     "erin",
+     "alice",
+     "bob",
+     "carol"
+    ],
+    "messages": 3,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 4
+   },
+   {
+    "kind": "team-channel",
+    "name": "platform-planning",
+    "members": [
+     "carol",
+     "dave",
+     "erin"
+    ],
+    "messages": 3,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "platform",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 4
+   },
+   {
+    "kind": "team-channel-private",
+    "name": "platform-standup",
+    "members": [
+     "alice",
+     "bob",
+     "carol"
+    ],
+    "messages": 3,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "platform",
+    "from_message": -1,
+    "private": true,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 4
+   },
+   {
+    "kind": "general",
+    "name": "general",
+    "members": [
+     "alice",
+     "bob",
+     "carol",
+     "dave",
+     "erin"
+    ],
+    "messages": 5,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 6
+   },
+   {
+    "kind": "discussion",
+    "name": "customer escalation 4821",
+    "members": [
+     "dave",
+     "erin",
+     "alice"
+    ],
+    "messages": 2,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "team-chat",
+    "from_message": 0,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 5
+   },
+   {
+    "kind": "discussion",
+    "name": "rollback plan",
+    "members": [
+     "bob",
+     "carol",
+     "dave"
+    ],
+    "messages": 2,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "dev",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 3
+   },
+   {
+    "kind": "dm",
+    "name": "alice~bob",
+    "members": [
+     "alice",
+     "bob"
+    ],
+    "messages": 2,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 3
+   },
+   {
+    "kind": "dm",
+    "name": "bob~carol",
+    "members": [
+     "bob",
+     "carol"
+    ],
+    "messages": 2,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 3
+   }
+  ]
+ },
+ "standard": {
+  "profile": "standard",
+  "users": 20,
+  "channels": 5,
+  "messages": 20,
+  "reactions": true,
+  "dms": 5,
+  "rich": true,
+  "total_messages": 287,
+  "total_replies": 48,
+  "by_kind": {
+   "channel": 5,
+   "private": 2,
+   "team": 1,
+   "team-channel": 2,
+   "team-channel-private": 2,
+   "team-private": 1,
+   "general": 1,
+   "discussion": 3,
+   "dm": 5
+  },
+  "rooms": [
+   {
+    "kind": "channel",
+    "name": "team-chat",
+    "members": [
+     "alice",
+     "bob",
+     "carol",
+     "dave"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "channel",
+    "name": "dev",
+    "members": [
+     "dave",
+     "erin",
+     "frank",
+     "grace"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "channel",
+    "name": "support",
+    "members": [
+     "grace",
+     "heidi",
+     "ivan",
+     "judy"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "channel",
+    "name": "random",
+    "members": [
+     "judy",
+     "mallory",
+     "niaj",
+     "olivia"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "channel",
+    "name": "announcements",
+    "members": [
+     "olivia",
+     "peggy",
+     "quinn",
+     "rupert"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "private",
+    "name": "leadership",
+    "members": [
+     "rupert",
+     "sybil",
+     "trent"
+    ],
+    "messages": 10,
+    "threads": [
+     0,
+     5
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": true,
+    "replies": 2,
+    "reacted": 4,
+    "total_messages": 12
+   },
+   {
+    "kind": "private",
+    "name": "private-project",
+    "members": [
+     "uma",
+     "victor",
+     "alice"
+    ],
+    "messages": 10,
+    "threads": [
+     0,
+     5
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": true,
+    "replies": 2,
+    "reacted": 4,
+    "total_messages": 12
+   },
+   {
+    "kind": "team",
+    "name": "platform",
+    "members": [
+     "bob",
+     "carol",
+     "dave",
+     "erin"
+    ],
+    "messages": 10,
+    "threads": [
+     0,
+     5
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 2,
+    "reacted": 4,
+    "total_messages": 12
+   },
+   {
+    "kind": "team-channel",
+    "name": "platform-planning",
+    "members": [
+     "erin",
+     "frank",
+     "grace"
+    ],
+    "messages": 10,
+    "threads": [
+     0,
+     5
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9
+    ],
+    "parent": "platform",
+    "from_message": -1,
+    "private": false,
+    "replies": 2,
+    "reacted": 4,
+    "total_messages": 12
+   },
+   {
+    "kind": "team-channel-private",
+    "name": "platform-standup",
+    "members": [
+     "heidi",
+     "ivan",
+     "judy"
+    ],
+    "messages": 10,
+    "threads": [
+     0,
+     5
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9
+    ],
+    "parent": "platform",
+    "from_message": -1,
+    "private": true,
+    "replies": 2,
+    "reacted": 4,
+    "total_messages": 12
+   },
+   {
+    "kind": "team-private",
+    "name": "customer-success",
+    "members": [
+     "mallory",
+     "niaj",
+     "olivia",
+     "peggy"
+    ],
+    "messages": 10,
+    "threads": [
+     0,
+     5
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": true,
+    "replies": 2,
+    "reacted": 4,
+    "total_messages": 12
+   },
+   {
+    "kind": "team-channel",
+    "name": "customer-success-planning",
+    "members": [
+     "peggy",
+     "quinn",
+     "rupert"
+    ],
+    "messages": 10,
+    "threads": [
+     0,
+     5
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9
+    ],
+    "parent": "customer-success",
+    "from_message": -1,
+    "private": false,
+    "replies": 2,
+    "reacted": 4,
+    "total_messages": 12
+   },
+   {
+    "kind": "team-channel-private",
+    "name": "customer-success-standup",
+    "members": [
+     "sybil",
+     "trent",
+     "uma"
+    ],
+    "messages": 10,
+    "threads": [
+     0,
+     5
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9
+    ],
+    "parent": "customer-success",
+    "from_message": -1,
+    "private": true,
+    "replies": 2,
+    "reacted": 4,
+    "total_messages": 12
+   },
+   {
+    "kind": "general",
+    "name": "general",
+    "members": [
+     "alice",
+     "bob",
+     "carol",
+     "dave",
+     "erin",
+     "frank",
+     "grace",
+     "heidi",
+     "ivan",
+     "judy",
+     "mallory",
+     "niaj",
+     "olivia",
+     "peggy",
+     "quinn",
+     "rupert",
+     "sybil",
+     "trent",
+     "uma",
+     "victor"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "discussion",
+    "name": "customer escalation 4821",
+    "members": [
+     "victor",
+     "alice",
+     "bob"
+    ],
+    "messages": 5,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0,
+     3
+    ],
+    "parent": "team-chat",
+    "from_message": 0,
+    "private": false,
+    "replies": 1,
+    "reacted": 2,
+    "total_messages": 8
+   },
+   {
+    "kind": "discussion",
+    "name": "rollback plan",
+    "members": [
+     "carol",
+     "dave",
+     "erin"
+    ],
+    "messages": 5,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0,
+     3
+    ],
+    "parent": "dev",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 2,
+    "total_messages": 6
+   },
+   {
+    "kind": "discussion",
+    "name": "release checklist",
+    "members": [
+     "frank",
+     "grace",
+     "heidi"
+    ],
+    "messages": 5,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0,
+     3
+    ],
+    "parent": "support",
+    "from_message": 0,
+    "private": false,
+    "replies": 1,
+    "reacted": 2,
+    "total_messages": 8
+   },
+   {
+    "kind": "dm",
+    "name": "alice~bob",
+    "members": [
+     "alice",
+     "bob"
+    ],
+    "messages": 4,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0,
+     3
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 2,
+    "total_messages": 5
+   },
+   {
+    "kind": "dm",
+    "name": "bob~carol",
+    "members": [
+     "bob",
+     "carol"
+    ],
+    "messages": 4,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0,
+     3
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 2,
+    "total_messages": 5
+   },
+   {
+    "kind": "dm",
+    "name": "carol~dave",
+    "members": [
+     "carol",
+     "dave"
+    ],
+    "messages": 4,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0,
+     3
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 2,
+    "total_messages": 5
+   },
+   {
+    "kind": "dm",
+    "name": "dave~erin",
+    "members": [
+     "dave",
+     "erin"
+    ],
+    "messages": 4,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0,
+     3
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 2,
+    "total_messages": 5
+   },
+   {
+    "kind": "dm",
+    "name": "erin~frank",
+    "members": [
+     "erin",
+     "frank"
+    ],
+    "messages": 4,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0,
+     3
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 2,
+    "total_messages": 5
+   }
+  ]
+ },
+ "large": {
+  "profile": "large",
+  "users": 100,
+  "channels": 12,
+  "messages": 100,
+  "reactions": true,
+  "dms": 20,
+  "rich": true,
+  "total_messages": 3006,
+  "total_replies": 500,
+  "by_kind": {
+   "channel": 12,
+   "private": 4,
+   "team": 2,
+   "team-channel": 3,
+   "team-channel-private": 3,
+   "team-private": 1,
+   "general": 1,
+   "discussion": 6,
+   "dm": 20
+  },
+  "rooms": [
+   {
+    "kind": "channel",
+    "name": "team-chat",
+    "members": [
+     "alice",
+     "bob",
+     "carol",
+     "dave"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "channel",
+    "name": "dev",
+    "members": [
+     "dave",
+     "erin",
+     "frank",
+     "grace"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "channel",
+    "name": "support",
+    "members": [
+     "grace",
+     "heidi",
+     "ivan",
+     "judy"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "channel",
+    "name": "random",
+    "members": [
+     "judy",
+     "mallory",
+     "niaj",
+     "olivia"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "channel",
+    "name": "announcements",
+    "members": [
+     "olivia",
+     "peggy",
+     "quinn",
+     "rupert"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "channel",
+    "name": "design",
+    "members": [
+     "rupert",
+     "sybil",
+     "trent",
+     "uma"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "channel",
+    "name": "qa",
+    "members": [
+     "uma",
+     "victor",
+     "wendy",
+     "xavier"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "channel",
+    "name": "ops",
+    "members": [
+     "xavier",
+     "yvonne",
+     "zack",
+     "alice2"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "channel",
+    "name": "product",
+    "members": [
+     "alice2",
+     "bob2",
+     "carol2",
+     "dave2"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "channel",
+    "name": "sales",
+    "members": [
+     "dave2",
+     "erin2",
+     "frank2",
+     "grace2"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "channel",
+    "name": "incidents",
+    "members": [
+     "grace2",
+     "heidi2",
+     "ivan2",
+     "judy2"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "channel",
+    "name": "watercooler",
+    "members": [
+     "judy2",
+     "mallory2",
+     "niaj2",
+     "olivia2"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "private",
+    "name": "leadership",
+    "members": [
+     "olivia2",
+     "peggy2",
+     "quinn2"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": true,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "private",
+    "name": "private-project",
+    "members": [
+     "rupert2",
+     "sybil2",
+     "trent2"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": true,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "private",
+    "name": "security",
+    "members": [
+     "uma2",
+     "victor2",
+     "wendy2"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": true,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "private",
+    "name": "hiring",
+    "members": [
+     "xavier2",
+     "yvonne2",
+     "zack2"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": true,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "team",
+    "name": "platform",
+    "members": [
+     "alice3",
+     "bob3",
+     "carol3",
+     "dave3"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "team-channel",
+    "name": "platform-planning",
+    "members": [
+     "dave3",
+     "erin3",
+     "frank3"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "platform",
+    "from_message": -1,
+    "private": false,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "team-channel-private",
+    "name": "platform-standup",
+    "members": [
+     "grace3",
+     "heidi3",
+     "ivan3"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "platform",
+    "from_message": -1,
+    "private": true,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "team-private",
+    "name": "customer-success",
+    "members": [
+     "judy3",
+     "mallory3",
+     "niaj3",
+     "olivia3"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": true,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "team-channel",
+    "name": "customer-success-planning",
+    "members": [
+     "olivia3",
+     "peggy3",
+     "quinn3"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "customer-success",
+    "from_message": -1,
+    "private": false,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "team-channel-private",
+    "name": "customer-success-standup",
+    "members": [
+     "rupert3",
+     "sybil3",
+     "trent3"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "customer-success",
+    "from_message": -1,
+    "private": true,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "team",
+    "name": "infrastructure",
+    "members": [
+     "uma3",
+     "victor3",
+     "wendy3",
+     "xavier3"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "team-channel",
+    "name": "infrastructure-planning",
+    "members": [
+     "xavier3",
+     "yvonne3",
+     "zack3"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "infrastructure",
+    "from_message": -1,
+    "private": false,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "team-channel-private",
+    "name": "infrastructure-standup",
+    "members": [
+     "alice4",
+     "bob4",
+     "carol4"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "infrastructure",
+    "from_message": -1,
+    "private": true,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "general",
+    "name": "general",
+    "members": [
+     "alice",
+     "bob",
+     "carol",
+     "dave",
+     "erin",
+     "frank",
+     "grace",
+     "heidi",
+     "ivan",
+     "judy",
+     "mallory",
+     "niaj",
+     "olivia",
+     "peggy",
+     "quinn",
+     "rupert",
+     "sybil",
+     "trent",
+     "uma",
+     "victor",
+     "wendy",
+     "xavier",
+     "yvonne",
+     "zack",
+     "alice2",
+     "bob2",
+     "carol2",
+     "dave2",
+     "erin2",
+     "frank2",
+     "grace2",
+     "heidi2",
+     "ivan2",
+     "judy2",
+     "mallory2",
+     "niaj2",
+     "olivia2",
+     "peggy2",
+     "quinn2",
+     "rupert2",
+     "sybil2",
+     "trent2",
+     "uma2",
+     "victor2",
+     "wendy2",
+     "xavier2",
+     "yvonne2",
+     "zack2",
+     "alice3",
+     "bob3",
+     "carol3",
+     "dave3",
+     "erin3",
+     "frank3",
+     "grace3",
+     "heidi3",
+     "ivan3",
+     "judy3",
+     "mallory3",
+     "niaj3",
+     "olivia3",
+     "peggy3",
+     "quinn3",
+     "rupert3",
+     "sybil3",
+     "trent3",
+     "uma3",
+     "victor3",
+     "wendy3",
+     "xavier3",
+     "yvonne3",
+     "zack3",
+     "alice4",
+     "bob4",
+     "carol4",
+     "dave4",
+     "erin4",
+     "frank4",
+     "grace4",
+     "heidi4",
+     "ivan4",
+     "judy4",
+     "mallory4",
+     "niaj4",
+     "olivia4",
+     "peggy4",
+     "quinn4",
+     "rupert4",
+     "sybil4",
+     "trent4",
+     "uma4",
+     "victor4",
+     "wendy4",
+     "xavier4",
+     "yvonne4",
+     "zack4",
+     "alice5",
+     "bob5",
+     "carol5",
+     "dave5"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "discussion",
+    "name": "customer escalation 4821",
+    "members": [
+     "dave4",
+     "erin4",
+     "frank4"
+    ],
+    "messages": 25,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24
+    ],
+    "parent": "team-chat",
+    "from_message": 0,
+    "private": false,
+    "replies": 5,
+    "reacted": 9,
+    "total_messages": 32
+   },
+   {
+    "kind": "discussion",
+    "name": "rollback plan",
+    "members": [
+     "grace4",
+     "heidi4",
+     "ivan4"
+    ],
+    "messages": 25,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24
+    ],
+    "parent": "dev",
+    "from_message": -1,
+    "private": false,
+    "replies": 5,
+    "reacted": 9,
+    "total_messages": 30
+   },
+   {
+    "kind": "discussion",
+    "name": "release checklist",
+    "members": [
+     "judy4",
+     "mallory4",
+     "niaj4"
+    ],
+    "messages": 25,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24
+    ],
+    "parent": "support",
+    "from_message": 0,
+    "private": false,
+    "replies": 5,
+    "reacted": 9,
+    "total_messages": 32
+   },
+   {
+    "kind": "discussion",
+    "name": "post-mortem draft",
+    "members": [
+     "olivia4",
+     "peggy4",
+     "quinn4"
+    ],
+    "messages": 25,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24
+    ],
+    "parent": "random",
+    "from_message": -1,
+    "private": false,
+    "replies": 5,
+    "reacted": 9,
+    "total_messages": 30
+   },
+   {
+    "kind": "discussion",
+    "name": "capacity for Q3",
+    "members": [
+     "rupert4",
+     "sybil4",
+     "trent4"
+    ],
+    "messages": 25,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24
+    ],
+    "parent": "announcements",
+    "from_message": 0,
+    "private": false,
+    "replies": 5,
+    "reacted": 9,
+    "total_messages": 32
+   },
+   {
+    "kind": "discussion",
+    "name": "onboarding questions",
+    "members": [
+     "uma4",
+     "victor4",
+     "wendy4"
+    ],
+    "messages": 25,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24
+    ],
+    "parent": "design",
+    "from_message": -1,
+    "private": false,
+    "replies": 5,
+    "reacted": 9,
+    "total_messages": 30
+   },
+   {
+    "kind": "dm",
+    "name": "alice~bob",
+    "members": [
+     "alice",
+     "bob"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "dm",
+    "name": "bob~carol",
+    "members": [
+     "bob",
+     "carol"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "dm",
+    "name": "carol~dave",
+    "members": [
+     "carol",
+     "dave"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "dm",
+    "name": "dave~erin",
+    "members": [
+     "dave",
+     "erin"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "dm",
+    "name": "erin~frank",
+    "members": [
+     "erin",
+     "frank"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "dm",
+    "name": "frank~grace",
+    "members": [
+     "frank",
+     "grace"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "dm",
+    "name": "grace~heidi",
+    "members": [
+     "grace",
+     "heidi"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "dm",
+    "name": "heidi~ivan",
+    "members": [
+     "heidi",
+     "ivan"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "dm",
+    "name": "ivan~judy",
+    "members": [
+     "ivan",
+     "judy"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "dm",
+    "name": "judy~mallory",
+    "members": [
+     "judy",
+     "mallory"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "dm",
+    "name": "mallory~niaj",
+    "members": [
+     "mallory",
+     "niaj"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "dm",
+    "name": "niaj~olivia",
+    "members": [
+     "niaj",
+     "olivia"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "dm",
+    "name": "olivia~peggy",
+    "members": [
+     "olivia",
+     "peggy"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "dm",
+    "name": "peggy~quinn",
+    "members": [
+     "peggy",
+     "quinn"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "dm",
+    "name": "quinn~rupert",
+    "members": [
+     "quinn",
+     "rupert"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "dm",
+    "name": "rupert~sybil",
+    "members": [
+     "rupert",
+     "sybil"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "dm",
+    "name": "sybil~trent",
+    "members": [
+     "sybil",
+     "trent"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "dm",
+    "name": "trent~uma",
+    "members": [
+     "trent",
+     "uma"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "dm",
+    "name": "uma~victor",
+    "members": [
+     "uma",
+     "victor"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "dm",
+    "name": "victor~wendy",
+    "members": [
+     "victor",
+     "wendy"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   }
+  ]
+ },
+ "small {\"users\":2}": {
+  "profile": "small",
+  "users": 2,
+  "channels": 2,
+  "messages": 5,
+  "reactions": false,
+  "dms": 1,
+  "rich": false,
+  "total_messages": 45,
+  "total_replies": 10,
+  "by_kind": {
+   "channel": 2,
+   "private": 1,
+   "team": 1,
+   "team-channel": 1,
+   "team-channel-private": 1,
+   "general": 1,
+   "discussion": 2,
+   "dm": 1
+  },
+  "rooms": [
+   {
+    "kind": "channel",
+    "name": "team-chat",
+    "members": [
+     "alice",
+     "bob"
+    ],
+    "messages": 5,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 6
+   },
+   {
+    "kind": "channel",
+    "name": "dev",
+    "members": [
+     "bob",
+     "alice"
+    ],
+    "messages": 5,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 6
+   },
+   {
+    "kind": "private",
+    "name": "leadership",
+    "members": [
+     "alice",
+     "bob"
+    ],
+    "messages": 3,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "",
+    "from_message": -1,
+    "private": true,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 4
+   },
+   {
+    "kind": "team",
+    "name": "platform",
+    "members": [
+     "bob",
+     "alice"
+    ],
+    "messages": 3,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 4
+   },
+   {
+    "kind": "team-channel",
+    "name": "platform-planning",
+    "members": [
+     "alice",
+     "bob"
+    ],
+    "messages": 3,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "platform",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 4
+   },
+   {
+    "kind": "team-channel-private",
+    "name": "platform-standup",
+    "members": [
+     "bob",
+     "alice"
+    ],
+    "messages": 3,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "platform",
+    "from_message": -1,
+    "private": true,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 4
+   },
+   {
+    "kind": "general",
+    "name": "general",
+    "members": [
+     "alice",
+     "bob"
+    ],
+    "messages": 5,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 6
+   },
+   {
+    "kind": "discussion",
+    "name": "customer escalation 4821",
+    "members": [
+     "alice",
+     "bob"
+    ],
+    "messages": 2,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "team-chat",
+    "from_message": 0,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 5
+   },
+   {
+    "kind": "discussion",
+    "name": "rollback plan",
+    "members": [
+     "bob",
+     "alice"
+    ],
+    "messages": 2,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "dev",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 3
+   },
+   {
+    "kind": "dm",
+    "name": "alice~bob",
+    "members": [
+     "alice",
+     "bob"
+    ],
+    "messages": 2,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 3
+   }
+  ]
+ },
+ "small {\"users\":4,\"messages\":0}": {
+  "profile": "small",
+  "users": 4,
+  "channels": 2,
+  "messages": 0,
+  "reactions": false,
+  "dms": 2,
+  "rich": false,
+  "total_messages": 30,
+  "total_replies": 8,
+  "by_kind": {
+   "channel": 2,
+   "private": 1,
+   "team": 1,
+   "team-channel": 1,
+   "team-channel-private": 1,
+   "general": 1,
+   "discussion": 2,
+   "dm": 2
+  },
+  "rooms": [
+   {
+    "kind": "channel",
+    "name": "team-chat",
+    "members": [
+     "alice",
+     "bob",
+     "carol",
+     "dave"
+    ],
+    "messages": 0,
+    "threads": [],
+    "reactions": [],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 0,
+    "reacted": 0,
+    "total_messages": 0
+   },
+   {
+    "kind": "channel",
+    "name": "dev",
+    "members": [
+     "dave",
+     "alice",
+     "bob",
+     "carol"
+    ],
+    "messages": 0,
+    "threads": [],
+    "reactions": [],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 0,
+    "reacted": 0,
+    "total_messages": 0
+   },
+   {
+    "kind": "private",
+    "name": "leadership",
+    "members": [
+     "carol",
+     "dave",
+     "alice"
+    ],
+    "messages": 3,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "",
+    "from_message": -1,
+    "private": true,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 4
+   },
+   {
+    "kind": "team",
+    "name": "platform",
+    "members": [
+     "bob",
+     "carol",
+     "dave",
+     "alice"
+    ],
+    "messages": 3,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 4
+   },
+   {
+    "kind": "team-channel",
+    "name": "platform-planning",
+    "members": [
+     "alice",
+     "bob",
+     "carol"
+    ],
+    "messages": 3,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "platform",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 4
+   },
+   {
+    "kind": "team-channel-private",
+    "name": "platform-standup",
+    "members": [
+     "dave",
+     "alice",
+     "bob"
+    ],
+    "messages": 3,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "platform",
+    "from_message": -1,
+    "private": true,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 4
+   },
+   {
+    "kind": "general",
+    "name": "general",
+    "members": [
+     "alice",
+     "bob",
+     "carol",
+     "dave"
+    ],
+    "messages": 0,
+    "threads": [],
+    "reactions": [],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 0,
+    "reacted": 0,
+    "total_messages": 0
+   },
+   {
+    "kind": "discussion",
+    "name": "customer escalation 4821",
+    "members": [
+     "carol",
+     "dave",
+     "alice"
+    ],
+    "messages": 2,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "team-chat",
+    "from_message": 0,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 5
+   },
+   {
+    "kind": "discussion",
+    "name": "rollback plan",
+    "members": [
+     "bob",
+     "carol",
+     "dave"
+    ],
+    "messages": 2,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "dev",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 3
+   },
+   {
+    "kind": "dm",
+    "name": "alice~bob",
+    "members": [
+     "alice",
+     "bob"
+    ],
+    "messages": 2,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 3
+   },
+   {
+    "kind": "dm",
+    "name": "bob~carol",
+    "members": [
+     "bob",
+     "carol"
+    ],
+    "messages": 2,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 3
+   }
+  ]
+ },
+ "standard {\"channels\":0,\"users\":3}": {
+  "profile": "standard",
+  "users": 3,
+  "channels": 0,
+  "messages": 20,
+  "reactions": true,
+  "dms": 3,
+  "rich": true,
+  "total_messages": 157,
+  "total_replies": 26,
+  "by_kind": {
+   "private": 2,
+   "team": 1,
+   "team-channel": 2,
+   "team-channel-private": 2,
+   "team-private": 1,
+   "general": 1,
+   "discussion": 3,
+   "dm": 3
+  },
+  "rooms": [
+   {
+    "kind": "private",
+    "name": "leadership",
+    "members": [
+     "alice",
+     "bob",
+     "carol"
+    ],
+    "messages": 10,
+    "threads": [
+     0,
+     5
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": true,
+    "replies": 2,
+    "reacted": 4,
+    "total_messages": 12
+   },
+   {
+    "kind": "private",
+    "name": "private-project",
+    "members": [
+     "alice",
+     "bob",
+     "carol"
+    ],
+    "messages": 10,
+    "threads": [
+     0,
+     5
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": true,
+    "replies": 2,
+    "reacted": 4,
+    "total_messages": 12
+   },
+   {
+    "kind": "team",
+    "name": "platform",
+    "members": [
+     "alice",
+     "bob",
+     "carol"
+    ],
+    "messages": 10,
+    "threads": [
+     0,
+     5
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 2,
+    "reacted": 4,
+    "total_messages": 12
+   },
+   {
+    "kind": "team-channel",
+    "name": "platform-planning",
+    "members": [
+     "alice",
+     "bob",
+     "carol"
+    ],
+    "messages": 10,
+    "threads": [
+     0,
+     5
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9
+    ],
+    "parent": "platform",
+    "from_message": -1,
+    "private": false,
+    "replies": 2,
+    "reacted": 4,
+    "total_messages": 12
+   },
+   {
+    "kind": "team-channel-private",
+    "name": "platform-standup",
+    "members": [
+     "alice",
+     "bob",
+     "carol"
+    ],
+    "messages": 10,
+    "threads": [
+     0,
+     5
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9
+    ],
+    "parent": "platform",
+    "from_message": -1,
+    "private": true,
+    "replies": 2,
+    "reacted": 4,
+    "total_messages": 12
+   },
+   {
+    "kind": "team-private",
+    "name": "customer-success",
+    "members": [
+     "alice",
+     "bob",
+     "carol"
+    ],
+    "messages": 10,
+    "threads": [
+     0,
+     5
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": true,
+    "replies": 2,
+    "reacted": 4,
+    "total_messages": 12
+   },
+   {
+    "kind": "team-channel",
+    "name": "customer-success-planning",
+    "members": [
+     "alice",
+     "bob",
+     "carol"
+    ],
+    "messages": 10,
+    "threads": [
+     0,
+     5
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9
+    ],
+    "parent": "customer-success",
+    "from_message": -1,
+    "private": false,
+    "replies": 2,
+    "reacted": 4,
+    "total_messages": 12
+   },
+   {
+    "kind": "team-channel-private",
+    "name": "customer-success-standup",
+    "members": [
+     "alice",
+     "bob",
+     "carol"
+    ],
+    "messages": 10,
+    "threads": [
+     0,
+     5
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9
+    ],
+    "parent": "customer-success",
+    "from_message": -1,
+    "private": true,
+    "replies": 2,
+    "reacted": 4,
+    "total_messages": 12
+   },
+   {
+    "kind": "general",
+    "name": "general",
+    "members": [
+     "alice",
+     "bob",
+     "carol"
+    ],
+    "messages": 20,
+    "threads": [
+     0,
+     5,
+     10,
+     15
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 4,
+    "reacted": 7,
+    "total_messages": 24
+   },
+   {
+    "kind": "discussion",
+    "name": "customer escalation 4821",
+    "members": [
+     "alice",
+     "bob",
+     "carol"
+    ],
+    "messages": 5,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0,
+     3
+    ],
+    "parent": "leadership",
+    "from_message": 0,
+    "private": false,
+    "replies": 1,
+    "reacted": 2,
+    "total_messages": 8
+   },
+   {
+    "kind": "discussion",
+    "name": "rollback plan",
+    "members": [
+     "alice",
+     "bob",
+     "carol"
+    ],
+    "messages": 5,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0,
+     3
+    ],
+    "parent": "private-project",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 2,
+    "total_messages": 6
+   },
+   {
+    "kind": "discussion",
+    "name": "release checklist",
+    "members": [
+     "alice",
+     "bob",
+     "carol"
+    ],
+    "messages": 5,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0,
+     3
+    ],
+    "parent": "platform",
+    "from_message": 0,
+    "private": false,
+    "replies": 1,
+    "reacted": 2,
+    "total_messages": 8
+   },
+   {
+    "kind": "dm",
+    "name": "alice~bob",
+    "members": [
+     "alice",
+     "bob"
+    ],
+    "messages": 4,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0,
+     3
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 2,
+    "total_messages": 5
+   },
+   {
+    "kind": "dm",
+    "name": "bob~carol",
+    "members": [
+     "bob",
+     "carol"
+    ],
+    "messages": 4,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0,
+     3
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 2,
+    "total_messages": 5
+   },
+   {
+    "kind": "dm",
+    "name": "carol~alice",
+    "members": [
+     "carol",
+     "alice"
+    ],
+    "messages": 4,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0,
+     3
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 2,
+    "total_messages": 5
+   }
+  ]
+ },
+ "large {\"users\":1}": {
+  "profile": "large",
+  "users": 1,
+  "channels": 12,
+  "messages": 100,
+  "reactions": true,
+  "dms": 0,
+  "rich": true,
+  "total_messages": 2526,
+  "total_replies": 420,
+  "by_kind": {
+   "channel": 12,
+   "private": 4,
+   "team": 2,
+   "team-channel": 3,
+   "team-channel-private": 3,
+   "team-private": 1,
+   "general": 1,
+   "discussion": 6
+  },
+  "rooms": [
+   {
+    "kind": "channel",
+    "name": "team-chat",
+    "members": [
+     "alice"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "channel",
+    "name": "dev",
+    "members": [
+     "alice"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "channel",
+    "name": "support",
+    "members": [
+     "alice"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "channel",
+    "name": "random",
+    "members": [
+     "alice"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "channel",
+    "name": "announcements",
+    "members": [
+     "alice"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "channel",
+    "name": "design",
+    "members": [
+     "alice"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "channel",
+    "name": "qa",
+    "members": [
+     "alice"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "channel",
+    "name": "ops",
+    "members": [
+     "alice"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "channel",
+    "name": "product",
+    "members": [
+     "alice"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "channel",
+    "name": "sales",
+    "members": [
+     "alice"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "channel",
+    "name": "incidents",
+    "members": [
+     "alice"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "channel",
+    "name": "watercooler",
+    "members": [
+     "alice"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "private",
+    "name": "leadership",
+    "members": [
+     "alice"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": true,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "private",
+    "name": "private-project",
+    "members": [
+     "alice"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": true,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "private",
+    "name": "security",
+    "members": [
+     "alice"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": true,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "private",
+    "name": "hiring",
+    "members": [
+     "alice"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": true,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "team",
+    "name": "platform",
+    "members": [
+     "alice"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "team-channel",
+    "name": "platform-planning",
+    "members": [
+     "alice"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "platform",
+    "from_message": -1,
+    "private": false,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "team-channel-private",
+    "name": "platform-standup",
+    "members": [
+     "alice"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "platform",
+    "from_message": -1,
+    "private": true,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "team-private",
+    "name": "customer-success",
+    "members": [
+     "alice"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": true,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "team-channel",
+    "name": "customer-success-planning",
+    "members": [
+     "alice"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "customer-success",
+    "from_message": -1,
+    "private": false,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "team-channel-private",
+    "name": "customer-success-standup",
+    "members": [
+     "alice"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "customer-success",
+    "from_message": -1,
+    "private": true,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "team",
+    "name": "infrastructure",
+    "members": [
+     "alice"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "team-channel",
+    "name": "infrastructure-planning",
+    "members": [
+     "alice"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "infrastructure",
+    "from_message": -1,
+    "private": false,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "team-channel-private",
+    "name": "infrastructure-standup",
+    "members": [
+     "alice"
+    ],
+    "messages": 50,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48
+    ],
+    "parent": "infrastructure",
+    "from_message": -1,
+    "private": true,
+    "replies": 10,
+    "reacted": 17,
+    "total_messages": 60
+   },
+   {
+    "kind": "general",
+    "name": "general",
+    "members": [
+     "alice"
+    ],
+    "messages": 100,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20,
+     25,
+     30,
+     35,
+     40,
+     45,
+     50,
+     55,
+     60,
+     65,
+     70,
+     75,
+     80,
+     85,
+     90,
+     95
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24,
+     27,
+     30,
+     33,
+     36,
+     39,
+     42,
+     45,
+     48,
+     51,
+     54,
+     57,
+     60,
+     63,
+     66,
+     69,
+     72,
+     75,
+     78,
+     81,
+     84,
+     87,
+     90,
+     93,
+     96,
+     99
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 20,
+    "reacted": 34,
+    "total_messages": 120
+   },
+   {
+    "kind": "discussion",
+    "name": "customer escalation 4821",
+    "members": [
+     "alice"
+    ],
+    "messages": 25,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24
+    ],
+    "parent": "team-chat",
+    "from_message": 0,
+    "private": false,
+    "replies": 5,
+    "reacted": 9,
+    "total_messages": 32
+   },
+   {
+    "kind": "discussion",
+    "name": "rollback plan",
+    "members": [
+     "alice"
+    ],
+    "messages": 25,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24
+    ],
+    "parent": "dev",
+    "from_message": -1,
+    "private": false,
+    "replies": 5,
+    "reacted": 9,
+    "total_messages": 30
+   },
+   {
+    "kind": "discussion",
+    "name": "release checklist",
+    "members": [
+     "alice"
+    ],
+    "messages": 25,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24
+    ],
+    "parent": "support",
+    "from_message": 0,
+    "private": false,
+    "replies": 5,
+    "reacted": 9,
+    "total_messages": 32
+   },
+   {
+    "kind": "discussion",
+    "name": "post-mortem draft",
+    "members": [
+     "alice"
+    ],
+    "messages": 25,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24
+    ],
+    "parent": "random",
+    "from_message": -1,
+    "private": false,
+    "replies": 5,
+    "reacted": 9,
+    "total_messages": 30
+   },
+   {
+    "kind": "discussion",
+    "name": "capacity for Q3",
+    "members": [
+     "alice"
+    ],
+    "messages": 25,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24
+    ],
+    "parent": "announcements",
+    "from_message": 0,
+    "private": false,
+    "replies": 5,
+    "reacted": 9,
+    "total_messages": 32
+   },
+   {
+    "kind": "discussion",
+    "name": "onboarding questions",
+    "members": [
+     "alice"
+    ],
+    "messages": 25,
+    "threads": [
+     0,
+     5,
+     10,
+     15,
+     20
+    ],
+    "reactions": [
+     0,
+     3,
+     6,
+     9,
+     12,
+     15,
+     18,
+     21,
+     24
+    ],
+    "parent": "design",
+    "from_message": -1,
+    "private": false,
+    "replies": 5,
+    "reacted": 9,
+    "total_messages": 30
+   }
+  ]
+ },
+ "small {\"users\":-5}": {
+  "profile": "small",
+  "users": 0,
+  "channels": 2,
+  "messages": 5,
+  "reactions": false,
+  "dms": 0,
+  "rich": false,
+  "total_messages": 42,
+  "total_replies": 9,
+  "by_kind": {
+   "channel": 2,
+   "private": 1,
+   "team": 1,
+   "team-channel": 1,
+   "team-channel-private": 1,
+   "general": 1,
+   "discussion": 2
+  },
+  "rooms": [
+   {
+    "kind": "channel",
+    "name": "team-chat",
+    "members": [],
+    "messages": 5,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 6
+   },
+   {
+    "kind": "channel",
+    "name": "dev",
+    "members": [],
+    "messages": 5,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 6
+   },
+   {
+    "kind": "private",
+    "name": "leadership",
+    "members": [],
+    "messages": 3,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "",
+    "from_message": -1,
+    "private": true,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 4
+   },
+   {
+    "kind": "team",
+    "name": "platform",
+    "members": [],
+    "messages": 3,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 4
+   },
+   {
+    "kind": "team-channel",
+    "name": "platform-planning",
+    "members": [],
+    "messages": 3,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "platform",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 4
+   },
+   {
+    "kind": "team-channel-private",
+    "name": "platform-standup",
+    "members": [],
+    "messages": 3,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "platform",
+    "from_message": -1,
+    "private": true,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 4
+   },
+   {
+    "kind": "general",
+    "name": "general",
+    "members": [],
+    "messages": 5,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 6
+   },
+   {
+    "kind": "discussion",
+    "name": "customer escalation 4821",
+    "members": [],
+    "messages": 2,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "team-chat",
+    "from_message": 0,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 5
+   },
+   {
+    "kind": "discussion",
+    "name": "rollback plan",
+    "members": [],
+    "messages": 2,
+    "threads": [
+     0
+    ],
+    "reactions": [],
+    "parent": "dev",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 0,
+    "total_messages": 3
+   }
+  ]
+ },
+ "standard {\"messages\":1}": {
+  "profile": "standard",
+  "users": 20,
+  "channels": 5,
+  "messages": 1,
+  "reactions": true,
+  "dms": 5,
+  "rich": true,
+  "total_messages": 72,
+  "total_replies": 22,
+  "by_kind": {
+   "channel": 5,
+   "private": 2,
+   "team": 1,
+   "team-channel": 2,
+   "team-channel-private": 2,
+   "team-private": 1,
+   "general": 1,
+   "discussion": 3,
+   "dm": 5
+  },
+  "rooms": [
+   {
+    "kind": "channel",
+    "name": "team-chat",
+    "members": [
+     "alice",
+     "bob",
+     "carol",
+     "dave"
+    ],
+    "messages": 1,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 1,
+    "total_messages": 2
+   },
+   {
+    "kind": "channel",
+    "name": "dev",
+    "members": [
+     "dave",
+     "erin",
+     "frank",
+     "grace"
+    ],
+    "messages": 1,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 1,
+    "total_messages": 2
+   },
+   {
+    "kind": "channel",
+    "name": "support",
+    "members": [
+     "grace",
+     "heidi",
+     "ivan",
+     "judy"
+    ],
+    "messages": 1,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 1,
+    "total_messages": 2
+   },
+   {
+    "kind": "channel",
+    "name": "random",
+    "members": [
+     "judy",
+     "mallory",
+     "niaj",
+     "olivia"
+    ],
+    "messages": 1,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 1,
+    "total_messages": 2
+   },
+   {
+    "kind": "channel",
+    "name": "announcements",
+    "members": [
+     "olivia",
+     "peggy",
+     "quinn",
+     "rupert"
+    ],
+    "messages": 1,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 1,
+    "total_messages": 2
+   },
+   {
+    "kind": "private",
+    "name": "leadership",
+    "members": [
+     "rupert",
+     "sybil",
+     "trent"
+    ],
+    "messages": 3,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": true,
+    "replies": 1,
+    "reacted": 1,
+    "total_messages": 4
+   },
+   {
+    "kind": "private",
+    "name": "private-project",
+    "members": [
+     "uma",
+     "victor",
+     "alice"
+    ],
+    "messages": 3,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": true,
+    "replies": 1,
+    "reacted": 1,
+    "total_messages": 4
+   },
+   {
+    "kind": "team",
+    "name": "platform",
+    "members": [
+     "bob",
+     "carol",
+     "dave",
+     "erin"
+    ],
+    "messages": 3,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 1,
+    "total_messages": 4
+   },
+   {
+    "kind": "team-channel",
+    "name": "platform-planning",
+    "members": [
+     "erin",
+     "frank",
+     "grace"
+    ],
+    "messages": 3,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0
+    ],
+    "parent": "platform",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 1,
+    "total_messages": 4
+   },
+   {
+    "kind": "team-channel-private",
+    "name": "platform-standup",
+    "members": [
+     "heidi",
+     "ivan",
+     "judy"
+    ],
+    "messages": 3,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0
+    ],
+    "parent": "platform",
+    "from_message": -1,
+    "private": true,
+    "replies": 1,
+    "reacted": 1,
+    "total_messages": 4
+   },
+   {
+    "kind": "team-private",
+    "name": "customer-success",
+    "members": [
+     "mallory",
+     "niaj",
+     "olivia",
+     "peggy"
+    ],
+    "messages": 3,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": true,
+    "replies": 1,
+    "reacted": 1,
+    "total_messages": 4
+   },
+   {
+    "kind": "team-channel",
+    "name": "customer-success-planning",
+    "members": [
+     "peggy",
+     "quinn",
+     "rupert"
+    ],
+    "messages": 3,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0
+    ],
+    "parent": "customer-success",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 1,
+    "total_messages": 4
+   },
+   {
+    "kind": "team-channel-private",
+    "name": "customer-success-standup",
+    "members": [
+     "sybil",
+     "trent",
+     "uma"
+    ],
+    "messages": 3,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0
+    ],
+    "parent": "customer-success",
+    "from_message": -1,
+    "private": true,
+    "replies": 1,
+    "reacted": 1,
+    "total_messages": 4
+   },
+   {
+    "kind": "general",
+    "name": "general",
+    "members": [
+     "alice",
+     "bob",
+     "carol",
+     "dave",
+     "erin",
+     "frank",
+     "grace",
+     "heidi",
+     "ivan",
+     "judy",
+     "mallory",
+     "niaj",
+     "olivia",
+     "peggy",
+     "quinn",
+     "rupert",
+     "sybil",
+     "trent",
+     "uma",
+     "victor"
+    ],
+    "messages": 1,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 1,
+    "total_messages": 2
+   },
+   {
+    "kind": "discussion",
+    "name": "customer escalation 4821",
+    "members": [
+     "victor",
+     "alice",
+     "bob"
+    ],
+    "messages": 2,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0
+    ],
+    "parent": "team-chat",
+    "from_message": 0,
+    "private": false,
+    "replies": 1,
+    "reacted": 1,
+    "total_messages": 5
+   },
+   {
+    "kind": "discussion",
+    "name": "rollback plan",
+    "members": [
+     "carol",
+     "dave",
+     "erin"
+    ],
+    "messages": 2,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0
+    ],
+    "parent": "dev",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 1,
+    "total_messages": 3
+   },
+   {
+    "kind": "discussion",
+    "name": "release checklist",
+    "members": [
+     "frank",
+     "grace",
+     "heidi"
+    ],
+    "messages": 2,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0
+    ],
+    "parent": "support",
+    "from_message": 0,
+    "private": false,
+    "replies": 1,
+    "reacted": 1,
+    "total_messages": 5
+   },
+   {
+    "kind": "dm",
+    "name": "alice~bob",
+    "members": [
+     "alice",
+     "bob"
+    ],
+    "messages": 2,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 1,
+    "total_messages": 3
+   },
+   {
+    "kind": "dm",
+    "name": "bob~carol",
+    "members": [
+     "bob",
+     "carol"
+    ],
+    "messages": 2,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 1,
+    "total_messages": 3
+   },
+   {
+    "kind": "dm",
+    "name": "carol~dave",
+    "members": [
+     "carol",
+     "dave"
+    ],
+    "messages": 2,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 1,
+    "total_messages": 3
+   },
+   {
+    "kind": "dm",
+    "name": "dave~erin",
+    "members": [
+     "dave",
+     "erin"
+    ],
+    "messages": 2,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 1,
+    "total_messages": 3
+   },
+   {
+    "kind": "dm",
+    "name": "erin~frank",
+    "members": [
+     "erin",
+     "frank"
+    ],
+    "messages": 2,
+    "threads": [
+     0
+    ],
+    "reactions": [
+     0
+    ],
+    "parent": "",
+    "from_message": -1,
+    "private": false,
+    "replies": 1,
+    "reacted": 1,
+    "total_messages": 3
+   }
+  ]
+ }
+}

@@ -1,0 +1,56 @@
+
+ Usage: houston cluster [OPTIONS] [action] [name]
+
+ What a Kubernetes cluster is holding, and what it is costing.
+
+ NEW TO THIS? `houston cluster guide` prints the whole EKS walkthrough — what to
+ install, which permissions to grant, and the six commands from an empty AWS
+ account to a workspace on a real domain and back to nothing.
+
+ A peer of `edge`: the cluster is not a workspace, so it never appears in `list`
+ and `prune`/`down` cannot describe it — but something holding your workspaces,
+ your volumes and, on a managed cluster, your money should be answerable, and
+ this is where it answers.
+
+ `status` is read-only and free on every distribution — kind, an adopted k3s or a
+ managed one. `create` and `delete` are neither, and they are deliberately their
+ own verb: `up` can never build a cloud cluster, at any lifecycle, under any flag,
+ because it is the command you run per ticket and this one takes twenty minutes and
+ real money.
+
+ `create` makes a NEW VPC unless `--subnet <az>=<id>` names an existing one, and it
+ is gated on the AWS account having been approved on this box. `delete` removes only
+ a cluster houston built, proved by a tag on the cluster itself rather than by its
+ name.
+
+ Nothing here reports a zero it did not read. A cluster that cannot be reached
+ shows `?` rather than "0 workspaces, nothing running" — a ledger whose job is to
+ stop a cluster being forgotten must not be the thing that says it is empty.
+
+╭─ Arguments ──╮
+   action      <str>  status | list | guide | iam-policy | create | prepare | delete | forget
+                      [default: status]
+   name        <str>  the cluster's name, for `create` and `delete`; which document, for
+                      `iam-policy`
+╰──╯
+╭─ Options ──╮
+ --context          <str>  which cluster — its own name (`support`) or the full context name
+                           (status). Defaults to `kubernetes.context`, then to the one `up` would
+                           use
+ --region           <str>  AWS region (create/delete; narrows `list` to one region). Defaults to
+                           the one `aws` resolves
+ --nodes            <int>  how many nodes (create). Default 3; Launchpad sizes 5 for a production
+                           workspace
+                           [default: 0]
+ --expires          <str>  days until you expect to be finished with this cluster, or `never`
+                           (create). Default 7. A REMINDER only — nothing deletes on it
+ --subnet           <str>  use an EXISTING VPC: `--subnet <az>=<subnet-id>`, repeatable. Without
+                           any, a new VPC is created
+ --force                   delete without reading what the cluster holds; on `list`, show every
+                           cluster and not only houston's
+ --yes      -y             skip the confirmation prompt (delete)
+ --path                    print where the shipped guide is on this machine, and nothing else
+                           (guide)
+ --json                    print the ledger as one JSON envelope
+ --help                    Show this message and exit.
+╰──╯

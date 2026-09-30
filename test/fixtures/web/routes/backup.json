@@ -1,0 +1,244 @@
+{
+ "confined": [
+  [
+   [
+    "ok",
+    "{HOME}/backups/a.rcbak"
+   ],
+   [
+    "ok",
+    "{HOME}/backups/a.rcbak"
+   ]
+  ],
+  [
+   [
+    "refused",
+    "`bundle` must be inside {HOME}/backups — the HTTP API cannot read arbitrary paths on the server (the CLI still can)"
+   ],
+   [
+    "refused",
+    "`out` must be inside {HOME}/backups — the HTTP API cannot choose arbitrary paths on the server (the CLI's --out still can)"
+   ]
+  ],
+  [
+   [
+    "ok",
+    "{HOME}/backups/a.rcbak"
+   ],
+   [
+    "ok",
+    "{HOME}/backups/a.rcbak"
+   ]
+  ],
+  [
+   [
+    "refused",
+    "`bundle` must be inside {HOME}/backups — the HTTP API cannot read arbitrary paths on the server (the CLI still can)"
+   ],
+   [
+    "refused",
+    "`out` must be inside {HOME}/backups — the HTTP API cannot choose arbitrary paths on the server (the CLI's --out still can)"
+   ]
+  ],
+  [
+   [
+    "ok",
+    "{HOME}/backups/b.rcbak"
+   ],
+   [
+    "ok",
+    "{HOME}/backups/b.rcbak"
+   ]
+  ],
+  [
+   [
+    "500",
+    "Could not determine home directory."
+   ],
+   [
+    "500",
+    "Could not determine home directory."
+   ]
+  ],
+  [
+   [
+    "refused",
+    "`bundle` must be inside {CWD}/~/backups — the HTTP API cannot read arbitrary paths on the server (the CLI still can)"
+   ],
+   [
+    "refused",
+    "`out` must be inside {CWD}/~/backups — the HTTP API cannot choose arbitrary paths on the server (the CLI's --out still can)"
+   ]
+  ],
+  [
+   [
+    "refused",
+    "`bundle` must be inside {CWD}/~/backups — the HTTP API cannot read arbitrary paths on the server (the CLI still can)"
+   ],
+   [
+    "refused",
+    "`out` must be inside {CWD}/~/backups — the HTTP API cannot choose arbitrary paths on the server (the CLI's --out still can)"
+   ]
+  ],
+  [
+   [
+    "ok",
+    "{CWD}/~/backups/a.rcbak"
+   ],
+   [
+    "ok",
+    "{CWD}/~/backups/a.rcbak"
+   ]
+  ],
+  [
+   [
+    "refused",
+    "`bundle` must be inside {CWD}/~/backups — the HTTP API cannot read arbitrary paths on the server (the CLI still can)"
+   ],
+   [
+    "refused",
+    "`out` must be inside {CWD}/~/backups — the HTTP API cannot choose arbitrary paths on the server (the CLI's --out still can)"
+   ]
+  ],
+  [
+   [
+    "refused",
+    "`bundle` must be inside {CWD}/~/backups — the HTTP API cannot read arbitrary paths on the server (the CLI still can)"
+   ],
+   [
+    "refused",
+    "`out` must be inside {CWD}/~/backups — the HTTP API cannot choose arbitrary paths on the server (the CLI's --out still can)"
+   ]
+  ],
+  [
+   [
+    "500",
+    "Could not determine home directory."
+   ],
+   [
+    "500",
+    "Could not determine home directory."
+   ]
+  ],
+  [
+   [
+    "ok",
+    "{HOME}/backups/a.rcbak"
+   ],
+   [
+    "ok",
+    "{HOME}/backups/a.rcbak"
+   ]
+  ],
+  [
+   [
+    "refused",
+    "`bundle` must be inside {HOME}/backups — the HTTP API cannot read arbitrary paths on the server (the CLI still can)"
+   ],
+   [
+    "refused",
+    "`out` must be inside {HOME}/backups — the HTTP API cannot choose arbitrary paths on the server (the CLI's --out still can)"
+   ]
+  ],
+  [
+   [
+    "ok",
+    "{HOME}/backups/a.rcbak"
+   ],
+   [
+    "ok",
+    "{HOME}/backups/a.rcbak"
+   ]
+  ],
+  [
+   [
+    "refused",
+    "`bundle` must be inside {HOME}/backups — the HTTP API cannot read arbitrary paths on the server (the CLI still can)"
+   ],
+   [
+    "refused",
+    "`out` must be inside {HOME}/backups — the HTTP API cannot choose arbitrary paths on the server (the CLI's --out still can)"
+   ]
+  ],
+  [
+   [
+    "ok",
+    "{HOME}/backups/b.rcbak"
+   ],
+   [
+    "ok",
+    "{HOME}/backups/b.rcbak"
+   ]
+  ],
+  [
+   [
+    "500",
+    "Could not determine home directory."
+   ],
+   [
+    "500",
+    "Could not determine home directory."
+   ]
+  ],
+  [
+   [
+    "refused",
+    "`bundle` must be inside {CWD}/~/backups — the HTTP API cannot read arbitrary paths on the server (the CLI still can)"
+   ],
+   [
+    "refused",
+    "`out` must be inside {CWD}/~/backups — the HTTP API cannot choose arbitrary paths on the server (the CLI's --out still can)"
+   ]
+  ],
+  [
+   [
+    "refused",
+    "`bundle` must be inside {CWD}/~/backups — the HTTP API cannot read arbitrary paths on the server (the CLI still can)"
+   ],
+   [
+    "refused",
+    "`out` must be inside {CWD}/~/backups — the HTTP API cannot choose arbitrary paths on the server (the CLI's --out still can)"
+   ]
+  ],
+  [
+   [
+    "ok",
+    "{CWD}/~/backups/a.rcbak"
+   ],
+   [
+    "ok",
+    "{CWD}/~/backups/a.rcbak"
+   ]
+  ],
+  [
+   [
+    "refused",
+    "`bundle` must be inside {CWD}/~/backups — the HTTP API cannot read arbitrary paths on the server (the CLI still can)"
+   ],
+   [
+    "refused",
+    "`out` must be inside {CWD}/~/backups — the HTTP API cannot choose arbitrary paths on the server (the CLI's --out still can)"
+   ]
+  ],
+  [
+   [
+    "refused",
+    "`bundle` must be inside {CWD}/~/backups — the HTTP API cannot read arbitrary paths on the server (the CLI still can)"
+   ],
+   [
+    "refused",
+    "`out` must be inside {CWD}/~/backups — the HTTP API cannot choose arbitrary paths on the server (the CLI's --out still can)"
+   ]
+  ],
+  [
+   [
+    "500",
+    "Could not determine home directory."
+   ],
+   [
+    "500",
+    "Could not determine home directory."
+   ]
+  ]
+ ]
+}

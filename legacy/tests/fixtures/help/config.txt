@@ -1,0 +1,27 @@
+
+ Usage: houston config [OPTIONS] [action] [key] [value]
+
+ Read or write remembered settings, so they need not be retyped every run.
+
+ Keys: kubernetes.context, cluster.approved_accounts, acme.email, acme.staging,
+ acme.dns_provider,
+ bind_host, gui.create_policy, gui.destroy_policy. Stored in
+ ~/.houston/config.yaml.
+
+
+ Members may set --rc-image/--reg-token/--bind by default. Where an account is
+ not the same thing as trust, narrow it:
+     houston config set gui.create_policy admin
+
+ And to publish every workspace on this box beyond loopback, one decision
+ instead of one per create:
+     houston config set bind_host 0.0.0.0
+
+╭─ Arguments ──╮
+   action      <str>  list | get | set | unset [default: list]
+   key         <str>  e.g. kubernetes.context
+   value       <str>  the value, for `set`
+╰──╯
+╭─ Options ──╮
+ --help          Show this message and exit.
+╰──╯

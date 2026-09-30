@@ -1,0 +1,12 @@
+
+ Usage: houston pat [OPTIONS]
+
+ Mint a Personal Access Token and print ready-to-use headers (curl/Postman).
+
+╭─ Options ──╮
+ --name        -n                     <str>
+ --label                              <str>  token name shown in the admin UI [default: houston]
+ --bypass-2fa      --no-bypass-2fa           create with "Ignore Two Factor Authentication"
+                                             [default: bypass-2fa]
+ --help                                      Show this message and exit.
+╰──╯

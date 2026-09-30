@@ -1,0 +1,56 @@
+
+ Usage: houston serve [OPTIONS]
+
+ Launch the web GUI (needs `pip install 'houston[gui]'`).
+
+
+ TRYING IT OUT? There is nothing to learn:
+     houston serve
+
+ Binds localhost — nothing crosses a network, and none of the options below
+ apply. The first run prints a one-time link ending in /setup#k=... ; open the
+ whole url, including the part after #, to make the first account.
+
+ (On a box already set up with --domain, plain `serve` keeps serving that name.
+ Add --no-domain for a local session.)
+
+ The rest is only about letting OTHER machines reach it:
+
+
+     your team, over HTTPS    --domain rc.example.com --email you@example.com
+     a lab or proxy in front  --bind 0.0.0.0 --allow-host <name> --trust-proxy <ip>
+     a plain IP, no TLS       --bind 0.0.0.0 --allow-host <ip>
+
+ --bind decides whether anything off this machine can reach it; --allow-host
+ says which names may be used to. Whatever you type in the address bar must be
+ listed there or every request is a 403, and either flag alone does nothing.
+
+ --trust-proxy names whatever already terminates TLS (a lab url, ngrok, a load
+ balancer) so the session cookie can be marked Secure. Address or CIDR — a bare
+ 0.0.0.0 is one address and matches nothing; 0.0.0.0/0 is anywhere.
+
+ The third row is refused until you say what protects the password. `serve`
+ prints the flag to add, and why, at the point it stops.
+
+ Binding anything but localhost exposes docker control — creating and deleting
+ repros and their volumes — to whoever can reach the port.
+
+╭─ Options ──╮
+ --port                 <int>  host port for the web GUI [default: 7070]
+ --domain               <str>  serve the GUI over HTTPS on this hostname, via houston's shared
+                               front door
+ --email                <str>  contact address for the Let's Encrypt certificate (remembered
+                               after the first use)
+ --no-domain                   ignore the domain this box was set up with and serve locally
+ --bind                 <str>  interface to bind (default: loopback, or the Docker bridge with
+                               --domain)
+ --allow-host           <str>  extra Host header to accept, e.g. a reverse-proxy domain
+                               (repeatable; '*' = any host). Needed for iximiuz/Codespaces/remote
+                               access
+ --no-open                     don't open a browser
+ --print-service               print how to keep this running (systemd unit, or nohup) and exit —
+                               writes nothing
+ --trust-proxy          <str>  TLS ends at this proxy: believe its X-Forwarded-Proto/-For and
+                               mark the cookie Secure (address or CIDR, repeatable)
+ --help                        Show this message and exit.
+╰──╯

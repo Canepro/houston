@@ -1,0 +1,1241 @@
+{
+ "prepared": {
+  "POST {\"user\": \"a\", \"password\": \"b\", \"n\": [1, 2.5, -0.5, true, null]}": {
+   "body": "{\"user\": \"a\", \"password\": \"b\", \"n\": [1, 2.5, -0.5, true, null]}",
+   "ctype": "application/json",
+   "error": ""
+  },
+  "POST [\"café\", \"😀\", \"\", \"tab\\there\"]": {
+   "body": "[\"caf\\u00e9\", \"\\ud83d\\ude00\", \"\\u007f\", \"tab\\there\"]",
+   "ctype": "application/json",
+   "error": ""
+  },
+  "POST \"x\"": {
+   "body": "\"x\"",
+   "ctype": "application/json",
+   "error": ""
+  },
+  "POST {\"a\": {}, \"b\": []}": {
+   "body": "{\"a\": {}, \"b\": []}",
+   "ctype": "application/json",
+   "error": ""
+  },
+  "POST 0": {
+   "body": "0",
+   "ctype": "application/json",
+   "error": ""
+  },
+  "POST ": {
+   "body": "",
+   "ctype": null,
+   "error": ""
+  },
+  "POST {\"a\": NaN}": {
+   "body": "",
+   "ctype": null,
+   "error": "Out of range float values are not JSON compliant: nan"
+  },
+  "POST [1e400]": {
+   "body": "",
+   "ctype": null,
+   "error": "Out of range float values are not JSON compliant: inf"
+  },
+  "POST -Infinity": {
+   "body": "",
+   "ctype": null,
+   "error": "Out of range float values are not JSON compliant: -inf"
+  },
+  "GET {\"a\": 1}": {
+   "body": "{\"a\": 1}",
+   "ctype": "application/json",
+   "error": ""
+  },
+  "HEAD \"x\"": {
+   "body": "\"x\"",
+   "ctype": "application/json",
+   "error": ""
+  },
+  "TRACE ": {
+   "body": "",
+   "ctype": null,
+   "error": ""
+  },
+  "TRACE [1, \"é\"]": {
+   "body": "[1, \"\\u00e9\"]",
+   "ctype": "application/json",
+   "error": ""
+  }
+ },
+ "raised": {
+  "closed before a status line, without a body": {
+   "message": "http://localhost:{PORT}/loop: the connection closed without a response",
+   "kind": "connection"
+  },
+  "closed before a status line, a GET with a body": {
+   "message": "http://localhost:{PORT}/loop: the connection closed without a response",
+   "kind": "connection"
+  },
+  "reset before a status line, without a body": {
+   "message": "http://localhost:{PORT}/loop: the connection was reset (Connection reset by peer)",
+   "kind": "connection"
+  },
+  "reset before a status line, a GET with a body": {
+   "message": "http://localhost:{PORT}/loop: the connection was reset (Connection reset by peer)",
+   "kind": "connection"
+  },
+  "a body short of its length, without a body": {
+   "message": "http://localhost:{PORT}/loop: the response ended early (11 bytes read, 89 more expected)",
+   "kind": "other"
+  },
+  "a body short of its length, a GET with a body": {
+   "message": "http://localhost:{PORT}/loop: the response ended early (11 bytes read, 89 more expected)",
+   "kind": "other"
+  },
+  "reset in the body, without a body": {
+   "message": "http://localhost:{PORT}/loop: the connection was reset mid-response (Connection reset by peer)",
+   "kind": "other"
+  },
+  "reset in the body, a GET with a body": {
+   "message": "http://localhost:{PORT}/loop: the connection was reset mid-response (Connection reset by peer)",
+   "kind": "other"
+  },
+  "silent until the deadline, without a body": {
+   "message": "localhost:{PORT} did not answer within 1.0s",
+   "kind": "timeout"
+  },
+  "silent until the deadline, a GET with a body": {
+   "message": "localhost:{PORT} did not answer within 1.0s",
+   "kind": "timeout"
+  },
+  "silent in the body, without a body": {
+   "message": "localhost:{PORT} stopped sending before the response ended",
+   "kind": "connection"
+  },
+  "silent in the body, a GET with a body": {
+   "message": "localhost:{PORT} stopped sending before the response ended",
+   "kind": "connection"
+  },
+  "a redirect loop, without a body": {
+   "message": "Exceeded 30 redirects.",
+   "kind": "other"
+  },
+  "a redirect loop, a GET with a body": {
+   "message": "Exceeded 30 redirects.",
+   "kind": "other"
+  },
+  "a body that is not the gzip it says, without a body": {
+   "message": "the response said content-encoding gzip but could not be decoded: incorrect header check",
+   "kind": "other"
+  },
+  "a body that is not the gzip it says, a GET with a body": {
+   "message": "the response said content-encoding gzip but could not be decoded: incorrect header check",
+   "kind": "other"
+  },
+  "a body that is not the deflate it says, without a body": {
+   "message": "the response said content-encoding deflate but could not be decoded: invalid block type",
+   "kind": "other"
+  },
+  "a body that is not the deflate it says, a GET with a body": {
+   "message": "the response said content-encoding deflate but could not be decoded: invalid block type",
+   "kind": "other"
+  },
+  "a login refused": {
+   "message": "cannot connect to 127.0.0.1:{PORT} (/api/v1/login): Connection refused",
+   "kind": "connection"
+  },
+  "a query refused, by name": {
+   "message": "cannot connect to localhost:{PORT} (/api/v1/users.list?count=0): Connection refused",
+   "kind": "connection"
+  },
+  "a host spelled in capitals": {
+   "message": "cannot connect to localhost:{PORT} (/): Connection refused",
+   "kind": "connection"
+  },
+  "the https pool": {
+   "message": "cannot connect to 127.0.0.1:{PORT} (/api/info): Connection refused",
+   "kind": "connection"
+  },
+  "a target earlier releases escape": {
+   "message": "cannot connect to 127.0.0.1:{PORT} (/api/v1/a%20b?q=a'b%7Cc): Connection refused",
+   "kind": "connection"
+  },
+  "names an IPv6 host in brackets": {
+   "message": "cannot connect to [::1]:{PORT} (/api/v1/login): Connection refused",
+   "kind": "connection"
+  },
+  "names the hop that failed, after a redirect": {
+   "message": "cannot connect to 127.0.0.1:{OTHER_PORT} (/next?x=1): Connection refused",
+   "kind": "connection"
+  },
+  "proxy for an http URL, asked of the proxy as the whole URL": {
+   "message": "cannot connect to the proxy 127.0.0.1:{OTHER_PORT} for http://127.0.0.1:{PORT}/api/v1/login?q=1: Connection refused",
+   "kind": "connection"
+  },
+  "proxy for an https URL, tunnelled": {
+   "message": "cannot connect to the proxy 127.0.0.1:{OTHER_PORT} for /api/v1/login?q=1: Connection refused",
+   "kind": "connection"
+  }
+ },
+ "prepared_url": {
+  "/api/v1/x?q=a|b": {
+   "url": "{ORIGIN}/api/v1/x?q=a%7Cb",
+   "target": "/api/v1/x?q=a%7Cb"
+  },
+  "/api/v1/[x]": {
+   "url": "{ORIGIN}/api/v1/%5Bx%5D",
+   "target": "/api/v1/%5Bx%5D"
+  },
+  "/api/v1/a\\b": {
+   "url": "{ORIGIN}/api/v1/a%5Cb",
+   "target": "/api/v1/a%5Cb"
+  },
+  "/api/v1/%zz": {
+   "url": "{ORIGIN}/api/v1/%25zz",
+   "target": "/api/v1/%25zz"
+  },
+  "/api/v1/x\ty": {
+   "url": "{ORIGIN}/api/v1/x%09y",
+   "target": "/api/v1/x%09y"
+  },
+  "/api/v1/rooms.info?query={\"name\":{\"$in\":[\"a b\"]}}": {
+   "url": "{ORIGIN}/api/v1/rooms.info?query=%7B%22name%22:%7B%22$in%22:%5B%22a%20b%22%5D%7D%7D",
+   "target": "/api/v1/rooms.info?query=%7B%22name%22:%7B%22$in%22:%5B%22a%20b%22%5D%7D%7D"
+  },
+  "/api/v1/x?q='a'": {
+   "url": "{ORIGIN}/api/v1/x?q='a'",
+   "target": "/api/v1/x?q='a'"
+  },
+  "/api/v1/../x": {
+   "url": "{ORIGIN}/api/x",
+   "target": "/api/x"
+  },
+  "/api/v1/%2e%2e/x": {
+   "url": "{ORIGIN}/api/v1/../x",
+   "target": "/api/v1/../x"
+  },
+  "/api/v1/x?a=%41&b=%7e": {
+   "url": "{ORIGIN}/api/v1/x?a=A&b=~",
+   "target": "/api/v1/x?a=A&b=~"
+  },
+  "/api/v1/x%2fy": {
+   "url": "{ORIGIN}/api/v1/x%2Fy",
+   "target": "/api/v1/x%2Fy"
+  },
+  "/api/v1/café": {
+   "url": "{ORIGIN}/api/v1/caf%C3%A9",
+   "target": "/api/v1/caf%C3%A9"
+  },
+  "/api/v1/a b?q=c d+e": {
+   "url": "{ORIGIN}/api/v1/a%20b?q=c%20d+e",
+   "target": "/api/v1/a%20b?q=c%20d+e"
+  },
+  "/api/v1/x#frag": {
+   "url": "{ORIGIN}/api/v1/x#frag",
+   "target": "/api/v1/x"
+  },
+  "/api/v1/x?": {
+   "url": "{ORIGIN}/api/v1/x",
+   "target": "/api/v1/x"
+  },
+  "/api/v1/a%20%zz": {
+   "url": "{ORIGIN}/api/v1/a%2520%25zz",
+   "target": "/api/v1/a%2520%25zz"
+  },
+  "/api/v1/%é1": {
+   "url": "{ORIGIN}/api/v1/%25%C3%A91",
+   "target": "/api/v1/%25%C3%A91"
+  },
+  "/api/v1/x\u0001y": {
+   "url": "{ORIGIN}/api/v1/x%01y",
+   "target": "/api/v1/x%01y"
+  },
+  "/api//v1//x": {
+   "url": "{ORIGIN}/api//v1//x",
+   "target": "/api//v1//x"
+  },
+  "/api/v1/x?a=?b": {
+   "url": "{ORIGIN}/api/v1/x?a=?b",
+   "target": "/api/v1/x?a=?b"
+  }
+ },
+ "headers": {
+  "a GET": {
+   "127.0.0.1": [
+    [
+     "GET /x",
+     [
+      "Host",
+      "127.0.0.1:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ]
+    ]
+   ],
+   "localhost": [
+    [
+     "GET /x",
+     [
+      "Host",
+      "localhost:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ]
+    ]
+   ]
+  },
+  "a login: earlier releases put the Content-Type after the length": {
+   "127.0.0.1": [
+    [
+     "POST /x",
+     [
+      "Host",
+      "127.0.0.1:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "Content-Length",
+      "41"
+     ],
+     [
+      "Content-Type",
+      "application/json"
+     ]
+    ]
+   ],
+   "localhost": [
+    [
+     "POST /x",
+     [
+      "Host",
+      "localhost:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "Content-Length",
+      "41"
+     ],
+     [
+      "Content-Type",
+      "application/json"
+     ]
+    ]
+   ]
+  },
+  "a setting written with the caller Content-Type and the 2FA headers": {
+   "127.0.0.1": [
+    [
+     "POST /x",
+     [
+      "Host",
+      "127.0.0.1:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "X-Auth-Token",
+      "tok"
+     ],
+     [
+      "X-User-Id",
+      "uid"
+     ],
+     [
+      "Content-Type",
+      "application/json"
+     ],
+     [
+      "x-2fa-code",
+      "c0de"
+     ],
+     [
+      "x-2fa-method",
+      "password"
+     ],
+     [
+      "Content-Length",
+      "15"
+     ]
+    ]
+   ],
+   "localhost": [
+    [
+     "POST /x",
+     [
+      "Host",
+      "localhost:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "X-Auth-Token",
+      "tok"
+     ],
+     [
+      "X-User-Id",
+      "uid"
+     ],
+     [
+      "Content-Type",
+      "application/json"
+     ],
+     [
+      "x-2fa-code",
+      "c0de"
+     ],
+     [
+      "x-2fa-method",
+      "password"
+     ],
+     [
+      "Content-Length",
+      "15"
+     ]
+    ]
+   ]
+  },
+  "an authed GET": {
+   "127.0.0.1": [
+    [
+     "GET /x",
+     [
+      "Host",
+      "127.0.0.1:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "X-Auth-Token",
+      "tok"
+     ],
+     [
+      "X-User-Id",
+      "uid"
+     ]
+    ]
+   ],
+   "localhost": [
+    [
+     "GET /x",
+     [
+      "Host",
+      "localhost:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "X-Auth-Token",
+      "tok"
+     ],
+     [
+      "X-User-Id",
+      "uid"
+     ]
+    ]
+   ]
+  },
+  "a POST without a body, which still says its length": {
+   "127.0.0.1": [
+    [
+     "POST /x",
+     [
+      "Host",
+      "127.0.0.1:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "Content-Length",
+      "0"
+     ]
+    ]
+   ],
+   "localhost": [
+    [
+     "POST /x",
+     [
+      "Host",
+      "localhost:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "Content-Length",
+      "0"
+     ]
+    ]
+   ]
+  },
+  "a DELETE without a body, the same": {
+   "127.0.0.1": [
+    [
+     "DELETE /x",
+     [
+      "Host",
+      "127.0.0.1:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "Content-Length",
+      "0"
+     ]
+    ]
+   ],
+   "localhost": [
+    [
+     "DELETE /x",
+     [
+      "Host",
+      "localhost:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "Content-Length",
+      "0"
+     ]
+    ]
+   ]
+  },
+  "an OPTIONS, the same": {
+   "127.0.0.1": [
+    [
+     "OPTIONS /x",
+     [
+      "Host",
+      "127.0.0.1:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "Content-Length",
+      "0"
+     ]
+    ]
+   ],
+   "localhost": [
+    [
+     "OPTIONS /x",
+     [
+      "Host",
+      "localhost:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "Content-Length",
+      "0"
+     ]
+    ]
+   ]
+  },
+  "a caller header in the place of the default it names, in its spelling": {
+   "127.0.0.1": [
+    [
+     "PUT /x",
+     [
+      "Host",
+      "127.0.0.1:{PORT}"
+     ],
+     [
+      "user-agent",
+      "a-script/1.0"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "accept",
+      "application/json"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "Content-Length",
+      "0"
+     ]
+    ]
+   ],
+   "localhost": [
+    [
+     "PUT /x",
+     [
+      "Host",
+      "localhost:{PORT}"
+     ],
+     [
+      "user-agent",
+      "a-script/1.0"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "accept",
+      "application/json"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "Content-Length",
+      "0"
+     ]
+    ]
+   ]
+  },
+  "a GET with a body": {
+   "127.0.0.1": [
+    [
+     "GET /x",
+     [
+      "Host",
+      "127.0.0.1:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "Content-Length",
+      "8"
+     ],
+     [
+      "Content-Type",
+      "application/json"
+     ]
+    ]
+   ],
+   "localhost": [
+    [
+     "GET /x",
+     [
+      "Host",
+      "localhost:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "Content-Length",
+      "8"
+     ],
+     [
+      "Content-Type",
+      "application/json"
+     ]
+    ]
+   ]
+  },
+  "a PUT a 301 moves: the body is dropped, and the length said is 0": {
+   "127.0.0.1": [
+    [
+     "PUT /r301",
+     [
+      "Host",
+      "127.0.0.1:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "Content-Length",
+      "8"
+     ],
+     [
+      "Content-Type",
+      "application/json"
+     ]
+    ],
+    [
+     "PUT /x",
+     [
+      "Host",
+      "127.0.0.1:{PORT}"
+     ],
+     [
+      "Content-Length",
+      "0"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ]
+    ]
+   ],
+   "localhost": [
+    [
+     "PUT /r301",
+     [
+      "Host",
+      "localhost:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "Content-Length",
+      "8"
+     ],
+     [
+      "Content-Type",
+      "application/json"
+     ]
+    ],
+    [
+     "PUT /x",
+     [
+      "Host",
+      "localhost:{PORT}"
+     ],
+     [
+      "Content-Length",
+      "0"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ]
+    ]
+   ]
+  },
+  "a POST a 302 turns into a GET": {
+   "127.0.0.1": [
+    [
+     "POST /r302",
+     [
+      "Host",
+      "127.0.0.1:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "X-Auth-Token",
+      "t"
+     ],
+     [
+      "Content-Length",
+      "8"
+     ],
+     [
+      "Content-Type",
+      "application/json"
+     ]
+    ],
+    [
+     "GET /x",
+     [
+      "Host",
+      "127.0.0.1:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "X-Auth-Token",
+      "t"
+     ]
+    ]
+   ],
+   "localhost": [
+    [
+     "POST /r302",
+     [
+      "Host",
+      "localhost:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "X-Auth-Token",
+      "t"
+     ],
+     [
+      "Content-Length",
+      "8"
+     ],
+     [
+      "Content-Type",
+      "application/json"
+     ]
+    ],
+    [
+     "GET /x",
+     [
+      "Host",
+      "localhost:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "X-Auth-Token",
+      "t"
+     ]
+    ]
+   ]
+  },
+  "a POST a 307 sends again": {
+   "127.0.0.1": [
+    [
+     "POST /r307",
+     [
+      "Host",
+      "127.0.0.1:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "Content-Length",
+      "8"
+     ],
+     [
+      "Content-Type",
+      "application/json"
+     ]
+    ],
+    [
+     "POST /x",
+     [
+      "Host",
+      "127.0.0.1:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "Content-Length",
+      "8"
+     ],
+     [
+      "Content-Type",
+      "application/json"
+     ]
+    ]
+   ],
+   "localhost": [
+    [
+     "POST /r307",
+     [
+      "Host",
+      "localhost:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "Content-Length",
+      "8"
+     ],
+     [
+      "Content-Type",
+      "application/json"
+     ]
+    ],
+    [
+     "POST /x",
+     [
+      "Host",
+      "localhost:{PORT}"
+     ],
+     [
+      "User-Agent",
+      "<the default>"
+     ],
+     [
+      "Accept-Encoding",
+      "gzip, deflate"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ],
+     [
+      "Connection",
+      "keep-alive"
+     ],
+     [
+      "Content-Length",
+      "8"
+     ],
+     [
+      "Content-Type",
+      "application/json"
+     ]
+    ]
+   ]
+  }
+ }
+}

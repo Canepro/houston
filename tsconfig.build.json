@@ -1,0 +1,20 @@
+{
+  // The EMIT configuration. `tsconfig.json` is the gate and type-checks test/ as well;
+  // this one reads src/ alone, where every file is production code, so no spec or setup
+  // file can reach dist/.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // `tsc` EMIT, no bundler. A bundler rewrites the `data/` lookup behind `dataPath()` in
+    // src/lib/config.ts; `versions.ts` would then fall back to the live endpoint and presets
+    // would report "not found" -- at runtime, in production, with a green build.
+    "rootDir": "src",
+    "outDir": "dist",
+    // The package is a command, not a library: nothing imports its types, and a map would
+    // point at src/, which is not shipped. The editor's config keeps all three.
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

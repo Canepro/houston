@@ -1,0 +1,11 @@
+
+ Usage: houston skill install [OPTIONS]
+
+ Copy the packaged skill where an agent will find it.
+
+╭─ Options ──╮
+ --host         <str>  claude | agents | all [default: all]
+ --force               overwrite a locally-edited copy
+ --json                print the result as one JSON envelope
+ --help                Show this message and exit.
+╰──╯

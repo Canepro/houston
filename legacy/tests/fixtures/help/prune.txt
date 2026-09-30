@@ -1,0 +1,13 @@
+
+ Usage: houston prune [OPTIONS]
+
+ Delete every `down` repro — INCLUDING its data volume and record. Skips pinned and running ones.
+
+╭─ Options ──╮
+ --yes      -y        skip the confirmation prompt (for scripts/CI)
+ --orphans            also delete Kubernetes namespaces houston owns that no local record
+                      explains
+ --force              with --orphans, sweep namespaces that belong to somebody else or whose
+                      owner cannot be read
+ --help               Show this message and exit.
+╰──╯

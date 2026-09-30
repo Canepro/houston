@@ -1,0 +1,10 @@
+
+ Usage: houston monitor [OPTIONS]
+
+ Attach (or --off to detach) Prometheus + Grafana on a running repro.
+
+╭─ Options ──╮
+ --name  -n      <str>
+ --off                  detach: remove Prometheus + Grafana
+ --help                 Show this message and exit.
+╰──╯

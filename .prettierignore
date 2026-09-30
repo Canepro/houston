@@ -1,0 +1,12 @@
+# Prettier is scoped by the `format` script's globs, not by walking the repo. This file
+# is the second line of defence for anything those globs could still reach.
+#
+# It is deliberately NOT a repo-wide style gate: reformatting a tree whose comments carry
+# its reasons is a large diff that buries the change somebody needs to review.
+dist/
+node_modules/
+build/
+.venv/
+coverage/
+.yarn/
+yarn.lock

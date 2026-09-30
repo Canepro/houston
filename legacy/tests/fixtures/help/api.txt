@@ -1,0 +1,21 @@
+
+ Usage: houston api [OPTIONS] {method} {path}
+
+ Make an authenticated REST call against a repro and print the response.
+
+ Examples:
+ houston api GET  /api/v1/me
+ houston api POST /api/v1/users.update --pat -d '{"userId":"ID","data":{"name":"X"}}'
+ houston api POST /api/v1/users.update --2fa -d '{"userId":"ID","data":{"name":"X"}}'
+
+╭─ Arguments ──╮
+ *    method      <str>  HTTP method, e.g. GET / POST [required]
+ *    path        <str>  API path, e.g. /api/v1/users.update [required]
+╰──╯
+╭─ Options ──╮
+ --name  -n      <str>
+ --data  -d      <str>  JSON request body (for POST/PUT)
+ --pat                  auth with a bypass-2FA Personal Access Token (like a customer script)
+ --2fa                  add the admin password-2FA header (to pass 2FA-guarded endpoints)
+ --help                 Show this message and exit.
+╰──╯

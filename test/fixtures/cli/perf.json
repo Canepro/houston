@@ -1,0 +1,106 @@
+{
+  "capacity": {
+    "a bisected search with the report it wrote": {
+      "code": 0,
+      "out": "Capacity search: journey as admin token, SLO p95=1500ms,error=2% (steps of 1s)\n\n    10 VUs              35.0 req/s   p95   100ms   err  0.00%   PASS\n    20 VUs              71.2 req/s   p95   1.00s   err  0.40%   PASS\n    40 VUs              90.5 req/s   p95   2.50s   err  3.00%   FAIL (p95 <= 1500ms (actual 2500ms); error <= 2% (actual 3.00%))\n    30 VUs (bisect)     80.0 req/s   p95   1.20s   err  1.00%   PASS\n    35 VUs (bisect)     85.0 req/s   p95   1.60s   err  2.00%   FAIL (p95 <= 1500ms (actual 1600ms))\n\nCapacity: ~30 concurrent VUs (holds at 30, breaks at 35)\n  why it broke: at 35 VUs: p95 <= 1500ms (actual 1600ms)\n\n✓ wrote /isolated/capacity.md\n",
+      "err": ""
+    },
+    "a constrained search as seeded users, whose caps could not be restored": {
+      "code": 0,
+      "out": "Capacity search: journey as 3 seeded users, SLO p95=1500ms,error=2% (steps of 1s, constrained rocketchat=2cpu/2g, mongodb=1cpu/1g)\n\n    10 VUs              35.0 req/s   p95   100ms   err  0.00%   PASS\n    20 VUs              70.0 req/s   p95   180ms   err  0.00%   PASS\n  ⚠ could not restore resource limits — rocketchat: could not determine CPU/memory capacity to restore - the daemon went away\n\nCapacity: holds the SLO up to 20 VUs (never breached; raise --max to push further)\n",
+      "err": ""
+    },
+    "a failed restore under --json": {
+      "code": 0,
+      "out": "{\"contract\": 2, \"data\": {\"breach_vus\": null, \"capacity_vus\": 20, \"ctx\": {\"constrained\": \"rocketchat=2cpu/2g\", \"name\": \"resolved\", \"scenario\": \"journey\", \"slo\": \"p95=1500ms,error=2%\", \"step_duration\": \"1s\", \"target\": \"http://rocketchat:3000\", \"users\": 3, \"version\": \"8.5.1\"}, \"result\": \"holds the SLO up to 20 VUs (never breached; raise --max to push further)\", \"steps\": [{\"breached\": [], \"error_rate\": 0, \"lag_max_s\": 0.0, \"ok\": true, \"p95\": 100, \"rps\": 35, \"vus\": 10}, {\"breached\": [], \"error_rate\": 0, \"lag_max_s\": 0.0, \"ok\": true, \"p95\": 180, \"rps\": 70, \"vus\": 20}], \"why\": \"\"}, \"error\": null, \"generated_at\": \"$GEN\", \"houston_version\": \"$VER\", \"ok\": true, \"schema\": \"houston.capacity.v1\", \"warnings\": []}\n",
+      "err": "  ⚠ could not restore resource limits — rocketchat: could not determine CPU/memory capacity to restore - the daemon went away\n"
+    },
+    "each step's floats under --json": {
+      "code": 0,
+      "out": "{\"contract\": 2, \"data\": {\"breach_vus\": 35, \"capacity_vus\": 30, \"ctx\": {\"constrained\": \"\", \"name\": \"resolved\", \"scenario\": \"journey\", \"slo\": \"p95=1500ms\", \"step_duration\": \"1s\", \"target\": \"http://rocketchat:3000\", \"users\": 0, \"version\": \"8.5.1\"}, \"result\": \"~30 concurrent VUs (holds at 30, breaks at 35)\", \"steps\": [{\"breached\": [], \"error_rate\": 0, \"lag_max_s\": 0.0, \"ok\": true, \"p95\": 100, \"rps\": 35, \"vus\": 10}, {\"breached\": [], \"error_rate\": 0.0, \"lag_max_s\": 1.0, \"ok\": true, \"p95\": 180, \"rps\": 70, \"vus\": 20}, {\"breached\": [\"p95 <= 1500ms (actual 2500ms)\"], \"error_rate\": 0.03, \"lag_max_s\": 0.0, \"ok\": false, \"p95\": 2500, \"rps\": 90, \"vus\": 40}, {\"breached\": [], \"error_rate\": 0.0, \"lag_max_s\": 0.0, \"ok\": true, \"p95\": 1200, \"rps\": 80, \"vus\": 30}, {\"breached\": [\"p95 <= 1500ms (actual 1600ms)\"], \"error_rate\": 0.0, \"lag_max_s\": 0.0, \"ok\": false, \"p95\": 1600, \"rps\": 85, \"vus\": 35}], \"why\": \"at 35 VUs: p95 <= 1500ms (actual 1600ms)\"}, \"error\": null, \"generated_at\": \"$GEN\", \"houston_version\": \"$VER\", \"ok\": true, \"schema\": \"houston.capacity.v1\", \"warnings\": []}\n",
+      "err": ""
+    },
+    "a search whose caps cannot be applied": {
+      "code": 1,
+      "out": "",
+      "err": "error: could not apply --constrain: no running container for service 'rocketchat' — is the repro up?\n"
+    },
+    "a search whose caps cannot be applied, from a home of its own": {
+      "code": 1,
+      "out": "",
+      "err": "error: could not apply --constrain: no running container for service 'rocketchat' — is the repro up?\n"
+    }
+  },
+  "loadtest": {
+    "every warning, the moment it happens": {
+      "code": 0,
+      "out": "  note: --vus is ignored when --ramp is given\n  ⚠ no seeded users could log in — using the admin token (run `houston seed` first for realistic multi-user load)\n  constrained: rocketchat=2cpu/2g (restored after the test)\n  ⚠ could not disable the API rate limiter — results may be throttled (429s)\nLoad test: messages @ ramp 0:20 for 1s as admin token -> http://rocketchat:3000 (via k6 on 'resolved''s network)\n\n  ⚠ could not restore resource limits — rocketchat: docker update failed: the daemon went away\n  ⚠ baseline 'b0' was a 'read' run — comparing across scenarios\n  ⚠ baseline 'b0' ran a different load shape (3 VUs vs ramp 0:20) — deltas reflect the offered load, not just the workspace\n  ⚠ baseline 'b0' ran under different resource constraints (rocketchat=1cpu/1g vs rocketchat=2cpu/2g) — deltas reflect the hardware change\n\n+- loadtest messages (ramp 0:20 / 1s) ----------------------+\n|  throughput   41.5 req/s   (125 requests)                 |\n|  latency      p50 120ms  p90 250ms  p95 300ms  p99 400ms  |\n|  avg -  min -  max -                                      |\n|  errors       0.40%   checks - ok                         |\n|  constrained  rocketchat=2cpu/2g                          |\n+-----------------------------------------------------------+\n\nvs baseline 'b0' (read, saved 2020-01-01T00:00:00):\n  throughput (rps)       5.0 -> 41.5       +730%\n  p95                  200ms -> 300ms       +50%   <- regression\n  error rate           0.00% -> 0.40%        +0%\n",
+      "err": ""
+    },
+    "a spike as seeded users": {
+      "code": 0,
+      "out": "Load test: messages @ spike 5:50 for 1s as 2 seeded users -> http://rocketchat:3000 (via k6 on 'resolved''s network)\n\n\n+- loadtest messages (spike 5:50 / 1s, 2 users) -----------+\n|  throughput  41.5 req/s   (125 requests)                 |\n|  latency     p50 120ms  p90 250ms  p95 300ms  p99 400ms  |\n|  avg -  min -  max -                                     |\n|  errors      0.40%   checks - ok                         |\n+----------------------------------------------------------+\n",
+      "err": ""
+    },
+    "the live hint and the diagnostics a custom run cannot arm": {
+      "code": 0,
+      "out": "Load test: custom POST /api/v1/chat.postMessage @ spike 10:100 for 1s as admin token -> http://rocketchat:3000 (via k6 on 'resolved''s network)\n\n  live: k6 metrics streaming into Prometheus — open the 'k6 Load Test' dashboard in Grafana (http://localhost:5050), or Explore -> k6_*\n  ⚠ Mongo slow-query capture unavailable (profiler could not be enabled)\n\n+- loadtest custom POST /api/v1/chat.postMessage (spike 10:100 / 1s) ---+\n|  throughput  41.5 req/s   (125 requests)                              |\n|  latency     p50 120ms  p90 250ms  p95 300ms  p99 400ms               |\n|  avg -  min -  max -                                                  |\n|  errors      0.40%   checks - ok                                      |\n+-----------------------------------------------------------------------+\n\nVerdict:\n  - No saturation signals: p95 300ms at 41.5 req/s, 0.40% errors - the workspace has\n      headroom at this load.\n",
+      "err": ""
+    },
+    "every warning under --json": {
+      "code": 0,
+      "out": "{\"contract\": 2, \"data\": {\"compare\": {\"baseline\": \"b0\", \"rows\": [{\"after\": 41.5, \"before\": 5.0, \"flag\": false, \"metric\": \"throughput (rps)\", \"pct\": 730.0000000000001, \"worse\": false}, {\"after\": 300.0, \"before\": 200.0, \"flag\": true, \"metric\": \"p95\", \"pct\": 50.0, \"worse\": true}, {\"after\": 0.004, \"before\": 0.0, \"flag\": false, \"metric\": \"error rate\", \"pct\": 0.0, \"worse\": true}]}, \"ctx\": {\"constrained\": \"rocketchat=2cpu/2g\", \"duration\": \"1s\", \"label\": \"messages\", \"name\": \"resolved\", \"ramp\": \"0:20\", \"scenario\": \"messages\", \"spike\": \"\", \"target\": \"http://rocketchat:3000\", \"users\": 0, \"version\": \"8.5.1\", \"vus\": 12}, \"passed\": true, \"slo\": [], \"snapshot\": {\"constraints\": \"rocketchat=2cpu/2g\", \"instances\": 1, \"preset\": \"default\", \"rc_version\": \"8.5.1\"}, \"summary\": {\"count\": 125, \"error_rate\": 0.004, \"p50\": 120, \"p90\": 250, \"p95\": 300, \"p99\": 400, \"rps\": 41.5}, \"warnings\": [\"note: --vus is ignored when --ramp is given\", \"no seeded users could log in \\u2014 using the admin token (run `houston seed` first for realistic multi-user load)\", \"could not disable the API rate limiter \\u2014 results may be throttled (429s)\", \"could not restore resource limits \\u2014 rocketchat: docker update failed: the daemon went away\", \"baseline 'b0' was a 'read' run \\u2014 comparing across scenarios\", \"baseline 'b0' ran a different load shape (3 VUs vs ramp 0:20) \\u2014 deltas reflect the offered load, not just the workspace\", \"baseline 'b0' ran under different resource constraints (rocketchat=1cpu/1g vs rocketchat=2cpu/2g) \\u2014 deltas reflect the hardware change\"]}, \"error\": null, \"generated_at\": \"$GEN\", \"houston_version\": \"$VER\", \"ok\": true, \"schema\": \"houston.loadtest.v1\", \"warnings\": []}\n",
+      "err": ""
+    },
+    "every row of the panel, the step table, SLO rules and the saved outputs": {
+      "code": 1,
+      "out": "Load test: journey @ 10 VUs for 1s as 2 seeded users -> http://rocketchat:3000 (via k6 on 'resolved''s network)\n\n\n+- loadtest journey (10 VUs / 1s, 2 users) ----------------+\n|  throughput  41.5 req/s   (1245 requests)                |\n|  latency     p50 80ms  p90 210ms  p95 300ms  p99 1500ms  |\n|  avg 120ms  min 3ms  max 2500ms                          |\n|  errors      0.40%   checks 99% ok                       |\n|  responses   2xx 1180 · 429 60 · 4xx 5                   |\n+----------------------------------------------------------+\n\nPer-step latency:\n  step      count       p50     p95     p99\n  login        10      50ms    90ms   120ms\n  post        400      62ms   1.25s   3.00s\n  zeta          3       0ms    40ms     0ms\n\n  ✗ p95 <= 200ms  (actual 300ms)\n  ✓ error <= 1%  (actual 0.40%)\n  ✗ rps >= 100  (actual 41.5)\n  ✓ p50 <= 1s  (actual 80ms)\n\nSLO gate: FAIL\n\n✓ saved baseline 'after-fix' (compare later with --compare after-fix)\n\n✓ wrote /isolated/loadtest.md\n",
+      "err": ""
+    },
+    "a run with no rules, and no gate": {
+      "code": 0,
+      "out": "Load test: journey @ 10 VUs for 1s as 2 seeded users -> http://rocketchat:3000 (via k6 on 'resolved''s network)\n\n\n+- loadtest journey (10 VUs / 1s, 2 users) ----------------+\n|  throughput  41.5 req/s   (1245 requests)                |\n|  latency     p50 80ms  p90 210ms  p95 300ms  p99 1500ms  |\n|  avg 120ms  min 3ms  max 2500ms                          |\n|  errors      0.40%   checks 99% ok                       |\n|  responses   2xx 1180 · 429 60 · 4xx 5                   |\n+----------------------------------------------------------+\n\nPer-step latency:\n  step      count       p50     p95     p99\n  login        10      50ms    90ms   120ms\n  post        400      62ms   1.25s   3.00s\n  zeta          3       0ms    40ms     0ms\n",
+      "err": ""
+    },
+    "a zero-request run, unmeasured metrics as -": {
+      "code": 0,
+      "out": "  ⚠ no seeded users could log in — using the admin token (run `houston seed` first for realistic multi-user load)\nLoad test: journey @ ramp 0:20 for 1s as admin token -> http://rocketchat:3000 (via k6 on 'resolved''s network)\n\n\n+- loadtest journey (ramp 0:20 / 1s) ------+\n|  throughput  0.0 req/s   (0 requests)    |\n|  latency     p50 -  p90 -  p95 -  p99 -  |\n|  avg -  min -  max -                     |\n|  errors      0.00%   checks - ok         |\n+------------------------------------------+\n",
+      "err": ""
+    },
+    "a spike with the whole diagnosis and the resource cost": {
+      "code": 0,
+      "out": "  constrained: rocketchat=2cpu/2g (restored after the test)\nLoad test: journey @ spike 10:100 for 1s as 2 seeded users -> http://rocketchat:3000 (via k6 on 'resolved''s network)\n\n\n+- loadtest journey (spike 10:100 / 1s, 2 users) -----------+\n|  throughput   41.5 req/s   (1245 requests)                |\n|  latency      p50 80ms  p90 210ms  p95 300ms  p99 1500ms  |\n|  avg 120ms  min 3ms  max 2500ms                           |\n|  errors       0.40%   checks 99% ok                       |\n|  responses    2xx 1180 · 429 60 · 4xx 5                   |\n|  constrained  rocketchat=2cpu/2g                          |\n+-----------------------------------------------------------+\n\nPer-step latency:\n  step      count       p50     p95     p99\n  login        10      50ms    90ms   120ms\n  post        400      62ms   1.25s   3.00s\n  zeta          3       0ms    40ms     0ms\n  spike: baseline p95 110ms -> peak 1.20s -> recovered ~0s after load dropped\n\n  p95 over time   100ms |  +#+    | 1.20s   (9 buckets of 1s)\n  errors                |....xx...|   (first at ~4s)\n\nRC internals during the test:\n  rocketchat-1   event-loop lag peak 620ms / p99 410ms   heap 312MB   ddp users 12\n  rocketchat-2   event-loop lag peak 4ms\n\nSlow MongoDB queries (3 profiled, 1 COLLSCAN):\n    1.25s  rocketchat.rocketchat_message  query  [COLLSCAN]  docs 5000/ret 10\n    150ms  rocketchat.users  update  [?]  docs 1/ret 0\n\nVerdict:\n  - RC event loop saturated: lag peaked at 620ms on rocketchat-1 - the Node process is\n      the bottleneck; more CPU or more instances (multi-instance preset) will help.\n  - MongoDB ran 1 collection scan(s) (COLLSCAN) among the profiled slow queries - likely\n      a missing index - slowest: rocketchat.rocketchat_message 1.25s.\n\nResource cost (idle -> peak):\n  mongodb        CPU 0% -> 60%   RAM 250 MB (+124)\n  rocketchat-1   CPU 2% -> 180%   RAM 650 MB (+350)\n  rocketchat-2   CPU 0% -> 90%   RAM 400 MB (+200)\n",
+      "err": ""
+    },
+    "a comparison with the baseline it was made against": {
+      "code": 0,
+      "out": "Load test: journey @ 10 VUs for 1s as 2 seeded users -> http://rocketchat:3000 (via k6 on 'resolved''s network)\n\n\n+- loadtest journey (10 VUs / 1s, 2 users) ----------------+\n|  throughput  41.5 req/s   (1245 requests)                |\n|  latency     p50 80ms  p90 210ms  p95 300ms  p99 1500ms  |\n|  avg 120ms  min 3ms  max 2500ms                          |\n|  errors      0.40%   checks 99% ok                       |\n|  responses   2xx 1180 · 429 60 · 4xx 5                   |\n+----------------------------------------------------------+\n\nPer-step latency:\n  step      count       p50     p95     p99\n  login        10      50ms    90ms   120ms\n  post        400      62ms   1.25s   3.00s\n  zeta          3       0ms    40ms     0ms\n\nvs baseline 'b0' (journey, saved 2026-09-20T10:00:00):\n  throughput (rps)      50.0 -> 41.5        -17%\n  p50                   70ms -> 80ms        +14%\n  p95                  250ms -> 300ms       +20%\n  p99                  600ms -> 1.50s      +150%   <- regression\n  error rate           0.00% -> 0.40%        +0%\n  step login p95        40ms -> 90ms       +125%   <- regression\n  step post p95        1.30s -> 1.25s        -4%\n",
+      "err": ""
+    },
+    "the envelope's computed numbers": {
+      "code": 1,
+      "out": "{\"contract\": 2, \"data\": {\"compare\": {\"baseline\": \"b0\", \"rows\": [{\"after\": 41.5, \"before\": 50.0, \"flag\": false, \"metric\": \"throughput (rps)\", \"pct\": -17.000000000000004, \"worse\": true}, {\"after\": 300.0, \"before\": 300.0, \"flag\": false, \"metric\": \"p95\", \"pct\": 0.0, \"worse\": false}, {\"after\": 0.004, \"before\": 0.0, \"flag\": false, \"metric\": \"error rate\", \"pct\": 0.0, \"worse\": true}]}, \"ctx\": {\"constrained\": \"rocketchat=2cpu/2g\", \"duration\": \"1s\", \"label\": \"journey\", \"name\": \"resolved\", \"ramp\": \"\", \"scenario\": \"journey\", \"spike\": \"10:100\", \"target\": \"http://rocketchat:3000\", \"users\": 2, \"version\": \"8.5.1\", \"vus\": 10}, \"diag\": {\"mongo\": {\"collscan\": 1, \"slow\": [{\"cmd\": \"{}\", \"docs\": 5000, \"keys\": 0, \"millis\": 1250, \"ns\": \"rocketchat.rocketchat_message\", \"op\": \"query\", \"plan\": \"COLLSCAN\", \"ret\": 10}, {\"docs\": 1, \"keys\": 1, \"millis\": 150, \"ns\": \"rocketchat.users\", \"op\": \"update\", \"plan\": \"\", \"ret\": 0}], \"total\": 3}, \"rcmetrics\": {\"rocketchat\": {\"eventloop_lag_max_s\": {\"last\": 1.0, \"max\": 1.0, \"mean\": 1.0, \"n\": 2}}}, \"spike\": {\"baseline_p95\": 110.0, \"recovered_after_s\": 0, \"spike_p95\": 1200.0}, \"timeline\": {\"buckets\": [{\"errors\": 0, \"max\": 101.0, \"p50\": 50.0, \"p95\": 100.0, \"reqs\": 5, \"t0\": 0}, {\"errors\": 0, \"max\": 111.0, \"p50\": 55.0, \"p95\": 110.0, \"reqs\": 5, \"t0\": 1}, {\"errors\": 0, \"max\": 901.0, \"p50\": 450.0, \"p95\": 900.0, \"reqs\": 5, \"t0\": 2}, {\"errors\": 0, \"max\": 1201.0, \"p50\": 600.0, \"p95\": 1200.0, \"reqs\": 5, \"t0\": 3}, {\"errors\": 1, \"max\": 951.0, \"p50\": 475.0, \"p95\": 950.0, \"reqs\": 5, \"t0\": 4}, {\"errors\": 1, \"max\": 131.0, \"p50\": 65.0, \"p95\": 130.0, \"reqs\": 5, \"t0\": 5}, {\"errors\": 0, \"max\": 121.0, \"p50\": 60.0, \"p95\": 120.0, \"reqs\": 5, \"t0\": 6}, {\"errors\": 0, \"max\": 116.0, \"p50\": 57.5, \"p95\": 115.0, \"reqs\": 5, \"t0\": 7}, {\"errors\": 0, \"max\": 111.0, \"p50\": 55.0, \"p95\": 110.0, \"reqs\": 5, \"t0\": 8}], \"first_error_s\": 4, \"span_s\": 8.0, \"width_s\": 1}, \"verdict\": [\"RC event loop saturated: lag peaked at 1.00s on rocketchat \\u2014 the Node process is the bottleneck; more CPU or more instances (multi-instance preset) will help.\", \"MongoDB ran 1 collection scan(s) (COLLSCAN) among the profiled slow queries \\u2014 likely a missing index \\u2014 slowest: rocketchat.rocketchat_message 1.25s.\"]}, \"passed\": false, \"resources\": {\"rocketchat\": {\"idle_cpu\": 0.0, \"idle_mem\": 300000000.0, \"limit_mem\": 2000000000.0, \"peak_cpu\": 180.0, \"peak_cpu_t\": 3.0, \"peak_mem\": 650000000.0}}, \"slo\": [{\"actual\": 300.0, \"key\": \"p95\", \"measured\": true, \"ok\": true, \"op\": \"<=\", \"raw\": \"1s\", \"threshold\": 1000.0}, {\"actual\": 0.4, \"key\": \"error\", \"measured\": true, \"ok\": false, \"op\": \"<=\", \"raw\": \"0.1%\", \"threshold\": 0.1}], \"snapshot\": {\"constraints\": \"rocketchat=2cpu/2g\", \"instances\": 1, \"preset\": \"default\", \"rc_version\": \"8.5.1\"}, \"summary\": {\"avg\": 120.25, \"checks_rate\": 0.99, \"count\": 1245, \"error_rate\": 0.004, \"max\": 2500.5, \"min\": 3.1, \"p50\": 80, \"p90\": 210.5, \"p95\": 300, \"p99\": 1500, \"rps\": 41.5, \"status\": {\"2xx\": 1180, \"429\": 60, \"4xx\": 5, \"5xx\": 0, \"other\": 0}, \"steps\": {\"login\": {\"count\": 10, \"p50\": 50, \"p95\": 90, \"p99\": 120.5}, \"post\": {\"count\": 400, \"p50\": 62.5, \"p95\": 1250, \"p99\": 3000}, \"zeta\": {\"count\": 3, \"p95\": 40}}}, \"warnings\": []}, \"error\": null, \"generated_at\": \"$GEN\", \"houston_version\": \"$VER\", \"ok\": true, \"schema\": \"houston.loadtest.v1\", \"warnings\": []}\n",
+      "err": ""
+    },
+    "a load test whose caps cannot be applied, from a home of its own": {
+      "code": 1,
+      "out": "",
+      "err": "error: could not apply --constrain: no running container for service 'rocketchat' — is the repro up?\n"
+    },
+    "a load test whose caps cannot be applied": {
+      "code": 1,
+      "out": "",
+      "err": "error: could not apply --constrain: no running container for service 'rocketchat' — is the repro up?\n"
+    },
+    "a load test whose k6 left no summary": {
+      "code": 1,
+      "out": "Load test: messages @ 10 VUs for 1s as admin token -> http://rocketchat:3000 (via k6 on 'resolved''s network)\n\n",
+      "err": "error: k6 summary was unreadable (truncated) — the run likely did not finish\n"
+    },
+    "a cap it cannot apply, under --json": {
+      "code": 1,
+      "out": "{\"contract\": 2, \"data\": null, \"error\": {\"code\": \"REPRO_ERROR\", \"message\": \"could not apply --constrain: no running container for service 'rocketchat' \\u2014 is the repro up?\"}, \"generated_at\": \"$GEN\", \"houston_version\": \"$VER\", \"ok\": false, \"schema\": \"houston.error.v1\", \"warnings\": []}\n",
+      "err": "error: could not apply --constrain: no running container for service 'rocketchat' — is the repro up?\n"
+    }
+  }
+}

@@ -1,0 +1,447 @@
+# houston user guide
+
+This guide covers what comes after your first workspace. For installing houston and
+starting one, read the [README](../../README.md) first.
+
+Every command also explains itself: `houston <command> --help`.
+
+**Contents:** [Commands at a glance](#commands-at-a-glance) ·
+[Everyday lifecycle](#everyday-lifecycle) · [Scenarios (presets)](#scenarios-presets) ·
+[Sample data](#sample-data) · [A customer's settings](#a-customers-settings) ·
+[Settings and environment variables](#settings-and-environment-variables) ·
+[Backup, restore, upgrade](#backup-restore-upgrade) · [HTTPS](#https) ·
+[Monitoring](#monitoring) · [Load testing](#load-testing-and-capacity) ·
+[REST API](#rest-api) · [Versions and MongoDB](#versions-and-mongodb) ·
+[Where state lives](#where-state-lives)
+
+---
+
+## Commands at a glance
+
+| Group | Commands |
+|---|---|
+| lifecycle | `up` `start` `stop` `restart` `down` `prune` |
+| inspect | `list` `info` `logs` `ready` `stats` |
+| settings | `use` `config` `env` |
+| data | `seed` `config-import` `backup` `backups` `restore` `upgrade` |
+| performance (Docker only) | `loadtest` `capacity` |
+| REST | `token` `api` `pat` |
+| web GUI and accounts | `serve` `users` `audit` `chown` |
+| HTTPS | `edge` `trust-ca` `tls-status` |
+| cloud clusters | `cluster` (see [EKS](eks.md)) |
+| other | `monitor` `presets` `versions` `doctor` `capabilities` `skill` |
+
+---
+
+## Everyday lifecycle
+
+```bash
+houston list                          # every workspace: version, MongoDB, runtime, port, state, URL
+houston info  --name ticket-1234      # URL, login, links, notes
+houston logs  --name ticket-1234 -f   # follow the logs (Ctrl-C to stop)
+houston ready --name ticket-1234      # wait until Rocket.Chat is serving
+```
+
+A workspace can live as long as the ticket does. Pause and resume it instead of
+creating it again:
+
+| Command | What it does |
+|---|---|
+| `up` | creates a workspace, or brings a stopped one back with its data |
+| `stop` / `start` | pauses and resumes it in seconds |
+| `restart` | restarts Rocket.Chat |
+| `down` | removes the containers but **keeps** the data and the record |
+| `down --volumes` | deletes the data too, after asking |
+| `prune` | removes every workspace that is `down`, except pinned and running ones |
+
+The commands that delete data ask first, and `prune` lists what it will remove. Add
+`--yes` to skip the question in a script.
+
+**`up` on an existing name reuses that workspace exactly as it was.** If you asked
+for a different version, preset or monitoring, it warns and ignores the request. To try
+another version, use `houston upgrade` or pick a new name. `--force` rebuilds the
+workspace, and `--fresh` also wipes its data.
+
+**One workspace you use every day:** create it once with `--pin`, then `stop` and
+`start` it. A command without `--name` acts on the pinned workspace, or on the one
+`houston use <name>` chose last.
+
+```bash
+houston up --version 8.5.1 --name main --pin
+houston use ticket-1234        # later commands without --name act on ticket-1234
+```
+
+**Remove workspaces you are done with.** Each one uses about 1.1 GB of memory, `up`
+refuses when the machine does not have room, and too many at once can run a machine
+out of memory.
+
+---
+
+## Scenarios (presets)
+
+A preset adds the service a ticket is about, wires Rocket.Chat to it, and turns the
+feature on, so it is ready when you sign in.
+
+```bash
+houston presets                                                  # what exists
+houston up --version 8.5.1 --name ticket-1234 --preset ldap --wait
+```
+
+| Preset | Starts | Use it for |
+|---|---|---|
+| `default` | Rocket.Chat and MongoDB | anything |
+| `airgapped` | no route to Rocket.Chat Cloud | offline or disconnected workspaces |
+| `ldap` | OpenLDAP with users and a group | LDAP login and sync |
+| `saml` | a Keycloak identity provider (SAML) | SAML single sign-on |
+| `oidc` | a Keycloak identity provider (OpenID Connect) | OIDC / OAuth single sign-on |
+| `email` | Mailpit, catching every mail Rocket.Chat sends | invites, password resets, verification, 2FA codes |
+| `s3_minio` | MinIO as the file-upload store | uploads, previews, presigned URLs |
+| `livechat` | Omnichannel, an agent and a demo page with the widget | the widget, CORS, routing |
+
+For `ldap`, `saml` and `oidc`, sign in as **`user1` / `user1`**. `houston info` lists
+each preset's consoles and logins.
+
+Presets take parameters with `--set key=value`. `houston presets` prints each one's
+parameters and defaults:
+
+```bash
+houston up --version 8.5.1 --name big-ldap --preset ldap --set users=130000   # a large directory
+houston up --version 8.5.1 --name mail --preset email --seed --wait            # users with mail
+houston up --version 8.5.1 --name s3 --preset s3_minio --set presigned=true
+```
+
+Things to know:
+
+- **One preset per workspace.** To reproduce two scenarios, start two workspaces.
+- **`oidc` needs a hosts entry:** add `127.0.0.1  keycloak` to `/etc/hosts`. Your
+  browser and Rocket.Chat must resolve the login URL the same way. `up` and `info`
+  print this reminder.
+- **Several Rocket.Chat instances is a deployment, not a preset.** Use
+  `--deployment multi-instance --replicas 3` on Docker. It starts the instances behind
+  a load balancer, with NATS and one MongoDB. The old spelling, `--preset
+  multi-instance`, still works and prints a hint. It cannot be combined with another
+  preset.
+
+### Your own presets
+
+Put a YAML file at `~/.houston/presets/<name>.yaml`. It replaces a built-in preset of
+the same name. `--preset` always takes a name, never a path.
+
+```yaml
+name: my-scenario
+description: What this reproduces.
+env:
+  OVERWRITE_SETTING_Some_Setting: "true"
+services:
+  my-sidecar: { image: some/image:tag }
+depends_on: [my-sidecar]
+```
+
+**Treat preset files like code.** They can start any container and mount files.
+
+### Enterprise licences
+
+Pass a Rocket.Chat Cloud registration token. The workspace registers itself on first
+boot and Cloud sends the licence down.
+
+```bash
+houston up --version 8.5.1 --name ee --reg-token <token> --wait
+```
+
+To stop typing it, put `reg_token:` in `~/.houston/config.yaml` or export
+`HOUSTON_REG_TOKEN`. **A registration token is a real licence.** Never paste one into a
+support case.
+
+---
+
+## Sample data
+
+A new workspace is empty. `--seed` fills it with users, rooms and messages over the
+REST API, then reads everything back and checks it against the plan.
+
+```bash
+houston up --version 8.5.1 --name ticket-1234 --seed --seed-profile standard --verify-seed
+houston seed --name ticket-1234 --profile large              # seed a running workspace
+houston seed --name ticket-1234 --users 30 --channels 10 --messages 40
+```
+
+| Profile | Users | Rooms | Messages | Threads |
+|---|---|---|---|---|
+| `small` (default) | 5 | 11 | 48 | 11 |
+| `standard` | 20 | 22 | 287 | 48 |
+| `large` | 100 | 52 | 3006 | 500 |
+
+The messages column counts every message the rooms end up holding, including the two
+each discussion starts from. `seed` prints the ones it posted, so `small` reports
+`messages: 46`, `standard` 283 and `large` 3000.
+
+Every profile has every kind of room: public and private channels, public and private
+teams, channels inside teams, discussions, direct messages, threads and reactions.
+
+- Seed users are `alice`, `bob` and so on, and each password is the username.
+- Email 2FA and the rate limiter are off while seeding, and are put back afterwards.
+- **Check the result, not the request.** The result has `verification.ok`. Treat a
+  false or missing one as not proven. `--verify-seed` makes a mismatch fail the
+  command.
+
+### Large volumes
+
+For "50k users" or "a room with 800k messages will not load", `--scale` writes
+straight into MongoDB:
+
+```bash
+houston seed --name ticket-1234 --scale users=50000,messages=800000@general
+houston seed --name ticket-1234 --clear-scale    # removes exactly what --scale added
+```
+
+These rows skip Rocket.Chat's own hooks: scale users cannot log in and scale messages
+send no notifications. Use `--scale` for how Rocket.Chat behaves at volume, and the
+normal seed for how a feature behaves. `--scale` works on Docker workspaces only.
+
+---
+
+## A customer's settings
+
+Load the settings export from a customer's support dump:
+
+```bash
+houston config-import ./8.5.0-settings.json --name ticket-1234 --dry-run   # see what would change
+houston config-import ./8.5.0-settings.json --name ticket-1234 --only Livechat,LDAP
+```
+
+It skips redacted secrets and lists them, so you can set them by hand. It also skips
+settings that would break a local workspace, such as `Site_Url`,
+`Enterprise_License`, `Assets_*` and the cloud registration.
+
+---
+
+## Settings and environment variables
+
+```bash
+houston env --name ticket-1234                                   # the effective environment, secrets masked
+houston env --name ticket-1234 --setting Message_AllowEditing=false   # a Rocket.Chat setting
+houston env --name ticket-1234 --set MY_FLAG=true                # a plain environment variable
+houston env --name ticket-1234 --unset MY_FLAG
+```
+
+Most Rocket.Chat configuration is a **setting**, the thing you change in the admin
+UI. From the environment, a setting only takes effect with the `OVERWRITE_SETTING_`
+prefix, and without it Rocket.Chat ignores the variable silently:
+
+| Environment variable | Effect on `Accounts_ShowFormLogin` |
+|---|---|
+| `Accounts_ShowFormLogin=false` | none |
+| `OVERWRITE_SETTING_Accounts_ShowFormLogin=false` | applied |
+
+`--setting Id=value` adds the prefix for you. `--set` is for real environment
+variables; give it a setting's name and houston points you to the prefixed form.
+
+- An `OVERWRITE_SETTING_` value is applied at every boot. The admin UI can still change
+  it while Rocket.Chat runs, and the next restart puts it back.
+- A change recreates only the Rocket.Chat container. MongoDB keeps running.
+  `--no-restart` saves the change for the next `up`.
+- Your overrides are kept with the workspace and win over the preset's.
+- You may override `MONGO_URL`, `PORT`, `ROOT_URL` or `TRANSPORTER` to reproduce a
+  broken configuration. houston warns what each one will break.
+
+Changing the environment works on Docker workspaces. On Kubernetes, `env` only reads;
+see the [Kubernetes guide](kubernetes.md#what-kubernetes-refuses).
+
+---
+
+## Backup, restore, upgrade
+
+```bash
+houston backup  --name ticket-1234 --label "before upgrade"   # writes ~/.houston/backups/<file>.rcbak
+houston backups                                               # list the backups
+houston restore <bundle> --new                                # rebuild the whole workspace from one file
+houston upgrade --name ticket-1234 --to 8.6.1                 # backs up first
+houston upgrade --name ticket-1234 --rollback
+```
+
+- **A backup is a bundle:** the database plus the version, preset and parameters that
+  produced it. One file rebuilds the workspace, on your machine or a colleague's.
+- Rocket.Chat is stopped while a backup is taken, so the dump is consistent. `--live`
+  skips the stop.
+- A restore replaces the target database completely. `--new` restores into a new
+  workspace instead.
+- Restoring newer data into an older version is refused. Older into newer needs
+  `--allow-upgrade`.
+- A backup does not include the side services' data: MinIO files, Keycloak realms,
+  LDAP entries or Mailpit mail.
+- `upgrade` needs the workspace running, because Rocket.Chat migrates its database when
+  it starts. `--dry-run` shows the plan without changing anything.
+- An upgrade that also needs a new major MongoDB version is refused. MongoDB majors
+  have to be upgraded one step at a time.
+
+---
+
+## HTTPS
+
+This section is about Docker workspaces. For Kubernetes, see
+[HTTPS on a cluster](kubernetes.md#https-on-a-cluster).
+
+On Docker, one shared Traefik proxy, the **edge**, holds ports 80 and 443 and serves
+every HTTPS name on the machine. It starts with the first workspace that needs it.
+
+```bash
+# A real name, with a Let's Encrypt certificate. The name must point at this machine.
+houston up --version 8.5.1 --name ticket-1234 --domain t1234.example.com --email you@example.com
+
+# No domain and no internet: houston's own certificate authority.
+houston trust-ca                                              # once per machine
+houston up --version 8.5.1 --name ticket-1234 --https         # https://ticket-1234.houston.localhost
+```
+
+The email is remembered (`houston config set acme.email <address>`). Rocket.Chat's
+`ROOT_URL` becomes the HTTPS URL, which is what OAuth and SAML redirects need.
+
+```bash
+houston edge status              # is it running, which names, can it reach each one
+houston edge stop                # frees ports 80 and 443
+houston tls-status --name ticket-1234
+```
+
+While the edge is stopped, every HTTPS name on the machine is unreachable, so `doctor`
+reports a stopped edge as a failure. A route the edge cannot reach answers **502**, and
+`edge status` shows which.
+
+**Wildcard certificates (dns-01):** put your DNS provider's credentials in
+`~/.houston/acme/dns.env` and houston uses the dns-01 challenge automatically:
+
+```bash
+mkdir -p ~/.houston/acme && chmod 700 ~/.houston/acme
+printf 'CF_DNS_API_TOKEN=%s\n' "$TOKEN" > ~/.houston/acme/dns.env
+chmod 600 ~/.houston/acme/dns.env
+```
+
+A `--domain` workspace can be reached by anyone who can reach that name, so houston
+gives it a generated admin password instead of `admin123`. `houston info` shows it.
+
+---
+
+## Monitoring
+
+Prometheus, Grafana and Loki on top of any workspace:
+
+```bash
+houston up --version 8.5.1 --name ticket-1234 --monitor
+houston monitor --name ticket-1234          # or add it later, without restarting Rocket.Chat
+houston monitor --name ticket-1234 --off
+```
+
+- **Grafana** is at `http://localhost:5050` (`admin` / `admin`, anonymous viewing on),
+  with the Rocket.Chat, MongoDB and Node Exporter dashboards.
+- **Prometheus** is at `http://localhost:9090`.
+- Container logs go to **Loki**, readable in the *Rocket.Chat Logs* dashboard.
+
+On Docker, log collection covers only that workspace. On Kubernetes, one shared stack
+runs in the `houston-system` namespace, and `--off` leaves it running while another
+workspace still uses it.
+
+---
+
+## Load testing and capacity
+
+**Docker workspaces only.** On Kubernetes the traffic would go through one
+`kubectl port-forward`, which saturates long before Rocket.Chat does, so the numbers
+would measure the forward.
+
+```bash
+houston loadtest --name ticket-1234 --scenario journey --vus 50 --duration 60s
+houston loadtest --name ticket-1234 --scenario custom --endpoint "GET /api/v1/channels.list?count=100"
+houston loadtest --name ticket-1234 --scenario journey --save before-fix
+houston loadtest --name ticket-1234 --scenario journey --compare before-fix
+houston capacity --name ticket-1234 --slo "p95=300ms,error=2%"
+```
+
+The load comes from [k6](https://k6.io), run as a temporary container on the
+workspace's own network.
+
+- **Scenarios:** `journey` (a whole session, each step timed), `messages`, `login`,
+  `read`, `mixed`, `webhook`, `badbot` and `custom`.
+- **Shapes:** a constant `--vus`, `--ramp 10:200`, or `--spike 10:100`, which reports
+  how long p95 took to recover. `--stats` on a long run reports memory growth per
+  hour, the sign of a leak.
+- **The customer's hardware:** `--constrain "rc=2cpu/2g,mongo=1cpu/1g"` limits the
+  services for the run and removes the limits afterwards.
+- **`--slo p95=300ms,error=1%`** makes the command fail when the target is missed, so it
+  fits in CI.
+- **Diagnosis is on by default:** Rocket.Chat's event-loop lag, MongoDB's slow queries
+  with their plans (it flags `COLLSCAN`), and when errors started, ending in a
+  plain-language verdict.
+
+`capacity` doubles the load until the target breaks, narrows down where, and says why.
+
+**VUs are k6 workers, not Rocket.Chat accounts.** Write scenarios leave real messages
+in `#general`; `read` and `login` add nothing.
+
+---
+
+## REST API
+
+```bash
+houston token --name ticket-1234                    # auth headers for curl
+houston api   --name ticket-1234 GET /api/v1/me
+houston api   --name ticket-1234 --pat POST /api/v1/users.update -d '{"userId":"ID","data":{"name":"X"}}'
+houston api   --name ticket-1234 --2fa POST /api/v1/settings/Message_AllowEditing -d '{"value":false}'
+houston pat   --name ticket-1234                    # create a Personal Access Token
+```
+
+`--pat` calls the API the way a customer's Personal Access Token would (with "Ignore
+2FA"). `--2fa` gets past an admin endpoint that asks for two-factor authentication.
+The web GUI has the same console.
+
+---
+
+## Versions and MongoDB
+
+`houston up --version X` asks `releases.rocket.chat/<version>/info`, Rocket.Chat's own
+compatibility data, and picks the newest supported MongoDB. When that is unreachable,
+or for a release older than that data, it uses the list shipped with houston.
+`--offline` always uses the shipped list.
+
+```bash
+houston versions 8.5.1        # which MongoDB houston would pair with 8.5.1, and why
+```
+
+Give full versions such as `8.5.1`. MongoDB 8 and newer runs the
+`mongodb/mongodb-community-server` image; older MongoDB runs `bitnamilegacy/mongodb`.
+
+---
+
+## Where state lives
+
+Everything houston keeps is under `~/.houston`. Set `HOUSTON_HOME` to use another
+directory.
+
+```
+~/.houston/
+├── IMPLEMENTATION            # which houston versions may use this directory
+├── config.yaml               # your defaults: bind_host, reg_token, acme.email, GUI policies
+├── users  sessions           # web GUI accounts and sign-ins (mode 0600)
+├── first-run                 # the web GUI's one-time setup key, until the first account exists
+├── audit.log                 # who did what
+├── logs/houston.log          # one start and one end line for every command
+├── locks/  journal/          # houston's own bookkeeping; leave them alone
+├── presets/                  # your own presets
+├── backups/                  # backup bundles
+├── reports/  loadtests/      # load-test reports and saved runs
+├── acme/  edge/              # HTTPS: certificate state, the edge and its routes
+├── clients/kubernetes/       # houston's own kubeconfig, never your ~/.kube/config
+├── clusters/<name>/          # a cloud cluster houston built, and its kubeconfig
+└── repros/<name>/
+    ├── docker-compose.yml    # generated: run `up` again instead of editing it
+    └── repro.json            # the workspace record: version, runtime, ports, seed result, notes
+```
+
+**Every command writes to `logs/houston.log`**, even `--help` and `--version`. When you
+experiment or script against houston, point it at a throwaway directory first:
+
+```bash
+export HOUSTON_HOME=$(mktemp -d)
+```
+
+Settings can also come from the environment, which wins over `config.yaml`:
+`HOUSTON_HOME`, `HOUSTON_REG_TOKEN`, `HOUSTON_RC_IMAGE`, `HOUSTON_BIND_HOST` (the
+`--bind` flag wins over both) and `HOUSTON_KUBE_CONTEXT`.

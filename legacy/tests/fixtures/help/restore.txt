@@ -1,0 +1,27 @@
+
+ Usage: houston restore [OPTIONS] {bundle}
+
+ Restore a backup bundle into a repro.
+
+ Three targets:
+
+   houston restore B                  in place — the repro it came from
+   houston restore B --new            a fresh repro built from the bundle
+   houston restore B --name other     an existing, different repro
+
+ Existing collections are DROPPED, so the result is the backup's data and not a
+ merge of the two. Downgrading (newer data into an older workspace) is refused:
+ Rocket.Chat does not migrate a database backwards.
+
+╭─ Arguments ──╮
+ *    bundle      <str>  path to a .rcbak bundle [required]
+╰──╯
+╭─ Options ──╮
+ --name           -n      <str>  restore into this repro (default: the one it came from)
+ --new                           create a fresh repro from the bundle instead of restoring into
+                                 an existing one
+ --allow-upgrade                 permit restoring older data into a newer workspace (Rocket.Chat
+                                 will migrate it)
+ --force                         ignore compatibility refusals
+ --help                          Show this message and exit.
+╰──╯

@@ -1,0 +1,572 @@
+{
+  "contract": 2,
+  "data": {
+    "commands": [
+      {
+        "flags": [
+          "--2fa",
+          "--data",
+          "--name",
+          "--pat"
+        ],
+        "json": false,
+        "name": "api"
+      },
+      {
+        "flags": [
+          "--actor",
+          "--denied",
+          "--grep",
+          "--kind",
+          "--lines",
+          "--since",
+          "--tsv"
+        ],
+        "json": false,
+        "name": "audit"
+      },
+      {
+        "flags": [
+          "--label",
+          "--live",
+          "--name",
+          "--out"
+        ],
+        "json": false,
+        "name": "backup"
+      },
+      {
+        "flags": [
+          "--name"
+        ],
+        "json": false,
+        "name": "backups"
+      },
+      {
+        "flags": [],
+        "json": true,
+        "name": "capabilities",
+        "schema": "houston.capabilities.v1",
+        "streams": false
+      },
+      {
+        "flags": [
+          "--constrain",
+          "--json",
+          "--max",
+          "--name",
+          "--report",
+          "--report-path",
+          "--scenario",
+          "--slo",
+          "--start",
+          "--step-duration",
+          "--users"
+        ],
+        "json": true,
+        "name": "capacity",
+        "schema": "houston.capacity.v1",
+        "streams": false
+      },
+      {
+        "flags": [
+          "--name",
+          "--to"
+        ],
+        "json": false,
+        "name": "chown"
+      },
+      {
+        "flags": [
+          "--context",
+          "--expires",
+          "--force",
+          "--json",
+          "--nodes",
+          "--path",
+          "--region",
+          "--subnet",
+          "--yes"
+        ],
+        "json": true,
+        "name": "cluster",
+        "schema": "houston.cluster.v1",
+        "schemas": [
+          "houston.cluster-create.v1",
+          "houston.cluster-delete.v1",
+          "houston.cluster-forget.v1",
+          "houston.cluster-guide.v1",
+          "houston.cluster-iam-policy.v1",
+          "houston.cluster-list.v1",
+          "houston.cluster-prepare.v1",
+          "houston.cluster.v1"
+        ],
+        "streams": false
+      },
+      {
+        "flags": [],
+        "json": false,
+        "name": "config"
+      },
+      {
+        "flags": [
+          "--dry-run",
+          "--name",
+          "--only"
+        ],
+        "json": false,
+        "name": "config-import"
+      },
+      {
+        "flags": [
+          "--context",
+          "--json"
+        ],
+        "json": true,
+        "name": "doctor",
+        "schema": "houston.doctor.v1",
+        "streams": false
+      },
+      {
+        "flags": [
+          "--json",
+          "--name",
+          "--volumes",
+          "--yes"
+        ],
+        "json": true,
+        "name": "down",
+        "schema": "houston.down.v1",
+        "streams": false
+      },
+      {
+        "flags": [
+          "--follow",
+          "--tail",
+          "--yes"
+        ],
+        "json": false,
+        "name": "edge"
+      },
+      {
+        "flags": [
+          "--name",
+          "--no-restart",
+          "--set",
+          "--setting",
+          "--unset"
+        ],
+        "json": false,
+        "name": "env"
+      },
+      {
+        "flags": [
+          "--json",
+          "--name"
+        ],
+        "json": true,
+        "name": "info",
+        "schema": "houston.info.v1",
+        "streams": false
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "json": true,
+        "name": "list",
+        "schema": "houston.list.v1",
+        "streams": false
+      },
+      {
+        "flags": [
+          "--body",
+          "--compare",
+          "--constrain",
+          "--diag/--no-diag",
+          "--duration",
+          "--endpoint",
+          "--json",
+          "--live",
+          "--name",
+          "--ramp",
+          "--report",
+          "--report-path",
+          "--save",
+          "--scenario",
+          "--slo",
+          "--slowms",
+          "--spike",
+          "--stats",
+          "--users",
+          "--vus"
+        ],
+        "json": true,
+        "name": "loadtest",
+        "schema": "houston.loadtest.v1",
+        "streams": false
+      },
+      {
+        "flags": [
+          "--follow",
+          "--name",
+          "--tail"
+        ],
+        "json": false,
+        "name": "logs"
+      },
+      {
+        "flags": [
+          "--name",
+          "--off"
+        ],
+        "json": false,
+        "name": "monitor"
+      },
+      {
+        "flags": [
+          "--bypass-2fa/--no-bypass-2fa",
+          "--label",
+          "--name"
+        ],
+        "json": false,
+        "name": "pat"
+      },
+      {
+        "flags": [],
+        "json": false,
+        "name": "presets"
+      },
+      {
+        "flags": [
+          "--force",
+          "--orphans",
+          "--yes"
+        ],
+        "json": false,
+        "name": "prune"
+      },
+      {
+        "flags": [
+          "--json",
+          "--name",
+          "--timeout"
+        ],
+        "json": true,
+        "name": "ready",
+        "schema": "houston.ready.v1",
+        "streams": true
+      },
+      {
+        "flags": [
+          "--name"
+        ],
+        "json": false,
+        "name": "restart"
+      },
+      {
+        "flags": [
+          "--allow-upgrade",
+          "--force",
+          "--name",
+          "--new"
+        ],
+        "json": false,
+        "name": "restore"
+      },
+      {
+        "flags": [
+          "--channels",
+          "--clear-scale",
+          "--messages",
+          "--name",
+          "--profile",
+          "--scale",
+          "--stats",
+          "--users",
+          "--verify-seed"
+        ],
+        "json": false,
+        "name": "seed"
+      },
+      {
+        "flags": [
+          "--allow-host",
+          "--bind",
+          "--domain",
+          "--email",
+          "--insecure",
+          "--no-domain",
+          "--no-open",
+          "--no-token",
+          "--port",
+          "--print-service",
+          "--trust-proxy"
+        ],
+        "json": false,
+        "name": "serve"
+      },
+      {
+        "flags": [
+          "--force",
+          "--host",
+          "--json"
+        ],
+        "json": true,
+        "name": "skill install",
+        "schema": "houston.skill-install.v1",
+        "streams": false
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "json": true,
+        "name": "skill status",
+        "schema": "houston.skill-status.v1",
+        "streams": false
+      },
+      {
+        "flags": [
+          "--name"
+        ],
+        "json": false,
+        "name": "start"
+      },
+      {
+        "flags": [
+          "--for",
+          "--name",
+          "--watch"
+        ],
+        "json": false,
+        "name": "stats"
+      },
+      {
+        "flags": [
+          "--name"
+        ],
+        "json": false,
+        "name": "stop"
+      },
+      {
+        "flags": [
+          "--name"
+        ],
+        "json": false,
+        "name": "tls-status"
+      },
+      {
+        "flags": [
+          "--name"
+        ],
+        "json": false,
+        "name": "token"
+      },
+      {
+        "flags": [
+          "--show",
+          "--uninstall"
+        ],
+        "json": false,
+        "name": "trust-ca"
+      },
+      {
+        "flags": [
+          "--bind",
+          "--context",
+          "--deployment",
+          "--domain",
+          "--email",
+          "--env",
+          "--force",
+          "--fresh",
+          "--https",
+          "--ingress-class",
+          "--json",
+          "--mongo",
+          "--mongo-operator",
+          "--monitor",
+          "--name",
+          "--no-pull",
+          "--offline",
+          "--pin",
+          "--port",
+          "--preset",
+          "--rc-image",
+          "--reg-token",
+          "--replicas",
+          "--root-url",
+          "--runtime",
+          "--seed",
+          "--seed-profile",
+          "--set",
+          "--setting",
+          "--stats",
+          "--verify-seed",
+          "--version",
+          "--wait"
+        ],
+        "json": true,
+        "name": "up",
+        "schema": "houston.up.v1",
+        "streams": true
+      },
+      {
+        "flags": [
+          "--bundle",
+          "--dry-run",
+          "--force",
+          "--name",
+          "--no-backup",
+          "--no-rollback",
+          "--offline",
+          "--rollback",
+          "--to"
+        ],
+        "json": false,
+        "name": "upgrade"
+      },
+      {
+        "flags": [],
+        "json": false,
+        "name": "use"
+      },
+      {
+        "flags": [
+          "--ask-password"
+        ],
+        "json": false,
+        "name": "users"
+      },
+      {
+        "flags": [
+          "--offline"
+        ],
+        "json": false,
+        "name": "versions"
+      }
+    ],
+    "contract_versions": [
+      2
+    ],
+    "default_bind_host": "127.0.0.1",
+    "default_runtime": "docker",
+    "error_codes": [
+      "CONFLICT",
+      "CREATE_FAILED",
+      "ENGINE_UNAVAILABLE",
+      "GATE",
+      "GATE_CLOUD_SPEND",
+      "GATE_DELETE_UNOWNED",
+      "GATE_UNAPPROVED_CLUSTER",
+      "NOT_FOUND",
+      "NOT_READY",
+      "PREFLIGHT_FAILED",
+      "REPRO_ERROR",
+      "VALIDATION_FAILED"
+    ],
+    "exit_codes": {
+      "0": "ok",
+      "1": "internal",
+      "2": "usage",
+      "3": "preflight",
+      "4": "not_found",
+      "5": "not_ready",
+      "6": "gate",
+      "7": "create_failed",
+      "8": "conflict"
+    },
+    "houston_version": "<version>",
+    "phases": [
+      "preflight",
+      "resolve",
+      "provision",
+      "plan",
+      "pull",
+      "create",
+      "boot",
+      "wait",
+      "post_ready",
+      "config",
+      "tls",
+      "seed",
+      "backup",
+      "restore",
+      "upgrade",
+      "monitor",
+      "teardown",
+      "ready",
+      "done",
+      "failed",
+      "queued",
+      "info"
+    ],
+    "presets": [
+      "airgapped",
+      "default",
+      "email",
+      "ldap",
+      "livechat",
+      "multi-instance",
+      "oidc",
+      "s3_minio",
+      "saml"
+    ],
+    "runtimes": [
+      {
+        "creatable": true,
+        "default_deployment": "monolith",
+        "deployments": [
+          "monolith",
+          "multi-instance"
+        ],
+        "name": "docker"
+      },
+      {
+        "creatable": true,
+        "default_deployment": "microservices",
+        "deployments": [
+          "microservices",
+          "monolith"
+        ],
+        "name": "kubernetes"
+      }
+    ],
+    "seed_profiles": [
+      "large",
+      "small",
+      "standard"
+    ],
+    "skill": {
+      "current": "<install state>",
+      "hosts": {
+        "agents": {
+          "path": "$HOME/.agents/skills/houston/SKILL.md",
+          "scope": "user",
+          "status": "<install state>",
+          "version": "<version>"
+        },
+        "claude": {
+          "path": "$HOME/.claude/skills/houston/SKILL.md",
+          "scope": "user",
+          "status": "<install state>",
+          "version": "<version>"
+        },
+        "project": {
+          "path": "$REPO/.claude/skills/houston/SKILL.md",
+          "scope": "project",
+          "status": "<install state>",
+          "version": "<version>"
+        }
+      },
+      "version": "<version>"
+    }
+  },
+  "error": null,
+  "generated_at": "<generated_at>",
+  "houston_version": "<version>",
+  "ok": true,
+  "schema": "houston.capabilities.v1",
+  "warnings": []
+}

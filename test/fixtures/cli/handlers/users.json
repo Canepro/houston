@@ -1,0 +1,102 @@
+{
+  "the empty listing, both of its lines": {
+    "code": 0,
+    "stdout": "no users yet — add one with `houston users add <name>`\n  or just run `houston serve` — it prints a one-time link that creates the first one.\n",
+    "stderr": ""
+  },
+  "the listing, with the date each account was made": {
+    "code": 0,
+    "stdout": "+- GUI users ---------------------+\n|  alice  2026-01-02  [admin]     |\n|  bob    2026-01-03  [member]    |\n|  carol  2026-01-04  [readonly]  |\n+---------------------------------+\n",
+    "stderr": ""
+  },
+  "the default action, which is the listing": {
+    "code": 0,
+    "stdout": "+- GUI users ---------------------+\n|  alice  2026-01-02  [admin]     |\n|  bob    2026-01-03  [member]    |\n|  carol  2026-01-04  [readonly]  |\n+---------------------------------+\n",
+    "stderr": ""
+  },
+  "a blank role column, marked implicit and explained": {
+    "code": 0,
+    "stdout": "+- GUI users -----------------------------+\n|  alice  2026-01-02  [admin (implicit)]  |\n|  bob    2026-01-03  [member]            |\n+-----------------------------------------+\n  (implicit) = the role column is blank, which means admin. That is the\n  migration for accounts made before roles existed, not a default.\n  narrow one with: houston users role alice member\n",
+    "stderr": ""
+  },
+  "a full ISO timestamp line, shown with its effective role": {
+    "code": 0,
+    "stdout": "+- GUI users ---------------------+\n|  alice  2026-01-02T08  [admin]  |\n|  bob    2026-01-03  [member]    |\n+---------------------------------+\n",
+    "stderr": ""
+  },
+  "columns the service reads as admin or member, shown as it reads them": {
+    "code": 0,
+    "stdout": "+- GUI users ---------------------+\n|  alice  2026-01-02  [admin]     |\n|  bob    2026-01-03  [member]    |\n|  carol  2026-01-04  [admin]     |\n|  dave   2026-01-05  [readonly]  |\n+---------------------------------+\n",
+    "stderr": ""
+  },
+  "the first account: its role, and the first-run link spent": {
+    "code": 0,
+    "stdout": "✓ user 'bob' added.\n+- password for bob ---+\n|  Pinned-Minted-16    |\n+----------------------+\n  Shown once. houston keeps only a scrypt hash, so nobody — including you —\n  can read it back. Send it over something the person can delete afterwards.\n  role: admin  (the first account has to be an admin, or nobody could promote anyone)\n  `houston serve` will now ask for this login, and the first-run link is spent.\n",
+    "stderr": ""
+  },
+  "a role given": {
+    "code": 0,
+    "stdout": "✓ user 'dave' added.\n+- password for dave ---+\n|  Pinned-Minted-16     |\n+-----------------------+\n  Shown once. houston keeps only a scrypt hash, so nobody — including you —\n  can read it back. Send it over something the person can delete afterwards.\n  role: readonly  — change it with `houston users role dave <role>`\n",
+    "stderr": ""
+  },
+  "an admin given": {
+    "code": 0,
+    "stdout": "✓ user 'dave' added.\n+- password for dave ---+\n|  Pinned-Minted-16     |\n+-----------------------+\n  Shown once. houston keeps only a scrypt hash, so nobody — including you —\n  can read it back. Send it over something the person can delete afterwards.\n  role: admin  (the first account has to be an admin, or nobody could promote anyone)\n",
+    "stderr": ""
+  },
+  "a two-letter name: the password is the panel's label": {
+    "code": 0,
+    "stdout": "✓ user 'ab' added.\n+- password for ab ----+\n|  Pinned-Minted-16    |\n+----------------------+\n  Shown once. houston keeps only a scrypt hash, so nobody — including you —\n  can read it back. Send it over something the person can delete afterwards.\n  role: member  — change it with `houston users role ab <role>`\n",
+    "stderr": ""
+  },
+  "a dotted name says what it became": {
+    "code": 0,
+    "stdout": "  'Lucy.Felix' becomes 'lucy-felix' — an account name becomes part of a workspace name, and therefore a DNS label.\n✓ user 'lucy-felix' added.\n+- password for lucy-felix ---+\n|  Pinned-Minted-16           |\n+-----------------------------+\n  Shown once. houston keeps only a scrypt hash, so nobody — including you —\n  can read it back. Send it over something the person can delete afterwards.\n  role: member  — change it with `houston users role lucy-felix <role>`\n",
+    "stderr": ""
+  },
+  "what it became, before the conflict": {
+    "code": 8,
+    "stdout": "  'BOB' becomes 'bob' — an account name becomes part of a workspace name, and therefore a DNS label.\n",
+    "stderr": "error: user 'bob' already exists (change the password with `houston users passwd bob`)\n"
+  },
+  "a name with a quote in it, quoted with the other quote": {
+    "code": 0,
+    "stdout": "  \"O'Brien\" becomes 'o-brien' — an account name becomes part of a workspace name, and therefore a DNS label.\n✓ user 'o-brien' added.\n+- password for o-brien ---+\n|  Pinned-Minted-16        |\n+--------------------------+\n  Shown once. houston keeps only a scrypt hash, so nobody — including you —\n  can read it back. Send it over something the person can delete afterwards.\n  role: member  — change it with `houston users role o-brien <role>`\n",
+    "stderr": ""
+  },
+  "a typed password: the note before the prompt, and the role after": {
+    "code": 0,
+    "stdout": "  'Lucy.Felix' becomes 'lucy-felix' — an account name becomes part of a workspace name, and therefore a DNS label.\nPassword for lucy-felix: \nRepeat: \n✓ user 'lucy-felix' added.\n  role: readonly  — change it with `houston users role lucy-felix <role>`\n",
+    "stderr": ""
+  },
+  "the first account, from a typed password": {
+    "code": 0,
+    "stdout": "Password for bob: \nRepeat: \n✓ user 'bob' added.\n  role: admin  (the first account has to be an admin, or nobody could promote anyone)\n  `houston serve` will now ask for this login, and the first-run link is spent.\n",
+    "stderr": ""
+  },
+  "passwd: the note, the panel, and the sessions it ended": {
+    "code": 0,
+    "stdout": "  'Bob' becomes 'bob' — an account name becomes part of a workspace name, and therefore a DNS label.\n✓ user 'bob' password changed.\n+- password for bob ---+\n|  Pinned-Minted-16    |\n+----------------------+\n  Shown once. houston keeps only a scrypt hash, so nobody — including you —\n  can read it back. Send it over something the person can delete afterwards.\n  2 active session(s) signed out.\n",
+    "stderr": ""
+  },
+  "role: the sessions signed out, and what roles bound": {
+    "code": 0,
+    "stdout": "✓ 'bob' is now readonly.\n  2 active session(s) signed out, so it takes effect now.\n  roles bound the GUI. The CLI has no roles: anyone with a shell on this box\n  is already in the docker group. A readonly user with an ssh key is not readonly.\n",
+    "stderr": ""
+  },
+  "role to the role it has already": {
+    "code": 0,
+    "stdout": "✓ 'bob' is now member.\n  roles bound the GUI. The CLI has no roles: anyone with a shell on this box\n  is already in the docker group. A readonly user with an ssh key is not readonly.\n",
+    "stderr": ""
+  },
+  "role, both words normalised": {
+    "code": 0,
+    "stdout": "✓ 'bob' is now admin.\n  roles bound the GUI. The CLI has no roles: anyone with a shell on this box\n  is already in the docker group. A readonly user with an ssh key is not readonly.\n",
+    "stderr": ""
+  },
+  "remove, and the sessions it ended": {
+    "code": 0,
+    "stdout": "✓ user 'bob' removed.\n  2 active session(s) signed out.\n",
+    "stderr": ""
+  }
+}

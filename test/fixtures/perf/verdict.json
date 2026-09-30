@@ -1,0 +1,55 @@
+{
+  "findings": [
+    [
+      "No saturation signals: p95 120ms at 95.4 req/s, 0.01% errors — the workspace has headroom at this load."
+    ],
+    [
+      "No requests were recorded, so this run says nothing about the workspace - the load generator produced no measurements. Check that k6 could reach the target and that the scenario ran."
+    ],
+    [
+      "No requests were recorded, so this run says nothing about the workspace - the load generator produced no measurements. Check that k6 could reach the target and that the scenario ran."
+    ],
+    [
+      "RC event loop saturated: lag peaked at 900ms on rocketchat-1 — the Node process is the bottleneck; more CPU or more instances (multi-instance preset) will help."
+    ],
+    [
+      "RC event loop degraded: lag averaged 200ms (peaks to 400ms) on rc — approaching CPU saturation at this load."
+    ],
+    [
+      "RC event loop saturated: lag peaked at 900ms on rocketchat-2 — the Node process is the bottleneck; more CPU or more instances (multi-instance preset) will help."
+    ],
+    [
+      "MongoDB ran 2 collection scan(s) (COLLSCAN) among the profiled slow queries — likely a missing index — slowest: rc.messages 400ms."
+    ],
+    [
+      "3 MongoDB quer(ies) exceeded the slow threshold — slowest: rc.a update 1.50s (no plan)."
+    ],
+    [
+      "Rocket.Chat was the hot container (99% CPU vs Mongo 10%) — likely CPU-bound in RC."
+    ],
+    [
+      "MongoDB was the hot container (99% CPU vs RC 10%) — likely Mongo-bound at this load."
+    ],
+    [
+      "15.0% of requests failed: 30x 429 (throttled), 5x 5xx (server errors), 2x 4xx, starting ~12s into the run."
+    ],
+    [
+      "mongodb RAM grew ~40MB/h over this sustained run — if a longer soak repeats this slope, treat it as a leak candidate."
+    ],
+    [
+      "Did not recover from the spike within the run: p95 stayed above 1.5x the pre-spike baseline (120ms) after load dropped — connections/queues are not draining."
+    ],
+    [
+      "Slow spike recovery: p95 took ~45s to return to normal after load dropped (baseline 120ms)."
+    ],
+    [
+      "No saturation signals: p95 120ms at 95.4 req/s, 0.01% errors — the workspace has headroom at this load."
+    ],
+    [
+      "High client latency (p95 1500ms) without RC event-loop saturation — requests are queueing outside the Node loop (CPU throttling, Mongo waits, or connection backlog). If this run was --constrain'ed, that's the cap at work."
+    ],
+    [
+      "No saturation signals: p95 120ms at 95.5 req/s, 0.01% errors — the workspace has headroom at this load."
+    ]
+  ]
+}

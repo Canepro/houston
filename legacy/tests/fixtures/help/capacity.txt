@@ -1,0 +1,28 @@
+
+ Usage: houston capacity [OPTIONS]
+
+ Find how much concurrency a repro sustains before the SLO breaks.
+
+ Doubles VUs (start, 2x, 4x, …) running the scenario at each step until a
+ rule fails, then bisects between the last pass and first fail — ending with
+ "handles ~N concurrent VUs" plus why it broke (event-loop lag at the wall).
+
+╭─ Options ──╮
+ --name           -n      <str>
+ --scenario               <str>  which workload to scale: journey | messages | read | mixed |
+                                 login | badbot
+                                 [default: journey]
+ --users                  <int>  spread load across up to N seeded users; 0 = admin only
+                                 [default: 10]
+ --slo                    <str>  the limit that defines 'capacity' [default: p95=500ms,error=2%]
+ --start                  <int>  first VU step [default: 10]
+ --max                    <int>  stop doubling past this many VUs [default: 640]
+ --step-duration          <str>  how long each step runs [default: 20s]
+ --constrain              <str>  find capacity on customer-sized hardware, e.g. "rc=2cpu/2g"
+                                 (restored after)
+ --report                        write a markdown report to
+                                 $HOUSTON_HOME/reports
+ --report-path            <str>  write the report to this file/dir instead (implies --report)
+ --json                          print the result as JSON
+ --help                          Show this message and exit.
+╰──╯

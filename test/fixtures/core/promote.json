@@ -1,0 +1,25 @@
+{
+  "home": {
+    "IMPLEMENTATION": {
+      "mode": "600",
+      "bytes": "python\n"
+    },
+    "users": {
+      "mode": "600",
+      "bytes": "# houston GUI accounts. Managed by `houston users`.\n# name:hash:created_at[:role]\nalice:scrypt$16384$8$1$HVTev8qe5wqebkdTu1y3NQ==$cgph3dY4junpPLZDo2CYm4ZC1JA3RR6+VpMkV8hTJUg=:2026-09-29:admin\n"
+    },
+    "audit.log": {
+      "mode": "600",
+      "bytes": "2026-09-29T09:06:49+00:00\t-\tuser-add\talice role=admin\t-\tok\n"
+    },
+    "config.yaml": {
+      "mode": "664",
+      "bytes": "bind_host: 127.0.0.1\n"
+    },
+    "locks/users.lock": {
+      "mode": "664",
+      "bytes": ""
+    }
+  },
+  "dualMarker": "dual-v1\n"
+}

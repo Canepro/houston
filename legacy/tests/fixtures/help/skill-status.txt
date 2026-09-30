@@ -1,0 +1,9 @@
+
+ Usage: houston skill status [OPTIONS]
+
+ Whether the installed skill matches this build.
+
+╭─ Options ──╮
+ --json          print the result as one JSON envelope
+ --help          Show this message and exit.
+╰──╯

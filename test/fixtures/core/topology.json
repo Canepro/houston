@@ -1,0 +1,157 @@
+{
+  "axes": [
+    {
+      "runtime": "docker",
+      "deployment": "monolith",
+      "replicas": 1,
+      "preset": "default",
+      "params": {},
+      "hints": []
+    },
+    {
+      "runtime": "kubernetes",
+      "deployment": "microservices",
+      "replicas": 1,
+      "preset": "default",
+      "params": {},
+      "hints": []
+    },
+    {
+      "runtime": "kubernetes",
+      "deployment": "microservices",
+      "replicas": 1,
+      "preset": "default",
+      "params": {},
+      "hints": ["--deployment microservices implies --runtime kubernetes"]
+    },
+    {
+      "runtime": "docker",
+      "deployment": "multi-instance",
+      "replicas": 2,
+      "preset": "multi-instance",
+      "params": { "instances": 2 },
+      "hints": [
+        "--preset multi-instance is now --deployment multi-instance (the old spelling still works)"
+      ]
+    },
+    {
+      "runtime": "docker",
+      "deployment": "multi-instance",
+      "replicas": 3,
+      "preset": "multi-instance",
+      "params": { "instances": 3 },
+      "hints": []
+    },
+    {
+      "runtime": "docker",
+      "deployment": "multi-instance",
+      "replicas": 5,
+      "preset": "multi-instance",
+      "params": { "instances": 5 },
+      "hints": [
+        "--preset multi-instance is now --deployment multi-instance (the old spelling still works)",
+        "--set instances=5 is now --replicas 5 (the old spelling still works)"
+      ]
+    },
+    {
+      "runtime": "docker",
+      "deployment": "multi-instance",
+      "replicas": 3,
+      "preset": "multi-instance",
+      "params": { "instances": "3" },
+      "hints": [
+        "--preset multi-instance is now --deployment multi-instance (the old spelling still works)",
+        "--set instances=3 is now --replicas 3 (the old spelling still works)"
+      ]
+    },
+    {
+      "runtime": "kubernetes",
+      "deployment": "monolith",
+      "replicas": 1,
+      "preset": "default",
+      "params": {},
+      "hints": []
+    },
+    {
+      "runtime": "docker",
+      "deployment": "monolith",
+      "replicas": 1,
+      "preset": "ldap",
+      "params": {},
+      "hints": []
+    }
+  ],
+  "axesOfMeta": [
+    { "runtime": "docker", "deployment": "monolith", "preset": "default", "replicas": 0 },
+    { "runtime": "docker", "deployment": "multi-instance", "preset": "default", "replicas": 3 },
+    { "runtime": "kubernetes", "deployment": "microservices", "preset": "ldap", "replicas": 0 },
+    { "runtime": "kubernetes", "deployment": "microservices", "preset": "default", "replicas": 0 },
+    { "runtime": "docker", "deployment": "monolith", "preset": "default", "replicas": 0 },
+    {
+      "runtime": "docker",
+      "deployment": "monolith",
+      "preset": "default",
+      "replicas": 0,
+      "context": "prod-eu"
+    }
+  ],
+  "tables": {
+    "aliases": {
+      "docker": "docker",
+      "compose": "docker",
+      "docker-compose": "docker",
+      "dockercompose": "docker",
+      "kubernetes": "kubernetes",
+      "k8s": "kubernetes",
+      "kube": "kubernetes"
+    },
+    "deployments": {
+      "docker": ["monolith", "multi-instance"],
+      "kubernetes": ["microservices", "monolith"]
+    },
+    "registered": ["docker", "kubernetes"],
+    "labels": { "docker": "Docker Compose", "kubernetes": "Kubernetes" }
+  },
+  "protoNames": [
+    [
+      ["ValidationError", "unknown runtime 'constructor'. Known runtimes: docker, kubernetes."],
+      [
+        "ValidationError",
+        "unknown deployment 'constructor'. Known deployments: microservices, monolith, multi-instance."
+      ],
+      ["ok", "docker"]
+    ],
+    [
+      ["ValidationError", "unknown runtime 'tostring'. Known runtimes: docker, kubernetes."],
+      [
+        "ValidationError",
+        "unknown deployment 'tostring'. Known deployments: microservices, monolith, multi-instance."
+      ],
+      ["ok", "docker"]
+    ],
+    [
+      ["ValidationError", "unknown runtime '__proto__'. Known runtimes: docker, kubernetes."],
+      [
+        "ValidationError",
+        "unknown deployment '__proto__'. Known deployments: microservices, monolith, multi-instance."
+      ],
+      ["ok", "docker"]
+    ],
+    [
+      ["ValidationError", "unknown runtime 'hasownproperty'. Known runtimes: docker, kubernetes."],
+      [
+        "ValidationError",
+        "unknown deployment 'hasownproperty'. Known deployments: microservices, monolith, multi-instance."
+      ],
+      ["ok", "docker"]
+    ],
+    [
+      ["ValidationError", "unknown runtime 'valueof'. Known runtimes: docker, kubernetes."],
+      [
+        "ValidationError",
+        "unknown deployment 'valueof'. Known deployments: microservices, monolith, multi-instance."
+      ],
+      ["ok", "docker"]
+    ]
+  ]
+}
