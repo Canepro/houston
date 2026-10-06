@@ -215,6 +215,35 @@ describe('the create path end to end, stopped at the write seam', () => {
 });
 
 describe('rebuilding an existing workspace', () => {
+  it('Grafana public URL regression: passes the TLS URL into the compose document and notes', async () => {
+    const versions = require('../../../src/lib/versions') as typeof VersionsNS;
+    const createDocker =
+      require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+    const plan = createDocker.createPlan({
+      req: createReq({ version: '8.5.1', name: 'grafana', monitor: true }),
+      emit: nullEmit,
+    });
+    plan.reproName = 'grafana';
+    plan.resolved = versions.resolve('8.5.1', { offline: true });
+    plan.pre = presets.load('default', {});
+    plan.hostPort = 3310;
+    plan.root = 'http://localhost:3310';
+    plan.public = 'https://h';
+    plan.bindHost = '127.0.0.1';
+    plan.tlsspec = tlsSpec({ mode: 'local', host: 'h' });
+    await createDocker.buildDocument(plan);
+    createDocker.buildRecord(plan);
+    createDocker.attachMonitoring(plan);
+    expect(plan.doc?.services.grafana?.environment).toHaveProperty(
+      'GF_SERVER_ROOT_URL',
+      'https://h/grafana/',
+    );
+    expect(plan.meta?.extra.notes).toEqual(
+      expect.arrayContaining([
+        'Grafana:    https://h/grafana  (admin/admin; anonymous view enabled)',
+      ]),
+    );
+  });
   it('carries its env overrides forward, and this run’s win', async () => {
     // `up --force` rebuilds compose from the spec, so overrides must live in the record.
     // Verified live: editing only the generated compose file worked until the next

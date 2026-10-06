@@ -1,39 +1,27 @@
 {
   "conflict": [
     [
-      "MongoDB 8.0 cannot start on this engine's kernel (6.19) — mongod 8.0 exits on kernel 6.19 and newer (SERVER-121912). Use an engine on an older kernel, or a Rocket.Chat version that pairs with MongoDB 7.0.",
-      "MongoDB 8.0 cannot start on this engine's kernel (6.19) — mongod 8.0 exits on kernel 6.19 and newer (SERVER-121912). Use an engine on an older kernel, or a Rocket.Chat version that pairs with MongoDB 7.0.",
+      "MongoDB 8.0 cannot start on this engine's kernel (6.19) — MongoDB 8 and newer exit on Linux kernel 6.19 through 7.0.13 (SERVER-121912). Use an engine on kernel 7.0.14 or newer (on a Mac or Windows, update Docker Desktop), or a Rocket.Chat version that pairs with MongoDB 7.0.",
+      "MongoDB 8.0 cannot start on this engine's kernel (6.19.7) — MongoDB 8 and newer exit on Linux kernel 6.19 through 7.0.13 (SERVER-121912). Use an engine on kernel 7.0.14 or newer (on a Mac or Windows, update Docker Desktop), or a Rocket.Chat version that pairs with MongoDB 7.0.",
       "",
-      "MongoDB 8.0 cannot start on this engine's kernel (6.20) — mongod 8.0 exits on kernel 6.19 and newer (SERVER-121912). Use an engine on an older kernel, or a Rocket.Chat version that pairs with MongoDB 7.0.",
+      "MongoDB 8.0 cannot start on this engine's kernel (6.20) — MongoDB 8 and newer exit on Linux kernel 6.19 through 7.0.13 (SERVER-121912). Use an engine on kernel 7.0.14 or newer (on a Mac or Windows, update Docker Desktop), or a Rocket.Chat version that pairs with MongoDB 7.0.",
       "",
-      "MongoDB 8.0 cannot start on this engine's kernel (7.0) — mongod 8.0 exits on kernel 6.19 and newer (SERVER-121912). Use an engine on an older kernel, or a Rocket.Chat version that pairs with MongoDB 7.0.",
+      "MongoDB 8.0 cannot start on this engine's kernel (7.0) — MongoDB 8 and newer exit on Linux kernel 6.19 through 7.0.13 (SERVER-121912). Use an engine on kernel 7.0.14 or newer (on a Mac or Windows, update Docker Desktop), or a Rocket.Chat version that pairs with MongoDB 7.0.",
       "",
       "",
-      "MongoDB 8.0 cannot start on this engine's kernel (6.19) — mongod 8.0 exits on kernel 6.19 and newer (SERVER-121912). Use an engine on an older kernel, or a Rocket.Chat version that pairs with MongoDB 7.0.",
+      "MongoDB 8.0 cannot start on this engine's kernel (6.19) — MongoDB 8 and newer exit on Linux kernel 6.19 through 7.0.13 (SERVER-121912). Use an engine on kernel 7.0.14 or newer (on a Mac or Windows, update Docker Desktop), or a Rocket.Chat version that pairs with MongoDB 7.0.",
       ""
     ],
     [
-      "MongoDB 8.0.4 cannot start on this engine's kernel (6.19) — mongod 8.0 exits on kernel 6.19 and newer (SERVER-121912). Use an engine on an older kernel, or a Rocket.Chat version that pairs with MongoDB 7.0.",
-      "MongoDB 8.0.4 cannot start on this engine's kernel (6.19) — mongod 8.0 exits on kernel 6.19 and newer (SERVER-121912). Use an engine on an older kernel, or a Rocket.Chat version that pairs with MongoDB 7.0.",
+      "MongoDB 8.0.4 cannot start on this engine's kernel (6.19) — MongoDB 8 and newer exit on Linux kernel 6.19 through 7.0.13 (SERVER-121912). Use an engine on kernel 7.0.14 or newer (on a Mac or Windows, update Docker Desktop), or a Rocket.Chat version that pairs with MongoDB 7.0.",
+      "MongoDB 8.0.4 cannot start on this engine's kernel (6.19.7) — MongoDB 8 and newer exit on Linux kernel 6.19 through 7.0.13 (SERVER-121912). Use an engine on kernel 7.0.14 or newer (on a Mac or Windows, update Docker Desktop), or a Rocket.Chat version that pairs with MongoDB 7.0.",
       "",
-      "MongoDB 8.0.4 cannot start on this engine's kernel (6.20) — mongod 8.0 exits on kernel 6.19 and newer (SERVER-121912). Use an engine on an older kernel, or a Rocket.Chat version that pairs with MongoDB 7.0.",
+      "MongoDB 8.0.4 cannot start on this engine's kernel (6.20) — MongoDB 8 and newer exit on Linux kernel 6.19 through 7.0.13 (SERVER-121912). Use an engine on kernel 7.0.14 or newer (on a Mac or Windows, update Docker Desktop), or a Rocket.Chat version that pairs with MongoDB 7.0.",
       "",
-      "MongoDB 8.0.4 cannot start on this engine's kernel (7.0) — mongod 8.0 exits on kernel 6.19 and newer (SERVER-121912). Use an engine on an older kernel, or a Rocket.Chat version that pairs with MongoDB 7.0.",
-      "",
-      "",
-      "MongoDB 8.0.4 cannot start on this engine's kernel (6.19) — mongod 8.0 exits on kernel 6.19 and newer (SERVER-121912). Use an engine on an older kernel, or a Rocket.Chat version that pairs with MongoDB 7.0.",
-      ""
-    ],
-    [
+      "MongoDB 8.0.4 cannot start on this engine's kernel (7.0) — MongoDB 8 and newer exit on Linux kernel 6.19 through 7.0.13 (SERVER-121912). Use an engine on kernel 7.0.14 or newer (on a Mac or Windows, update Docker Desktop), or a Rocket.Chat version that pairs with MongoDB 7.0.",
       "",
       "",
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
+      "MongoDB 8.0.4 cannot start on this engine's kernel (6.19) — MongoDB 8 and newer exit on Linux kernel 6.19 through 7.0.13 (SERVER-121912). Use an engine on kernel 7.0.14 or newer (on a Mac or Windows, update Docker Desktop), or a Rocket.Chat version that pairs with MongoDB 7.0.",
       ""
     ],
     [
@@ -49,15 +37,27 @@
       ""
     ],
     [
-      "MongoDB 8 cannot start on this engine's kernel (6.19) — mongod 8.0 exits on kernel 6.19 and newer (SERVER-121912). Use an engine on an older kernel, or a Rocket.Chat version that pairs with MongoDB 7.0.",
-      "MongoDB 8 cannot start on this engine's kernel (6.19) — mongod 8.0 exits on kernel 6.19 and newer (SERVER-121912). Use an engine on an older kernel, or a Rocket.Chat version that pairs with MongoDB 7.0.",
-      "",
-      "MongoDB 8 cannot start on this engine's kernel (6.20) — mongod 8.0 exits on kernel 6.19 and newer (SERVER-121912). Use an engine on an older kernel, or a Rocket.Chat version that pairs with MongoDB 7.0.",
-      "",
-      "MongoDB 8 cannot start on this engine's kernel (7.0) — mongod 8.0 exits on kernel 6.19 and newer (SERVER-121912). Use an engine on an older kernel, or a Rocket.Chat version that pairs with MongoDB 7.0.",
       "",
       "",
-      "MongoDB 8 cannot start on this engine's kernel (6.19) — mongod 8.0 exits on kernel 6.19 and newer (SERVER-121912). Use an engine on an older kernel, or a Rocket.Chat version that pairs with MongoDB 7.0.",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      ""
+    ],
+    [
+      "MongoDB 8 cannot start on this engine's kernel (6.19) — MongoDB 8 and newer exit on Linux kernel 6.19 through 7.0.13 (SERVER-121912). Use an engine on kernel 7.0.14 or newer (on a Mac or Windows, update Docker Desktop), or a Rocket.Chat version that pairs with MongoDB 7.0.",
+      "MongoDB 8 cannot start on this engine's kernel (6.19.7) — MongoDB 8 and newer exit on Linux kernel 6.19 through 7.0.13 (SERVER-121912). Use an engine on kernel 7.0.14 or newer (on a Mac or Windows, update Docker Desktop), or a Rocket.Chat version that pairs with MongoDB 7.0.",
+      "",
+      "MongoDB 8 cannot start on this engine's kernel (6.20) — MongoDB 8 and newer exit on Linux kernel 6.19 through 7.0.13 (SERVER-121912). Use an engine on kernel 7.0.14 or newer (on a Mac or Windows, update Docker Desktop), or a Rocket.Chat version that pairs with MongoDB 7.0.",
+      "",
+      "MongoDB 8 cannot start on this engine's kernel (7.0) — MongoDB 8 and newer exit on Linux kernel 6.19 through 7.0.13 (SERVER-121912). Use an engine on kernel 7.0.14 or newer (on a Mac or Windows, update Docker Desktop), or a Rocket.Chat version that pairs with MongoDB 7.0.",
+      "",
+      "",
+      "MongoDB 8 cannot start on this engine's kernel (6.19) — MongoDB 8 and newer exit on Linux kernel 6.19 through 7.0.13 (SERVER-121912). Use an engine on kernel 7.0.14 or newer (on a Mac or Windows, update Docker Desktop), or a Rocket.Chat version that pairs with MongoDB 7.0.",
       ""
     ],
     [

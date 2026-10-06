@@ -227,6 +227,27 @@ describe('the rows a probe’s answer becomes', () => {
     expect(hit[0]).toContain('k3s');
   });
 
+  it('says kubectl has no current context when the kubeconfig names clusters, not that none is configured', async () => {
+    // A kubeconfig left with contexts and no current one (a deleted EKS cluster that was
+    // current does this) read as "No Kubernetes cluster configured" while the Clusters page
+    // listed the same k3s as running. houston does not pick one by itself; it says how.
+    installTools('kubectl', 'helm');
+    fakeRun([
+      ['config current-context', 1, ''],
+      ['config get-contexts', 0, 'default\n'],
+      ['version', 0, 'v9.9.9'],
+    ]);
+    const said = messages(await rows());
+    expect(said.some((message) => message.includes('No Kubernetes cluster configured'))).toBe(
+      false,
+    );
+    const hit = said.filter((message) => message.includes('no current context'));
+    expect(hit).toHaveLength(1);
+    expect(hit[0]).toContain("'default'");
+    expect(hit[0]).toContain('config use-context default');
+    expect(hit[0]).toContain('--context default');
+  });
+
   it('names the cluster `up` would actually use, and the one it would set aside', async () => {
     // A box with BOTH kind and k3s: the report said "Using your cluster 'default' (k3s)"
     // and `up` went and built a kind cluster. A preflight whose job is predicting a boot

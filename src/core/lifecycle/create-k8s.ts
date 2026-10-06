@@ -26,6 +26,7 @@ import {
   resolve,
 } from '../../lib/versions';
 import { endpointString } from '../kube/endpoints';
+import { deregister as deregisterRoute, routeHost } from '../edge/routes';
 import { installed as edgeInstalled } from '../edge/spec';
 import { assertNamespaceAvailable, namespaceFor } from '../kube/namespace';
 import { type ClusterPlan, planCluster } from '../kube/context';
@@ -105,6 +106,8 @@ export interface KubeCreate {
   plan: ClusterPlan | null;
   tlsspec: TlsSpec | null;
   ktls: KubeTls | null;
+  /** Whether THIS create put the name's edge route there, so a failure takes back only that. */
+  routeIntroduced: boolean;
   adminPassword: string;
   provisional: Metadata | null;
   out: Bag;
@@ -132,6 +135,7 @@ export function kubeCreate(
     plan: null,
     tlsspec: null,
     ktls: null,
+    routeIntroduced: false,
     adminPassword: '',
     provisional: null,
     out: {},
@@ -386,8 +390,25 @@ export async function writeProvisionalRecord(job: KubeCreate): Promise<void> {
   // BEFORE the create, so an ACME challenge has somewhere to land the moment the chart's
   // Ingress appears.
   if (job.ktls !== null) {
+    job.routeIntroduced = routeHost(job.reproName) === '';
     await tlsplan.routeKubernetesName(job.reproName, job.ktls, { emit: job.emit });
   }
+}
+
+/**
+ * A failed create takes back the edge route it registered, as the cluster side takes back
+ * the namespace. The route goes in BEFORE the create, so an ACME challenge has somewhere to
+ * land; left behind, it sent the name to a NodePort the rollback had already deleted
+ * (measured on a k3s playground, 2026-10-06). The record stays, as it always has, so
+ * `list` and `down` still find the workspace; a route that was there before this create --
+ * a workspace being re-created -- stays too.
+ */
+export function forgetTheRouteThisCreateMade(job: KubeCreate): void {
+  if (job.ktls === null || !job.routeIntroduced) return;
+  deregisterRoute(job.reproName);
+  warn(job.emit, `create failed — removing the edge route for ${job.ktls.host}`, {
+    phase: 'teardown',
+  });
 }
 
 /** The namespace, MongoDB, the chart release and the port-forward -- the long part. */
@@ -475,6 +496,10 @@ export async function buildRecord(job: KubeCreate): Promise<void> {
     // deliberately stays the plain http port-forward URL; `publicUrl` is what a human opens.
     job.meta.publicUrl = `https://${job.ktls.host}`;
     job.meta.extra.tls = job.ktls.issuer?.mode === 'acme' ? MODE_ACME : 'local';
+    if (job.ktls.issuer?.mode === 'acme') {
+      job.meta.extra.tls_staging = Boolean(job.ktls.issuer.acmeStaging);
+      job.meta.extra.tls_email = job.ktls.issuer.acmeEmail ?? '';
+    }
     // `edge` means "a route file speaks for this name". It is what `noteGroupsOf` keys the
     // HTTPS card on, and it is false in the topology where the cluster holds :443 itself
     // and no edge is involved at all.
@@ -615,7 +640,12 @@ export async function createKubernetes(
   await planTls(job);
   await planKubeTls(job);
   await writeProvisionalRecord(job);
-  await createTheWorkspace(job);
+  try {
+    await createTheWorkspace(job);
+  } catch (error) {
+    forgetTheRouteThisCreateMade(job);
+    throw error;
+  }
   await buildRecord(job);
   recordTheRequest(job);
   await writeRecordStep(job);

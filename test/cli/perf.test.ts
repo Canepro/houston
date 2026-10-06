@@ -53,6 +53,38 @@ function sink(): { writeOut: (text: string) => void; writeErr: (text: string) =>
   return { writeOut: () => undefined, writeErr: () => undefined };
 }
 
+it('Grafana public URL regression: prints the public dashboard URL in the live hint', async () => {
+  const run = coreLoadtest.newLoadRun();
+  run.summary = { p95: 1, rps: 1, error_rate: 0 };
+  const execute = jest.fn(async (...args: unknown[]) => {
+    (args[4] as coreLoadtest.CliHooks).armed?.();
+    return {
+      run,
+      verdict: {
+        grafana: 'https://h/grafana',
+        mongoSlow: null,
+        passed: true,
+        shortStats: null,
+        sloResults: [],
+        tl: null,
+        verdictLines: [],
+      },
+    };
+  });
+  const output: string[] = [];
+  await runLoadtestCli(
+    { ...LOAD_DEFAULTS, json: false, live: true },
+    { writeOut: (line) => output.push(line), writeErr: () => undefined },
+    loadtestDeps(execute, {
+      readMeta: async () => ({
+        ...meta({ monitoring: true, tls: 'local' }),
+        publicUrl: 'https://h',
+      }),
+    }),
+  );
+  expect(output.join('')).toContain('dashboard in Grafana (https://h/grafana)');
+});
+
 const LOAD_DEFAULTS: LoadtestCliOptions = {
   name: 'work',
   scenario: 'messages',

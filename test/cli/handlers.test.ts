@@ -182,6 +182,122 @@ describe('real handler dispatch through Commander', () => {
   });
 });
 
+describe('cluster delete names the region it will act in', () => {
+  it('uses the region the cluster was built in when none is typed, and says so in the question', async () => {
+    const seen: string[] = [];
+    jest.doMock('../../src/core/eks', () => ({
+      ...jest.requireActual('../../src/core/eks'),
+      preflight: async () => ({
+        tools: {},
+        identity: { account: '1', arn: '', error: '' },
+        region: 'eu-west-1',
+      }),
+      rememberedRegion: () => 'us-west-2',
+      describeCluster: async (_name: string, region: string) => {
+        seen.push(region);
+        return { state: 'present', doc: { tags: {} } };
+      },
+    }));
+    const app = require('../../src/cli/app') as typeof AppNS;
+    const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
+    let asked = '';
+    const io: CliIo = { writeOut: () => undefined, writeErr: () => undefined };
+    const code = await app.runCli(['cluster', 'delete', 'support'], {
+      execute: handlers.createExecutor(io, {
+        confirm: async (question: string) => {
+          asked = question;
+          return false;
+        },
+      }),
+      io,
+    });
+    jest.dontMock('../../src/core/eks');
+    expect(code).toBe(1);
+    // The existence check and the question both name the build region: a delete that
+    // looked in the AWS CLI's default region printed "nothing to delete" while the
+    // cluster billed on elsewhere, and the question named no region unless one was typed.
+    expect(seen).toEqual(['us-west-2']);
+    expect(asked).toContain('in us-west-2');
+  });
+
+  it('asks in red where colour is wanted, like every word that is about to destroy something', async () => {
+    jest.resetModules();
+    const saved = { force: process.env.FORCE_COLOR, none: process.env.NO_COLOR };
+    process.env.FORCE_COLOR = '1';
+    delete process.env.NO_COLOR;
+    jest.doMock('../../src/core/eks', () => ({
+      ...jest.requireActual('../../src/core/eks'),
+      preflight: async () => ({
+        tools: {},
+        identity: { account: '1', arn: '', error: '' },
+        region: 'eu-west-1',
+      }),
+      rememberedRegion: () => 'eu-west-1',
+      describeCluster: async () => ({ state: 'present', doc: { tags: {} } }),
+    }));
+    try {
+      const app = require('../../src/cli/app') as typeof AppNS;
+      const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
+      let asked = '';
+      const io: CliIo = { writeOut: () => undefined, writeErr: () => undefined };
+      await app.runCli(['cluster', 'delete', 'support'], {
+        execute: handlers.createExecutor(io, {
+          confirm: async (question: string) => {
+            asked = question;
+            return false;
+          },
+        }),
+        io,
+      });
+      expect(asked.startsWith('\u001b[31mDelete EKS cluster')).toBe(true);
+    } finally {
+      jest.dontMock('../../src/core/eks');
+      if (saved.force === undefined) delete process.env.FORCE_COLOR;
+      else process.env.FORCE_COLOR = saved.force;
+      if (saved.none !== undefined) process.env.NO_COLOR = saved.none;
+    }
+  });
+});
+
+describe('cluster connect uses the same existing-cluster path as the GUI', () => {
+  it('hands the full ARN to the core and prints the context for a workspace', async () => {
+    jest.resetModules();
+    const arn = 'arn:aws:eks:eu-west-1:111122223333:cluster/support';
+    const connectExisting = jest.fn(async () => ({
+      context: arn,
+      account: '111122223333',
+      principal: 'arn:aws:iam::111122223333:user/alice',
+      region: 'eu-west-1',
+      reachable: true,
+      access_reason: '',
+    }));
+    jest.doMock('../../src/core/eks', () => ({
+      ...jest.requireActual('../../src/core/eks'),
+      connectExisting,
+    }));
+    try {
+      const app = require('../../src/cli/app') as typeof AppNS;
+      const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
+      let output = '';
+      const io: CliIo = {
+        writeOut: (line) => {
+          output += line;
+        },
+        writeErr: () => undefined,
+      };
+      const code = await app.runCli(['cluster', 'connect', arn], {
+        execute: handlers.createExecutor(io),
+        io,
+      });
+      expect(code).toBe(0);
+      expect(connectExisting).toHaveBeenCalledWith(arn);
+      expect(output).toContain(`--context ${arn}`);
+    } finally {
+      jest.dontMock('../../src/core/eks');
+    }
+  });
+});
+
 describe('an invalid version is refused before anything is asked', () => {
   // A DEFECT AN EARLIER VERSION HAD: `resolve` is synchronous, so every caller fetches the release
   // info first -- and they fetched BEFORE `resolve` could refuse the version, so an invalid

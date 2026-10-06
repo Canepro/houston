@@ -35,9 +35,10 @@ const SIGNATURES: readonly (readonly [readonly string[], string])[] = Object.fre
       '12257600',
       'incompatibility with this version of mongodb',
     ],
-    "MongoDB refused to start: this host's Linux kernel (>= 6.19) is incompatible " +
-      'with MongoDB 8.0 (SERVER-121912) - it is NOT a volume/permission problem. Use ' +
-      'an engine/VM on kernel < 6.19 for RC versions that require Mongo 8.0. See ' +
+    "MongoDB refused to start: this host's Linux kernel (6.19 through 7.0.13) is " +
+      'incompatible with MongoDB 8 and newer (SERVER-121912) - it is NOT a volume/permission ' +
+      'problem. Use an engine/VM on kernel 7.0.14 or newer for RC versions that require ' +
+      'Mongo 8. See ' +
       'https://jira.mongodb.org/browse/SERVER-121912',
   ],
   [

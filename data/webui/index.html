@@ -112,156 +112,133 @@
     <span class="sb-right" id="sb-engines">docker: ? · k8s: ?</span>
   </footer>
 
-  <!-- Create dialog -->
-  <dialog id="create-dialog">
+  <!-- Create a workspace: two steps, then its progress. Step 1 asks only where it runs,
+       with the same cards the Clusters page shows, so the picture is learned once.
+       Step 2 is the details, in named sections. On Create the dialog becomes the job's
+       progress rather than handing off to a second dialog. Every field keeps its name,
+       so the request the form sends is the one it always sent. -->
+  <dialog id="create-dialog" class="wzd" aria-labelledby="create-title">
     <form id="create-form" method="dialog">
-      <h2>New workspace</h2>
-      <!-- Shown only when this GUI is open at a NON-loopback address, i.e. the
-           browser is not on the same machine as `serve`. Filled by app.js from
-           location.hostname and the box's default bind host; amber because it
-           wants something from you, and it is a notice -- it changes no field and
-           no URL. -->
-      <p id="create-bind-hint" class="banner warn" hidden></p>
+      <header class="wzd-h">
+        <div><h2 id="create-title">Create a workspace</h2>
+          <div class="wzd-steps" id="create-steps"></div></div>
+        <button type="button" class="wzd-x" id="create-x" aria-label="Close">✕</button>
+      </header>
+      <div class="wzd-b" id="create-body">
+        <!-- Shown only when this GUI is open at a NON-loopback address: a workspace
+             binds 127.0.0.1 and will not answer the browser it was created from. -->
+        <p id="create-bind-hint" class="banner warn" hidden></p>
 
-      <!-- THREE NUMBERED SECTIONS. The numbers are not decoration: choosing a
-           runtime re-shapes the form, and numbering says WHICH part changed rather
-           than leaving fields to appear and vanish somewhere in a long scroll.
-           Sections 1 and 3 are identical across runtimes; only 2 and Advanced
-           differ, which is the honest picture. -->
-      <section class="sec">
-        <div class="sec-h"><span class="sec-n">1</span>
-          <span class="sec-t">Which Rocket.Chat</span></div>
-        <label>Version <input name="version" placeholder="8.5.1" required></label>
-        <p id="version-hint" class="hint"></p>
-      </section>
+        <section class="wzd-step" id="create-step-1">
+          <p class="wzd-q" tabindex="-1">Where should it run?</p>
+          <div id="dest-cards" role="radiogroup" aria-label="Where it runs"></div>
+          <p id="dest-note" class="callout" hidden></p>
+          <input type="hidden" name="runtime" id="runtime-value">
+          <!-- The context the cards chose. A select, so the value sent is always one
+               the server listed; the cards set it and nothing downstream changed. -->
+          <select name="context" id="context-select" hidden aria-hidden="true" tabindex="-1"></select>
+        </section>
 
-      <section class="sec">
-        <div class="sec-h"><span class="sec-n">2</span>
-          <span class="sec-t">Where it runs</span>
-          <span class="sec-sub" id="create-room"></span></div>
-        <!-- Two CARDS rather than a select. The runtime decides what the other
-             twenty-odd fields mean, and the two facts that decide it -- what it
-             costs and what it cannot do -- have nowhere to live inside an
-             <option>. The hidden input keeps the submit path unchanged. -->
-        <div class="forks" id="runtime-forks" role="group" aria-label="Runtime"></div>
-        <input type="hidden" name="runtime" id="runtime-value">
-        <!-- Arrangement is DEPENDENT on the runtime, so it is a segmented control
-             inside this section, changing when its parent changes. Two peer
-             dropdowns said they were independent and the code then had to fight
-             that -- it produced two live bugs. -->
-        <div class="seg" id="deployment-seg" role="group" aria-label="Arrangement"></div>
-        <input type="hidden" name="deployment" id="deployment-value">
-        <p id="runtime-hint" class="hint seg-note"></p>
-        <!-- WHICH cluster is part of "where it runs", so it belongs in this section
-             and not in Advanced. Advanced is for fields whose default is right until
-             you have a reason to change it; on a managed cluster this one's default
-             is "whatever this box was last pointed at", which may be a colleague's
-             cluster or one that bills by the hour. A SELECT, not a text box: the
-             server already knows which clusters it can see, and an EKS context name
-             is long and not memorable. Blank means "decide for me", which is what an
-             un-set --context means. -->
-        <label id="context-row" hidden>Cluster
-          <select name="context" id="context-select"></select></label>
-        <p id="context-hint" class="hint" hidden>Which cluster this workspace is created
-          in. On the command line this is <code>--context</code>.</p>
-        <!-- What choosing THAT cluster means, said where the choice is made. Filled
-             by syncClusterNote from the same rows the picker is built from. -->
-        <p id="cluster-note" class="banner warn" hidden></p>
-        <div class="checks" id="runtime-extra"></div>
-        <!-- HTTPS SITS IN SECTION 2 because "how it is reached" is part of
-             "where it runs", and because on a managed cluster the domain is
-             not an advanced nicety -- without it the workspace answers only on
-             a port-forward, which is the one outcome that wastes a cluster you
-             are paying for. It was the LAST thing inside Advanced: two clicks
-             and a scroll from the decision it belongs to. -->
-        <!-- Still a flag rather than a preset: --preset is single-valued, so a tls
-             preset would exclude oidc/saml/livechat, which are the ones that need it. -->
-        <div class="fgroup" id="create-https-block">
-          <span class="fgroup-t">HTTPS</span>
-          <label>Certificate
-            <select name="https_mode" id="https-mode">
-              <option value="">Off — plain http://localhost:PORT</option>
-              <option value="acme">Let's Encrypt — a domain that already points here</option>
-              <option value="local">Local certificate — offline, no domain (run houston trust-ca once)</option>
-            </select>
-          </label>
-          <p class="hint" id="https-mode-hint"></p>
-          <label class="https-acme" hidden>Domain
-            <input name="domain" placeholder="rc1.example.com"></label>
-          <label class="https-acme" hidden>Contact email for Let's Encrypt
-            <input name="acme_email" type="email" placeholder="you@example.com"></label>
-          <p class="hint https-acme" hidden>The same two values the official
-            Rocket.Chat compose asks for (<code>DOMAIN</code> and
-            <code>LETSENCRYPT_EMAIL</code>). Traefik requests the certificate in the
-            background; check it with <b>Check TLS</b> once the workspace is up.<br>
-            The domain has to resolve to this host with port 443 reachable — Let's
-            Encrypt validates by connecting to it. Add an A or CNAME record for the
-            name at your DNS provider before you create the workspace; on a managed
-            cluster, point it at the load balancer <b>Prepare</b> reports.</p>
-        </div>
-      </section>
+        <section class="wzd-step" id="create-step-2" hidden>
+          <div class="wzd-summary"><span id="create-summary"></span><span class="sp"></span>
+            <button type="button" class="linkbtn" id="create-change">Change</button></div>
+          <div class="fsec"><div class="fsec-l">Rocket.Chat</div><div class="fsec-f two">
+            <div><label class="f">Version <input name="version" placeholder="8.5.1" required autocomplete="off"></label>
+              <p id="version-hint" class="hint"></p></div>
+            <div><label class="f">Name <span class="opt">(optional)</span>
+                <input name="name" placeholder="derived from the version" autocomplete="off"></label>
+              <p class="hint">Used in commands, e.g. <code>houston logs &lt;name&gt;</code>.</p></div>
+          </div></div>
+          <div class="fsec"><div class="fsec-l">Preset</div><div class="fsec-f">
+            <select name="preset" id="preset-select" aria-label="Preset"></select>
+            <p id="preset-desc" class="hint"></p>
+            <div id="preset-params"></div>
+            <div class="checks">
+              <label><input type="checkbox" name="seed"> Sample data <span class="opt">(users, channels, messages)</span></label>
+              <label><input type="checkbox" name="monitor"> Monitoring <span class="opt">(Prometheus + Grafana)</span></label>
+              <label id="create-seed-profile-row" class="f" hidden>Sample data size
+                <select name="seed_profile">
+                  <option value="small">small — 5 users, 3 channels, 5 msgs/channel</option>
+                  <option value="standard">standard — 20 users, 8 channels, 20 msgs/channel</option>
+                  <option value="large">large — 100 users, 20 channels, 100 msgs/channel</option>
+                </select>
+              </label>
+            </div>
+          </div></div>
+          <!-- HTTPS stays visible and outside the collapsible: how a workspace is reached
+               is part of where it runs, and on a managed cluster without a name it is
+               reachable only by a port-forward. -->
+          <div class="fsec"><div class="fsec-l">Access</div><div class="fsec-f">
+            <p id="cluster-note" class="callout money" hidden></p>
+            <div id="create-https-block">
+              <label class="f">HTTPS
+                <select name="https_mode" id="https-mode">
+                  <option value="">Off: plain http://localhost:PORT</option>
+                  <option value="acme">Let's Encrypt: a domain that already points here</option>
+                  <option value="local">Local certificate: no domain needed (run houston trust-ca once)</option>
+                </select>
+              </label>
+              <p class="hint" id="https-mode-hint"></p>
+              <div class="two https-acme" hidden>
+                <label class="f">Domain <input name="domain" placeholder="rc1.example.com"></label>
+                <label class="f">Contact email for Let's Encrypt <input name="acme_email" type="email" placeholder="you@example.com"></label>
+              </div>
+              <p class="hint https-acme" hidden>The domain has to resolve to this host with port 443
+                reachable: Let's Encrypt validates by connecting to it. On a managed cluster, point
+                it at the load balancer <b>Prepare</b> reports. Check it with <b>Check TLS</b> once
+                the workspace is up.</p>
+            </div>
+          </div></div>
+          <div class="fsec"><div class="fsec-l">Shape</div><div class="fsec-f">
+            <div><div class="seg" id="deployment-seg" role="group" aria-label="Shape"></div></div>
+            <input type="hidden" name="deployment" id="deployment-value">
+            <p id="runtime-hint" class="hint"></p>
+          </div></div>
+          <details class="adv">
+            <summary>More options</summary>
+            <!-- Filled from the server's own refusal registry, so this never claims a
+                 field is unavailable that has since been built. -->
+            <p id="adv-gone" class="adv-gone" hidden></p>
+            <div class="grid3">
+              <label class="f">Host port <input name="port" type="number" min="1024" max="65535" placeholder="auto"></label>
+              <label class="f">Bind host <input name="bind" placeholder="127.0.0.1"></label>
+              <label class="f">Root URL <input name="root_url" placeholder="http://localhost:PORT"></label>
+              <label class="f">Rocket.Chat image <input name="rc_image" placeholder="registry/…/rocket.chat"></label>
+              <label class="f">MongoDB version <input name="mongo" placeholder="e.g. 8.0"></label>
+              <label class="f">Registration token <input name="reg_token" placeholder="cloud reg token"></label>
+              <label class="f" id="replicas-row" hidden>Instances <input name="replicas" type="number" min="1" max="9" placeholder="1"></label>
+              <label class="f span2">If the name already exists
+                <select name="existing">
+                  <option value="reuse">Reuse it: start the existing workspace as it is</option>
+                  <option value="force">Rebuild it from these settings, keeping its data</option>
+                  <option value="fresh">Rebuild it and DELETE its data: users, channels, messages, uploads</option>
+                </select>
+              </label>
+            </div>
+            <div class="checks">
+              <label><input type="checkbox" name="wait" checked> Wait until ready</label>
+              <label><input type="checkbox" name="pin"> Keep (pin, and make it the default)</label>
+              <span id="runtime-extra" class="checks-inline"></span>
+            </div>
+          </details>
+        </section>
 
-      <section class="sec">
-        <div class="sec-h"><span class="sec-n">3</span>
-          <span class="sec-t">What to reproduce</span></div>
-        <label>Preset <select name="preset" id="preset-select"></select></label>
-        <p id="preset-desc" class="hint"></p>
-        <div id="preset-params"></div>
-        <label>Host port (blank = auto) <input name="port" type="number" min="1024" max="65535" placeholder="auto"></label>
-      <div class="checks">
-        <label><input type="checkbox" name="monitor"> Monitoring (Prometheus + Grafana)</label>
-        <label><input type="checkbox" name="seed"> Seed sample data (users, channels, messages)</label>
-        <label id="create-seed-profile-row" hidden>Seed profile
-          <select name="seed_profile">
-            <option value="small">small — 5 users, 3 channels, 5 msgs/channel</option>
-            <option value="standard">standard — 20 users, 8 channels, 20 msgs/channel</option>
-            <option value="large">large — 100 users, 20 channels, 100 msgs/channel</option>
-          </select>
-        </label>
-        <label><input type="checkbox" name="wait" checked> Wait until ready</label>
-        <!-- Kubernetes only, and hidden entirely on Compose -- so it costs the
-             common case nothing and sits where it can be found in the case that
-             has it. Buried under Advanced it was below "Root URL override", which
-             is a long way to hide the switch that decides whether this
-             workspace's MongoDB requires a password. -->
+        <!-- The job's own events, as they arrive. -->
+        <section class="wzd-step" id="create-step-3" hidden>
+          <p class="wzd-q" id="create-progress-title" tabindex="-1">Creating…</p>
+          <ul class="checklist" id="create-progress" aria-live="polite"></ul>
+          <div id="create-result"></div>
+        </section>
       </div>
-      </section>
-
-      <details class="adv">
-        <summary>Advanced options</summary>
-        <!-- Filled by syncAdvancedForRuntime from the server's own refusal registry,
-             so this can never claim a field is unavailable that has since been
-             built. It said `--reg-token` and every preset until they were. -->
-        <p id="adv-gone" class="adv-gone" hidden></p>
-        <label>Name (blank = derived) <input name="name" placeholder="e.g. rc8-5-1-ldap"></label>
-        <label>If that name already exists
-          <select name="existing">
-            <option value="reuse">Reuse it — just start the existing containers as they are</option>
-            <option value="force">Rebuild it from the settings above — keep its data</option>
-            <option value="fresh">Rebuild it and DELETE its data — users, channels, messages, uploads</option>
-          </select>
-        </label>
-        <p class="hint">Only applies when the name is already taken. “Reuse” is the default, and it is why
-          creating over an existing name keeps the old version, preset and port — those are read back from
-          the existing workspace, not rebuilt. Seeding and “Wait until ready” still run against it.</p>
-        <label>Registration token — EE license (--reg-token) <input name="reg_token" placeholder="cloud reg token"></label>
-        <label>MongoDB tag override (--mongo) <input name="mongo" placeholder="e.g. 8.0"></label>
-        <label>RC image override (--rc-image) <input name="rc_image" placeholder="registry/…/rocket.chat"></label>
-        <label>Bind host (--bind) <input name="bind" placeholder="127.0.0.1"></label>
-        <label>Root URL override (--root-url) <input name="root_url" placeholder="http://localhost:PORT"></label>
-        <label id="replicas-row" hidden>Instances (--replicas)
-          <input name="replicas" type="number" min="1" max="9" placeholder="1"></label>
-        <div class="checks">
-          <label><input type="checkbox" name="pin"> Pin (persistent + set as default)</label>
-          <label><input type="checkbox" name="offline"> Offline (skip live version lookup)</label>
-          <label><input type="checkbox" name="no_pull"> Don't pull images first</label>
-        </div>
-
-      </details>
-      <menu>
-        <button value="cancel" type="button" id="create-cancel" class="btn">Cancel</button>
-        <button value="ok" class="btn primary" id="create-submit">Create</button>
-      </menu>
+      <footer class="wzd-f">
+        <button type="button" class="btn" id="create-back" hidden>← Back</button>
+        <span class="hint wzd-hint" id="create-foot-hint"></span>
+        <button type="button" class="btn" id="create-cancel">Cancel</button>
+        <button type="button" class="btn solid" id="create-next">Next →</button>
+        <button value="ok" class="btn solid" id="create-submit" hidden>Create workspace</button>
+        <button type="button" class="btn" id="create-open-ws" hidden>Open workspace</button>
+        <a class="btn solid" id="create-open-rc" hidden target="_blank" rel="noreferrer">Open Rocket.Chat</a>
+      </footer>
     </form>
   </dialog>
 
@@ -465,32 +442,29 @@
     </menu>
   </dialog>
 
-  <!-- Building a managed cluster: twenty minutes and billable from the first
-       minute, so the dialog leads with what it will cost rather than burying it.
-       Not the three-section create dialog's shape: that one's numbering exists
-       because choosing a runtime re-shapes the form, and nothing here does. -->
-  <dialog id="cluster-create-dialog">
-    <form id="cluster-create-form" method="dialog">
-      <h2>New cluster</h2>
-      <p class="hint">A managed cluster takes about twenty minutes to build and
-        <b>costs money for as long as it exists</b>, whether or not anything is running
-        in it. It is not removed by <code>down</code>, <code>prune</code> or by any
-        expiry date — only by deleting it.</p>
-      <p id="cluster-create-cost" class="banner warn"></p>
-      <label>Name <input name="name" placeholder="support" required></label>
-      <label>Region <input name="region" placeholder="us-east-1"></label>
-      <div class="row2">
-        <label>Nodes <input name="nodes" type="number" min="1" max="20" placeholder="3"></label>
-        <label>Expires <input name="expires" placeholder="7"
-          title="Days until you expect to be finished, or `never`. A REMINDER only — nothing deletes on it"></label>
-      </div>
-      <p class="hint">Expiry is a reminder and nothing more: removing a cloud cluster is
-        minutes of destructive work on a shared account, and a timer is the worst
-        possible thing to have decided it.</p>
-      <menu>
-        <button type="button" id="cluster-create-cancel" class="btn">Cancel</button>
-        <button type="submit" class="btn solid">Build it — this starts charging</button>
-      </menu>
+  <!-- Set up Amazon EKS: one guided path for an admin. ① AWS on the server (the tools
+       and the identity the AWS CLI finds there; keys are never typed here), ② build a
+       cluster, or check the account for one houston built, ③ ready. Rendered by
+       clusters-tail.js, step by step. -->
+  <dialog id="eks-setup" class="wzd narrow" aria-labelledby="eks-title">
+    <form id="eks-form" method="dialog">
+      <header class="wzd-h">
+        <div><h2 id="eks-title">Set up Amazon EKS</h2>
+          <div class="wzd-steps" id="eks-steps"></div></div>
+        <button type="button" class="wzd-x" id="eks-x" aria-label="Close">✕</button>
+      </header>
+      <div class="wzd-b" id="eks-body"></div>
+      <footer class="wzd-f" id="eks-foot"></footer>
+    </form>
+  </dialog>
+
+  <!-- A cluster's public names: its DNS zone and the load balancer to point it at. -->
+  <dialog id="cluster-build" class="wiz">
+    <form id="cluster-build-form" method="dialog">
+      <h2 id="cluster-build-title">Public names</h2>
+      <div class="wizsteps" id="cluster-build-steps"></div>
+      <div id="cluster-build-body"></div>
+      <menu id="cluster-build-menu"></menu>
     </form>
   </dialog>
 
@@ -506,8 +480,8 @@
         <input name="confirm" autocomplete="off" spellcheck="false"></label>
       <label class="toggle"><input type="checkbox" name="force">
         Delete without reading what it holds (<code>--force</code>)</label>
-      <p class="hint">Release its load balancers first, or the VPC delete will hang:
-        <code>kubectl delete svc -A --field-selector spec.type=LoadBalancer</code></p>
+      <p class="hint">houston releases its load balancers before the delete, then lists
+        anything AWS still holds for this cluster.</p>
       <menu>
         <button type="button" id="cluster-delete-cancel" class="btn">Cancel</button>
         <button type="submit" id="cluster-delete-go" class="btn danger" disabled>Delete it</button>

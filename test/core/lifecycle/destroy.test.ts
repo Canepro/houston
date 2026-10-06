@@ -8,6 +8,35 @@ import * as paths from '../../../src/core/runner/paths';
 import type * as DestroyNS from '../../../src/core/lifecycle/destroy';
 import type * as JournalNS from '../../../src/core/journal';
 
+it('Grafana public URL regression: destroying a TLS workspace removes its shared-namespace resources', async () => {
+  jest.resetModules();
+  const removeIngress = jest.fn(async () => undefined);
+  jest.doMock('../../../src/core/kube/monitoring', () => ({
+    ...jest.requireActual<object>('../../../src/core/kube/monitoring'),
+    removeGrafanaIngress: removeIngress,
+    removeMonitoring: async () => false,
+  }));
+  jest.doMock('../../../src/core/kube/operator', () => ({
+    ...jest.requireActual<object>('../../../src/core/kube/operator'),
+    removeOperator: async () => false,
+  }));
+  const destroy = require('../../../src/core/lifecycle/destroy') as typeof DestroyNS;
+  try {
+    await destroy.removeTheClusterSide(
+      'prod',
+      () => undefined,
+      metadata({ name: 'w', extra: { tls: 'local' } }),
+      'w',
+      true,
+    );
+    expect(removeIngress).toHaveBeenCalledWith('w', expect.objectContaining({ context: 'prod' }));
+  } finally {
+    jest.dontMock('../../../src/core/kube/monitoring');
+    jest.dontMock('../../../src/core/kube/operator');
+    jest.resetModules();
+  }
+});
+
 interface Seen {
   message: string;
   level: string;
@@ -103,6 +132,7 @@ describe('tearing a workspace down when its record will not go', () => {
       removed: true,
       found: true,
       runtime: 'kubernetes',
+      context: 'kind-houston-local',
     });
 
     expect(await paths.exists('kub')).toBe(true);

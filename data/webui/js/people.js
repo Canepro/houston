@@ -55,6 +55,10 @@ const JOB_RESULT_RENDERER = {
   monitor: ctx.renderCreateResult, "monitor-off": ctx.renderCreateResult,
   seed: renderSeedResult,
   loadtest: ctx.renderPerfResult, capacity: ctx.renderCapResult,
+  // Lazily: the cluster module loads after this one.
+  "cluster-create": (r) => ctx.renderClusterCreateResult(r),
+  "cluster-delete": (r) => ctx.renderClusterDeleteResult(r),
+  "cluster-sweep": (r) => ctx.renderClusterSweepResult(r),
 };
 const jobTitle = (j) => (j.label ? `${j.kind}: ${j.label}` : j.kind);
 function jobAge(j) {
@@ -191,11 +195,11 @@ let PRIVILEGED_FIELDS = ["rc_image", "reg_token", "bind"];
 // has answered.
 let DEFAULT_BIND_HOST = "127.0.0.1";
 
-async function openCreate(preset) {
+// `dest` preselects a place ("docker", "k8s:<context>", "eks:<context>") and opens on
+// the details, which is what "Create here" on the Clusters page means.
+async function openCreate(preset, { dest = "" } = {}) {
   try { PRESETS = (await ctx.api("/api/presets")).presets; } catch (e) { ctx.toast(e.message); return; }
-  // Whether `config set acme.email` has been run. The email field is optional only
-  // if it has -- and the GUI cannot set it, so a first-time user must be told to
-  // type one rather than discovering it from a failed job.
+  // Whether `config set acme.email` has been run: the email field is optional only if it has.
   try {
     const s = await ctx.api("/api/settings");
     ACME_EMAIL_REMEMBERED = s.acme_email_remembered;
@@ -204,55 +208,28 @@ async function openCreate(preset) {
     if (Array.isArray(s.privileged_fields) && s.privileged_fields.length) {
       PRIVILEGED_FIELDS = s.privileged_fields;
     }
-    // Rebuilt every open rather than cached: a cluster can appear or go away while
-    // the tab is up, and a stale list would offer one the create then refuses.
+    // Rebuilt every open: a cluster can appear or go away while the tab is up. ROWS, not
+    // names -- which one costs money is the service's decision. The GUI offers local
+    // Kubernetes and EKS; every other kubeconfig context stays a command-line choice,
+    // and is kept here only so the box default can be described truthfully.
+    ctx.ALL_KUBE_CLUSTERS = Array.isArray(s.kube_clusters) ? s.kube_clusters : [];
+    // Not a cluster still being built: it is not a place to run anything yet.
+    ctx.KUBE_CLUSTERS = ctx.ALL_KUBE_CLUSTERS.filter((c) => c.where !== "elsewhere" && !ctx.clBuilding(c));
     const csel = ctx.$("#context-select");
     if (csel) {
-      // ROWS, not names: which of these costs money is decided by the service and
-      // sent here, rather than re-derived from the shape of the name in JS. This
-      // dialog already learned that lesson about the refusal registry.
-      ctx.KUBE_CLUSTERS = Array.isArray(s.kube_clusters) ? s.kube_clusters : [];
-      const was = csel.value;
       csel.innerHTML = "";
-      const fallback = ctx.KUBE_CLUSTERS.find((c) => c.is_default);
-      // The three things "decide for me" can mean, said rather than left to be
-      // discovered: this saved cluster, the only one there is, or a local one that
-      // does not exist yet and will be built.
-      const only = ctx.KUBE_CLUSTERS.length === 1 ? ctx.KUBE_CLUSTERS[0] : null;
-      const willBuild = !ctx.KUBE_CLUSTERS.length && (ctx.KUBE || {}).can_provision;
-      csel.append(ctx.el("option", { value: "" },
-        fallback ? `Decide for me — ${ctx.clusterLabel(fallback)}`
-        : only ? `Decide for me — ${ctx.clusterLabel(only)}`
-        : willBuild ? "Decide for me — a local cluster will be created"
-        : "Decide for me"));
-      for (const c of ctx.KUBE_CLUSTERS) {
-        // The VALUE is always the full context — it is what gets sent, and shortening
-        // that would send a name the server cannot resolve. Only the label is short.
-        csel.append(ctx.el("option", { value: c.context, title: c.context },
-          ctx.clusterLabel(c) + (c.billable ? " · costs money" : "")
-          + (c.is_default ? " · default" : "")));
-      }
-      if (was && ctx.KUBE_CLUSTERS.some((c) => c.context === was)) csel.value = was;
-      ctx.syncClusterNote();
+      csel.append(ctx.el("option", { value: "" }, "the server's default"));
+      for (const c of ctx.KUBE_CLUSTERS) csel.append(ctx.el("option", { value: c.context }, ctx.clusterLabel(c)));
     }
-    if (Array.isArray(s.runtimes) && s.runtimes.length) {
-      ctx.RUNTIMES = s.runtimes;
-      const cur = ctx.$("#runtime-value");
-      const want = cur.value || s.default_runtime;
-      cur.value = ctx.RUNTIMES.some((r) => r.name === want) ? want : ctx.RUNTIMES[0].name;
-    }
+    if (Array.isArray(s.runtimes) && s.runtimes.length) ctx.RUNTIMES = s.runtimes;
   } catch (_) { ACME_EMAIL_REMEMBERED = false; MAY_SET_PRIVILEGED = false; }
-  // What the box has left, next to the choice that spends it. `up` already REFUSES
-  // without headroom, so the cost belongs at the moment of choosing rather than in
-  // the failure afterwards -- and this is the same number the refusal uses.
-  ctx.$("#create-room").textContent = "";
+  // What this machine has left, on the cards for the places that are on it. `up`
+  // REFUSES without headroom, so the room belongs at the moment of choosing.
   ctx.api("/api/machine").then((cap) => {
     if (!cap || !cap.known) return;
     ctx.MACHINE_ROOM = cap;
-    ctx.syncRoomLine();
+    if (ctx.$("#create-dialog").open) ctx.renderDestinations();
   }).catch(() => {});
-  ctx.renderRuntimeAxes();
-  ctx.syncHttpsFields();
   const sel = ctx.$("#preset-select");
   sel.innerHTML = "";
   for (const p of PRESETS) sel.append(ctx.el("option", { value: p.name }, p.name + (p.requires_license ? " (license)" : "")));
@@ -261,20 +238,11 @@ async function openCreate(preset) {
   ctx.$("#create-form").existing.value = "reuse";
   ctx.syncCreateSeed();
   ctx.$("#version-hint").textContent = "";
-  // These decide what CODE runs and where it listens, and the server refuses them
-  // from whoever `gui.create_policy` says (admin by default, `anyone` on a box
-  // where every account is a colleague). Ask the SERVER who that is rather than
-  // deciding from the role here: two places computing the same permission is how
-  // the dialog ends up offering a field the API rejects, which is exactly what it
-  // did -- a server comment claimed the GUI "never sends them for a member", and
-  // it sent all three for everybody.
-  //
-  // Hidden rather than disabled: a greyed-out field invites "why can't I?", and on
-  // a box that has opened the policy there is nothing to explain.
+  // These decide what CODE runs and where it listens, and the server refuses them from
+  // whoever `gui.create_policy` says. Ask the SERVER who that is, and hide rather than
+  // disable: a greyed-out field invites "why can't I?". `context` is the place cards'
+  // business -- they collapse to "the server's default" when it may not be chosen.
   for (const name of PRIVILEGED_FIELDS) {
-    // `context` is governed by syncAdvancedForRuntime instead, which ANDs this same
-    // policy check with "is the runtime Kubernetes". Handling it here too would win
-    // (this loop runs last) and put a cluster picker on Docker Compose.
     if (name === "context") continue;
     const input = ctx.$("#create-form")[name];
     if (input && input.closest("label")) {
@@ -284,6 +252,7 @@ async function openCreate(preset) {
   }
   syncBindHint();
   ctx.$("#create-dialog").showModal();
+  ctx.startCreate({ dest, step: dest ? 2 : 1 });
 }
 
 // The one thing a browser-only user on a shared server cannot find out any other

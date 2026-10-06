@@ -1,237 +1,426 @@
 import { ctx } from "./shared.js";
 
-// ---- the three axes: where it runs, how it is arranged, how many -------------
-// Populated from /api/settings, never from a list written here. The same reasoning
-// as PRIVILEGED_FIELDS a few lines up: two places deciding the same thing is how
-// the dialog ends up offering a combination the service layer refuses.
+// ---- where a workspace runs: the places, shared by Create and the Clusters page ----
+// Populated from /api/settings, never from a list written here: two places deciding
+// the same thing is how the dialog ends up offering a combination the service refuses.
 let RUNTIMES = [];
 
-const RUNTIME_LABEL = { docker: "Docker Compose", kubernetes: "Kubernetes" };
+const RUNTIME_LABEL = { docker: "Docker", kubernetes: "Kubernetes" };
+function runtimeLabel(name) { return RUNTIME_LABEL[name] || name; }
 
-// WHICH Kubernetes, from the server's probe rather than from a word written here.
-// The label was the literal "Kubernetes (kind)", which was true while kind was the
-// only way to have a cluster and became a lie the moment houston could adopt one:
-// on a box with no kind and a running k3s, the card named a cluster that would not
-// be touched -- the same defect `doctor` had, in the other front-end.
-//
-// The branch order is `plan_cluster`'s, so the card cannot promise a different
-// cluster than the create will use: kind present wins even when something else is
-// running, because houston makes its own.
-function runtimeLabel(name) {
-  // JUST "Kubernetes". This used to read "Kubernetes (k3s)" or "Kubernetes (kind)",
-  // naming whatever local cluster the box happened to have -- helpful when a local
-  // cluster was the only Kubernetes there was, and misleading the moment EKS existed:
-  // somebody heading for a cluster in AWS was told the card meant k3s, and reasonably
-  // read that as the wrong choice. Reported from a real screen.
-  //
-  // The information did not go anywhere. The cluster picker sits directly under this
-  // card and names the cluster that will actually be used, including "a local cluster
-  // will be created" when there is none -- which is the same fact, said where the
-  // choice is made rather than in the label of the thing above it.
-  if (name !== "kubernetes") return RUNTIME_LABEL[name] || name;
-  return "Kubernetes";
-}
-const DEPLOYMENT_LABEL = {
-  monolith: "monolith — one Rocket.Chat",
-  "multi-instance": "multi-instance — several behind a load balancer",
-  microservices: "microservices — split into services",
-};
-// What CHANGES when you pick one, said where the choice is made. Not decoration:
-// the runtime decides which other commands will work on this workspace for the
-// rest of its life, and that is not recoverable from the word "Kubernetes".
-// What the ARRANGEMENT builds, since that is the choice directly above it. What
-// the runtime cannot do is said once, by the absence line in Advanced, which is
-// generated from the server's refusal registry -- so this no longer repeats "HTTPS
-// is not available here", which was the same fact in two places and only one of
-// them would have been updated when it changes.
+// What the ARRANGEMENT builds, said under the control that chooses it. What a runtime
+// cannot do is said once, by the absence line in More options, which is generated from
+// the server's refusal registry.
 const DEPLOYMENT_NOTE = {
   monolith: "One Rocket.Chat process.",
   "multi-instance": "Several Rocket.Chat containers behind a load balancer.",
   microservices: "Rocket.Chat plus presence, ddp-streamer, account, authorization "
     + "and stream-hub, each its own deployment.",
 };
-
-// TWO functions, not one, and the split is load-bearing. Changing the RUNTIME
-// repopulates the arrangement list and resets it; changing the ARRANGEMENT must
-// only show or hide the fields that depend on it. Wiring one function to both
-// events made every arrangement choice snap straight back to the runtime's
-// default -- picking `monolith` on Kubernetes recorded `microservices`, and the
-// dialog looked right the whole time. Found by clicking it, not by a test.
-// What a card says, beyond its name. Everything measurable comes from the server
-// (`/api/settings` -> runtimes[].cost, built from the same constants check_capacity
-// spends), so a card cannot quote a figure the preflight will contradict. Only the
-// one-line "what this is for" is written here, because it is a judgement rather
-// than a measurement.
-const RUNTIME_PITCH = {
-  docker: "Every command works, including HTTPS and load tests.",
-  kubernetes: "Helm, real pods, microservices. SCRAM auth available.",
+// The words on the Shape control. The VALUE is still the deployment name the CLI
+// takes; only what a person reads is plain.
+const SHAPE_LABEL = {
+  docker: { monolith: "One instance", "multi-instance": "Several instances" },
+  kubernetes: { microservices: "Microservices", monolith: "One pod" },
 };
+const DEPLOYMENT_LABEL = { monolith: "monolith", "multi-instance": "multi-instance", microservices: "microservices" };
 
 function fmtGb(mb) {
   return mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${mb} MB`;
 }
 
-// The runtime fork. Rendered rather than written into the markup because the list
-// of runtimes comes from the server -- the same table the CLI resolves against, so
-// the dialog cannot offer a combination the service layer refuses.
+// The rows behind the cluster choice: the ones the GUI shows (local and AWS), and ALL
+// of them -- the second only so "is the box default one the GUI cannot show" can be
+// answered, which decides whether an empty context can be described truthfully.
+let KUBE_CLUSTERS = [];
+let ALL_KUBE_CLUSTERS = [];
+// This machine's memory, from /api/machine: room per runtime, shown on the cards for
+// the places that are on this machine and nowhere else.
+let MACHINE_ROOM = null;
+
+function clusterLabel(c) {
+  // `short` and `region` come from the SERVER: an EKS context is sixty-odd characters
+  // of ARN, and the name and region are the two a person needs.
+  const name = (c && c.short) || (c && c.context) || "";
+  const region = (c && c.region) || "";
+  return region ? `${name} (${region})` : name;
+}
+
+const PLACE_ICON = {
+  docker: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="10" width="18" height="9" rx="2"/><path d="M7 10V6h4v4M11 10V6h4v4"/></svg>',
+  k8s: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 2.5 20.5 7v10L12 21.5 3.5 17V7z"/><circle cx="12" cy="12" r="3"/></svg>',
+  aws: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M7 18h10a4 4 0 0 0 .6-7.96A6 6 0 0 0 6.1 9.2 4.5 4.5 0 0 0 7 18z"/></svg>',
+  plus: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
+};
+const icon = (name) => ctx.el("span", { class: "ico", html: PLACE_ICON[name] || "" });
+const plural = (n, word) => `${n === 0 ? "No" : n} ${word}${n === 1 ? "" : "s"}`;
+const perDay = (st) => (st && st.cost && st.cost.usd_hr ? st.cost.usd_hr * 24 : null);
+
+// A cluster's state in the words both pages use, and the pill colour that goes with it.
+function placeState(st) {
+  // "Reading…" only while a read is in flight: after a failed one it would never end.
+  if (!st) return ctx.CLSTATE && ctx.CLSTATE.overviewError ? ["off", "Not read"] : ["off", "Reading…"];
+  if (st.gone) return ["off", "Gone in AWS"];
+  if (st.reachable) return ["ok", "Running"];
+  if (st.reach_status === "denied") return ["warn", "Refusing"];
+  return ["warn", "Not answering"];
+}
+
+// What makes an EKS cluster want somebody, as one line. Not cost: a cluster you are
+// deliberately paying for is doing its job. Idle AND billing is the exception, because
+// that is money buying nothing.
+function placeWarn(st) {
+  if (!st || st.gone) return "";
+  if (!st.reachable) return st.reach_why ? `${st.reach_why}.` : "";
+  // A reminder wants you once it is DUE, not three days out: a build given a short
+  // reminder was flagged the minute it was ready, above the DNS record it actually needed.
+  const d = st.expires_in_days;
+  if (typeof d === "number" && d < 0) return `Past its reminder date ${-d} day${d === -1 ? "" : "s"} ago. It keeps billing until someone deletes it.`;
+  if (d === 0) return "Its reminder date is today. It keeps billing until someone deletes it.";
+  // Before "holds no workspaces": a new cluster holds none BECAUSE its names do not answer
+  // yet, so the record is the next step, not deleting it.
+  if (st.zone && st.ready && st.ready.dns_answers === false) return `Public names under ${st.zone} do not answer yet.`;
+  const day = perDay(st);
+  if (day && st.made_by_houston === true && Array.isArray(st.workspaces) && !st.workspaces.length) {
+    return `Holds no workspaces and still bills ~$${day.toFixed(2)} a day. Delete it when you are done.`;
+  }
+  return "";
+}
+
+function roomFor(runtime) {
+  const cap = MACHINE_ROOM;
+  if (!cap || !cap.known) return "";
+  if (runtime === "docker") return `room for ${cap.room} more`;
+  const spec = RUNTIMES.find((r) => r.name === "kubernetes");
+  const dep = spec ? spec.default_deployment : "microservices";
+  const n = (cap.room_by_runtime || {})[`kubernetes-${dep}`];
+  return typeof n === "number" ? `room for ${n} more` : "";
+}
+
+// Where a workspace with no cluster named lands. The server tries its saved default first,
+// then the cluster `up` picks on its own -- houston's own kind, else whatever kubectl points
+// at if it answers -- which is what /api/kubernetes reports as `context`. Null when neither
+// is known and answering. Reading only the saved default, a member was told "Unavailable"
+// on a box whose k3s took every such workspace (measured on a k3s playground).
+function emptyContextRow() {
+  const def = ALL_KUBE_CLUSTERS.find((c) => c.is_default);
+  if (def) return def;
+  const k = ctx.KUBE;
+  if (!k || !k.reachable || !k.context) return null;
+  return ALL_KUBE_CLUSTERS.find((c) => c.context === k.context) || null;
+}
+
+// Every place a workspace can go, as data: the Clusters page and step 1 of Create both
+// draw these, so the two can never describe the same place differently.
+function places({ inventory = false } = {}) {
+  const status = (ctx.CLSTATE && ctx.CLSTATE.status) || {};
+  const k = ctx.KUBE;
+  const here = [];
+  const aws = [];
+  const repros = ctx.ALL_REPROS || [];
+  if (!RUNTIMES.length || RUNTIMES.some((r) => r.name === "docker")) {
+    const n = repros.filter((r) => (r.runtime || "docker") === "docker").length;
+    here.push({ key: "docker", runtime: "docker", context: "", ico: "docker", nm: "Docker", wh: "On this machine",
+      pill: ctx.DOCKER_OK === false ? ["warn", "Not answering"] : ["ok", "Ready"],
+      ds: ctx.DOCKER_OK === false ? "Docker is not answering on the server. houston doctor says why."
+        : "The quickest way to run Rocket.Chat. Right for most workspaces.",
+      facts: [plural(n, "workspace"), roomFor("docker")].filter(Boolean), usable: ctx.DOCKER_OK !== false });
+  }
+  const kube = !RUNTIMES.length || RUNTIMES.some((r) => r.name === "kubernetes");
+  if (!kube) return { here, aws, hiddenDefault: false };
+  const def = ALL_KUBE_CLUSTERS.find((c) => c.is_default);
+  const hiddenDefault = !!def && def.where === "elsewhere";
+  const may = inventory || ctx.MAY_SET_PRIVILEGED === true;
+  const clusterCard = (c) => {
+    const st = status[c.context];
+    const local = c.where === "local";
+    const held = st && Array.isArray(st.workspaces) ? plural(st.workspaces.length, "workspace") : "";
+    const dist = (st && st.distribution) || (c.ours ? "kind" : "");
+    const day = perDay(st);
+    return { key: (local ? "k8s:" : "eks:") + c.context, runtime: "kubernetes", context: c.context,
+      ico: local ? "k8s" : "aws", nm: local ? "Kubernetes" : (c.short || c.context),
+      wh: local ? ["On this machine", dist, c.short || c.context].filter(Boolean).join(" · ")
+        : `Amazon EKS · ${(st && st.region) || c.region || "?"}`,
+      pill: placeState(st), cost: local ? null : day, costKnown: !local && !!st,
+      ds: local ? "Real pods and Helm charts on this computer. Use it when what you are testing depends on Kubernetes." : "",
+      facts: [held, local ? roomFor("kubernetes") : clNodesText(st)].filter(Boolean),
+      warn: local ? "" : placeWarn(st), usable: !st || (!!st.reachable && !st.gone), row: c };
+  };
+  if (!may) {
+    // The box policy keeps the cluster choice to admins, so the form cannot send one: one
+    // card, "the server's default" -- and only where it can be said where that goes. A
+    // default the GUI does not show, or none and no kind to make one, is said, not offered.
+    const lands = emptyContextRow();
+    const known = !!lands && lands.where !== "elsewhere";
+    const makes = !lands && k && k.can_provision;
+    const card = { key: "k8s-default", runtime: "kubernetes", context: "", ico: lands && lands.where === "aws" ? "aws" : "k8s",
+      nm: "Kubernetes", wh: known ? `This server's default · ${clusterLabel(lands)}` : "This server's default cluster",
+      pill: known || makes ? ["ok", "Ready"] : ["off", "Unavailable"],
+      ds: known || makes ? "Choosing a cluster is kept to admins on this server, so this uses its default."
+        : "Choosing a cluster is kept to admins on this server, and its default is set from the command line.",
+      facts: [], usable: !!(known || makes) };
+    if (lands && lands.where === "aws") aws.push(card); else here.push(card);
+    return { here, aws, hiddenDefault: !!lands && lands.where === "elsewhere", limited: true };
+  }
+  const locals = KUBE_CLUSTERS.filter((c) => c.where === "local");
+  for (const c of locals) here.push(clusterCard(c));
+  if (!locals.length) {
+    // AN EMPTY CONTEXT IS OFFERED ONLY WHEN IT CAN BE SAID WHERE IT GOES. The server
+    // resolves "" to the box default first, so with a default set -- a remote cluster
+    // the GUI does not show, or an EKS one -- "a local cluster will be created" would be
+    // a false sentence about a real workspace.
+    const canMake = k && k.can_provision && !def;
+    if (canMake) {
+      here.push({ key: "k8s-new", runtime: "kubernetes", context: "", ico: "k8s", nm: "Kubernetes", wh: "On this machine",
+        pill: ["off", "Not set up yet"], facts: [roomFor("kubernetes")].filter(Boolean), usable: true,
+        ds: "Houston sets up a local cluster the first time you create a Kubernetes workspace: about 3 minutes and 600 MB of memory." });
+    } else {
+      here.push({ key: "k8s-none", runtime: "kubernetes", context: "", ico: "k8s", nm: "Kubernetes", wh: "On this machine",
+        pill: ["off", k === null ? "Not checked" : "Unavailable"], facts: [], usable: false,
+        ds: def ? "No cluster on this machine. This server's default cluster is set elsewhere, so a local one is not made from here."
+          : k && k.tools_ready ? "No cluster on this machine, and kind is not installed to make one. houston doctor shows what is missing."
+          : "Needs kubectl and helm on the server. houston doctor shows what is missing." });
+    }
+  }
+  for (const c of KUBE_CLUSTERS.filter((x) => x.where === "aws")) aws.push(clusterCard(c));
+  return { here, aws, hiddenDefault };
+}
+
+function clNodesText(st) {
+  const shapes = st && st.instance_types ? Object.entries(st.instance_types) : [];
+  return shapes.length ? shapes.map(([t, n]) => `${n} × ${t || "unlabelled"}`).join(", ") : "";
+}
+
+// One place, as a card body: the same markup on the Clusters page and in Create.
+function placeBody(p) {
+  const out = [ctx.el("div", { class: "ph" }, icon(p.ico),
+    ctx.el("div", {}, ctx.el("div", { class: "nm" }, p.nm), ctx.el("div", { class: "wh" }, p.wh)))];
+  out.push(ctx.el("div", {}, ctx.el("span", { class: `pill ${p.pill[0]}` }, p.pill[1])));
+  if (p.cost !== null && p.cost !== undefined) {
+    out.push(ctx.el("div", { class: "cost" }, `~$${p.cost.toFixed(2)} `, ctx.el("small", {}, "a day" + (p.lastKnown ? ", last known" : ""))));
+  } else if (p.costKnown === false && p.ico === "aws") {
+    out.push(ctx.el("div", { class: "cost" }, ctx.el("small", {}, "bills by the hour")));
+  }
+  if (p.ds) out.push(ctx.el("p", { class: "ds" }, p.ds));
+  if (typeof p.progress === "number") out.push(ctx.el("div", { class: "progress" }, ctx.el("i", { style: `width:${p.progress}%` })));
+  if (p.facts && p.facts.length) out.push(ctx.el("div", { class: "facts" }, ...p.facts.map((f) => ctx.el("span", {}, f))));
+  if (p.warn) out.push(ctx.el("div", { class: "warnline" }, `▲ ${p.warn}`));
+  return out;
+}
+
+// ---- Create a workspace: step 1, where it runs -----------------------------------
+let DEST = "";            // the chosen place's key
+let CREATE_STEP = 1;
+let cardsAskedForOverview = false;
+
+function destFor(key) {
+  const { here, aws } = places();
+  return [...here, ...aws].find((p) => p.key === key) || null;
+}
+
+function zoneHead(title, tag, money) {
+  return ctx.el("div", { class: "zone-h" }, ctx.el("h2", {}, title),
+    ctx.el("span", { class: "tag" + (money ? " money" : "") }, tag));
+}
+
+function renderDestinations() {
+  const box = ctx.$("#dest-cards");
+  if (!box) return;
+  const { here, aws, hiddenDefault, limited } = places();
+  const all = [...here, ...aws];
+  if (!all.some((p) => p.key === DEST && p.usable)) DEST = (all.find((p) => p.usable) || { key: "" }).key;
+  const pick = (p) => {
+    const input = ctx.el("input", { type: "radio", name: "dest", value: p.key, "aria-label": `${p.nm}, ${p.wh}` });
+    input.checked = p.key === DEST;
+    input.disabled = !p.usable;
+    input.addEventListener("change", () => pickDest(p.key));
+    return ctx.el("label", { class: "pcard place", "data-dest": p.key }, input, ctx.el("span", { class: "radio" }), ...placeBody(p));
+  };
+  box.innerHTML = "";
+  box.append(zoneHead("On this machine", "Free"), ctx.el("div", { class: "places" }, ...here.map(pick)));
+  const awsCards = aws.map(pick);
+  if (ctx.canAdmin() && !limited) {
+    awsCards.push(ctx.el("button", { type: "button", class: "pcard place add click", "data-dest": "add",
+      onclick: () => { ctx.$("#create-dialog").close(); ctx.openEksSetup(); } },
+      icon("plus"), ctx.el("div", { class: "nm" }, aws.length ? "Add an EKS cluster" : "Set up Amazon EKS"),
+      ctx.el("p", { class: "ds" }, "Opens the guided setup. This workspace waits.")));
+  } else if (!aws.length) {
+    awsCards.push(ctx.el("div", { class: "pcard place muted" }, ctx.el("div", { class: "nm" }, "Amazon EKS isn't set up"),
+      ctx.el("p", { class: "ds" }, limited ? "Choosing a cluster is kept to admins on this server."
+        : "An admin sets it up on the Clusters page.")));
+  }
+  box.append(zoneHead("In AWS", "Costs money", true), ctx.el("div", { class: "places" }, ...awsCards));
+  if (hiddenDefault) {
+    box.append(ctx.el("p", { class: "hint" }, "Other Kubernetes clusters on this server are used from the command line (",
+      ctx.el("code", {}, "--context"), ")."));
+  }
+  applyDest();
+  // What an EKS card costs comes from the overview; ask for it once if nobody has yet.
+  if (!cardsAskedForOverview && ctx.loadClusterOverview && !(ctx.CLSTATE && ctx.CLSTATE.overview)
+      && KUBE_CLUSTERS.some((c) => c.where === "aws")) {
+    cardsAskedForOverview = true;
+    ctx.loadClusterOverview().then((ov) => { if (ov && CREATE_STEP === 1 && ctx.$("#create-dialog").open) renderDestinations(); }).catch(() => {});
+  }
+}
+
+function pickDest(key) {
+  DEST = key;
+  applyDest();
+}
+
+// The chosen place into the two fields the form sends, and what choosing it means.
+function applyDest() {
+  const p = destFor(DEST);
+  const rt = ctx.$("#runtime-value");
+  const csel = ctx.$("#context-select");
+  if (p) {
+    if (rt.value !== p.runtime) {
+      rt.value = p.runtime;
+      // The new runtime's DEFAULT arrangement, unconditionally: `--runtime k8s` on the
+      // CLI defaults to microservices, and keeping Compose's monolith would diverge.
+      const spec = RUNTIMES.find((r) => r.name === p.runtime);
+      ctx.$("#deployment-value").value = spec ? spec.default_deployment : "";
+    }
+    if (csel) {
+      if (p.context && ![...csel.options].some((o) => o.value === p.context)) {
+        csel.append(ctx.el("option", { value: p.context }, p.context));
+      }
+      csel.value = p.context;
+    }
+  }
+  const note = ctx.$("#dest-note");
+  if (!note) return;
+  note.innerHTML = "";
+  note.className = "callout";
+  if (p && p.ico === "aws") {
+    note.classList.add("money");
+    note.append("▲ ", ctx.el("b", {}, p.nm), ` is shared and costs ${p.cost ? `about ~$${p.cost.toFixed(2)} a day` : "money by the hour"}`
+      + " whether or not this workspace runs. Deleting the workspace doesn't stop the charge.");
+    note.hidden = false;
+  } else if (p && p.key === "k8s-new") {
+    note.classList.add("info");
+    note.append("Houston sets up a local Kubernetes cluster first (about 3 minutes), then creates the workspace on it.");
+    note.hidden = false;
+  } else note.hidden = true;
+}
+
+function whereText(p) {
+  if (!p) return "";
+  if (p.ico === "aws") return `${p.nm} · Amazon EKS`;
+  if (p.key === "docker") return "Docker · this machine";
+  if (p.key === "k8s-new") return "Kubernetes · a new local cluster";
+  if (p.key === "k8s-default") return "Kubernetes · this server's default";
+  const rest = p.wh.replace(/^On this machine( · )?/u, "");
+  return `Kubernetes${rest ? ` · ${rest}` : ""} · this machine`;
+}
+
+// ---- Create a workspace: the steps ----------------------------------------------
+function setCreateStep(n, back = false) {
+  CREATE_STEP = n;
+  for (const i of [1, 2, 3]) { const s = ctx.$(`#create-step-${i}`); if (s) s.hidden = i !== n; }
+  const sec = ctx.$(`#create-step-${n}`);
+  if (sec) { sec.classList.remove("anim", "back"); void sec.offsetWidth; sec.classList.add("anim"); if (back) sec.classList.add("back"); }
+  const steps = ctx.$("#create-steps");
+  steps.innerHTML = "";
+  ["Where it runs", "Details"].forEach((label, i) => {
+    const at = i + 1;
+    const cls = n === 3 || at < n ? "done" : at === n ? "on" : "";
+    if (i) steps.append(ctx.el("span", { class: "ln" }));
+    steps.append(ctx.el("span", { class: cls }, ctx.el("i", {}, cls === "done" ? "✓" : String(at)), label));
+  });
+  const show = (id, on) => { const b = ctx.$(id); if (b) b.hidden = !on; };
+  show("#create-back", n === 2);
+  show("#create-cancel", n !== 2);
+  ctx.$("#create-cancel").textContent = n === 3 ? "Close" : "Cancel";
+  show("#create-next", n === 1);
+  show("#create-submit", n === 2);
+  show("#create-open-ws", false);
+  show("#create-open-rc", false);
+  const hint = ctx.$("#create-foot-hint");
+  const p = destFor(DEST);
+  if (n === 1) hint.textContent = "Next: the Rocket.Chat version and what to set up.";
+  else if (n === 2) hint.textContent = createSummaryLine();
+  else hint.textContent = "You can close this; the workspace keeps starting and shows in the list.";
+  if (n === 2) {
+    const sum = ctx.$("#create-summary");
+    sum.innerHTML = "";
+    sum.append("Runs on ", ctx.el("b", {}, whereText(p)));
+    if (p && p.ico === "aws" && p.cost) sum.append(` · ~$${p.cost.toFixed(2)}/day, shared`);
+    renderRuntimeAxes();
+    syncHttpsFields();
+  }
+  const focus = n === 2 ? ctx.$("#create-form").version : sec && sec.querySelector(".wzd-q");
+  if (focus) focus.focus({ preventScroll: true });
+  ctx.$("#create-body").scrollTop = 0;
+}
+
+function createSummaryLine() {
+  const f = ctx.$("#create-form");
+  return [f.version.value.trim(), f.preset.value || "default", whereText(destFor(DEST))].filter(Boolean).join(" · ");
+}
+
+// The arrangement control, for the chosen runtime, and the fields that follow it.
 function renderRuntimeAxes() {
   const rt = ctx.$("#runtime-value").value || (RUNTIMES[0] && RUNTIMES[0].name) || "docker";
-  const forks = ctx.$("#runtime-forks");
-  forks.innerHTML = "";
-  for (const spec of RUNTIMES) {
-    const chosen = spec.name === rt;
-    const cost = (spec.cost || {})[spec.default_deployment] || {};
-    const card = ctx.el("button", {
-      type: "button", class: "fork", "aria-pressed": String(chosen),
-      onclick: () => pickRuntime(spec.name),
-    },
-      ctx.el("span", { class: "fork-n" }, ctx.el("span", { class: "fork-dot" }),
-         runtimeLabel(spec.name)),
-      // What it BUILDS, not what it might weigh. The memory figure was an
-      // estimate dressed as a fact -- it depends on the preset, the arrangement
-      // and what else is running -- and the free-space line in this same header
-      // answers "will it fit" from the box itself, which is the question.
-      ctx.el("div", { class: "fork-cost" }, cost.shape || ""),
-      ctx.el("div", { class: "fork-can" }, RUNTIME_PITCH[spec.name] || ""));
-    forks.append(card);
-  }
   const spec = RUNTIMES.find((r) => r.name === rt);
-
-  // Arrangement: a segmented control INSIDE this section, because it is dependent
-  // on the runtime rather than a peer of it. Two peer dropdowns claimed to be
-  // independent and the code then had to fight that -- it produced two live bugs,
-  // the arrangement snapping back to the runtime default being one of them.
   const seg = ctx.$("#deployment-seg");
   seg.innerHTML = "";
   const deployments = spec ? spec.deployments : [];
-  // A value outside this runtime's list can never stand. Choosing the runtime's
-  // default when the runtime CHANGES is `pickRuntime`'s job, not this function's --
-  // see the comment there for why "keep it if it is still legal" is wrong.
   if (!deployments.includes(ctx.$("#deployment-value").value)) {
     ctx.$("#deployment-value").value = spec ? spec.default_deployment : "";
   }
   for (const d of deployments) {
-    seg.append(ctx.el("button", {
-      type: "button", "aria-pressed": String(ctx.$("#deployment-value").value === d),
-      onclick: () => pickDeployment(d),
-    }, d));
+    seg.append(ctx.el("button", { type: "button", "data-deployment": d,
+      "aria-pressed": String(ctx.$("#deployment-value").value === d), onclick: () => pickDeployment(d) },
+      (SHAPE_LABEL[rt] || {})[d] || d));
   }
-  ctx.$("#runtime-hint").textContent =
-    DEPLOYMENT_NOTE[ctx.$("#deployment-value").value] || "";
-
-  // The one control a runtime ADDS rather than removes, and it belongs here in
-  // "where it runs" rather than in Advanced: it decides whether this workspace's
-  // MongoDB requires a password.
+  ctx.$("#runtime-hint").textContent = DEPLOYMENT_NOTE[ctx.$("#deployment-value").value] || "";
+  // The one control a runtime ADDS: whether this workspace's MongoDB requires a password.
   const extra = ctx.$("#runtime-extra");
+  const ticked = !!(ctx.$("#mongo-operator") && ctx.$("#mongo-operator").checked);
   extra.innerHTML = "";
   if (rt === "kubernetes") {
-    extra.append(ctx.el("label", {},
-      ctx.el("input", { type: "checkbox", name: "mongo_operator", id: "mongo-operator" }),
-      " MongoDB via the official operator (adds SCRAM authentication)"));
+    const box = ctx.el("input", { type: "checkbox", name: "mongo_operator", id: "mongo-operator" });
+    box.checked = ticked;
+    extra.append(ctx.el("label", {}, box, " MongoDB via the official operator (SCRAM)"));
   }
   syncAdvancedForRuntime(spec);
   syncDeploymentFields();
 }
 
 function pickRuntime(name) {
-  if (ctx.$("#runtime-value").value === name) return;
-  ctx.$("#runtime-value").value = name;
-  // The new runtime's DEFAULT, unconditionally -- not "keep the old one if it is
-  // still legal". Both runtimes offer `monolith`, so keeping it looked considerate
-  // and produced a real divergence: `--runtime k8s` on the CLI defaults to
-  // microservices, and the dialog would hand you monolith because that is what
-  // Compose had selected a moment earlier. The value sitting there was never a
-  // choice about Kubernetes.
-  const spec = RUNTIMES.find((r) => r.name === name);
-  ctx.$("#deployment-value").value = spec ? spec.default_deployment : "";
+  // Kept for callers that name a runtime rather than a place: the first usable place
+  // of that runtime.
+  const { here, aws } = places();
+  const p = [...here, ...aws].find((x) => x.runtime === name && x.usable);
+  if (p) pickDest(p.key);
   renderRuntimeAxes();
 }
 
 function pickDeployment(name) {
   ctx.$("#deployment-value").value = name;
   renderRuntimeAxes();
+  ctx.$("#create-foot-hint").textContent = createSummaryLine();
 }
 
-// Advanced follows the runtime too, and it is a DIFFERENT SET rather than a
-// cosmetic difference: the fields below do not work on Kubernetes, and each was
-// once accepted and silently dropped. The list comes from the server's own refusal
-// registry, so the form cannot claim something is unavailable that has since been
-// built -- `--reg-token` and every preset were on that list until they were.
 const ADV_GONE_LABEL = {
   https: "HTTPS", domain: "a public domain",
   fresh: "rebuild and DELETE data",
 };
 
-// The rows behind the cluster picker, so the note below can say what a choice MEANS
-// without asking the server again or re-deriving anything.
-let KUBE_CLUSTERS = [];
-
-// What choosing THIS cluster commits you to, said in section 2 where the choice is
-// made rather than discovered afterwards. Two facts, and only for a managed cluster:
-// it bills for as long as it exists, and without a public name the workspace is
-// reachable only by a port-forward -- which on a cluster you are paying to have
-// somewhere else is the one outcome that wastes the whole point of it.
-//
-// The domain field is NOT duplicated here. One field, made findable: the button
-// opens Advanced and puts the cursor in it, so there is still exactly one place that
-// value lives.
-// THIS MACHINE'S MEMORY, shown only when this machine is where the workspace lands.
-// It sat in section 2's header unconditionally, so choosing an EKS cluster left
-// "5.4 GB free · room for about 4 more" on screen -- a number about a laptop, next to
-// a choice to run in AWS, and "room for about 4 more" is simply false there. The
-// capacity that matters on a managed cluster is the cluster's, which `cluster status`
-// reports and this dialog does not have.
-let MACHINE_ROOM = null;
-
-function clusterLabel(c) {
-  // WHAT TO SHOW for a cluster in a picker. An EKS context is
-  // `arn:aws:eks:<region>:<account>:cluster/<name>` — sixty-odd characters, of which
-  // the name and the region are the two a person needs and the account id is not.
-  // With two suffixes appended that made a ninety-five character `<option>`, and a
-  // native select cannot shrink text: it ran out of its box.
-  //
-  // `short` and `region` come from the SERVER, beside `billable`, because deriving
-  // them here would be a second copy of a rule the service already owns. The fallback
-  // to `context` keeps an older payload rendering rather than showing "undefined".
-  const name = (c && c.short) || (c && c.context) || "";
-  const region = (c && c.region) || "";
-  return region ? `${name} (${region})` : name;
-}
-
 function runsOnThisMachine() {
-  const spec = RUNTIMES.find((r) => r.name === ctx.$("#runtime-value").value);
-  if (!spec || spec.name !== "kubernetes") return true;      // Compose is always here
+  const p = destFor(DEST);
+  if (p) return p.ico !== "aws";
   const csel = ctx.$("#context-select");
-  const chosen = csel && (csel.value
-    ? KUBE_CLUSTERS.find((c) => c.context === csel.value)
-    : KUBE_CLUSTERS.find((c) => c.is_default));
-  // No cluster known yet means the local one houston would build.
+  const chosen = csel && csel.value ? KUBE_CLUSTERS.find((c) => c.context === csel.value) : null;
   return !chosen || !chosen.billable;
 }
 
-function syncRoomLine() {
-  const el_ = ctx.$("#create-room");
-  if (!el_) return;
-  if (!MACHINE_ROOM || !runsOnThisMachine()) { el_.textContent = ""; return; }
-  const free = Math.max(0, (MACHINE_ROOM.available_mb || 0) - (MACHINE_ROOM.reserve_mb || 0));
-  el_.textContent = `${fmtGb(free)} free · room for about ${MACHINE_ROOM.room} more`;
-}
-
 function syncLocalCaOption() {
-  // "Local certificate" CANNOT work on a cluster that is not on this machine, and the
-  // reason is a security gate rather than a missing feature: it would copy houston's
-  // CA PRIVATE KEY into a Secret in somebody else's cluster, and that key can mint a
-  // certificate for any name this box trusts. `_kubernetes_tls_plan` refuses it with
-  // GATE_UNAPPROVED_CLUSTER.
-  //
-  // Removed rather than left to be refused, because that is this dialog's rule: an
-  // option that cannot succeed is worse than no option — it invites a click, costs a
-  // filled-in form, and explains itself only after the submit.
-  //
-  // ONLY WHEN WE POSITIVELY KNOW. `runsOnThisMachine()` answers true for Compose, for
-  // an unknown cluster and for the local one houston would build, and false only when
-  // the chosen cluster is billable. Taking a working choice away on a guess would be
-  // the worse mistake of the two, so uncertainty keeps the option.
+  // "Local certificate" cannot work on a cluster that is not on this machine: it would
+  // copy houston's CA PRIVATE KEY into somebody else's cluster, which the server refuses
+  // with GATE_UNAPPROVED_CLUSTER. Removed rather than left to be refused -- but only
+  // when we positively know, so uncertainty keeps a working choice.
   const mode = ctx.$("#https-mode");
   if (!mode) return;
   const here = runsOnThisMachine();
@@ -242,50 +431,86 @@ function syncLocalCaOption() {
     syncHttpsFields();
   } else if (here && !has) {
     mode.append(ctx.el("option", { value: "local" },
-      "Local certificate — offline, no domain (run houston trust-ca once)"));
+      "Local certificate: no domain needed (run houston trust-ca once)"));
   }
 }
 
+// The cluster this create goes to, or null for Docker.
+function chosenCluster() {
+  const csel = ctx.$("#context-select");
+  if (!csel) return null;
+  return csel.value
+    ? KUBE_CLUSTERS.find((c) => c.context === csel.value) || null
+    : (ctx.$("#runtime-value").value === "kubernetes" ? KUBE_CLUSTERS.find((c) => c.is_default) || null : null);
+}
+
+// The zone the SERVER will name this workspace from, or "". The server defaults
+// <name>.<zone> only for a cluster named in the request -- an empty context is the box
+// default, which it does not -- and reads the zone from THIS box's build note, which a
+// cluster built elsewhere and connected here does not have. The dialog promising a name
+// in either case sent a request the server answered without one.
+function chosenZone() {
+  const csel = ctx.$("#context-select");
+  const chosen = chosenCluster();
+  if (!csel || !csel.value || !chosen || chosen.made_by_houston !== true) return "";
+  return ((ctx.CLSTATE && ctx.CLSTATE.status[chosen.context]) || {}).zone || "";
+}
+
+// ON A CLUSTER WITH A DNS ZONE EVERY NEW WORKSPACE GETS A PUBLIC NAME: the server fills in
+// <name>.<zone> when no domain is typed, and that name is served by Let's Encrypt, which
+// needs a contact email. "Off" was offered there and the create then failed on the email
+// nobody was asked for; it goes, Let's Encrypt is chosen, and the domain becomes optional.
+let OFF_OPTION = null;
+let ZONE_CHOSE_ACME = false;
+function syncZoneHttps(zone) {
+  const mode = ctx.$("#https-mode");
+  if (!mode) return;
+  const domain = ctx.$("#create-form") && ctx.$("#create-form").domain;
+  const off = [...mode.options].find((o) => o.value === "");
+  const acme = [...mode.options].some((o) => o.value === "acme");
+  if (zone && acme) {
+    // Read BEFORE removing it: removing the selected option makes the browser select the
+    // first one left, Let's Encrypt, so "was it ours to change" could never be answered.
+    const wasOther = mode.value !== "acme";
+    if (off) { OFF_OPTION = off; off.remove(); }
+    if (wasOther) { mode.value = "acme"; ZONE_CHOSE_ACME = true; }
+    if (domain) domain.placeholder = `leave empty for <name>.${zone}`;
+  } else {
+    if (!off) mode.prepend(OFF_OPTION || ctx.el("option", { value: "" }, "Off: plain http://localhost:PORT"));
+    if (ZONE_CHOSE_ACME) { mode.value = ""; ZONE_CHOSE_ACME = false; }
+    if (domain) domain.placeholder = "rc1.example.com";
+  }
+  syncHttpsFields();
+}
+
+// What a managed cluster means for how the workspace is REACHED, said in Access where
+// that is decided. The money was said in step 1, where the cluster was chosen.
 function syncClusterNote() {
+  syncLocalCaOption();
+  syncZoneHttps(chosenZone());
   const note = ctx.$("#cluster-note");
   const csel = ctx.$("#context-select");
-  const row = ctx.$("#context-row");
-  syncRoomLine();
-  // The cluster decides this, not only the runtime — picking a managed cluster with
-  // Kubernetes already selected has to take the option away too.
-  syncLocalCaOption();
   if (!note || !csel) return;
-  // WHAT "DECIDE FOR ME" WOULD ACTUALLY DECIDE. Leaving the picker alone is the most
-  // likely thing anybody does, and on a box whose saved default is a managed cluster
-  // it sent the workspace somewhere that bills -- with no warning, because this note
-  // keyed on an EXPLICIT choice. The default option was the one path with nothing
-  // said about it.
-  const chosen = csel.value
-    ? KUBE_CLUSTERS.find((c) => c.context === csel.value)
-    : KUBE_CLUSTERS.find((c) => c.is_default);
-  if (!chosen || !chosen.billable || (row && row.hidden)) { note.hidden = true; return; }
+  const chosen = chosenCluster();
+  if (!chosen || !chosen.billable) { note.hidden = true; return; }
   const domain = ctx.$("#create-form").domain;
   const hasDomain = !!(domain && domain.value.trim());
   note.hidden = false;
   note.innerHTML = "";
-  note.append(ctx.el("b", {}, csel.value ? "This cluster costs money. "
-                                    : `Without a choice this goes to ${chosen.context}, which costs money. `));
-  note.append("A workspace on it adds an EBS volume, and a public name adds a load "
-    + "balancer. Deleting the workspace does not delete the cluster.");
-  if (!hasDomain) {
-    note.append(ctx.el("br", {}));
-    note.append("Without a domain it is reachable only by a port-forward from the "
-      + "server — tied to a pod, gone when it restarts, one person at a time. ");
-    note.append(ctx.el("button", { type: "button", class: "btn small",
+  // One load balancer per cluster, made by Prepare: every public name goes through it.
+  note.append("A workspace on this cluster adds an EBS volume. Its public name goes through the cluster's "
+    + "load balancer, which is already there.");
+  const zone = chosenZone();
+  if (!hasDomain && zone) {
+    note.append(ctx.el("br", {}), `Its public name is <name>.${zone} unless you type a domain below. `
+      + "Let's Encrypt gives it a certificate, so it needs a contact email once.");
+  } else if (!hasDomain) {
+    note.append(ctx.el("br", {}), "Without a domain it is reachable only by a port-forward from the "
+      + "server: tied to a pod, gone when it restarts, one person at a time. ");
+    note.append(ctx.el("button", { type: "button", class: "btn sm",
       onclick: () => {
-        // No longer opens Advanced: the HTTPS block moved into section 2, where the
-        // cluster it depends on is chosen. Opening a disclosure that no longer holds
-        // the field would scroll past it.
         const mode = ctx.$("#https-mode");
-        if (mode && [...mode.options].some((o) => o.value === "acme")) {
-          mode.value = "acme";
-          syncHttpsFields();
-        }
+        if (mode && [...mode.options].some((o) => o.value === "acme")) { mode.value = "acme"; syncHttpsFields(); }
         const d = ctx.$("#create-form").domain;
         if (d) { d.scrollIntoView({ block: "center" }); d.focus(); }
       } }, "Set a domain"));
@@ -294,37 +519,11 @@ function syncClusterNote() {
 
 function syncAdvancedForRuntime(spec) {
   const gone = new Set(((spec && spec.unsupported) || []).map((u) => u.field));
-
-  // HTTPS is a block of its own, so it goes entirely -- but only when HTTPS itself
-  // is refused. This used to read `gone.has("https") || gone.has("domain")`, which
-  // was right while a runtime refused both and became wrong the moment one of them
-  // worked: Kubernetes now serves `--https` through the chart's own Ingress and still
-  // cannot do `--domain`, and the || hid the whole control for want of the half that
-  // is missing.
+  // HTTPS goes entirely only when HTTPS itself is refused; Kubernetes serves --https
+  // through the chart's Ingress and cannot do --domain, so only that mode goes.
   const https = ctx.$("#create-https-block");
   if (https) https.hidden = gone.has("https");
-
-  // WHICH cluster is a Kubernetes question and means nothing on Compose, so the row
-  // is absent rather than disabled -- this dialog's rule, and the same one
-  // `#replicas-row` follows for a field that is meaningless on a monolith.
-  // BOTH rules, in ONE place, because this row is the first field to be governed by
-  // two of them: it is PRIVILEGED (the box policy may forbid it) and it is
-  // KUBERNETES-ONLY (it means nothing on Compose). The privileged loop in openCreate
-  // deliberately skips it -- that loop runs later and would re-show a row this line
-  // had just hidden for the runtime, offering a cluster picker on Docker.
-  const ctxRow = ctx.$("#context-row");
-  if (ctxRow) {
-    ctxRow.hidden = !ctx.MAY_SET_PRIVILEGED || !spec || spec.name !== "kubernetes";
-    const hint = ctx.$("#context-hint");
-    if (hint) hint.hidden = ctxRow.hidden;
-    if (ctxRow.hidden) { const cs = ctx.$("#context-select"); if (cs) cs.value = ""; }
-    syncClusterNote();
-  }
-
-  // The MODE is the thing that is unavailable, so the mode goes and the block stays.
-  // Removed rather than disabled, because that is this dialog's rule -- a disabled
-  // option invites a click and explains nothing, and `#adv-gone` below already says
-  // what was taken away and why.
+  syncClusterNote();
   const mode = ctx.$("#https-mode");
   if (mode) {
     const has = [...mode.options].some((o) => o.value === "acme");
@@ -333,16 +532,12 @@ function syncAdvancedForRuntime(spec) {
       [...mode.options].find((o) => o.value === "acme").remove();
       syncHttpsFields();
     } else if (!gone.has("domain") && !has) {
-      mode.append(ctx.el("option", { value: "acme" },
-        "Let's Encrypt — a domain that already points here"));
+      mode.append(ctx.el("option", { value: "acme" }, "Let's Encrypt: a domain that already points here"));
     }
     syncLocalCaOption();
   }
-
-  // `fresh` is ONE OPTION of the existing-name select, not the whole control:
-  // `reuse` and `force` work on both runtimes, and hiding the row would take a
-  // working choice away to remove a broken one. The option is removed and put back
-  // rather than disabled, for the same reason the privileged fields are hidden.
+  // `fresh` is ONE OPTION of the existing-name select: reuse and force work on both
+  // runtimes, so the option goes and the control stays.
   const existing = ctx.$("#create-form").existing;
   if (existing) {
     const has = [...existing.options].some((o) => o.value === "fresh");
@@ -351,10 +546,9 @@ function syncAdvancedForRuntime(spec) {
       [...existing.options].find((o) => o.value === "fresh").remove();
     } else if (!gone.has("fresh") && !has) {
       existing.append(ctx.el("option", { value: "fresh" },
-        "Rebuild it and DELETE its data — users, channels, messages, uploads"));
+        "Rebuild it and DELETE its data: users, channels, messages, uploads"));
     }
   }
-
   const note = ctx.$("#adv-gone");
   if (!note) return;
   const named = [...gone].map((f) => ADV_GONE_LABEL[f] || f);
@@ -377,7 +571,7 @@ function renderPresetParams() {
   ctx.$("#preset-desc").textContent = p ? p.description : "";
   const box = ctx.$("#preset-params"); box.innerHTML = "";
   for (const [key, help] of Object.entries((p && p.params_help) || {})) {
-    box.append(ctx.el("label", {}, `--set ${key}`, ctx.el("input", { name: "set:" + key, placeholder: help })));
+    box.append(ctx.el("label", { class: "f" }, `--set ${key}`, ctx.el("input", { name: "set:" + key, placeholder: help })));
   }
 }
 // ---- HTTPS: certificate check ------------------------------------------------
@@ -479,7 +673,8 @@ function applyHttpsToRequest(f, req) {
   if (!mode) return true;
   const val = (k) => (f[k] && f[k].value.trim()) || "";
   if (mode === "local") { req.https = true; return true; }
-  if (!val("domain")) { ctx.toast("HTTPS: a domain is required for Let's Encrypt"); return false; }
+  // Not on a cluster with a zone: the server names the workspace <name>.<zone> itself.
+  if (!val("domain") && !chosenZone()) { ctx.toast("HTTPS: a domain is required for Let's Encrypt"); return false; }
   if (!val("acme_email") && !ctx.ACME_EMAIL_REMEMBERED) {
     ctx.toast("HTTPS: a contact email is required for Let's Encrypt");
     return false;
@@ -499,10 +694,8 @@ async function submitCreate() {
     preset: f.preset.value,
     port: f.port.value ? parseInt(f.port.value, 10) : 0,
     monitor: f.monitor.checked, seed: f.seed.checked, wait: f.wait.checked,
-    // Always sent, both of them. Omitting `runtime` would let the service layer's
-    // default decide, which is the same answer today and would silently stop being
-    // so the moment that default moved -- and the dialog would still be showing the
-    // old one.
+    // Always sent, both of them: omitting `runtime` would let the service's default
+    // decide, which would silently stop matching what this dialog showed.
     runtime: f.runtime ? f.runtime.value : "docker",
     deployment: f.deployment ? f.deployment.value : "",
     params: {},
@@ -512,17 +705,16 @@ async function submitCreate() {
   }
   if (f.mongo_operator && f.mongo_operator.checked) req.mongo_operator = true;
   if (f.seed.checked && f.seed_profile) req.seed_profile = f.seed_profile.value;
-  if (!req.version) { ctx.toast("version is required"); return; }
+  if (!req.version) { ctx.toast("version is required"); f.version.focus(); return; }
   for (const inp of f.querySelectorAll("input[name^='set:']")) {
     if (inp.value.trim()) req.params[inp.name.slice(4)] = inp.value.trim();
   }
-  for (const k of ["name", "reg_token", "mongo", "rc_image", "bind", "root_url"]) {
+  for (const k of ["name", "reg_token", "mongo", "rc_image", "bind", "root_url", "context"]) {
     if (f[k] && f[k].value.trim()) req[k] = f[k].value.trim();
   }
-  for (const k of ["pin", "offline", "no_pull"]) if (f[k] && f[k].checked) req[k] = true;
-  if (!applyHttpsToRequest(f, req)) return;      // validates before closing the dialog
-  // One choice, not two checkboxes: either flag bypasses reuse, and `fresh` already
-  // implies `force`, so ticking both was meaningless.
+  // --offline and --no-pull stay on the command line; the dialog does not offer them.
+  if (f.pin && f.pin.checked) req.pin = true;
+  if (!applyHttpsToRequest(f, req)) return;      // validates before anything is sent
   const existing = f.existing ? f.existing.value : "reuse";
   if (existing === "force") req.force = true;
   if (existing === "fresh") {
@@ -530,11 +722,94 @@ async function submitCreate() {
       + `channels, messages and uploads — then rebuilds it.\n\nContinue?`)) return;
     req.fresh = true;
   }
-  ctx.$("#create-dialog").close();
-  try { const { job_id } = await ctx.api("/api/repros", { method: "POST", body: JSON.stringify(req) }); ctx.streamJob(job_id, `Creating ${req.version} (${req.preset})`, ctx.renderCreateResult); }
-  catch (e) { ctx.toast(e.message); }
+  const label = req.name || `rc-${req.version.replace(/\./gu, "-")}`;
+  const where = whereText(destFor(DEST));
+  setCreateStep(3);
+  const title = ctx.$("#create-progress-title");
+  title.textContent = `Creating ${label} on ${where}`;
+  ctx.$("#create-progress").innerHTML = "";
+  ctx.$("#create-result").innerHTML = "";
+  try {
+    const { job_id } = await ctx.api("/api/repros", { method: "POST", body: JSON.stringify(req) });
+    ctx.streamJob(job_id, `Creating ${req.version} (${req.preset})`, (r) => renderCreateDone(r, label),
+      { list: ctx.$("#create-progress"), title, dialog: ctx.$("#create-dialog"),
+        failed: () => { title.textContent = `${label} could not be created`; } });
+  } catch (e) {
+    ctx.toast(e.message);
+    setCreateStep(2, true);
+  }
 }
 
+// What a finished create leaves in the dialog: where to go and how to sign in, then
+// the preset's notes -- the same facts the CLI prints after `up`.
+function renderCreateDone(r, label) {
+  const name = (r && r.name) || label;
+  ctx.$("#create-progress-title").textContent = `${name} is ready`;
+  const box = ctx.$("#create-result");
+  box.innerHTML = "";
+  const url = (r && (r.public_url || r.root_url)) || "";
+  if (url) {
+    const call = ctx.el("div", { class: "callout info" }, "Open ", ctx.el("b", { class: "mono" }, url));
+    if (r.login) call.append(" and sign in as ", ctx.el("b", {}, `${r.login.user} / ${r.login.password}`));
+    call.append(".");
+    box.append(call);
+  }
+  const kv = ctx.el("div", { class: "result-kv" });
+  if (r && r.rc_version) kv.append(ctx.el("b", {}, "Rocket.Chat"), ctx.el("span", {}, `${r.rc_version} · MongoDB ${r.mongo_tag || "?"} · ${r.preset || "default"}`));
+  for (const u of (r && r.instance_urls) || []) kv.append(ctx.el("b", {}, "Instance"), ctx.el("span", {}, u));
+  if (r && r.grafana_url) kv.append(ctx.el("b", {}, "Grafana"), ctx.el("span", {}, r.grafana_url));
+  if (kv.childElementCount) box.append(kv);
+  if (r && r.notes && r.notes.length) ctx.appendNotes(box, r.notes);
+  ctx.$("#create-foot-hint").textContent = "";
+  const ws = ctx.$("#create-open-ws");
+  ws.hidden = false;
+  ws.onclick = () => { ctx.$("#create-dialog").close(); ctx.selectRepro(name); };
+  const rc = ctx.$("#create-open-rc");
+  if (url) { rc.href = url; rc.hidden = false; }
+}
+
+// ---- opening and moving through the dialog -----------------------------------------
+function startCreate({ dest = "", step = 1 } = {}) {
+  // Every open starts from the first usable place (Docker) unless a place was named. A
+  // named place this person may not choose is said -- never quietly swapped for Docker.
+  const named = dest ? destFor(dest) : null;
+  DEST = named && named.usable ? dest : "";
+  renderDestinations();
+  if (dest && !(named && named.usable)) {
+    ctx.toast(named ? `${named.nm} cannot take a workspace right now.` : "Choosing a cluster is kept to admins on this server; pick where it runs.", "info");
+  }
+  setCreateStep(step === 2 && named && named.usable ? 2 : 1);
+}
+
+function createNext() {
+  const p = destFor(DEST);
+  if (!p || !p.usable) { ctx.toast("Pick where it runs first."); return; }
+  setCreateStep(2);
+}
+
+ctx.$("#create-next").addEventListener("click", createNext);
+ctx.$("#create-back").addEventListener("click", () => setCreateStep(1, true));
+ctx.$("#create-change").addEventListener("click", () => setCreateStep(1, true));
+ctx.$("#create-x").addEventListener("click", () => ctx.$("#create-dialog").close());
+ctx.$("#create-form").addEventListener("keydown", (ev) => {
+  // Enter moves forward the way the button on screen would; it never submits step 1.
+  if (ev.key !== "Enter" || ev.target.tagName === "TEXTAREA" || ev.target.tagName === "BUTTON") return;
+  if (CREATE_STEP === 1) { ev.preventDefault(); createNext(); }
+});
+ctx.$("#create-form").preset.addEventListener("change", () => {
+  if (CREATE_STEP === 2) ctx.$("#create-foot-hint").textContent = createSummaryLine();
+});
+ctx.$("#create-form").version.addEventListener("input", () => {
+  if (CREATE_STEP === 2) ctx.$("#create-foot-hint").textContent = createSummaryLine();
+});
+// A create still running when the dialog is closed carries on, and says how it ended.
+ctx.$("#create-dialog").addEventListener("close", () => {
+  const job = ctx.JOB;
+  if (job && job.view && job.view.dialog === ctx.$("#create-dialog")) {
+    ctx.closeJobStream();
+    if (!job.finished) ctx.watchDetachedJob(job);
+  }
+});
 
 Object.defineProperties(ctx, {
   "RUNTIMES": { enumerable: true, get: () => RUNTIMES, set: value => { RUNTIMES = value; } },
@@ -542,17 +817,30 @@ Object.defineProperties(ctx, {
   "runtimeLabel": { enumerable: true, get: () => runtimeLabel },
   "DEPLOYMENT_LABEL": { enumerable: true, get: () => DEPLOYMENT_LABEL },
   "DEPLOYMENT_NOTE": { enumerable: true, get: () => DEPLOYMENT_NOTE },
-  "RUNTIME_PITCH": { enumerable: true, get: () => RUNTIME_PITCH },
   "fmtGb": { enumerable: true, get: () => fmtGb },
   "renderRuntimeAxes": { enumerable: true, get: () => renderRuntimeAxes },
   "pickRuntime": { enumerable: true, get: () => pickRuntime },
   "pickDeployment": { enumerable: true, get: () => pickDeployment },
   "ADV_GONE_LABEL": { enumerable: true, get: () => ADV_GONE_LABEL },
   "KUBE_CLUSTERS": { enumerable: true, get: () => KUBE_CLUSTERS, set: value => { KUBE_CLUSTERS = value; } },
+  "ALL_KUBE_CLUSTERS": { enumerable: true, get: () => ALL_KUBE_CLUSTERS, set: value => { ALL_KUBE_CLUSTERS = value; } },
   "MACHINE_ROOM": { enumerable: true, get: () => MACHINE_ROOM, set: value => { MACHINE_ROOM = value; } },
   "clusterLabel": { enumerable: true, get: () => clusterLabel },
+  "PLACE_ICON": { enumerable: true, get: () => PLACE_ICON },
+  "placeIcon": { enumerable: true, get: () => icon },
+  "places": { enumerable: true, get: () => places },
+  "placeBody": { enumerable: true, get: () => placeBody },
+  "placeState": { enumerable: true, get: () => placeState },
+  "placeWarn": { enumerable: true, get: () => placeWarn },
+  "perDay": { enumerable: true, get: () => perDay },
+  "plural": { enumerable: true, get: () => plural },
+  "emptyContextRow": { enumerable: true, get: () => emptyContextRow },
+  "zoneHead": { enumerable: true, get: () => zoneHead },
+  "renderDestinations": { enumerable: true, get: () => renderDestinations },
+  "pickDest": { enumerable: true, get: () => pickDest },
+  "startCreate": { enumerable: true, get: () => startCreate },
+  "setCreateStep": { enumerable: true, get: () => setCreateStep },
   "runsOnThisMachine": { enumerable: true, get: () => runsOnThisMachine },
-  "syncRoomLine": { enumerable: true, get: () => syncRoomLine },
   "syncLocalCaOption": { enumerable: true, get: () => syncLocalCaOption },
   "syncClusterNote": { enumerable: true, get: () => syncClusterNote },
   "syncAdvancedForRuntime": { enumerable: true, get: () => syncAdvancedForRuntime },
@@ -565,4 +853,4 @@ Object.defineProperties(ctx, {
   "applyHttpsToRequest": { enumerable: true, get: () => applyHttpsToRequest },
   "submitCreate": { enumerable: true, get: () => submitCreate },
 });
-export { RUNTIMES, RUNTIME_LABEL, runtimeLabel, DEPLOYMENT_LABEL, DEPLOYMENT_NOTE, RUNTIME_PITCH, fmtGb, renderRuntimeAxes, pickRuntime, pickDeployment, ADV_GONE_LABEL, KUBE_CLUSTERS, MACHINE_ROOM, clusterLabel, runsOnThisMachine, syncRoomLine, syncLocalCaOption, syncClusterNote, syncAdvancedForRuntime, syncDeploymentFields, renderPresetParams, TLS_LABEL, doTlsStatus, HTTPS_MODE_HINT, syncHttpsFields, applyHttpsToRequest, submitCreate };
+export { RUNTIMES, RUNTIME_LABEL, runtimeLabel, DEPLOYMENT_LABEL, DEPLOYMENT_NOTE, fmtGb, renderRuntimeAxes, pickRuntime, pickDeployment, ADV_GONE_LABEL, KUBE_CLUSTERS, ALL_KUBE_CLUSTERS, MACHINE_ROOM, clusterLabel, places, placeBody, renderDestinations, pickDest, startCreate, setCreateStep, runsOnThisMachine, syncLocalCaOption, syncClusterNote, syncAdvancedForRuntime, syncDeploymentFields, renderPresetParams, TLS_LABEL, doTlsStatus, HTTPS_MODE_HINT, syncHttpsFields, applyHttpsToRequest, submitCreate };

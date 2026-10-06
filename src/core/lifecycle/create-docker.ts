@@ -21,7 +21,11 @@ import {
   errorText,
 } from '../../lib/errors';
 import { type Emit, info, nullEmit, warn } from '../../lib/events';
-import { notes as monitoringNotes, files as monitoringFiles } from '../../lib/monitoring';
+import {
+  notes as monitoringNotes,
+  files as monitoringFiles,
+  grafanaUrl as monitoringGrafanaUrl,
+} from '../../lib/monitoring';
 import { toText } from '../../lib/format';
 import * as presets from '../../lib/presets/index';
 import { type Preset } from '../../lib/presets/types';
@@ -272,6 +276,8 @@ export async function createRepro(
       `name '${req.name}' contains no usable characters (want a-z, 0-9, '-')`,
     );
   }
+  // The workspace's public name, from the cluster's zone, once the name is known.
+  await request.defaultDomainFromZone(req, name, emit);
   naming.requireValidName(name);
   return await createUnderTheLock(req, name, emit, {
     streamOutput,
@@ -631,6 +637,7 @@ export async function buildDocument(plan: CreatePlan): Promise<void> {
     mongoShell: resolved.mongoShell,
     oplog: resolved.oplog,
     rootUrl: plan.req.rootUrl || plan.public || plan.root,
+    publicUrl: plan.public,
     hostPort: plan.hostPort,
     regToken: plan.token || null,
     preset: plan.pre as Preset,
@@ -710,7 +717,10 @@ export function attachMonitoring(plan: CreatePlan): void {
   meta.extra.monitoring = true;
   meta.extra.monitoring_ports = [...config.MONITOR_PORTS];
   const notes = Array.isArray(meta.extra.notes) ? [...meta.extra.notes] : [];
-  meta.extra.notes = [...notes, ...monitoringNotes()];
+  meta.extra.notes = [
+    ...notes,
+    ...monitoringNotes(monitoringGrafanaUrl(plan.public, !!plan.public)),
+  ];
 }
 
 /** Taking down what is already there, and the gate on destroying its data. */
@@ -896,6 +906,7 @@ export async function registerTheName(plan: CreatePlan, local: boolean): Promise
   const needsCert = await registerRoute(plan.reproName, tlsspec.host, {
     instances: (plan.pre as Preset).instances || 1,
     local,
+    grafana: plan.req.monitor,
   });
   if (local) {
     // nothing further: the certificate was issued above

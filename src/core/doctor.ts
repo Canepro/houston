@@ -336,8 +336,8 @@ export async function checkKernel(ctx: Ctx): Promise<Row[]> {
       line(
         'engine-kernel',
         'warn',
-        `engine kernel ${String(kv)} — MongoDB 8.0 will not start (SERVER-121912); ` +
-          'use an engine on kernel < 6.19 for RC versions that require Mongo 8',
+        `engine kernel ${String(kv)} — MongoDB 8 and newer will not start (SERVER-121912); ` +
+          'use an engine on kernel 7.0.14 or newer for RC versions that require Mongo 8',
       );
     } else if (kv !== null && kv !== '') {
       line('engine-kernel', 'ok', `engine kernel ${kv}`);
@@ -719,6 +719,16 @@ export async function checkEdge(ctx: Ctx): Promise<Row[]> {
           'ok',
           `Edge running${where} — holds :80/:443, ` + `${String(routes.length)} workspace route(s)`,
           { elsewhere: 'the edge chip in the header' },
+        );
+      } else if (routes.length === 0 && served === '') {
+        // NOTHING TO REACH. A stopped edge with no https workspace and no GUI name on it
+        // breaks nothing, and `fail` made `doctor` exit 1 on a box that had simply finished
+        // with HTTPS -- "every https name (0 route(s)) is unreachable" about no names at all.
+        line(
+          'edge',
+          'ok',
+          'Edge installed and stopped — no https workspace uses it. ' +
+            '`houston edge start` when one does',
         );
       } else {
         const holder = await engine.portHolder(443);
@@ -1295,8 +1305,8 @@ async function clusterIdentity(line: Report['line'], pre: KubeToolsNS.Preflight)
     line(
       'kubernetes',
       'ok',
-      `Using your cluster ${quotedText(pre.context)}${where} — houston ` +
-        'creates namespaces in it and never removes the cluster itself',
+      `Using cluster ${quotedText(pre.context)}${where} — houston creates namespaces ` +
+        'in it; only `houston cluster delete` removes a cluster, and only one houston built',
       { check: 'kubernetes-cluster' },
     );
   } else {
@@ -1385,11 +1395,11 @@ async function reportClusterToCreate(
     line(
       'kubernetes',
       'ok',
-      `Your cluster ${quotedText(other)} ` +
+      `Cluster ${quotedText(other)} ` +
         `(${(await distribution(other)) || 'unknown'}) is running and ` +
         `will NOT be used by default — houston creates its own ` +
         `while kind is installed. Use it with ` +
-        `\`--ctx.context ${other}\`, or make it this box's default ` +
+        `\`--context ${other}\`, or make it this box's default ` +
         `with \`houston config set kubernetes.context ${other}\``,
       { check: 'kubernetes-other-clusters' },
     );
@@ -1466,16 +1476,26 @@ async function reportCloudClusters(
   if (onEks || tools.some((tool) => (tool.path ?? '') !== '')) {
     const ready = eks.cloudReady(cloud as never);
     if (ready) {
+      // WHICH STAGE, of the six the Clusters page and the overview show: ready is stage 1
+      // done, and the row says what stage 2 is and how to do it, or that it is done too.
+      const account = String(bagOf(cloud.identity).account ?? '');
+      const approved = account !== '' && config.approvedAwsAccounts().has(account);
+      const stage = approved
+        ? ` — account approved; stage 3 is \`houston cluster create <name> --region ${String(
+            cloud.region ?? '',
+          )} --zone <your zone>\``
+        : ` — stage 2, approve the account for spending: \`houston config set ` +
+          `cluster.approved_accounts ${account || '<account id>'}\``;
       line(
         'kubernetes',
         'ok',
         `AWS ready — ${eks.identityPretty(cloud.identity as never)}, region ` +
-          `${String(cloud.region ?? '')}`,
+          `${String(cloud.region ?? '')}${stage}`,
         { check: 'kubernetes-cloud' },
       );
     } else {
       // `fail` only when a cluster in use NEEDS it.
-      for (const blocker of eks.blockers(cloud as never)) {
+      for (const blocker of eks.blockers(cloud as never, { toBuild: true })) {
         line('kubernetes', onEks ? 'fail' : 'warn', `AWS: ${blocker}`, {
           check: 'kubernetes-cloud',
         });
@@ -1643,14 +1663,34 @@ async function reportCluster(
         { check: 'kubernetes-cluster' },
       );
     } else if (toolsReady(pre)) {
-      line(
-        'kubernetes',
-        needed,
-        'No Kubernetes cluster configured — install kind so ' +
-          'houston can create one, or point kubectl at an ' +
-          'existing cluster (k3s, minikube, Docker Desktop)',
-        { check: 'kubernetes-cluster' },
-      );
+      // CONTEXTS BUT NO CURRENT ONE is not "nothing configured": a deleted cluster that was
+      // current leaves exactly this, and the Clusters page lists the rest as running. houston
+      // never picks one by itself, so it says how -- against the file it actually reads.
+      const { contexts } = await import('./kube/context');
+      const [named] = await contexts();
+      if (named.length > 0) {
+        const { userEnv } = await import('./kube/exec');
+        const file = userEnv()?.KUBECONFIG ?? '';
+        const first = named[0] as string;
+        line(
+          'kubernetes',
+          needed,
+          'kubectl has no current context, so houston has no cluster to use by default. ' +
+            `The kubeconfig names ${named.map((name) => quotedText(name)).join(', ')}: ` +
+            `\`kubectl ${file === '' ? '' : `--kubeconfig ${file} `}config use-context ${first}\` ` +
+            `makes one the default, or pass \`--context ${first}\` to the command that needs it`,
+          { check: 'kubernetes-cluster' },
+        );
+      } else {
+        line(
+          'kubernetes',
+          needed,
+          'No Kubernetes cluster configured — install kind so ' +
+            'houston can create one, or point kubectl at an ' +
+            'existing cluster (k3s, minikube, Docker Desktop)',
+          { check: 'kubernetes-cluster' },
+        );
+      }
     }
   }
 }

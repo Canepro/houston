@@ -136,7 +136,7 @@ function render() {
   ctx.$("#sb-count").textContent = `${ctx.ALL_REPROS.length} repro(s) · ` +
     (unknown ? "state unknown (docker unavailable)" : `${running} running`);
   ctx.$("#sb-refreshed").textContent = "Last refreshed: " + new Date().toLocaleTimeString();
-  // `no-detail` HIDES THE ACTION PANE, and "clusters" has one. Without the second
+  // `no-detail` HIDES THE ACTION PANE, and a cluster's own view has one. Without the second
   // clause this line -- which runs on the four-second poll -- put the class back four
   // seconds after the view was opened, so the build button and the permissions
   // documents disappeared while you were reading them. The identical mistake is
@@ -144,17 +144,17 @@ function render() {
   // column is displayed at all, and fixing only the other half looked correct in
   // every screenshot taken inside four seconds.
   ctx.$(".panes").classList.toggle(
-    "no-detail", ctx.VIEW !== "clusters" && (ctx.VIEW !== "workspace" || !ctx.SELECTED));
+    "no-detail", ctx.VIEW !== "cluster" && (ctx.VIEW !== "workspace" || !ctx.SELECTED));
   // render() runs on the four-second poll, so it must redraw the RAIL without
   // touching a stage it does not own. Activity and Scenarios paint themselves and
   // then stay put; anything else here reset them to home within four seconds of
   // opening, which is how the Scenarios page shipped in v0.40.0 and vanished
   // while you were reading it.
   if (ctx.VIEW === "home" && !ctx.SELECTED) ctx.renderHome();
-  // "clusters" paints its own pane and must keep it, for the reason the note above
+  // A cluster's view paints its own pane and must keep it, for the reason the note above
   // gives about the stage: this line reset it within four seconds of opening, so the
   // build button and the permissions documents vanished while you were reading them.
-  if (ctx.VIEW !== "workspace" && ctx.VIEW !== "clusters") ctx.$("#actpane").innerHTML = "";
+  if (ctx.VIEW !== "workspace" && ctx.VIEW !== "cluster") ctx.$("#actpane").innerHTML = "";
 
   let list = ctx.ALL_REPROS.filter((r) =>
     (!ctx.view.filter || r.name.toLowerCase().includes(ctx.view.filter)) &&
@@ -374,11 +374,11 @@ function renderActionPane(d, busyLabel) {
       fn: () => ctx.openPerf(d.name, d.monitoring), ok: running, on: !kube },
     { id: "capacity", label: "Find capacity", fn: () => ctx.openCap(d.name), ok: running,
       on: !kube },
-    // Greyed on Compose, GONE on Kubernetes: TLS is a runtime property there, so a
-    // Compose workspace can gain HTTPS later and this becomes available -- while
-    // `up --https` is refused outright on Kubernetes, so it never can.
+    // Greyed until there is a public name. On Kubernetes it was hidden outright, on the
+    // reasoning that `up --https` is refused there; but `--domain` gives a cluster
+    // workspace a real certificate, and the TLS route answers for it.
     { id: "tls", label: "Check the certificate", fn: () => ctx.doTlsStatus(d.name),
-      ok: running && !!d.public_url, on: !kube },
+      ok: running && !!d.public_url, on: !kube || !!d.public_url },
     { id: "default", label: "Use for CLI commands", fn: () => ctx.doDefault(d.name),
       ok: !d.is_default },
   ].filter((it) => it.on !== false);

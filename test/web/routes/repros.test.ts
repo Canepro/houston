@@ -935,6 +935,18 @@ describe('attribution and the audit trail', () => {
     expect(when?.startsWith('20')).toBe(true);
   });
 
+  it('audits a typed name as the workspace it makes', async () => {
+    // With accounts `gui-1` is made as `alice-gui-1`; the job and the audit said `gui-1`,
+    // a name nothing on the box answers to.
+    await post('/api/repros', { version: '8.5.1', name: 'gui-1' });
+    expect((await get('/api/jobs')).json().jobs[0].label).toBe('alice-gui-1');
+    const line = fs
+      .readFileSync(path.join(home, AUDIT_FILE), 'utf8')
+      .split('\n')
+      .find((row) => row.includes('\tcreate\t'));
+    expect(line?.split('\t')[3]).toBe('alice-gui-1');
+  });
+
   it('can finally be read', async () => {
     await post('/api/repros', { version: '8.5.1' });
     const lines = (await get('/api/audit')).json().lines as {

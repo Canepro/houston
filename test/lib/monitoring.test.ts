@@ -10,6 +10,7 @@ import {
   bindPorts,
   dashboard,
   files,
+  grafanaUrl,
   notes,
   sd,
   services,
@@ -109,5 +110,35 @@ describe('the config files written into a workspace', () => {
 describe('the notes printed after attach', () => {
   it('are the same lines, in the same order, with the same ports', () => {
     expect(notes()).toEqual(RECORDED.notes);
+  });
+});
+
+describe('Grafana public URL regression', () => {
+  it('configures the HTTPS sub-path without changing loopback services', () => {
+    expect(services('https://h/').grafana?.environment).toMatchObject({
+      GF_SERVER_ROOT_URL: 'https://h/grafana/',
+      GF_SERVER_SERVE_FROM_SUB_PATH: 'true',
+      GF_SECURITY_ADMIN_PASSWORD: 'admin',
+      GF_AUTH_ANONYMOUS_ORG_ROLE: 'Viewer',
+    });
+    expect(services('').grafana?.environment).not.toHaveProperty('GF_SERVER_ROOT_URL');
+    expect(services('').grafana?.environment).not.toHaveProperty('GF_SERVER_SERVE_FROM_SUB_PATH');
+  });
+  it('puts the public URL in both the Grafana and Loki notes', () => {
+    const result = notes('https://h/grafana');
+    expect(result[0]).toBe('Grafana:    https://h/grafana  (admin/admin; anonymous view enabled)');
+    expect(result.at(-1)).toContain('(https://h/grafana/d/houston-logs)');
+    expect(result[1]).toContain('http://localhost:9090');
+  });
+});
+
+describe('the pure Grafana URL helper', () => {
+  it.each([
+    ['', false, 'http://localhost:5050'],
+    ['https://h', false, 'http://localhost:5050'],
+    ['', true, 'http://localhost:5050/grafana'],
+    ['https://h/', true, 'https://h/grafana'],
+  ] as const)('combines public URL %s and sub-path %s', (url, subPath, expected) => {
+    expect(grafanaUrl(url, subPath)).toBe(expected);
   });
 });

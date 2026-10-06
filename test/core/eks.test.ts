@@ -18,8 +18,13 @@ import * as path from 'node:path';
 import * as YAML from 'yaml';
 
 import * as config from '../../src/lib/config';
-import { AuthorityGateError, ConflictError, PreflightError } from '../../src/lib/errors';
-import type { Event } from '../../src/lib/events';
+import {
+  AuthorityGateError,
+  ConflictError,
+  NotFoundError,
+  PreflightError,
+} from '../../src/lib/errors';
+import { type Event, nullEmit } from '../../src/lib/events';
 import { CLUSTER_UNFINISHED, installJournalSink, type JournalSink } from '../../src/lib/journal';
 import { awsCli, type AwsResult } from '../../src/seams/aws-cli';
 
@@ -35,6 +40,7 @@ import {
   aws,
   blockers,
   clusterConfig,
+  connectExisting,
   clusterExists,
   cloudReady,
   daysUntil,
@@ -52,6 +58,16 @@ import {
   remember,
   remembered,
   streamTool,
+  eksctlProgress,
+  ZONE_TAG_KEY,
+  zoneOf,
+  rememberZone,
+  installMetricsServer,
+  METRICS_SERVER_MANIFEST,
+  sweepLeftovers,
+  keepCluster,
+  shareCluster,
+  approveAccount,
   sweepClusters,
   whoami,
 } from '../../src/core/eks';
@@ -98,6 +114,7 @@ const mocked = <T extends (...args: never[]) => unknown>(fn: T) => fn as unknown
 const realKubeRun = kube.run;
 const realDescribe = aws.describeCluster;
 const realPreflight = aws.preflight;
+const realWhoami = aws.whoami;
 const realPrepare = aws.prepareCluster;
 
 type Rule = [(argv: readonly string[]) => boolean, Partial<AwsResult>];
@@ -174,7 +191,96 @@ afterEach(() => {
   kube.run = realKubeRun;
   aws.describeCluster = realDescribe;
   aws.preflight = realPreflight;
+  aws.whoami = realWhoami;
   aws.prepareCluster = realPrepare;
+});
+
+describe('connect to an existing EKS cluster', () => {
+  const arn = 'arn:aws:eks:eu-west-1:111122223333:cluster/support';
+
+  it('checks the account before writing kubeconfig', async () => {
+    aws.whoami = () =>
+      Promise.resolve(
+        identity({ account: '444455556666', arn: 'arn:aws:iam::444455556666:user/bob' }),
+      );
+    aws.describeCluster = () => Promise.resolve({ state: 'present' as const, doc: { arn } });
+    const kubeCalls: string[][] = [];
+    kube.run = (argv) => {
+      kubeCalls.push([...argv]);
+      return Promise.resolve({ argv, returncode: 0, stdout: '', stderr: '' });
+    };
+    script([]);
+    await expect(connectExisting(arn)).rejects.toThrow(/belongs to account 111122223333/u);
+    expect(seen).toEqual([]);
+    expect(kubeCalls).toEqual([]);
+  });
+
+  it('uses the full ARN as context, restores the prior context and reports Kubernetes denial', async () => {
+    aws.whoami = () =>
+      Promise.resolve(
+        identity({ account: '111122223333', arn: 'arn:aws:iam::111122223333:user/alice' }),
+      );
+    aws.describeCluster = () => Promise.resolve({ state: 'present' as const, doc: { arn } });
+    const commands: string[][] = [];
+    kube.run = (argv) => {
+      commands.push([...argv]);
+      if (argv.includes('current-context'))
+        return Promise.resolve({ argv, returncode: 0, stdout: 'kind-local\n', stderr: '' });
+      if (argv.includes('/readyz'))
+        return Promise.resolve({ argv, returncode: 1, stdout: '', stderr: 'Unauthorized' });
+      return Promise.resolve({ argv, returncode: 0, stdout: '', stderr: '' });
+    };
+    script([[(argv) => argv.includes('update-kubeconfig'), {}]]);
+    const connected = await connectExisting(arn);
+    expect(seen).toEqual([
+      [
+        'aws',
+        'eks',
+        'update-kubeconfig',
+        '--name',
+        'support',
+        '--region',
+        'eu-west-1',
+        '--alias',
+        arn,
+      ],
+    ]);
+    expect(commands).toContainEqual(['kubectl', 'config', 'use-context', 'kind-local']);
+    expect(connected).toMatchObject({ context: arn, account: '111122223333', reachable: false });
+    expect(connected.access_reason).toMatch(/permissions problem/u);
+  });
+
+  it('leaves kubectl without a selected context when none was selected before connecting', async () => {
+    aws.whoami = () =>
+      Promise.resolve(
+        identity({ account: '111122223333', arn: 'arn:aws:iam::111122223333:user/alice' }),
+      );
+    aws.describeCluster = () => Promise.resolve({ state: 'present' as const, doc: { arn } });
+    let currentContext = '';
+    const commands: string[][] = [];
+    kube.run = (argv) => {
+      commands.push([...argv]);
+      if (argv[2] === 'current-context') {
+        return Promise.resolve({
+          argv,
+          returncode: currentContext === '' ? 1 : 0,
+          stdout: currentContext,
+          stderr: '',
+        });
+      }
+      if (argv.includes('unset') && argv.includes('current-context')) currentContext = '';
+      if (argv.includes('use-context')) currentContext = argv[argv.length - 1] ?? '';
+      return Promise.resolve({ argv, returncode: 0, stdout: '', stderr: '' });
+    };
+    awsCli.run = (argv) => {
+      currentContext = arn; // update-kubeconfig changes kubectl's process-wide selection.
+      return Promise.resolve({ argv, returncode: 0, stdout: '', stderr: '' });
+    };
+
+    expect((await connectExisting(arn)).context).toBe(arn);
+    expect(commands).toContainEqual(['kubectl', 'config', 'unset', 'current-context']);
+    expect(currentContext).toBe('');
+  });
 });
 
 describe('who AWS says you are', () => {
@@ -241,6 +347,85 @@ describe('whether this box could build one at all', () => {
     expect(cloudReady(pre)).toBe(false);
   });
 
+  it('probes kubectl and helm too, because prepare needs them after the money is spent', async () => {
+    // The create checked aws and eksctl up front and needed kubectl and helm twenty minutes
+    // later, to prepare the cluster; the guide said in so many words that without them
+    // "you are left with a cluster that bills and cannot run a workspace yet".
+    script([]);
+    const pre = await aws.preflight();
+    expect(Object.keys(pre.tools).sort()).toEqual(['aws', 'eksctl', 'helm', 'kubectl']);
+    expect(blockers(pre, { toBuild: true })).toEqual(
+      expect.arrayContaining(['helm is not installed', 'kubectl is not installed']),
+    );
+    // A DELETE needs neither: it must never be the thing that cannot stop a bill because
+    // helm, which it does not use, is missing.
+    expect(blockers(pre).filter((line) => /helm|kubectl/u.test(line))).toEqual([]);
+  });
+
+  it('carries a DNS zone on the cluster, as a tag and in the build note', async () => {
+    // The zone is known once, at build time, and was typed again as --domain on every
+    // ticket. On the cluster itself (a tag, true on every machine) and in the note (for
+    // the box that built it), so `up` can default the name and the ledger can check DNS.
+    const doc = clusterConfig('support', { region: 'eu-west-1', zone: 'rc.example.com' });
+    expect((doc.metadata as { tags: Record<string, string> }).tags[ZONE_TAG_KEY]).toBe(
+      'rc.example.com',
+    );
+    const bare = clusterConfig('support', { region: 'eu-west-1' });
+    expect((bare.metadata as { tags: Record<string, string> }).tags).not.toHaveProperty(
+      ZONE_TAG_KEY,
+    );
+    expect(zoneOf('support')).toBe('');
+    await remember('support', { region: 'eu-west-1', account: '1', zone: 'rc.example.com' });
+    expect(zoneOf('support')).toBe('rc.example.com');
+    forget('support');
+  });
+
+  it('installs metrics-server on a managed cluster that lacks it, and adopts one that has it', async () => {
+    // `stats` and the Containers tab read `kubectl top`, which needs metrics-server, and
+    // `cluster create` did not install it: the guide had the reader apply the upstream
+    // manifest by hand. kind needs an insecure-TLS patch the manifest lacks; EKS does not.
+    const calls: string[][] = [];
+    let present = false;
+    kube.run = (argv) => {
+      calls.push([...argv]);
+      if (argv.includes('top')) {
+        return Promise.resolve({ argv, returncode: present ? 0 : 1, stdout: '', stderr: '' });
+      }
+      return Promise.resolve({ argv, returncode: 0, stdout: '', stderr: '' });
+    };
+    const ctx = 'arn:aws:eks:eu-west-1:1:cluster/support';
+    const out = { already: [] as string[], metrics_server: false };
+    await installMetricsServer(ctx, 'eks', nullEmit, out);
+    expect(calls).toContainEqual([
+      'kubectl',
+      '--context',
+      ctx,
+      'apply',
+      '-f',
+      METRICS_SERVER_MANIFEST,
+    ]);
+    expect(out.metrics_server).toBe(true);
+    expect(METRICS_SERVER_MANIFEST).toMatch(
+      /^https:\/\/github\.com\/kubernetes-sigs\/metrics-server\/releases\/download\/v\d/u,
+    );
+
+    calls.length = 0;
+    present = true;
+    const had = { already: [] as string[], metrics_server: false };
+    await installMetricsServer(ctx, 'eks', nullEmit, had);
+    expect(calls.some((call) => call.includes('apply'))).toBe(false);
+    expect(had.already).toContain('metrics-server');
+    expect(had.metrics_server).toBe(true);
+
+    // Not on kind or k3s: kind needs a patch this manifest lacks, k3s ships its own.
+    calls.length = 0;
+    present = false;
+    const local = { already: [] as string[], metrics_server: false };
+    await installMetricsServer('kind-houston-local', 'kind', nullEmit, local);
+    expect(calls).toEqual([]);
+    expect(local.metrics_server).toBe(false);
+  });
+
   it('says how to arrange credentials, and never offers to hold them', () => {
     const said = blockers({ ...READY, identity: identity({ error: 'expired' }) }).join(' ');
     expect(said).toContain('not signed in to AWS (expired)');
@@ -300,7 +485,7 @@ describe('the cluster document', () => {
       managedNodeGroups: { desiredCapacity: number; privateNetworking: boolean }[];
     };
     expect(doc.iam.withOIDC).toBe(true);
-    expect(doc.addons).toEqual([{ name: 'aws-ebs-csi-driver', version: '1.47.0' }]);
+    expect(doc.addons).toEqual([{ name: 'aws-ebs-csi-driver', version: '1.66.0' }]);
     expect(doc.managedNodeGroups[0]?.desiredCapacity).toBe(DEFAULT_NODES);
     expect(doc.managedNodeGroups[0]?.privateNetworking).toBe(true);
   });
@@ -314,7 +499,7 @@ describe('the cluster document', () => {
       lineWidth: 0,
     });
     const parsed = YAML.parse(text) as { metadata: { version: unknown } };
-    expect(parsed.metadata.version).toBe('1.33');
+    expect(parsed.metadata.version).toBe('1.37');
   });
 });
 
@@ -457,6 +642,97 @@ describe('deleting, which is worse than creating', () => {
     );
   });
 
+  it('looks in the region the cluster was built in when none is typed', async () => {
+    // remember() wrote clusters/support/cluster.json with the build region. A delete typed
+    // without --region looked in the AWS CLI's default region instead, found nothing, and
+    // the cluster went on billing where it was built.
+    const dir = path.join(config.home(), 'clusters', 'support');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'cluster.json'),
+      JSON.stringify({
+        name: 'support',
+        region: 'us-west-2',
+        account: '111122223333',
+        provider: 'eks',
+        expires: '',
+        created_at: '2026-09-28T09:00:00Z',
+      }),
+    );
+    const asked: string[] = [];
+    aws.describeCluster = (_name: string, region: string) => {
+      asked.push(region);
+      return Promise.resolve({ state: 'refused' as const, doc: null });
+    };
+    await expect(deleteCluster('support')).rejects.toBeInstanceOf(PreflightError);
+    expect(asked).toEqual(['us-west-2']);
+  });
+
+  it('refuses to delete a same-name cluster in a different AWS account', async () => {
+    // The saved selection belongs to account A. A Houston-managed cluster with the same
+    // name and region in account B must not become the delete target when credentials
+    // change between the user's review and the actual job.
+    await remember('support', { region: 'eu-west-1', account: '111122223333' });
+    aws.preflight = () =>
+      Promise.resolve({
+        ...READY,
+        identity: identity({
+          account: '444455556666',
+          arn: 'arn:aws:iam::444455556666:user/bob',
+        }),
+      });
+    aws.describeCluster = () =>
+      Promise.resolve({
+        state: 'present' as const,
+        doc: {
+          arn: 'arn:aws:eks:eu-west-1:444455556666:cluster/support',
+          tags: { [OWNED_TAG_KEY]: OWNED_TAG_VALUE },
+        },
+      });
+    kube.run = (argv) => Promise.resolve({ argv, returncode: 0, stdout: '', stderr: '' });
+    const deletes: string[][] = [];
+    awsCli.stream = (argv) => {
+      deletes.push([...argv]);
+      return Promise.resolve({ argv, returncode: 0, stdout: '', stderr: '' });
+    };
+
+    await expect(deleteCluster('support', { region: 'eu-west-1', force: true })).rejects.toThrow(
+      /account.*111122223333.*444455556666|account.*444455556666.*111122223333/u,
+    );
+    expect(deletes).toEqual([]);
+  });
+
+  it('cleans up only the deleted cluster ARN when other accounts or regions reuse its name', async () => {
+    const target = 'arn:aws:eks:eu-west-1:111122223333:cluster/support';
+    const otherAccount = 'arn:aws:eks:eu-west-1:444455556666:cluster/support';
+    const otherRegion = 'arn:aws:eks:us-east-1:111122223333:cluster/support';
+    // This alias omits the account; with two matching ARNs it is ambiguous and must stay.
+    const ambiguousAlias = 'bob@support.eu-west-1.eksctl.io';
+    const known = new Set([target, otherAccount, otherRegion, ambiguousAlias]);
+    const removed: string[] = [];
+    aws.describeCluster = () =>
+      Promise.resolve({
+        state: 'present' as const,
+        doc: { arn: target, tags: { [OWNED_TAG_KEY]: OWNED_TAG_VALUE } },
+      });
+    kube.run = (argv) => {
+      if (argv.includes('get-contexts')) {
+        return Promise.resolve({ argv, returncode: 0, stdout: [...known].join('\n'), stderr: '' });
+      }
+      if (argv.includes('delete-context')) {
+        const context = argv[argv.length - 1] ?? '';
+        removed.push(context);
+        known.delete(context);
+      }
+      return Promise.resolve({ argv, returncode: 0, stdout: '', stderr: '' });
+    };
+    awsCli.stream = (argv) => Promise.resolve({ argv, returncode: 0, stdout: '', stderr: '' });
+
+    expect(await deleteCluster('support', { region: 'eu-west-1', force: true })).toBe(true);
+    expect(new Set(removed)).toEqual(new Set([target]));
+    expect(known).toEqual(new Set([otherAccount, otherRegion, ambiguousAlias]));
+  });
+
   it('gates a cluster it did not build, and hands over the command that would', async () => {
     aws.describeCluster = () => Promise.resolve({ state: 'present' as const, doc: { tags: {} } });
     let gate: unknown;
@@ -565,6 +841,90 @@ describe('deleting, which is worse than creating', () => {
     );
   });
 
+  it('releases the load balancers itself, and only then hands the cluster to eksctl', async () => {
+    // A LoadBalancer Service holds network interfaces in the VPC, and while it exists the
+    // VPC delete hangs. The guide had the reader run a raw kubectl against the pinned
+    // kubeconfig first, step 4 of the teardown, and the step most likely to be skipped.
+    const arn = 'arn:aws:eks:eu-west-1:111122223333:cluster/support';
+    aws.describeCluster = () =>
+      Promise.resolve({
+        state: 'present' as const,
+        doc: { arn, tags: { [OWNED_TAG_KEY]: OWNED_TAG_VALUE } },
+      });
+    const order: string[] = [];
+    kube.run = (argv) => {
+      if (argv.includes('delete') && argv.includes('svc')) order.push('release');
+      // The reach probe and the Service list: nothing left, nothing pending.
+      return Promise.resolve({ argv, returncode: 0, stdout: '{"items":[]}', stderr: '' });
+    };
+    awsCli.stream = (argv) => {
+      order.push('eksctl');
+      return Promise.resolve({ argv, returncode: 0, stdout: '', stderr: '' });
+    };
+    await deleteCluster('support', { region: 'eu-west-1', force: true });
+    expect(order).toEqual(['release', 'eksctl']);
+  });
+
+  it('does not take a refused read of the Services for a released load balancer', async () => {
+    // Read as "nothing left", one refused read handed the VPC to eksctl with the load
+    // balancer still holding interfaces in it, and the VPC delete hung.
+    aws.describeCluster = () =>
+      Promise.resolve({
+        state: 'present' as const,
+        doc: {
+          arn: 'arn:aws:eks:eu-west-1:111122223333:cluster/support',
+          tags: { [OWNED_TAG_KEY]: OWNED_TAG_VALUE },
+        },
+      });
+    const order: string[] = [];
+    let reads = 0;
+    kube.run = (argv) => {
+      if (argv.includes('delete') && argv.includes('svc')) order.push('release');
+      if (argv.includes('get') && argv.includes('svc')) {
+        reads += 1;
+        order.push(reads === 1 ? 'read: refused' : 'read: none');
+        if (reads === 1)
+          return Promise.resolve({ argv, returncode: 1, stdout: '', stderr: 'i/o timeout' });
+      }
+      return Promise.resolve({ argv, returncode: 0, stdout: '{"items":[]}', stderr: '' });
+    };
+    awsCli.stream = (argv) => {
+      order.push('eksctl');
+      return Promise.resolve({ argv, returncode: 0, stdout: '', stderr: '' });
+    };
+    await deleteCluster('support', { region: 'eu-west-1', force: true });
+    expect(order).toEqual(['release', 'read: refused', 'read: none', 'eksctl']);
+  }, 20_000);
+
+  it('does not warn about load balancers a timed-out delete did release', async () => {
+    // `kubectl delete` waits on the load-balancer finalizer, so it times out on a delete
+    // that went through. It warned "could not be removed" and skipped the wait.
+    aws.describeCluster = () =>
+      Promise.resolve({
+        state: 'present' as const,
+        doc: {
+          arn: 'arn:aws:eks:eu-west-1:111122223333:cluster/support',
+          tags: { [OWNED_TAG_KEY]: OWNED_TAG_VALUE },
+        },
+      });
+    kube.run = (argv) =>
+      Promise.resolve(
+        argv.includes('delete') && argv.includes('svc')
+          ? { argv, returncode: 1, stdout: '', stderr: 'timed out waiting for the condition' }
+          : { argv, returncode: 0, stdout: '{"items":[]}', stderr: '' },
+      );
+    awsCli.stream = (argv) => Promise.resolve({ argv, returncode: 0, stdout: '', stderr: '' });
+    const warned: string[] = [];
+    await deleteCluster('support', {
+      region: 'eu-west-1',
+      force: true,
+      emit: (event) => {
+        if (event.level === 'warn') warned.push(event.message);
+      },
+    });
+    expect(warned.filter((message) => message.includes('load balancer'))).toEqual([]);
+  });
+
   it('passes --wait, because without it a half-finished teardown reports success', async () => {
     aws.describeCluster = () => Promise.resolve(owned);
     let ran: readonly string[] = [];
@@ -590,6 +950,272 @@ describe('deleting, which is worse than creating', () => {
     await expect(deleteCluster('support', { region: 'eu-west-1' })).rejects.toThrow(
       /cannot delete an EKS cluster from here/u,
     );
+  });
+});
+
+describe('approving an account for spending', () => {
+  it("adds the account to the list, keeps the others, and records the Let's Encrypt contact", async () => {
+    // The GUI's build flow approves from the browser. It writes the same two keys
+    // `houston config set` writes, through the locked writer every config write uses.
+    config.updateConfig((cfg) => {
+      cfg[config.CLOUD_ACCOUNTS_KEY] = '444455556666';
+    });
+    const out = await approveAccount('111122223333', { acmeEmail: 'alice@example.com' });
+    expect(out.approved).toEqual(['111122223333', '444455556666']);
+    const cfg = config.loadConfig();
+    expect(String(cfg[config.CLOUD_ACCOUNTS_KEY])).toBe('111122223333,444455556666');
+    expect(String(cfg.acme_email)).toBe('alice@example.com');
+    await expect(approveAccount('abc')).rejects.toThrow(/12-digit/u);
+    config.updateConfig((c) => {
+      delete c[config.CLOUD_ACCOUNTS_KEY];
+      delete c.acme_email;
+    });
+  });
+});
+
+describe('keeping a cluster past its reminder date', () => {
+  const arn = 'arn:aws:eks:eu-west-1:111122223333:cluster/support';
+  const built = (tags: Record<string, string>) => () =>
+    Promise.resolve({ state: 'present' as const, doc: { arn, tags } });
+
+  it('moves the expiry tag and the note, and says the new date', async () => {
+    // The date is a reminder tag and nothing deletes on it, but extending it took
+    // `aws eks tag-resource` by hand; doctor then nagged about a cluster still in use.
+    aws.preflight = () => Promise.resolve(READY);
+    aws.describeCluster = built({
+      [OWNED_TAG_KEY]: OWNED_TAG_VALUE,
+      [EXPIRY_TAG_KEY]: '2026-10-01',
+    });
+    script([]);
+    await remember('support', {
+      region: 'eu-west-1',
+      account: '111122223333',
+      expires: '2026-10-01',
+    });
+    const out = await keepCluster('support', { days: 7, region: 'eu-west-1' });
+    const expected = expiryDate(7);
+    expect(out).toEqual({ name: 'support', region: 'eu-west-1', expires: expected, days: 7 });
+    expect(seen).toContainEqual([
+      'aws',
+      'eks',
+      'tag-resource',
+      '--resource-arn',
+      arn,
+      '--tags',
+      `${EXPIRY_TAG_KEY}=${expected}`,
+    ]);
+    expect(remembered().find((entry) => entry.name === 'support')?.expires).toBe(expected);
+    forget('support');
+  });
+
+  it('refuses a cluster houston did not build, and says so when there is none', async () => {
+    aws.preflight = () => Promise.resolve(READY);
+    script([]);
+    aws.describeCluster = built({});
+    await expect(keepCluster('support', { days: 7, region: 'eu-west-1' })).rejects.toBeInstanceOf(
+      AuthorityGateError,
+    );
+    aws.describeCluster = () => Promise.resolve({ state: 'absent' as const, doc: null });
+    await expect(keepCluster('support', { days: 7, region: 'eu-west-1' })).rejects.toBeInstanceOf(
+      NotFoundError,
+    );
+  });
+});
+
+describe('sharing a cluster with a colleague', () => {
+  const arn = 'arn:aws:eks:eu-west-1:111122223333:cluster/support';
+  beforeEach(() => {
+    aws.preflight = () => Promise.resolve(READY);
+    aws.describeCluster = () =>
+      Promise.resolve({
+        state: 'present' as const,
+        doc: { arn, tags: { [OWNED_TAG_KEY]: OWNED_TAG_VALUE } },
+      });
+  });
+
+  it('grants the AWS access entry, the cluster policy and the in-cluster RBAC, in that order', async () => {
+    // Appendix A of the guide: three aws commands and a kubectl apply, by hand, and "the
+    // first alone is not enough" -- with only the IAM half every kubectl says Unauthorized.
+    script([]);
+    let applied = '';
+    const order: string[] = [];
+    kube.run = (argv, options) => {
+      if (argv.includes('apply')) {
+        order.push('rbac');
+        applied = String((options as { input?: string }).input ?? '');
+      }
+      return Promise.resolve({ argv, returncode: 0, stdout: '', stderr: '' });
+    };
+    const out = await shareCluster('support', { user: 'bob', region: 'eu-west-1' });
+    const principal = 'arn:aws:iam::111122223333:user/bob';
+    const calls = seen.filter(
+      (call) => call.includes('create-access-entry') || call.includes('associate-access-policy'),
+    );
+    expect(calls.map((call) => call[2])).toEqual([
+      'create-access-entry',
+      'associate-access-policy',
+    ]);
+    expect(calls[0]).toEqual(
+      expect.arrayContaining([
+        '--principal-arn',
+        principal,
+        '--kubernetes-groups',
+        'houston-engineers',
+      ]),
+    );
+    expect(calls[1]).toEqual(
+      expect.arrayContaining([
+        '--policy-arn',
+        'arn:aws:eks::aws:cluster-access-policy/AmazonEKSAdminPolicy',
+      ]),
+    );
+    expect(order).toEqual(['rbac']);
+    expect(applied).toContain('houston-engineers');
+    expect(out.principal).toBe(principal);
+    expect(out.lines[0]).toBe('aws eks update-kubeconfig --name support --region eu-west-1');
+    expect(out.lines[1]).toContain('houston up');
+    expect(out.lines[1]).toContain('--context support');
+  });
+
+  it('refuses a cluster houston did not build, before granting anything', async () => {
+    // The operator policy may create access entries on any cluster in the account, so the
+    // tag is the gate, as it is for keep and delete: this grants cluster admin.
+    aws.describeCluster = () =>
+      Promise.resolve({ state: 'present' as const, doc: { arn, tags: {} } });
+    script([]);
+    await expect(
+      shareCluster('support', { user: 'bob', region: 'eu-west-1' }),
+    ).rejects.toBeInstanceOf(AuthorityGateError);
+    expect(seen.some((call) => call.includes('create-access-entry'))).toBe(false);
+  });
+
+  it('says what it already granted, and how to take it back, when the in-cluster step fails', async () => {
+    script([]);
+    kube.run = (argv) =>
+      Promise.resolve({
+        argv,
+        returncode: 1,
+        stdout: '',
+        stderr: 'error: You must be logged in to the server',
+      });
+    let failure: unknown;
+    try {
+      await shareCluster('support', { user: 'bob', region: 'eu-west-1' });
+    } catch (error) {
+      failure = error;
+    }
+    const message = (failure as Error).message;
+    expect(message).toContain('access entry');
+    expect(message).toContain('AmazonEKSAdminPolicy');
+    expect(message).toContain(
+      'aws eks delete-access-entry --cluster-name support --region eu-west-1 --principal-arn arn:aws:iam::111122223333:user/bob',
+    );
+  });
+
+  it('takes a full principal ARN as given, and an entry that already exists as done', async () => {
+    script([
+      [
+        has('create-access-entry'),
+        { returncode: 254, stderr: 'An error occurred (ResourceInUseException): already exists' },
+      ],
+    ]);
+    kube.run = (argv) => Promise.resolve({ argv, returncode: 0, stdout: '', stderr: '' });
+    const role = 'arn:aws:iam::111122223333:role/support-engineers';
+    const out = await shareCluster('support', { user: role, region: 'eu-west-1' });
+    expect(out.principal).toBe(role);
+    expect(out.already).toBe(true);
+  });
+});
+
+describe('what a delete leaves behind', () => {
+  // ONLY THIS CLUSTER'S. A region holds colleagues' clusters too; a region-wide list of
+  // load balancers and NAT gateways, each with its delete command, handed out commands
+  // that break someone else's running cluster. Every row is tied to `support` by a tag
+  // eksctl or Kubernetes put on it, or it is shown as a candidate with no command.
+  const SUPPORT = 'kubernetes.io/cluster/support';
+  it("lists what carries this cluster's tag, with the fix for each", async () => {
+    script([
+      [
+        has('describe-volumes'),
+        json([
+          ['vol-mine', 8, '2026-09-28', `kubernetes.io/created-for/pvc/name,${SUPPORT}`],
+          [
+            'vol-theirs',
+            8,
+            '2026-09-28',
+            'kubernetes.io/created-for/pvc/name,kubernetes.io/cluster/perf',
+          ],
+          [
+            'vol-untagged',
+            8,
+            '2026-09-28',
+            'kubernetes.io/created-for/pvc/name,kubernetes.io/created-for/pvc/namespace',
+          ],
+        ]),
+      ],
+      [
+        has('elb', 'describe-load-balancers'),
+        json([
+          ['a1', 'a1.elb.amazonaws.com'],
+          ['b2', 'b2.elb.amazonaws.com'],
+        ]),
+      ],
+      [
+        has('elb', 'describe-tags'),
+        json({
+          TagDescriptions: [
+            { LoadBalancerName: 'a1', Tags: [{ Key: SUPPORT, Value: 'owned' }] },
+            {
+              LoadBalancerName: 'b2',
+              Tags: [{ Key: 'kubernetes.io/cluster/perf', Value: 'owned' }],
+            },
+          ],
+        }),
+      ],
+      [has('elbv2', 'describe-load-balancers'), json([])],
+      [
+        has(
+          'describe-nat-gateways',
+          'Name=tag:aws:cloudformation:stack-name,Values=eksctl-support-cluster',
+        ),
+        json([['nat-1', 'vpc-1']]),
+      ],
+      [has('describe-nat-gateways'), json([['nat-theirs', 'vpc-9']])],
+      [
+        has(
+          'describe-addresses',
+          'Name=tag:aws:cloudformation:stack-name,Values=eksctl-support-cluster',
+        ),
+        json([['eipalloc-1', '3.4.5.6']]),
+      ],
+      [has('describe-addresses'), json([['eipalloc-theirs', '9.9.9.9']])],
+      [has('list-stacks'), json([['eksctl-support-cluster', 'DELETE_FAILED']])],
+    ]);
+    const out = await sweepLeftovers('support', 'eu-west-1');
+    expect(out.unreadable).toEqual([]);
+    expect(out.found.map((row) => [row.kind, row.id, row.certain])).toEqual([
+      ['volume', 'vol-mine', true],
+      ['volume', 'vol-untagged', false],
+      ['load balancer', 'a1', true],
+      ['nat gateway', 'nat-1', true],
+      ['elastic ip', 'eipalloc-1', true],
+      ['stack', 'eksctl-support-cluster', true],
+    ]);
+    expect(out.found[0]?.fix).toContain(
+      'aws ec2 delete-volume --region eu-west-1 --volume-id vol-mine',
+    );
+    // A candidate carries no command: nothing ties it to this cluster.
+    expect(out.found[1]?.fix).toBe('');
+    expect(out.found[1]?.detail).toContain('not tagged');
+    expect(out.found[2]?.fix).toContain('--load-balancer-name a1');
+  });
+
+  it('reports a read it could not make instead of counting it as clean', async () => {
+    script([[has('describe-volumes'), { returncode: 254, stderr: 'AccessDenied' }]], json([]));
+    const out = await sweepLeftovers('support', 'eu-west-1');
+    expect(out.found).toEqual([]);
+    expect(out.unreadable.map((entry) => entry.kind)).toEqual(['volume']);
+    expect(out.unreadable[0]?.why).toBe('AccessDenied');
   });
 });
 
@@ -645,6 +1271,50 @@ describe('the sweep that answers "what am I paying for"', () => {
       [mine, everything].map((sweep) => (sweep as unknown as Record<string, unknown>).owned_only),
     ).toEqual([true, false]);
     expect(Object.keys(everything)).not.toContain('ownedOnly');
+  });
+
+  it('asks the regions side by side, and still answers in the order they were named', async () => {
+    // Seventeen regions, one after another, at up to twenty seconds each, is why `cluster
+    // list` took minutes. The calls are independent reads; only the ORDER of the answer
+    // must not depend on which region answered first.
+    let firstResolved = false;
+    let secondAskedBeforeFirstResolved = false;
+    seen = [];
+    awsCli.run = (argv) => {
+      seen.push([...argv]);
+      const region = argv[argv.indexOf('--region') + 1];
+      const reply = (stdout: string): AwsResult => ({ argv, returncode: 0, stdout, stderr: '' });
+      if (argv.includes('list-clusters') && region === 'eu-west-1') {
+        return new Promise((resolve) => {
+          setTimeout(() => {
+            firstResolved = true;
+            resolve(reply(JSON.stringify(['slow'])));
+          }, 150);
+        });
+      }
+      if (argv.includes('list-clusters') && region === 'us-east-1') {
+        if (!firstResolved) secondAskedBeforeFirstResolved = true;
+        return Promise.resolve(reply(JSON.stringify(['fast'])));
+      }
+      return Promise.resolve(reply(''));
+    };
+    aws.describeCluster = (name, region) =>
+      Promise.resolve({
+        state: 'present' as const,
+        doc: {
+          status: 'ACTIVE',
+          arn: `arn:aws:eks:${region}:1:cluster/${name}`,
+          createdAt: '2026-09-01',
+          tags: { [OWNED_TAG_KEY]: OWNED_TAG_VALUE },
+        },
+      });
+    const out = await sweepClusters({ regions: ['eu-west-1', 'us-east-1'] });
+    expect(secondAskedBeforeFirstResolved).toBe(true);
+    expect(out.clusters.map((entry) => [entry.name, entry.region])).toEqual([
+      ['slow', 'eu-west-1'],
+      ['fast', 'us-east-1'],
+    ]);
+    expect(out.regions).toEqual(['eu-west-1', 'us-east-1']);
   });
 
   it('says ONE reason when there is no `aws` at all, not twenty-one copies of it', async () => {
@@ -788,6 +1458,80 @@ describe('the twenty minutes nothing can verify', () => {
     ]);
   });
 
+  it('reads a percentage out of the phases eksctl announces, and never goes backwards', async () => {
+    // Twenty minutes of raw lines with no sense of how far along they are: the GUI drew a
+    // modal of text and the CLI a scroll. eksctl's own phase announcements are stable
+    // enough to place on a bar.
+    expect(eksctlProgress('building cluster stack "eksctl-support-cluster"')).toBe(5);
+    expect(eksctlProgress('waiting for CloudFormation stack "eksctl-support-cluster"')).toBe(10);
+    // Printed AFTER the node group on a real build, so it moves nothing.
+    expect(eksctlProgress('waiting for the control plane to become ready')).toBeNull();
+    expect(eksctlProgress('building managed nodegroup stack "eksctl-support-nodegroup-ng"')).toBe(
+      65,
+    );
+    expect(eksctlProgress('creating addon: vpc-cni')).toBe(55);
+    expect(eksctlProgress('creating addon: aws-ebs-csi-driver')).toBe(85);
+    expect(eksctlProgress('EKS cluster "support" in "us-east-1" region is ready')).toBe(90);
+    expect(eksctlProgress('checking security group configuration for all nodegroups')).toBeNull();
+    awsCli.stream = (argv, options) => {
+      options.onLine('[ℹ]  building cluster stack "eksctl-support-cluster"');
+      options.onLine('[ℹ]  waiting for CloudFormation stack "eksctl-support-cluster"');
+      options.onLine('[ℹ]  building managed nodegroup stack "eksctl-support-nodegroup-ng"');
+      options.onLine('[ℹ]  waiting for CloudFormation stack "eksctl-support-cluster"');
+      options.onLine('[ℹ]  checking security group configuration for all nodegroups');
+      return Promise.resolve({ argv, returncode: 0, stdout: '', stderr: '' });
+    };
+    const events: Event[] = [];
+    await streamTool(['eksctl', 'create'], {
+      phase: 'provision',
+      emit: (event) => events.push(event),
+      timeout: 10,
+      progress: eksctlProgress,
+    });
+    expect(events.map((event) => event.pct)).toEqual([5, 10, 65, 65, 65]);
+  });
+
+  it('reads nothing from the plan eksctl opens with, only from what it does', () => {
+    // A real build (us-east-1, 2026-10-05), its lines in the order eksctl printed them. The
+    // plan and the task tree matched the patterns, so the bar stood at 85% from the first
+    // minute of twenty-five; it may not pass 10% until the control plane is up.
+    const real = [
+      'nodegroup "n-ng" will use "" [AmazonLinux2023/1.33]',
+      'creating EKS cluster "n" in "us-east-1" region with managed nodes',
+      'will create a CloudFormation stack for cluster itself and 1 managed nodegroup stack(s)',
+      'Kubernetes API endpoint access will use default of {publicAccess=true, privateAccess=false} for cluster "n" in "us-east-1"',
+      'default addons vpc-cni, kube-proxy, coredns, metrics-server were not specified, will install them as EKS addons',
+      '2 sequential tasks: { create cluster control plane "n",',
+      '1 task: { create addons },',
+      'wait for control plane to become ready,',
+      'create managed nodegroup "n-ng",',
+      'building cluster stack "eksctl-n-cluster"',
+      'deploying stack "eksctl-n-cluster"',
+      'waiting for CloudFormation stack "eksctl-n-cluster"',
+      'creating addon: vpc-cni',
+      'addon "vpc-cni" active',
+      'building managed nodegroup stack "eksctl-n-nodegroup-n-ng"',
+      'waiting for CloudFormation stack "eksctl-n-nodegroup-n-ng"',
+      'waiting for the control plane to become ready',
+      'node "ip-10-0-65-80.ec2.internal" is ready',
+      'created 1 managed nodegroup(s) in cluster "n"',
+      'creating addon: aws-ebs-csi-driver',
+      'creating addon: metrics-server',
+      'EKS cluster "n" in "us-east-1" region is ready',
+    ];
+    let best = 0;
+    const bar = real.map((line) => {
+      const read = eksctlProgress(line);
+      if (read !== null && read > best) best = read;
+      return best;
+    });
+    const upTo = (line: string): number => bar[real.indexOf(line)] ?? -1;
+    expect(upTo('create managed nodegroup "n-ng",')).toBe(0);
+    expect(upTo('waiting for CloudFormation stack "eksctl-n-cluster"')).toBe(10);
+    expect(upTo('waiting for CloudFormation stack "eksctl-n-nodegroup-n-ng"')).toBe(65);
+    expect(bar.at(-1)).toBe(90);
+  });
+
   it('repeats the last few lines on a failure, because they are the reason', async () => {
     awsCli.stream = (argv, options) => {
       for (let index = 0; index < 10; index += 1) options.onLine(`line ${String(index)}`);
@@ -870,7 +1614,13 @@ describe('the journal note that outlives the process', () => {
       await expect(aws.createCluster('support', { region: 'eu-west-1' })).rejects.toThrow(
         /can still be billing/u,
       );
-      expect(order).toEqual(['record']);
+      // AND HOW TO STOP THE BILL, in the message itself: the guide sent the reader to a
+      // raw eksctl; the managed-by tag is in the config eksctl was handed, so houston's own
+      // delete proves ownership and works on a half-built cluster.
+      await expect(aws.createCluster('support', { region: 'eu-west-1' })).rejects.toThrow(
+        /houston cluster delete support --region eu-west-1/u,
+      );
+      expect(order).toEqual(['record', 'record']);
     } finally {
       remove();
     }
@@ -965,13 +1715,13 @@ describe('the documents somebody has to approve', () => {
 describe('the shape it claims to share with the reference', () => {
   it('copies what carries fidelity, and diverges only on the node count', () => {
     // Launchpad decides what an EKS cluster must PROVIDE: a managed node group rather than
-    // Auto Mode, Kubernetes 1.33, t3.large. Node COUNT does not decide fidelity -- a repro
+    // Auto Mode, Kubernetes 1.37, t3.large. Node COUNT does not decide fidelity -- a repro
     // carries one workspace -- so that is the one deliberate divergence, and overridable.
     const doc = clusterConfig('rc-support', { region: 'us-east-1' }) as {
       metadata: { version: string };
       managedNodeGroups: { instanceType: string; desiredCapacity: number }[];
     };
-    expect(doc.metadata.version).toBe('1.33');
+    expect(doc.metadata.version).toBe('1.37');
     expect(doc.managedNodeGroups[0]?.instanceType).toBe('t3.large');
     expect('autoModeConfig' in doc).toBe(false);
     expect(DEFAULT_NODES).toBe(3);
@@ -1051,6 +1801,141 @@ describe('an approved account', () => {
     forget('support');
   });
 
+  it('leaves the current kubectl context where it found it', async () => {
+    // `aws eks update-kubeconfig` switches the merged kubeconfig's current context to the
+    // new cluster. A person whose bare kubectl pointed at production then found it pointing
+    // at ours, or the reverse, and the guide told everyone to pin KUBECONFIG by hand.
+    aws.preflight = () => Promise.resolve(READY);
+    let made = false;
+    aws.describeCluster = () =>
+      Promise.resolve(
+        made
+          ? {
+              state: 'present' as const,
+              doc: { arn: 'arn:aws:eks:eu-west-1:111122223333:cluster/support', tags: {} },
+            }
+          : { state: 'absent' as const, doc: null },
+      );
+    aws.prepareCluster = () => Promise.resolve({} as never);
+    script([]);
+    mocked(config.approvedAwsAccounts).mockReturnValue(new Set(['111122223333']));
+    // eksctl writes its OWN context and makes it current, as a real build does
+    // (`saved kubeconfig as ...`). Read after it, "the previous context" was eksctl's.
+    let current = 'prod-cluster';
+    aws.streamTool = () => {
+      made = true;
+      current = 'iam-root-account@support.eu-west-1.eksctl.io';
+      return Promise.resolve(0);
+    };
+    kube.run = (argv) => {
+      if (argv.includes('use-context')) current = argv.at(-1) ?? '';
+      if (argv.includes('unset')) current = '';
+      if (argv.includes('current-context') && !argv.includes('unset'))
+        return Promise.resolve(
+          current === ''
+            ? { argv, returncode: 1, stdout: '', stderr: 'error: current-context is not set' }
+            : { argv, returncode: 0, stdout: `${current}\n`, stderr: '' },
+        );
+      return Promise.resolve({ argv, returncode: 0, stdout: '', stderr: '' });
+    };
+    await aws.createCluster('support', { region: 'eu-west-1' });
+    expect(current).toBe('prod-cluster');
+  });
+
+  it('leaves no current context when there was none before the build', async () => {
+    aws.preflight = () => Promise.resolve(READY);
+    let made = false;
+    aws.describeCluster = () =>
+      Promise.resolve(
+        made
+          ? {
+              state: 'present' as const,
+              doc: { arn: 'arn:aws:eks:eu-west-1:111122223333:cluster/support', tags: {} },
+            }
+          : { state: 'absent' as const, doc: null },
+      );
+    aws.prepareCluster = () => Promise.resolve({} as never);
+    script([]);
+    mocked(config.approvedAwsAccounts).mockReturnValue(new Set(['111122223333']));
+    // None before, and eksctl makes its own current: a bare kubectl that pointed nowhere
+    // pointed at the billing cluster afterwards (measured on a real build, 2026-10-05).
+    let current = '';
+    aws.streamTool = () => {
+      made = true;
+      current = 'iam-root-account@support.eu-west-1.eksctl.io';
+      return Promise.resolve(0);
+    };
+    kube.run = (argv) => {
+      if (argv.includes('use-context')) current = argv.at(-1) ?? '';
+      if (argv.includes('unset')) current = '';
+      if (argv.includes('current-context') && !argv.includes('unset'))
+        return Promise.resolve(
+          current === ''
+            ? { argv, returncode: 1, stdout: '', stderr: 'error: current-context is not set' }
+            : { argv, returncode: 0, stdout: `${current}\n`, stderr: '' },
+        );
+      return Promise.resolve({ argv, returncode: 0, stdout: '', stderr: '' });
+    };
+    await aws.createCluster('support', { region: 'eu-west-1' });
+    expect(current).toBe('');
+  });
+
+  it('builds with the zone in the tags and keeps it in the note', async () => {
+    aws.preflight = () => Promise.resolve(READY);
+    aws.describeCluster = () => Promise.resolve({ state: 'absent' as const, doc: null });
+    aws.prepareCluster = () => Promise.resolve({} as never);
+    script([]);
+    mocked(config.approvedAwsAccounts).mockReturnValue(new Set(['111122223333']));
+    let handed = '';
+    aws.streamTool = (argv) => {
+      handed = fs.readFileSync(argv[argv.indexOf('-f') + 1] as string, 'utf8');
+      return Promise.resolve(0);
+    };
+    await aws.createCluster('support', { region: 'eu-west-1', zone: 'rc.example.com' });
+    expect(
+      (YAML.parse(handed) as { metadata: { tags: Record<string, string> } }).metadata.tags[
+        ZONE_TAG_KEY
+      ],
+    ).toBe('rc.example.com');
+    expect(zoneOf('support')).toBe('rc.example.com');
+  });
+
+  it('rememberZone writes the note and tags the cluster', async () => {
+    aws.describeCluster = () =>
+      Promise.resolve({
+        state: 'present' as const,
+        doc: { arn: 'arn:aws:eks:eu-west-1:111122223333:cluster/support', tags: {} },
+      });
+    script([]);
+    await rememberZone('support', 'eu-west-1', 'rc.example.com');
+    expect(zoneOf('support')).toBe('rc.example.com');
+    expect(seen).toContainEqual([
+      'aws',
+      'eks',
+      'tag-resource',
+      '--resource-arn',
+      'arn:aws:eks:eu-west-1:111122223333:cluster/support',
+      '--tags',
+      'houston.io/zone=rc.example.com',
+    ]);
+  });
+
+  it('hands eksctl the progress reader when it builds a cluster', async () => {
+    aws.preflight = () => Promise.resolve(READY);
+    aws.describeCluster = () => Promise.resolve({ state: 'absent' as const, doc: null });
+    aws.prepareCluster = () => Promise.resolve({} as never);
+    script([]);
+    mocked(config.approvedAwsAccounts).mockReturnValue(new Set(['111122223333']));
+    let reader: ((line: string) => number | null) | undefined;
+    aws.streamTool = (_argv, options) => {
+      reader = (options as { progress?: (line: string) => number | null }).progress;
+      return Promise.resolve(0);
+    };
+    await aws.createCluster('support', { region: 'eu-west-1' });
+    expect(reader).toBeDefined();
+    expect(reader?.('building cluster stack')).toBe(5);
+  });
+
   it('reaches eksctl with the document and a timeout built for twenty minutes', async () => {
     // The expensive path's only unverifiable step, so everything up to the child process is
     // pinned here: what is run, under what deadline, and with what document.
@@ -1108,7 +1993,7 @@ describe('an approved account', () => {
       'metadata:',
       '  name: support',
       '  region: eu-west-1',
-      "  version: '1.33'",
+      "  version: '1.37'",
       '  tags:',
       '    houston.io/managed-by: houston',
       `    houston.io/expires: '${expiryDate(7)}'`,
@@ -1122,7 +2007,7 @@ describe('an approved account', () => {
       '      ebs: true',
       'addons:',
       '- name: aws-ebs-csi-driver',
-      '  version: 1.47.0',
+      '  version: 1.66.0',
       'iam:',
       '  withOIDC: true',
       'vpc:',
@@ -1135,7 +2020,7 @@ describe('an approved account', () => {
       '',
     ].join('\n');
     expect(text).toBe(recorded);
-    expect(text).toContain("  version: '1.33'\n");
+    expect(text).toContain("  version: '1.37'\n");
   });
 
   it('makes the cluster it built the default, and its delete takes that back', async () => {
@@ -1166,14 +2051,21 @@ describe('an approved account', () => {
     const emit = (event: Event): void => void said.push(event.message);
     await aws.createCluster('support', { region: 'eu-west-1', emit });
     expect(config.defaultKubeContext()).toBe(arn);
+    // The delete now releases the load balancer Services through kubectl first.
+    kube.run = (argv) =>
+      Promise.resolve({ argv, returncode: 0, stdout: '{"items":[]}', stderr: '' });
     await deleteCluster('support', { region: 'eu-west-1', force: true, emit });
     expect(config.defaultKubeContext()).toBe('');
     // Announced in the words earlier releases used, an ASCII apostrophe in each: an earlier
     // version had a typographic one in both.
+    // A plain `up` never leaves Docker (lifecycle/request.ts inferRuntime); the earlier
+    // wording said it would, and people ran `up` expecting the cluster.
     expect(said).toContain(
-      "set as this box's default cluster — `up` goes here without --context now (change " +
-        'with `houston config set kubernetes.context <name>`)',
+      "set as this box's default cluster — `houston up --runtime kubernetes` lands here " +
+        'without --context; a plain `up` still makes a Docker workspace (change with ' +
+        '`houston config set kubernetes.context <name>`)',
     );
+    expect(said.join('\n')).not.toContain('`up` goes here without --context');
     expect(said).toContain("cleared this box's default cluster — it was the one just deleted");
   });
 });

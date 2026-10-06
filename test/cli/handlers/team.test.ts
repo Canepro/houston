@@ -257,6 +257,23 @@ describe('the shared-box CLI, against earlier releases', () => {
   });
 });
 
+describe('chown finds a workspace by the name its owner typed', () => {
+  it('hands alice-test over when alice types test', async () => {
+    // Earlier releases refused this with exit 4 while every lifecycle command took the bare
+    // name; a refusal is the only answer that changes, so the recorded runs above still hold.
+    const ours = await typescript({ argv: ['chown', '-n', 'test', '--to', 'bob'], user: 'alice' });
+    expect({ code: ours.code, stdout: ours.stdout, stderr: ours.stderr }).toEqual({
+      code: 0,
+      stdout: "✓ 'alice-test' now belongs to bob (was alice)\n",
+      stderr: '',
+    });
+    const record = JSON.parse(
+      fs.readFileSync(path.join(home, 'repros', 'alice-test', 'repro.json'), 'utf8'),
+    ) as { extra: { owner?: string } };
+    expect(record.extra.owner).toBe('bob');
+  });
+});
+
 describe('who HOUSTON_USER and the login name say is running, against earlier releases', () => {
   // Earlier releases strip and lower-case both. `trim()` kept \x1c-\x1f and NEL and stripped
   // a BOM, so the actor every gate, audit line and event-log record starts from was a

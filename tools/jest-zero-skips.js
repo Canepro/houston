@@ -62,7 +62,7 @@ const ROOT = path.resolve(__dirname, '..');
  * the measured count in the commit that adds tests, and lowered only in a commit that removes
  * tests and says why; git holds its history.
  */
-const FLOOR = 3582;
+const FLOOR = 3748;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

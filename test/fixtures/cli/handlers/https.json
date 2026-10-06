@@ -111,13 +111,13 @@
     "cluster, an unknown action": {
       "code": 2,
       "stdout": "",
-      "stderr": "error: unknown action 'bogus'. Want: status | list | guide | iam-policy | create | prepare | delete | forget.\n",
+      "stderr": "error: unknown action 'bogus'. Want: status | list | guide | iam-policy | create | prepare | delete | forget | keep | share | overview.\n",
       "dialled": []
     },
     "cluster, an unknown action with a quote in it": {
       "code": 2,
       "stdout": "",
-      "stderr": "error: unknown action \"it's\". Want: status | list | guide | iam-policy | create | prepare | delete | forget.\n",
+      "stderr": "error: unknown action \"it's\". Want: status | list | guide | iam-policy | create | prepare | delete | forget | keep | share | overview.\n",
       "dialled": []
     },
     "tls-status, trusted": {

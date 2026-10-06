@@ -152,7 +152,7 @@ export async function restoreRoute(meta: Metadata, emit: Emit = nullEmit): Promi
       typeof extra.instances === 'number' && Number.isInteger(extra.instances)
         ? extra.instances
         : 1;
-    await registerRoute(meta.name, host, { instances, local });
+    await registerRoute(meta.name, host, { instances, local, grafana: isTruthy(extra.monitoring) });
     info(emit, `${host} is served by the edge again`, { phase: 'tls' });
   } catch (error) {
     warn(

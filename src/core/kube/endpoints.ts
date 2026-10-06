@@ -47,8 +47,20 @@ function listOf(value: unknown): Record<string, unknown>[] {
  * a name, and where a provider gives both, the name is the stable one.
  */
 export async function loadbalancerState(context = CONTEXT): Promise<[string, string, number]> {
+  const { name, address, pending } = await loadbalancerRead(context);
+  return [name, address, pending];
+}
+
+/**
+ * The same read, saying whether the cluster answered at all. `loadbalancerState` reads a
+ * refusal as "none", which is right for a report and wrong for a teardown: a delete that
+ * took "could not ask" for "gone" handed the VPC to eksctl with a load balancer still in it.
+ */
+export async function loadbalancerRead(
+  context = CONTEXT,
+): Promise<{ refused: boolean; name: string; address: string; pending: number }> {
   const found = await askList('svc', { context, allNamespaces: true });
-  if (found.state === 'refused') return ['', '', 0];
+  if (found.state === 'refused') return { refused: true, name: '', address: '', pending: 0 };
   let pending = 0;
   for (const svc of items(found)) {
     if (String(mapOf(svc.spec).type ?? '') !== 'LoadBalancer') continue;
@@ -64,11 +76,16 @@ export async function loadbalancerState(context = CONTEXT): Promise<[string, str
       }
     }
     if (found_address !== '') {
-      return [String(mapOf(svc.metadata).name ?? ''), found_address, pending];
+      return {
+        refused: false,
+        name: String(mapOf(svc.metadata).name ?? ''),
+        address: found_address,
+        pending,
+      };
     }
     pending += 1;
   }
-  return ['', '', pending];
+  return { refused: false, name: '', address: '', pending };
 }
 
 /** `[service name, address]` for the first LoadBalancer Service that has one. */

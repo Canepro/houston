@@ -346,6 +346,15 @@ describe('binding', () => {
 });
 
 describe('the monitoring add-on', () => {
+  it('Grafana public URL regression: configures only houston-served HTTPS', () => {
+    expect(
+      build(official({ monitoring: true, publicUrl: 'https://h' })).services.grafana?.environment,
+    ).toHaveProperty('GF_SERVER_ROOT_URL', 'https://h/grafana/');
+    expect(
+      build(official({ monitoring: true, rootUrl: 'https://customers-proxy' })).services.grafana
+        ?.environment,
+    ).not.toHaveProperty('GF_SERVER_ROOT_URL');
+  });
   it('adds nothing unless asked', () => {
     const doc = build(official());
     for (const name of MONITOR_SERVICES) expect(doc.services).not.toHaveProperty(name);

@@ -15,10 +15,15 @@
  * `kube/` is the Kubernetes seam and stays it: everything below asks through it.
  */
 import * as config from '../lib/config';
-import { type Emit, nullEmit } from '../lib/events';
+import { resolve4, resolveCname } from 'node:dns/promises';
+
+import { type Emit, info, nullEmit } from '../lib/events';
+import { compareCodePoints } from '../lib/format';
+import { mapLimit } from '../lib/map-limit';
 
 import * as eks from './eks';
-import { ABSENT, type Answer, askList, items, present, refused } from './kube/ask';
+import * as journal from './journal';
+import { ABSENT, type Answer, askList, askObject, items, present, refused } from './kube/ask';
 import { ensureKubeconfig } from './kube/cluster';
 import {
   type ClusterPlan,
@@ -31,11 +36,14 @@ import {
   planCluster,
   shortName,
 } from './kube/context';
-import { workspaceNamespaces } from './kube/capabilities';
+import { loadbalancerService } from './kube/endpoints';
+import { workspaceNamespaces, ingressClasses, storageClasses } from './kube/capabilities';
 import { monitoringInstalled } from './kube/monitoring';
 import {
   CLUSTER_NAME,
   NAMESPACE_PREFIX,
+  OWNER_OF_LABEL,
+  OWNER_SELECTOR,
   PROVIDER_EXTERNAL,
   PROVIDER_KIND,
   isOurs,
@@ -60,7 +68,28 @@ import { which } from './kube/tools';
  * not recognise is the same lie as a zero for an unreadable cluster.
  */
 export const EKS_CONTROL_PLANE_USD_HR = 0.1;
+export const EKS_EXTENDED_CONTROL_PLANE_USD_HR = 0.6;
 export const NAT_GATEWAY_USD_HR = 0.045;
+
+/** Published EKS standard-support end dates, UTC; older offered versions are extended. */
+const EKS_STANDARD_END: Readonly<Record<string, string>> = Object.freeze({
+  '1.31': '2025-11-26',
+  '1.32': '2026-03-23',
+  '1.33': '2026-07-29',
+  '1.34': '2026-12-02',
+  '1.35': '2027-03-27',
+  '1.36': '2027-08-02',
+  '1.37': '2027-12-01',
+});
+
+export function eksControlPlaneRate(version: string, now = Date.now()): number {
+  const end = EKS_STANDARD_END[version];
+  if (end !== undefined)
+    return now >= Date.parse(`${end}T00:00:00Z`)
+      ? EKS_EXTENDED_CONTROL_PLANE_USD_HR
+      : EKS_CONTROL_PLANE_USD_HR;
+  return EKS_CONTROL_PLANE_USD_HR;
+}
 
 /**
  * A node's DISK, which `INSTANCE_USD_HR` cannot express because a disk is not an instance
@@ -288,18 +317,29 @@ export interface CostEstimate {
 export function estimateUsdHr(
   dist: string,
   inventory: Record<string, number>,
-  {
-    loadbalancers = 0,
-    volumeGb = 0.0,
-  }: { loadbalancers?: number | null; volumeGb?: number | null } = {},
+  options: { loadbalancers?: number | null; volumeGb?: number | null; version?: string } = {},
 ): CostEstimate | null {
-  if (!BILLABLE.includes(dist)) return null;
-  let total = EKS_CONTROL_PLANE_USD_HR + NAT_GATEWAY_USD_HR;
+  const { loadbalancers = 0, volumeGb = 0.0, version = '' } = options;
+  // A managed cluster may bill without sharing EKS's control-plane, NAT or node rates.
+  // Report GKE/AKS as unpriced until their own model exists.
+  if (dist !== 'eks') return null;
+  const supportTierKnown = Object.hasOwn(EKS_STANDARD_END, version);
+  const controlPlaneRate = supportTierKnown
+    ? eksControlPlaneRate(version)
+    : EKS_CONTROL_PLANE_USD_HR;
+  let total = controlPlaneRate + NAT_GATEWAY_USD_HR;
   // `Object.hasOwn` and a `Map`, for the reason `nodeInventory` builds one: the key is a
   // label the cluster chose. `INSTANCE_USD_HR['toString']` is a FUNCTION, so the rate was
   // not undefined, the type was not reported as unpriced, and the total became NaN.
   const unpricedCounts = new Map<string, number>();
   const incomplete: string[] = [];
+  if (Object.hasOwn(options, 'version') && !supportTierKnown) {
+    incomplete.push(
+      version === ''
+        ? 'EKS support tier (Kubernetes version unavailable)'
+        : `EKS support tier (Kubernetes ${version} not in this rate table)`,
+    );
+  }
   for (const [kind, count] of Object.entries(inventory)) {
     const rate = Object.hasOwn(INSTANCE_USD_HR, kind) ? INSTANCE_USD_HR[kind] : undefined;
     if (rate === undefined) {
@@ -324,7 +364,14 @@ export function estimateUsdHr(
     unpriced,
     incomplete,
     basis:
-      'us-east-1 on-demand: control plane, NAT gateway, nodes, ' +
+      `us-east-1 on-demand: ${
+        supportTierKnown
+          ? `EKS ${version} ${controlPlaneRate === EKS_EXTENDED_CONTROL_PLANE_USD_HR ? 'extended' : 'standard'} support `
+          : Object.hasOwn(options, 'version')
+            ? `EKS ${version || 'version unavailable'}; standard support assumed as a lower bound for `
+            : ''
+      }` +
+      'control plane, NAT gateway, nodes, ' +
       `${String(NODE_VOLUME_GB)} GB gp3 per node (eksctl's default, not read ` +
       'back), load balancers and workspace volumes',
     estimate: true,
@@ -368,6 +415,42 @@ export function round4(value: number): number {
   return negative ? -magnitude : magnitude;
 }
 
+/** Where a cluster lives: what decides how it is read and which part of a page shows it. */
+export type Where = 'local' | 'aws' | 'elsewhere';
+
+/** Context names local tools write for clusters that run on this machine. */
+const LOCAL_CONTEXT = /^(?:kind-|k3d-)|^(?:minikube|docker-desktop|rancher-desktop|orbstack)$/u;
+
+/**
+ * Where a cluster lives, from its context name and its API server, without asking it.
+ *
+ * AWS by the shape of the name or of the EKS endpoint; this machine for houston's own kind
+ * cluster, a name a local tool writes, or a server on the loopback; anywhere else is
+ * elsewhere. A k3s on another machine is not this machine, whatever its distribution.
+ * `ponytail:` the loopback is judged by NAME and never resolved, so a tunnel to 127.0.0.1
+ * reads as local; resolve the host if that ever matters.
+ */
+export function whereOf(context: string, server = ''): Where {
+  if (context.startsWith('arn:aws:eks:') || context.endsWith('.eksctl.io')) return 'aws';
+  let host: string;
+  try {
+    host = new URL(server).hostname.toLowerCase();
+  } catch {
+    host = '';
+  }
+  if (host.endsWith('.eks.amazonaws.com')) return 'aws';
+  if (isOurs(context) || LOCAL_CONTEXT.test(context)) return 'local';
+  if (
+    host === 'localhost' ||
+    host === '::1' ||
+    host === '[::1]' ||
+    host.startsWith('127.') ||
+    host.endsWith('.docker.internal')
+  )
+    return 'local';
+  return 'elsewhere';
+}
+
 export interface ContextRow {
   readonly context: string;
   readonly short: string;
@@ -377,6 +460,10 @@ export interface ContextRow {
   readonly provider: string;
   readonly billable: boolean;
   readonly is_default: boolean;
+  /** From the local build note only -- this list never probes. `status` asks AWS. */
+  readonly made_by_houston: boolean;
+  /** From the name and the API server, never a probe. */
+  readonly where: Where;
 }
 
 /** One row per context: whose it is, and whether it can be reached at all. */
@@ -384,6 +471,7 @@ async function contextRows(
   aliases: Record<string, string[]>,
   byDefault: string,
   names: readonly string[],
+  servers: ReadonlyMap<string, string>,
 ): Promise<ContextRow[]> {
   // THE ONE PROBE, and only in one situation. houston writes its OWN kubeconfig when it
   // builds its own cluster and never removes that entry -- so a cluster that has been
@@ -404,6 +492,10 @@ async function contextRows(
   if (oursCtx !== '' && names.includes(oursCtx) && which('kind') === '') {
     if (!reachOk(await reach(oursCtx))) drop.add(oursCtx);
   }
+  // The build note, read once for the whole list: `made_by_houston` here never probes.
+  const builtHere = new Set(
+    eks.remembered().map((entry) => `${String(entry.name ?? '')}@${String(entry.region ?? '')}`),
+  );
   const rows: ContextRow[] = [];
   for (const name of names) {
     if (drop.has(name)) continue;
@@ -426,6 +518,8 @@ async function contextRows(
       provider,
       billable: BILLABLE.includes(provider),
       is_default: name === byDefault,
+      made_by_houston: builtHere.has(`${shortName(name)}@${regionOf(name)}`),
+      where: whereOf(name, servers.get(name) ?? ''),
     });
   }
   return rows;
@@ -437,6 +531,7 @@ async function contextAliases(): Promise<{
   byDefault: string;
   names: string[];
   unreadable: string;
+  servers: Map<string, string>;
 }> {
   const [allNames, unreadable] = await contexts();
   const byDefault = config.defaultKubeContext();
@@ -480,7 +575,13 @@ async function contextAliases(): Promise<{
     }
     names = names.filter((n) => !serverOf.has(n) || keep.has(n));
   }
-  return { aliases: Object.fromEntries(aliasesOf), byDefault, names, unreadable };
+  return {
+    aliases: Object.fromEntries(aliasesOf),
+    byDefault,
+    names,
+    unreadable,
+    servers: serverOf,
+  };
 }
 
 export interface KnownContexts {
@@ -504,8 +605,12 @@ export interface KnownContexts {
  * cluster is up asks `status()`, which is the function that goes and finds out.
  */
 export async function knownContexts(): Promise<KnownContexts> {
-  const { aliases, byDefault, names, unreadable } = await contextAliases();
-  return { contexts: await contextRows(aliases, byDefault, names), unreadable, default: byDefault };
+  const { aliases, byDefault, names, unreadable, servers } = await contextAliases();
+  return {
+    contexts: await contextRows(aliases, byDefault, names, servers),
+    unreadable,
+    default: byDefault,
+  };
 }
 
 /**
@@ -526,33 +631,27 @@ export const STATUS_WORKERS = 8;
  * come back in ARGUMENT order however they finish, so the document does not
  * vary with which call happened to return first.
  */
-async function mapLimit<T, R>(
-  inputs: readonly T[],
-  limit: number,
-  run: (input: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  const out: R[] = new Array<R>(inputs.length);
-  let next = 0;
-  const worker = async (): Promise<void> => {
-    for (;;) {
-      const index = next;
-      next += 1;
-      if (index >= inputs.length) return;
-      out[index] = await run(inputs[index] as T, index);
-    }
-  };
-  const workers: Promise<void>[] = [];
-  for (let i = 0; i < Math.min(limit, inputs.length); i += 1) workers.push(worker());
-  await Promise.all(workers);
-  return out;
-}
-
 export interface WorkspaceRow {
   readonly namespace: string;
   readonly name: string;
   readonly owner: string;
   readonly owner_readable: boolean;
   readonly pvcs: number;
+}
+
+/**
+ * What `cluster prepare` sets up, read back: the default StorageClass, the ingress class,
+ * whether cert-manager's API is there, the load balancer's address a DNS name points at,
+ * and whether a name under the cluster's zone resolves to it. Each fact is null when it
+ * could not be read; `dns_answers` is null until a zone is known. The whole block is null
+ * for a cluster that did not answer.
+ */
+export interface Readiness {
+  storage_class: string | null;
+  ingress_class: string | null;
+  cert_manager: boolean | null;
+  cname_target: string;
+  dns_answers: boolean | null;
 }
 
 export interface Ledger {
@@ -577,6 +676,244 @@ export interface Ledger {
   operator: boolean | null;
   monitoring: boolean | null;
   cost: CostEstimate | null;
+  /** The short name and the region, so nobody has to read them out of the ARN. */
+  name: string;
+  region: string;
+  /** Version returned by EKS, when AWS lets this server describe the cluster. */
+  kubernetes_version?: string;
+  /**
+   * Whether houston built it: the `houston.io/managed-by` tag on the cluster itself, else the
+   * local build note, else null -- "could not tell", which is not "no". `ours` is a different
+   * question (whether this is houston's own kind cluster, and so which kubeconfig to use).
+   */
+  made_by_houston: boolean | null;
+  /** RFC 3339 creation time from AWS or the build note; '' when neither knows. */
+  created_at: string;
+  /** The `houston.io/expires` reminder date (YYYY-MM-DD) or ''; days to it, or null. */
+  expires: string;
+  expires_in_days: number | null;
+  /** The hourly rate times the age, rounded to 4 places; null when either is unknown. */
+  spend_usd: number | null;
+  ready: Readiness | null;
+  /** The DNS zone workspaces get their public names under, from the cluster's note or tag; '' when none. */
+  zone: string;
+  /** This machine, AWS or elsewhere: which part of a page shows it, and how much is read. */
+  where: Where;
+}
+
+// ---------------------------------------------------------------------------- next step
+
+/** What `nextStep` is told; everything a front-end already has in hand. */
+export interface NextStepInput {
+  /** The four tools present, signed in to AWS, a region resolved. */
+  readonly tools_ok: boolean;
+  /** What stops it, as `eks.blockers` words it; lets stage 1 name the missing part. */
+  readonly blockers?: readonly string[];
+  /** This box has approved the AWS account for spending. */
+  readonly approved: boolean;
+  readonly account: string;
+  readonly clusters: readonly Ledger[];
+  /** Names of clusters a build is running for right now. */
+  readonly building: readonly string[];
+  /** Builds that failed part-way, and whether AWS still has the cluster (null: could not ask). */
+  readonly failed: readonly FailedBuild[];
+  readonly default_context: string;
+}
+
+export interface FailedBuild {
+  readonly name: string;
+  readonly region: string;
+  readonly present: boolean | null;
+}
+
+/** One of the six stages, and the exact thing to do next. Printed verbatim by both front-ends. */
+export interface NextStep {
+  readonly stage: 1 | 2 | 3 | 4 | 5 | 6;
+  readonly title: string;
+  readonly why: string;
+  readonly command: string;
+  /** The cluster this step is about, or ''. */
+  readonly cluster: string;
+}
+
+export const STAGES = ['Tools', 'Approve', 'Build', 'DNS', 'Run workspaces', 'Tear down'] as const;
+
+/**
+ * The next thing to do, decided once for the CLI, the GUI stepper and the docs.
+ *
+ * ONE TABLE, FIRST MATCH WINS, in the order a person meets these: what stops everything
+ * (tools, approval) before what stops a cluster (a build, DNS), and what costs money
+ * (an expiry, an idle cluster) before the happy path. Pure: it reads what it is given and
+ * touches nothing, which is what lets both front-ends show the same sentence.
+ */
+export function nextStep(input: NextStepInput): NextStep {
+  const failed = input.failed.find((build) => build.present !== false);
+  if (failed !== undefined) {
+    return {
+      stage: 6,
+      cluster: failed.name,
+      title: `The build of ${failed.name} failed part-way and may be billing — delete what it left`,
+      why:
+        'eksctl may have built a VPC, a NAT gateway and a control plane before it failed, and ' +
+        'houston does not destroy them on its own. Delete proves ownership by the tag in the ' +
+        'config eksctl was handed, then checks AWS for anything left behind.',
+      command: `houston cluster delete ${failed.name} --region ${failed.region}`,
+    };
+  }
+  const building = input.building[0];
+  if (building !== undefined) {
+    return {
+      stage: 3,
+      cluster: building,
+      title: `Building ${building} — about twenty minutes`,
+      why:
+        'Billing started when the build started. When it finishes, point a DNS name at the ' +
+        'address it prints (stage 4).',
+      command: '',
+    };
+  }
+  const ordered = [...input.clusters].sort((a, b) => {
+    const ad = a.context === input.default_context ? 0 : 1;
+    const bd = b.context === input.default_context ? 0 : 1;
+    return ad - bd;
+  });
+  const usable = ordered.filter((c) => !c.gone);
+  if (usable.length === 0) {
+    // What stops a BUILD matters only when there is nothing to use yet: a box with a
+    // working cluster (kind, or a colleague's) is not told to install eksctl or approve
+    // an account it will never build in.
+    if (!input.tools_ok) {
+      // ONLY THE SIGN-IN (or the region) MISSING is its own sentence. `eks.blockers` lists
+      // no identity problem while a tool is absent, so a list with no tool in it means
+      // every tool is there -- and "Install the four tools" sent somebody with an expired
+      // SSO token looking for software they already had.
+      const blockers = input.blockers ?? [];
+      const toolMissing = blockers.some((line) => / is not installed$| is older than /u.test(line));
+      if (blockers.length > 0 && !toolMissing) {
+        const signIn = blockers.some((line) => line.startsWith('not signed in to AWS'));
+        return {
+          stage: 1,
+          cluster: '',
+          title: signIn ? 'Sign in to AWS on this machine' : 'Set an AWS region on this machine',
+          why: blockers.join(' '),
+          command: 'houston doctor',
+        };
+      }
+      return {
+        stage: 1,
+        cluster: '',
+        title: 'Install the four tools and sign in to AWS on this machine',
+        why:
+          'aws, eksctl, kubectl and helm, plus an AWS identity and a region. `houston doctor` ' +
+          'names whichever is missing; a cluster is not built until all of them are there, ' +
+          'because kubectl and helm are needed to prepare it after the money is spent.',
+        command: 'houston doctor',
+      };
+    }
+    if (!input.approved) {
+      const account = input.account === '' ? '<account id>' : input.account;
+      return {
+        stage: 2,
+        cluster: '',
+        title: `Approve AWS account ${account} for spending on this box`,
+        why:
+          'houston will not build a cluster in an account until an admin names it here. It is a ' +
+          'deliberate gate on money, and no flag skips it.',
+        command: `houston config set cluster.approved_accounts ${account}`,
+      };
+    }
+    return {
+      stage: 3,
+      cluster: '',
+      title: 'Build a cluster',
+      why:
+        'About twenty minutes, and it bills from the first minute whether or not anything runs ' +
+        'in it. Give it the DNS zone your workspace names will live under.',
+      command: 'houston cluster create support --region us-east-1 --zone <your zone>',
+    };
+  }
+  const dnsPending = usable.find(
+    (c) => c.zone !== '' && c.ready !== null && c.ready.dns_answers === false,
+  );
+  if (dnsPending !== undefined) {
+    const target = dnsPending.ready?.cname_target ?? '';
+    return {
+      stage: 4,
+      cluster: dnsPending.name,
+      title: `Point *.${dnsPending.zone} at ${target}, once`,
+      why:
+        `The name does not answer yet. Until it does, a workspace on ${dnsPending.name} is ` +
+        'reachable only by a port-forward. Add the record at your DNS provider (a CNAME, ' +
+        'not an A record: the address changes), then check it.',
+      command: `*.${dnsPending.zone}   CNAME   ${target}`,
+    };
+  }
+  // ONLY ONCE IT IS DUE. A build is often given a reminder a day or two out, and warning
+  // from three days before flagged every new cluster the minute it was ready -- above the
+  // DNS record it actually needed. The date itself stays on the cluster's details.
+  const expiring = usable.find((c) => c.expires_in_days !== null && c.expires_in_days <= 0);
+  if (expiring !== undefined) {
+    const days = expiring.expires_in_days ?? 0;
+    return {
+      stage: 6,
+      cluster: expiring.name,
+      title:
+        days < 0
+          ? `${expiring.name} passed its expiry date ${String(-days)} d ago — keep it or delete it`
+          : `${expiring.name} reaches its expiry date today — keep it or delete it`,
+      why:
+        'The date is a reminder tag and nothing deletes on it. Move it if the cluster is still ' +
+        'needed; delete the cluster when it is not, because it bills either way.',
+      command: `houston cluster keep ${expiring.name} --days 7`,
+    };
+  }
+  const idle = usable.find(
+    (c) =>
+      c.reachable &&
+      c.made_by_houston === true &&
+      c.workspaces !== null &&
+      c.workspaces.length === 0 &&
+      c.cost !== null,
+  );
+  if (idle !== undefined) {
+    const perDay = idle.cost === null ? '' : ` ~$${(idle.cost.usd_hr * 24).toFixed(2)}/day`;
+    return {
+      stage: 6,
+      cluster: idle.name,
+      title: `${idle.name} holds nothing and bills${perDay} — delete it when you are done`,
+      why:
+        'Removing workspaces does not lower the rate; only deleting the cluster stops it. ' +
+        'Delete releases the load balancer, removes the cluster and checks AWS for leftovers.',
+      command: `houston cluster delete ${idle.name}`,
+    };
+  }
+  const ready = usable.find((c) => c.reachable);
+  if (ready !== undefined) {
+    return {
+      stage: 5,
+      cluster: ready.name,
+      title: `Run a workspace on ${ready.name}`,
+      why:
+        `In the GUI: click New workspace and pick ${ready.name} under Where it runs` +
+        (ready.zone !== ''
+          ? `; its public name is pre-filled from ${ready.zone}.`
+          : ready.where !== 'aws'
+            ? '.'
+            : '. Without a DNS zone it is reachable only by a port-forward; ' +
+              `\`houston cluster prepare ${ready.name} --zone <zone>\` sets one.`),
+      command: `houston up --version <version> --name <ticket> --context ${ready.name}`,
+    };
+  }
+  const down = usable[0] as Ledger;
+  return {
+    stage: 5,
+    cluster: down.name,
+    title: `${down.name} is not answering — ${down.reach_why || 'it could not be read'}`,
+    why:
+      'Nothing about it could be read, which is not a report that it is empty or free. ' +
+      (down.reach_advice || 'Check the credentials and the network, then read it again.'),
+    command: `houston cluster status ${down.name}`,
+  };
 }
 
 /**
@@ -587,16 +924,55 @@ export interface Ledger {
  * only when `describeCluster` returns ABSENT. Anything else -- REFUSED, a malformed ARN, an
  * exception on the way -- leaves the cluster listed and the reader told it could not be read.
  */
-async function markIfAwsSaysGone(out: Ledger, context: string): Promise<void> {
+/**
+ * The AWS account the AWS CLI answers as, or '' when it cannot say. Asked once per five
+ * minutes (`ponytail:` a process-wide memo; a credential switched mid-serve is seen within
+ * that window).
+ */
+let callerMemo: { at: number; account: Promise<string> } | null = null;
+function callerAccount(): Promise<string> {
+  if (callerMemo === null || Date.now() - callerMemo.at > 300_000) {
+    callerMemo = {
+      at: Date.now(),
+      account: eks.aws.whoami().then(
+        (who) => who.account,
+        () => '',
+      ),
+    };
+  }
+  return callerMemo.account;
+}
+
+async function askAwsAboutIt(out: Ledger, context: string): Promise<void> {
   if (!context.startsWith('arn:aws:eks:')) return;
   const bits = context.split(':');
   const name = context.split('/').pop() ?? '';
   if (bits.length < 6 || name === '') return;
-  let seen: { state: string };
+  // ONLY IN THE CALLER'S OWN ACCOUNT. describe-cluster answers from the account the AWS
+  // CLI is signed in to, so a cluster in another account -- a colleague's, another
+  // profile's -- comes back "not found", and that was reported as gone: nothing billing,
+  // Forget offered, for a cluster that was running. Another account is "could not ask".
+  const caller = await callerAccount();
+  if (caller === '' || caller !== bits[4]) return;
+  let seen: Answer;
   try {
     seen = await eks.aws.describeCluster(name, bits[3] as string);
   } catch {
     // a report must not raise on a lookup
+    return;
+  }
+  if (present(seen)) {
+    // THE SAME DOCUMENT carries the tags `cluster create` wrote and the creation time, so
+    // who built it and when it expires are read here, on every machine, for nothing extra.
+    const doc: Record<string, unknown> = seen.doc;
+    const tags = (doc.tags ?? {}) as Record<string, unknown>;
+    out.made_by_houston = tags[eks.OWNED_TAG_KEY] === eks.OWNED_TAG_VALUE;
+    const expires = tags[eks.EXPIRY_TAG_KEY];
+    if (typeof expires === 'string') out.expires = expires;
+    const zone = tags[eks.ZONE_TAG_KEY];
+    if (typeof zone === 'string') out.zone = zone;
+    if (typeof doc.createdAt === 'string') out.created_at = doc.createdAt;
+    if (typeof doc.version === 'string') out.kubernetes_version = doc.version;
     return;
   }
   if (seen.state !== ABSENT) return;
@@ -680,16 +1056,31 @@ async function askTheClusterEverything(
   // their owners and volumes can be asked for. Within a wave nothing depends on anything
   // else, and results are assembled in a fixed order afterwards so the document does not
   // vary with which call happened to finish first.
-  const [dist, nodes, spaces, lbs, oper, mon] = await Promise.all([
-    distribution(ctx),
-    askList('nodes', { context: ctx }),
-    workspaceNamespaces(ctx),
-    askList('svc', { context: ctx, allNamespaces: true }),
-    operatorPresence(ctx),
-    monitoringInstalled(ctx),
-  ]);
+  const [dist, nodes, spaces, lbs, oper, mon, storage, ingress, certApi, lbService] =
+    await Promise.all([
+      distribution(ctx),
+      askList('nodes', { context: ctx }),
+      workspaceNamespaces(ctx),
+      askList('svc', { context: ctx, allNamespaces: true }),
+      operatorPresence(ctx),
+      monitoringInstalled(ctx),
+      // The four things `cluster prepare` leaves behind, so a page can say which stage a
+      // cluster is at without anybody re-running prepare to find out.
+      storageClasses(ctx),
+      ingressClasses(ctx),
+      askObject('customresourcedefinition', 'certificates.cert-manager.io', { context: ctx }),
+      loadbalancerService(ctx),
+    ]);
 
   out.distribution = providerOf(ctx, dist);
+  if (out.distribution === 'eks') out.where = 'aws';
+  out.ready = {
+    storage_class: storage === null ? null : storage[1],
+    ingress_class: ingress === null ? null : (ingress[0] ?? ''),
+    cert_manager: refused(certApi) ? null : present(certApi),
+    cname_target: lbService[1],
+    dns_answers: await dnsAnswers(out.zone, lbService[1]),
+  };
   out.provider = out.distribution === 'kind' ? PROVIDER_KIND : PROVIDER_EXTERNAL;
 
   if (refused(nodes)) {
@@ -790,7 +1181,87 @@ function emptyLedger(ctx: string): Ledger {
     operator: null,
     monitoring: null,
     cost: null,
+    name: shortName(ctx),
+    region: regionOf(ctx),
+    made_by_houston: null,
+    created_at: '',
+    expires: '',
+    expires_in_days: null,
+    spend_usd: null,
+    ready: null,
+    zone: '',
+    where: whereOf(ctx),
   };
+}
+
+/**
+ * What the local build note knows, for the fields AWS did not answer.
+ *
+ * The note is written by `cluster create` on the machine that ran it, so it is a fallback
+ * and never the first word: a tag says the same thing on every machine, and AWS saying
+ * "no tag" beats a note saying "I built it".
+ */
+function describeRecord(out: Ledger): void {
+  const record = eks
+    .remembered()
+    .find((entry) => entry.name === out.name && (out.region === '' || entry.region === out.region));
+  if (record === undefined) return;
+  if (out.made_by_houston === null) out.made_by_houston = true;
+  if (out.created_at === '' && typeof record.created_at === 'string')
+    out.created_at = record.created_at;
+  if (out.expires === '' && typeof record.expires === 'string') out.expires = record.expires;
+  if (out.zone === '' && typeof record.zone === 'string') out.zone = record.zone;
+}
+
+/** What a name resolves to as a CNAME, or [] when it does not; never throws. */
+export async function resolveName(host: string): Promise<string[]> {
+  try {
+    return await resolveCname(host);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The IPv4 addresses a name answers with, or [] when it answers none; never throws.
+ *
+ * Asked only when a name has no CNAME: a name that answers with addresses but no CNAME is
+ * a record a proxy rewrites -- Cloudflare's default, the orange cloud -- which is a
+ * different fix from a record that is not there at all.
+ */
+export async function resolveAddresses(host: string): Promise<string[]> {
+  try {
+    return await resolve4(host);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Whether a name under the cluster's zone reaches its load balancer: the wildcard CNAME
+ * the guide asks for, checked with a name nobody uses. null when there is no zone or no
+ * address to compare against; false when the name is missing or points elsewhere.
+ */
+async function dnsAnswers(zone: string, target: string): Promise<boolean | null> {
+  if (zone === '' || target === '') return null;
+  let answers: string[];
+  try {
+    answers = await resolveCname(`houston-probe.${zone}`);
+  } catch {
+    return false;
+  }
+  const want = target.toLowerCase().replace(/\.$/u, '');
+  return answers.some((answer) => answer.toLowerCase().replace(/\.$/u, '') === want);
+}
+
+/** The rate times the age, or null when either side is unknown. Never negative. */
+function spendSoFar(out: Ledger): number | null {
+  if (out.cost === null || out.created_at === '') return null;
+  const since = Date.parse(out.created_at);
+  if (Number.isNaN(since)) return null;
+  const hours = (Date.now() - since) / 3_600_000;
+  if (hours < 0) return null;
+  return round4(out.cost.usd_hr * hours);
 }
 
 /** What the ledger can still say about a cluster that will not answer. */
@@ -812,11 +1283,80 @@ async function unreachableLedger(ctx: string, out: Ledger): Promise<Ledger> {
   // expired credentials, no route, a permission boundary -- and calling that gone would
   // report a BILLING cluster as deleted, which is the one mistake this module exists to
   // prevent.
-  await markIfAwsSaysGone(out, ctx);
+  await askAwsAboutIt(out, ctx);
+  finishTheRecord(out);
   // Everything below needs the API server. Reporting zeros for a cluster that did not answer
   // is the exact failure this module is written against, so the fields stay null and the
   // caller is told why.
   out.unreadable.push('cluster');
+  return out;
+}
+
+/** The API server a context names, from the kubeconfig; '' when it cannot be read. */
+async function serverOf(ctx: string): Promise<string> {
+  const [servers] = await contextServers();
+  return Object.hasOwn(servers, ctx) ? (servers[ctx] as string) : '';
+}
+
+/**
+ * The overview's read of a cluster that does not bill: whether it answers, what it is,
+ * and which workspaces it holds.
+ *
+ * A working install does not change its storage class or its ingress between two looks,
+ * and `up` checks both right before it creates anything, so a page that asked again on
+ * every look paid eleven reads where three answer what it shows. `status` reads the rest
+ * when somebody opens the cluster. What is not read stays null, never a zero or a tick.
+ */
+async function glance(ctx: string, where: Where): Promise<Ledger> {
+  const out = emptyLedger(ctx);
+  out.where = where;
+  await describeOurCluster(ctx, out);
+  const got = await reach(ctx);
+  out.reachable = reachOk(got);
+  out.reach_status = got.status;
+  out.reach_why = reachWhy(got);
+  out.reach_advice = reachAdvice(got, ctx);
+  if (!out.reachable) {
+    out.unreadable.push('cluster');
+    return out;
+  }
+  const [dist, spaces, claims] = await Promise.all([
+    distribution(ctx),
+    askList('namespace', { context: ctx, selector: OWNER_SELECTOR }),
+    askList('pvc', { context: ctx, allNamespaces: true, selector: OWNER_SELECTOR }),
+  ]);
+  out.distribution = providerOf(ctx, dist);
+  // EKS under a name and a server that do not say so: it bills, so it is read in full.
+  if (out.distribution === 'eks') return await status(ctx);
+  out.provider = out.distribution === 'kind' ? PROVIDER_KIND : PROVIDER_EXTERNAL;
+  if (refused(spaces)) {
+    out.unreadable.push('workspaces');
+    return out;
+  }
+  const held = new Map<string, number>();
+  for (const claim of refused(claims) ? [] : items(claims)) {
+    const ns = String(metadataOf(claim).namespace ?? '');
+    held.set(ns, (held.get(ns) ?? 0) + 1);
+  }
+  const rows: WorkspaceRow[] = [];
+  for (const space of items(spaces)) {
+    const meta = metadataOf(space);
+    const ns = String(meta.name ?? '');
+    if (ns === '') continue;
+    const labels = (
+      typeof meta.labels === 'object' && meta.labels !== null ? meta.labels : {}
+    ) as Bag;
+    rows.push({
+      namespace: ns,
+      name: ns.startsWith(NAMESPACE_PREFIX) ? ns.slice(NAMESPACE_PREFIX.length) : ns,
+      owner: String(labels[OWNER_OF_LABEL] ?? ''),
+      owner_readable: true,
+      pvcs: held.get(ns) ?? 0,
+    });
+  }
+  out.workspaces = rows.sort((a, b) => compareCodePoints(a.namespace, b.namespace));
+  if (refused(claims)) out.unreadable.push('pvcs');
+  else out.pvcs = [...held.values()].reduce((sum, n) => sum + n, 0);
   return out;
 }
 
@@ -851,6 +1391,7 @@ export async function status(context = '', _emit: Emit = nullEmit): Promise<Ledg
     out.unreadable.push('context');
     return out;
   }
+  out.where = whereOf(ctx, await serverOf(ctx));
 
   await describeOurCluster(ctx, out);
   const got = await reach(ctx);
@@ -864,6 +1405,11 @@ export async function status(context = '', _emit: Emit = nullEmit): Promise<Ledg
   out.reach_advice = reachAdvice(got, ctx);
   if (!out.reachable) return await unreachableLedger(ctx, out);
 
+  // ONE describe per EKS status, on the reachable path too. The unreachable path already
+  // paid it (for `gone`); here it buys who built the cluster and when it expires, read from
+  // the cluster's own tags rather than from a note only the building machine has.
+  await askAwsAboutIt(out, ctx);
+  finishTheRecord(out);
   volumeGb = await askTheClusterEverything(ctx, out, volumeGb);
 
   // LAST, because it prices things read above it. Computing it beside the node inventory --
@@ -874,7 +1420,193 @@ export async function status(context = '', _emit: Emit = nullEmit): Promise<Ledg
     out.cost = estimateUsdHr(out.distribution, out.instance_types, {
       loadbalancers: out.loadbalancers,
       volumeGb,
+      version: out.kubernetes_version ?? '',
     });
   }
+  out.spend_usd = spendSoFar(out);
   return out;
+}
+
+/** The note's answers for what AWS left blank, then the days to the expiry date. */
+function finishTheRecord(out: Ledger): void {
+  describeRecord(out);
+  out.expires_in_days = eks.daysUntil(out.expires);
+}
+
+// ---------------------------------------------------------------------------- overview
+
+/** What stops everything before any cluster is looked at; what the build flow's first two steps show. */
+export interface OverviewPreflight {
+  readonly tools_ok: boolean;
+  readonly blockers: string[];
+  readonly account: string;
+  readonly identity: string;
+  readonly region: string;
+  readonly approved: boolean;
+}
+
+/** The AWS section's sums: a cluster on this machine or elsewhere is in none of them. */
+export interface OverviewTotals {
+  readonly clusters: number;
+  /** Clusters that cost money by the hour and are not known to be gone. */
+  readonly billable: number;
+  /** The sum of the known hourly rates times 24; null when no cluster's rate could be read. */
+  readonly usd_day: number | null;
+  readonly spend_usd: number | null;
+  /** Workspaces held, over the clusters whose list could be read. */
+  readonly workspaces: number;
+  /** Billing clusters whose rate could not be read (and builds with none yet): usd_day leaves them out. */
+  readonly unpriced: number;
+  /** Clusters whose workspace list could not be read: `workspaces` leaves them out. */
+  readonly unread: number;
+}
+
+export interface Overview {
+  readonly clusters: Ledger[];
+  readonly failed: FailedBuild[];
+  readonly preflight: OverviewPreflight;
+  readonly totals: OverviewTotals;
+  readonly next: NextStep;
+  readonly default: string;
+  readonly unreadable: string;
+}
+
+/** How long a server may reuse the AWS tool and identity checks between two overviews. */
+export const PREFLIGHT_REUSE_MS = 10 * 60_000;
+let lastPreflight: { at: number; value: Awaited<ReturnType<typeof eks.aws.preflight>> } | null =
+  null;
+
+/**
+ * Every known cluster, the totals, and what to do next -- the one answer both front-ends
+ * render, so the CLI and the GUI cannot disagree about what exists or what it costs.
+ *
+ * An AWS cluster is a full `status`, because its numbers are money and they change; any
+ * other is a `glance`. Three at a time (`ponytail:` each status already runs its own reads
+ * eight wide; a wider outer limit only multiplies kubectl processes -- raise it if a box
+ * with many clusters proves slow). A progress line per cluster, because one EKS status is
+ * measured at ~18 s and a page that shows nothing for a minute reads as broken.
+ *
+ * The stages and the totals are the AWS section's: a cluster on this machine has nothing
+ * to approve, build or pay for. `reuse` lets a server keep the AWS tool and identity
+ * checks for `PREFLIGHT_REUSE_MS` -- 1.9 s of a 2.6 s read on a box with only a k3s --
+ * while a Re-check, and every CLI run, asks again.
+ */
+export async function overview(
+  emit: Emit = nullEmit,
+  {
+    building = [] as readonly string[],
+    reuse = false,
+  }: { building?: readonly string[]; reuse?: boolean } = {},
+): Promise<Overview> {
+  const known = await knownContexts();
+  if (!reuse || lastPreflight === null || Date.now() - lastPreflight.at > PREFLIGHT_REUSE_MS) {
+    lastPreflight = { at: Date.now(), value: await eks.aws.preflight() };
+  }
+  const pre = lastPreflight.value;
+  const blockers = eks.blockers(pre, { toBuild: true });
+  const account = pre.identity.account;
+  const preflight: OverviewPreflight = {
+    tools_ok: blockers.length === 0,
+    blockers,
+    account,
+    identity: pre.identity.arn,
+    region: pre.region,
+    approved: account !== '' && config.approvedAwsAccounts().has(account),
+  };
+  const clusters = await mapLimit(known.contexts, 3, async (row) => {
+    info(emit, `reading ${row.short}…`, { phase: 'info' });
+    return row.where === 'aws'
+      ? await status(row.context, emit)
+      : await glance(row.context, row.where);
+  });
+  const inAws = clusters.filter((ledger) => ledger.where === 'aws');
+  // Builds that failed part-way: the note the create leaves stays until the cluster is
+  // gone, and AWS is asked whether it is. A refused read is null, never "not there".
+  // Only a build whose process is GONE failed; one still running (a CLI create in another
+  // terminal) is building, and "delete what it left" would have pointed at a live build.
+  const dead = new Set(journal.abandoned().map((entry) => entry.id));
+  const running = new Set(building);
+  const failed: FailedBuild[] = [];
+  for (const entry of journal.openEntries()) {
+    if (entry.kind !== journal.CLUSTER_UNFINISHED) continue;
+    if (!dead.has(entry.id)) {
+      running.add(entry.workspace);
+      continue;
+    }
+    const region = String((entry.detail as Record<string, unknown>).region ?? '');
+    let there: boolean | null;
+    try {
+      const seen = await eks.aws.describeCluster(entry.workspace, region);
+      there = seen.state === ABSENT ? false : present(seen) ? true : null;
+    } catch {
+      there = null;
+    }
+    failed.push({ name: entry.workspace, region, present: there });
+  }
+  let usd = 0;
+  let priced = 0;
+  let spend = 0;
+  let spent = 0;
+  let workspaces = 0;
+  let billable = 0;
+  let unpriced = 0;
+  let unread = 0;
+  const names = new Set<string>();
+  for (const ledger of inAws) {
+    names.add(ledger.name);
+    if (!ledger.gone) {
+      billable += 1;
+      // A billing cluster whose rate could not be read is money the total leaves out:
+      // counted here so both front-ends can say the figure is partial.
+      if (
+        ledger.cost === null ||
+        ledger.cost.incomplete.length > 0 ||
+        Object.keys(ledger.cost.unpriced).length > 0
+      )
+        unpriced += 1;
+    }
+    if (ledger.cost !== null) {
+      usd += ledger.cost.usd_hr;
+      priced += 1;
+    }
+    if (ledger.spend_usd !== null) {
+      spend += ledger.spend_usd;
+      spent += 1;
+    }
+    if (ledger.workspaces !== null) workspaces += ledger.workspaces.length;
+    else if (!ledger.gone) unread += 1;
+  }
+  // A cluster being built bills from its first minute and has no rate yet.
+  for (const name of running) {
+    if (names.has(name)) continue;
+    billable += 1;
+    unpriced += 1;
+  }
+  const totals: OverviewTotals = {
+    clusters: inAws.length,
+    billable,
+    usd_day: priced === 0 ? null : Math.round(usd * 24 * 100) / 100,
+    spend_usd: spent === 0 ? null : Math.round(spend * 100) / 100,
+    workspaces,
+    unpriced,
+    unread,
+  };
+  return {
+    clusters,
+    failed,
+    preflight,
+    totals,
+    next: nextStep({
+      tools_ok: preflight.tools_ok,
+      blockers,
+      approved: preflight.approved,
+      account,
+      clusters: inAws,
+      building: [...running],
+      failed,
+      default_context: known.default,
+    }),
+    default: known.default,
+    unreadable: known.unreadable,
+  };
 }

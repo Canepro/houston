@@ -1,6 +1,21 @@
 import type * as LoadtestNS from '../../src/core/loadtest';
 import * as runnerRecord from '../../src/core/runner/record';
 
+it('Grafana public URL regression: gives the load-test iframe the public sub-path URL', async () => {
+  const loadtest = require('../../src/core/loadtest') as typeof LoadtestNS;
+  const run = loadtest.newLoadRun();
+  run.summary = { p95: 1, rps: 1, error_rate: 0 };
+  const result = await loadtest.loadtestVerdict({
+    deps: loadtest.DEFAULT_DEPS,
+    emit: () => undefined,
+    m: runnerRecord.metadata({ name: 'w', publicUrl: 'https://h', extra: { tls: 'local' } }),
+    req: loadtest.loadtestReq({ name: 'w', live: true, diag: false }),
+    rules: [],
+    run,
+  });
+  expect(result.grafana).toBe('https://h/grafana');
+});
+
 describe('what a load test refuses before it runs', () => {
   afterEach(() => {
     jest.resetModules();

@@ -78,6 +78,8 @@
       "pinned": false,
       "runtime": "docker",
       "deployment": "monolith",
+      "context": "",
+      "cluster": "",
       "seed": null,
       "instances": 2,
       "instance_urls": ["http://localhost:3101", "http://localhost:3102"],
@@ -140,6 +142,8 @@
     "bind_host": "127.0.0.1",
     "seed": null,
     "pinned": false,
-    "namespace": ""
+    "namespace": "",
+    "context": "arn:aws:eks:us-east-1:1:cluster/support",
+    "cluster": "support"
   }
 }

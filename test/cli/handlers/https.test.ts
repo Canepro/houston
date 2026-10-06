@@ -454,6 +454,14 @@ describe('edge and tls-status, against earlier releases', () => {
   it.each(SCENARIOS)('%s', async (label, argv, world) => {
     writeRecords(world);
     const recorded = inHome(RECORDED.edge[label]);
+    // The pinned older-release fixture predates the additive `cluster connect` verb.
+    // Keep every other byte of its unknown-action response under comparison.
+    if (label.startsWith('cluster, an unknown action')) {
+      recorded.stderr = recorded.stderr.replace(
+        'status | list | guide',
+        'status | list | connect | guide',
+      );
+    }
     const ours = await typescript(world, argv);
     if (world.decline === true) {
       // The prompt is the one place the two front ends differ by construction: earlier
@@ -473,6 +481,21 @@ describe('edge and tls-status, against earlier releases', () => {
       stderr: ours.stderr,
       dialled: ours.dialled,
     }).toEqual(recorded);
+  });
+});
+
+describe('edge status with nothing on the edge', () => {
+  it('does not call names unreachable when there are none', async () => {
+    // "every https name on this box is unreachable" sat above "no names registered yet": the
+    // false alarm doctor also raised about a box that had finished with HTTPS. With names
+    // on it, the line is the one earlier releases printed (the recorded scenario above).
+    const ours = await typescript({ edge: { installed: true, running: false } }, [
+      'edge',
+      'status',
+    ]);
+    expect(ours.code).toBe(0);
+    expect(ours.stdout).not.toContain('unreachable');
+    expect(ours.stdout).toContain('stopped — no https workspace uses it');
   });
 });
 

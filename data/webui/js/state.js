@@ -9,18 +9,20 @@ import { ctx } from "./shared.js";
 // host with every individual create having succeeded. "Room for about 2 more" is
 // the sentence that decides what you do next; a row of totals would look like a
 // dashboard and say nothing.
-let HOME = { cap: null, audit: [], at: 0 };
+let HOME = { cap: null, at: 0 };
 const HOME_EVERY = 15000;
 
 async function refreshHome(force) {
   if (!force && Date.now() - HOME.at < HOME_EVERY) return;
   HOME.at = Date.now();
-  const [cap, audit] = await Promise.all([
-    ctx.api("/api/machine").catch(() => null),
-    ctx.api("/api/audit?limit=6").catch(() => ({ lines: [] })),
-  ]);
-  if (cap) HOME.cap = cap;
-  HOME.audit = (audit && audit.lines) || [];
+  const cap = await ctx.api("/api/machine").catch(() => null);
+  if (cap) { HOME.cap = cap; ctx.MACHINE_ROOM = cap; }
+  // What an EKS cluster wants arrives with the overview, after Home is drawn.
+  if (ctx.loadClusterOverview) {
+    ctx.loadClusterOverview(!!force).then((ov) => {
+      if (ov && ctx.VIEW === "home" && !ctx.SELECTED) renderHome();
+    }).catch(() => {});
+  }
   // `!SELECTED` is not the same question as "is Home on screen". Activity and
   // Scenarios are stage views with no workspace selected, so this timer repainted
   // the stage with Home underneath whatever you were reading -- the page appearing
@@ -29,76 +31,58 @@ async function refreshHome(force) {
   if (ctx.VIEW === "home" && !ctx.SELECTED) renderHome();
 }
 
-// One running workspace, on Home. Two destinations live in this row and they are
-// genuinely different places: the row opens the WORKSPACE (this tool's page about
-// it), and Open goes to Rocket.Chat itself. A row that only did the first made
-// getting to the actual chat server a two-step, which is the one thing everybody
-// is here for.
-//
-// The status tile is not decoration in a list where everything is running: the
-// dot is the HEALTH, so a container that is up but failing its healthcheck is
-// amber here rather than looking identical to a good one.
+// Where a workspace runs, in the words the Clusters page uses for the place.
+function whereOf(r) {
+  if ((r.runtime || "docker") !== "kubernetes") return "Docker";
+  const row = ((ctx.CLUSTERS && ctx.CLUSTERS.contexts) || []).find((c) => c.context === r.context);
+  const short = (row && row.short) || String(r.context || r.cluster || "").split("/").pop();
+  if (row && ctx.clWhere(row, ctx.CLSTATE.status[row.context]) === "aws") return `${short} · EKS`;
+  return short ? `Kubernetes · ${short}` : "Kubernetes";
+}
+
+// One running workspace, on Home. The name opens the WORKSPACE (this tool's page about
+// it); Open goes to Rocket.Chat itself -- two different places, so two targets.
 function runningRow(r) {
   const health = String(r.health || "").toLowerCase();
   const bad = health && !["healthy", "running", "starting"].includes(health);
-  const row = ctx.el("div", { class: "wsrow" });
-  row.append(ctx.el("button", {
-    class: "wsrow-main", onclick: () => selectRepro(r.name),
-    title: `Open ${r.name} in houston`,
-  },
-    ctx.el("span", { class: "wsrow-tile" + (bad ? " bad" : "") }),
-    ctx.el("span", { class: "wsrow-t" },
-      ctx.el("b", {}, r.name),
-      ctx.el("span", { class: "wsrow-m" },
-        `${r.rc_version} · ${r.preset || "default"} · :${r.host_port}`))));
-  const right = ctx.el("div", { class: "wsrow-r" });
-  if (r.uptime) {
-    right.append(ctx.el("span", { class: "wsrow-up" + (bad ? " bad" : "") },
-      r.uptime, ctx.el("i", {}, bad ? health : "uptime")));
-  }
-  right.append(ctx.el("a", { class: "btn small", href: r.public_url || r.root_url,
-                         target: "_blank", rel: "noreferrer",
-                         title: "Open Rocket.Chat itself, in a new tab" }, "Open"));
-  row.append(right);
-  return row;
+  return ctx.el("div", { class: "drow" },
+    ctx.el("span", { class: "ldot" + (bad ? " bad" : "") }),
+    ctx.el("button", { class: "t-btn grow", type: "button", title: `Open ${r.name} in houston`, onclick: () => selectRepro(r.name) },
+      ctx.el("div", { class: "t" }, r.name),
+      ctx.el("div", { class: "m" }, [r.rc_version, r.preset || "default", whereOf(r)].filter(Boolean).join(" · "))),
+    ctx.el("span", { class: "m" + (bad ? " warn" : "") }, bad ? health : (r.uptime || "")),
+    ctx.el("a", { class: "btn sm", href: r.public_url || r.root_url, target: "_blank", rel: "noreferrer",
+      title: "Open Rocket.Chat itself, in a new tab" }, "Open"));
 }
 
+// It leads with what limits this tool: `up` refuses without headroom, so "room for
+// about 2 more" is the sentence that decides what you do next.
 function capacityCard(cap) {
-  const box = ctx.el("div", { class: "capcard" });
+  const box = ctx.el("div", { class: "hcard dash capcard" }, ctx.el("h3", {}, "Memory on this machine"));
   if (!cap || !cap.known) {
-    box.append(ctx.el("div", { class: "caphead" }, ctx.el("span", { class: "lbl" }, "Memory on this machine")),
-      ctx.el("p", { class: "apnote", style: "padding:0" },
-        "houston reads /proc/meminfo, which this machine does not have — so it "
-        + "cannot say how much room is left, and `up` will not refuse on memory here."));
+    box.append(ctx.el("p", { class: "m", style: "margin:0;font-family:var(--sans);font-size:13px" },
+      "houston reads /proc/meminfo, which this machine does not have — so it "
+      + "cannot say how much room is left, and `up` will not refuse on memory here."));
     return box;
   }
   const usedMb = Math.max(0, cap.total_mb - cap.available_mb);
   const pct = (n) => Math.max(0, Math.min(100, (n / cap.total_mb) * 100));
   const gb = (mb) => (mb / 1024).toFixed(1);
-  const head = ctx.el("div", { class: "caphead" },
-    ctx.el("span", { class: "lbl" }, "Memory on this machine"));
-  // Speak up only when the answer is nearly no. "room for about 6 more" is a
-  // number you read past; the bar below already shows how full the machine is,
-  // and this line exists to catch the moment it stops being fine.
-  if (cap.room <= 1) {
-    head.append(ctx.el("span", { class: "caproom" + (cap.room < 1 ? " tight" : "") },
-      cap.room >= 1 ? `room for about ${cap.room} more` : "not enough for another workspace"));
-  }
-  box.append(head);
-  box.append(ctx.el("div", { class: "capnum" }, `${gb(usedMb)} GB`,
-    ctx.el("small", {}, ` of ${gb(cap.total_mb)} GB in use`)));
-  box.append(ctx.el("div", { class: "capbar" },
-    ctx.el("i", { class: "used", style: `width:${pct(usedMb)}%` }),
-    ctx.el("i", { class: "reserved", style: `width:${pct(cap.reserve_mb)}%`,
-              title: "kept back for the machine itself" })));
-  box.append(ctx.el("div", { class: "caplegend" },
-    ctx.el("span", {}, ctx.el("i", { class: "k used" }), `in use ${gb(usedMb)} GB`),
-    ctx.el("span", {}, ctx.el("i", { class: "k reserved" }), `held back ${gb(cap.reserve_mb)} GB`),
-    ctx.el("span", {}, ctx.el("i", { class: "k free" }),
-      `free ${gb(Math.max(0, cap.available_mb - cap.reserve_mb))} GB`)));
+  box.append(ctx.el("div", {}, ctx.el("span", { class: "big" }, `${gb(usedMb)} GB`), " ",
+    ctx.el("span", { class: "wh", style: "font-size:14px" }, `of ${gb(cap.total_mb)} GB in use`)));
+  box.append(ctx.el("div", { class: "bar" },
+    ctx.el("i", { class: "used", style: `width:${pct(usedMb)}%;background:var(--accent-fill)` }),
+    ctx.el("i", { class: "reserved", style: `width:${pct(cap.reserve_mb)}%;background:var(--line2)`, title: "kept back for the machine itself" })));
+  const kube = (cap.room_by_runtime || {})["kubernetes-microservices"];
+  const tight = cap.room < 1;
+  box.append(ctx.el("div", { class: "wh" + (tight ? " warn" : ""), style: "font-size:13px" + (tight ? ";color:var(--amber)" : "") },
+    tight ? "Not enough room for another workspace on this machine."
+      : `Room for about ${cap.room} more on Docker` + (typeof kube === "number" ? `, or ${kube} more on Kubernetes.` : ".")));
   return box;
 }
 
+// What wants somebody, and only that. Amazon EKS comes from the overview Home already
+// reads -- no call of its own.
 function attentionItems() {
   const out = [];
   if (!ctx.DOCKER_OK) {
@@ -116,65 +100,93 @@ function attentionItems() {
       `It still holds port :${r.host_port} and its data volume.`,
       () => selectRepro(r.name), "Review"]);
   }
+  // clRows, not the raw list: a cluster still being built is the build's item below, and
+  // listing its own warning beside it said the same cluster twice.
+  const aws = ctx.clRows("aws");
+  const sign = ctx.awsSignIn ? ctx.awsSignIn() : { state: "unknown" };
+  if (aws.length && sign.state === "expired") {
+    const names = aws.map((r) => r.short || r.context).join(", ");
+    out.push(["The server's AWS sign-in has expired",
+      `Houston can't check ${names} or what ${aws.length === 1 ? "it costs" : "they cost"} until someone signs in again on the server.`,
+      ctx.canAdmin() ? () => ctx.openEksSetup() : null, "Fix"]);
+  } else {
+    for (const r of aws) {
+      const st = ctx.CLSTATE.status[r.context];
+      const warn = ctx.placeWarn(st);
+      if (!warn) continue;
+      const name = `${r.short || r.context} (Amazon EKS)`;
+      const day = ctx.perDay(st);
+      const bills = day ? `It keeps billing ~$${day.toFixed(2)} a day until someone deletes it.` : "It keeps billing until someone deletes it.";
+      const d = st.expires_in_days;
+      // The DNS record is its own item with its own button: a first-time user does not know
+      // a built cluster needs one, and "Review" did not say that this was the next step.
+      if (/^Public names under/u.test(warn)) {
+        out.push([`${name} needs a DNS record`,
+          `Workspaces on it get public names under ${st.zone} once one record (a CNAME) answers. Add it once, at your DNS provider.`,
+          () => ctx.clOpenDns(r), "Set up DNS"]);
+        continue;
+      }
+      const [title, why] = !st.reachable ? [`${name} is not answering`, warn]
+        : typeof d === "number" && d < 0 ? [`${name} is past its reminder date`, bills]
+        : d === 0 ? [`${name} reaches its reminder date today`, bills]
+        : /^Holds no workspaces/u.test(warn) ? [`${name} holds no workspaces`, `It still bills ~$${(day || 0).toFixed(2)} a day until someone deletes it.`]
+        : [`${name} wants you`, warn];
+      out.push([title, why, () => ctx.openPlace(`eks:${r.context}`), "Review"]);
+    }
+  }
+  for (const j of ctx.CLSTATE.jobs.filter((x) => x.kind === "cluster-create")) {
+    out.push([`${j.label || "A cluster"} is being built`, "About 20 minutes in all. It is already billing.",
+      () => ctx.openClusters(), "View"]);
+  }
+  for (const b of (ctx.CLSTATE.overview && ctx.CLSTATE.overview.failed) || []) {
+    if (b.present === false) continue;
+    out.push([`The build of ${b.name} failed part-way`, "It may still be billing. Delete what it left.",
+      () => ctx.openClusters(), "Review"]);
+  }
   return out;
 }
 
 function renderHome() {
   const panel = ctx.$("#detail");
+  // The entrance plays once, when Home arrives -- not on every four-second repaint.
+  const fresh = !panel.querySelector(".pv.home");
   panel.innerHTML = "";
-  const running = ctx.ALL_REPROS.filter((r) => r.state === "running");
+  const box = ctx.el("div", { class: "pv home" + (fresh ? " anim" : "") });
   const hour = new Date().getHours();
   const part = hour < 12 ? "morning" : hour < 18 ? "afternoon" : "evening";
-  const head = ctx.el("div", { class: "home-head" },
-    ctx.el("h1", {}, ctx.ME ? `Good ${part}, ${ctx.ME}` : "Your workspaces"),
-    ctx.el("p", {}, `${ctx.ALL_REPROS.length} workspace(s) · ${running.length} running`
-      + (ctx.DOCKER_OK ? "" : " · docker is not answering")));
-  const body = ctx.el("div", { class: "home-body" });
+  box.append(ctx.el("h1", {}, ctx.ME ? `Good ${part}, ${ctx.ME}` : "Your workspaces"), ctx.el("p", { class: "sub" }));
+  if (!ctx.ALL_REPROS.length) {
+    box.append(ctx.canWrite()
+      ? ctx.el("div", { class: "hcard dash welcome", id: "home-welcome" },
+        ctx.el("h2", {}, "Create your first workspace"),
+        ctx.el("p", {}, "A workspace is a Rocket.Chat of the version you choose, with its own MongoDB and any services it needs, such as LDAP, SAML or email."),
+        ctx.el("button", { class: "btn solid", type: "button", onclick: () => ctx.openCreate() }, "+ Create a workspace"),
+        ctx.el("p", { class: "small" }, "First you pick where it runs, then the Rocket.Chat version. Docker on this machine is free and right for most workspaces."))
+      : ctx.el("div", { class: "hcard dash" }, ctx.el("p", { style: "margin:0;color:var(--muted)" },
+        "No workspaces yet. Workspaces your team creates appear here.")));
+  }
   const items = attentionItems();
   if (items.length) {
-    const card = ctx.el("div", { class: "hcard" },
-      ctx.el("div", { class: "hcard-h" }, ctx.el("span", { class: "lbl" }, "Needs you"),
-        ctx.el("span", { class: "lbl" }, String(items.length))));
+    const card = ctx.el("div", { class: "hcard dash", id: "home-needs" },
+      ctx.el("h3", {}, ctx.el("span", { class: "need" }, "Needs you"), ctx.el("span", {}, String(items.length))));
     for (const [title, why, fn, label] of items) {
-      card.append(ctx.el("div", { class: "att" },
-        ctx.el("span", { class: "att-i" }, "▲"),
-        ctx.el("span", { class: "att-t" }, ctx.el("b", {}, title), " — " + why),
-        ctx.el("button", { class: "btn small", onclick: fn }, label)));
+      card.append(ctx.el("div", { class: "drow att" },
+        ctx.el("span", { class: "need" }, "▲"),
+        ctx.el("div", { class: "grow" }, ctx.el("div", { class: "t" }, title), ctx.el("div", { class: "why" }, why)),
+        fn ? ctx.el("button", { class: "btn sm", type: "button", onclick: fn }, label) : ""));
     }
-    body.append(card);
+    box.append(card);
   }
-
-  const rcard = ctx.el("div", { class: "hcard" },
-    ctx.el("div", { class: "hcard-h" }, ctx.el("span", { class: "lbl" }, "Running now"),
-      ctx.el("span", { class: "lbl-n" }, `${running.length} of ${ctx.ALL_REPROS.length}`)));
-  if (running.length) {
-    const grid = ctx.el("div", { class: "mini" });
-    for (const r of running) grid.append(runningRow(r));
-    rcard.append(grid);
-  } else {
-    rcard.append(ctx.el("p", { class: "empty" }, ctx.canWrite()
-      ? "Nothing is running. Start one from the list, or create a workspace."
-      : "Nothing is running."));
+  if (ctx.ALL_REPROS.length) {
+    const running = ctx.ALL_REPROS.filter((r) => r.state === "running");
+    const card = ctx.el("div", { class: "hcard dash", id: "home-running" },
+      ctx.el("h3", {}, "Running now", ctx.el("span", { class: "mono", style: "letter-spacing:0;text-transform:none" }, `${running.length} of ${ctx.ALL_REPROS.length}`)));
+    if (running.length) for (const r of running) card.append(runningRow(r));
+    else card.append(ctx.el("p", { style: "color:var(--muted);margin:0" }, "Nothing is running."));
+    box.append(card);
   }
-  body.append(rcard);
-  body.append(capacityCard(HOME.cap));
-
-  const acard = ctx.el("div", { class: "hcard" },
-    ctx.el("div", { class: "hcard-h" }, ctx.el("span", { class: "lbl" }, "Recent activity"),
-      ctx.el("button", { class: "btn small", onclick: () => ctx.openJobs("history") }, "All activity")));
-  if (HOME.audit.length) {
-    for (const a of HOME.audit) {
-      acard.append(ctx.el("div", { class: "arow", "data-denied": String(a.outcome === "denied") },
-        ctx.el("span", { class: "who" }, a.actor || "—"),
-        ctx.el("span", { class: "kind" }, a.kind),
-        ctx.el("span", { class: "what" }, a.label || ""),
-        ctx.el("span", { class: "when" }, (a.ts || "").replace("T", " ").slice(5, 16))));
-    }
-  } else {
-    acard.append(ctx.el("p", { class: "empty" }, "Nothing recorded yet."));
-  }
-  body.append(acard);
-  panel.append(head, body);
+  box.append(capacityCard(HOME.cap));
+  panel.append(box);
 }
 
 
@@ -370,6 +382,27 @@ function scenarioCard(d, parsed, shown) {
 }
 
 // ---- detail panel -----------------------------------------------------------
+// WHAT THE LIST ALREADY KNOWS, drawn at once. The full panel waits for the workspace's own
+// read -- on a cluster several round trips -- and until then this showed only "Loading…",
+// for as long as a minute on a slow EKS cluster.
+function detailShell(r) {
+  const open = r.public_url || r.root_url;
+  const kube = (r.runtime || "docker") === "kubernetes";
+  return [
+    ctx.el("div", { class: "d-head" },
+      ctx.el("span", { class: "dot " + ctx.stateClass(r.state || "?") }, "●"),
+      ctx.el("span", { class: "name" }, r.name),
+      ctx.el("span", { class: "pill " + ctx.stateClass(r.state || "?") }, r.state || "?"),
+      ctx.el("button", { class: "close", onclick: ctx.closeDetail }, "×")),
+    ctx.el("div", { class: "d-sub" }, ctx.el("b", {}, r.rc_version || "?"), ctx.el("i", {}, "/"),
+      `mongo ${r.mongo_tag || "?"}`, ctx.el("i", {}, "·"), whereOf(r)),
+    open && r.state !== "?" ? ctx.el("div", { class: "d-actions" },
+      ctx.el("a", { href: open, target: "_blank", rel: "noreferrer", style: "text-decoration:none" },
+        ctx.el("button", { class: "btn primary" }, "↗ Open RC"))) : "",
+    ctx.el("div", { class: "placeholder", id: "detail-reading" },
+      kube ? `Reading ${r.name} from its cluster…` : `Loading ${r.name}…`),
+  ];
+}
 async function selectRepro(name) {
   ctx.setView("workspace");
   ctx.SELECTED = name; ctx.dstate.tab = "overview"; ctx.dstate.points = [];
@@ -382,7 +415,8 @@ async function selectRepro(name) {
   ctx.render();
   const panel = ctx.$("#detail");
   panel.innerHTML = "";
-  panel.append(ctx.el("div", { class: "placeholder" }, `Loading ${name}…`));
+  const row = (ctx.ALL_REPROS || []).find((r) => r.name === name);
+  panel.append(...(row ? detailShell(row) : [ctx.el("div", { class: "placeholder" }, `Loading ${name}…`)]));
   let detail;
   try { detail = await ctx.api(`/api/repros/${name}/detail`); }
   catch (e) {

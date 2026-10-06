@@ -235,6 +235,38 @@ describe('the front door', () => {
     expect(read.statusCode).toBe(403);
   });
 
+  it('opens the sign-in page from a company dashboard tile', async () => {
+    // The company's Okta tile has both of its URIs set to https://<host>/signin. A click
+    // arrives at the Initiate login URI as a cross-site top-level GET carrying
+    // `?iss=<issuer>`; the Sign-in redirect URI is where Okta would return `?code=&state=`,
+    // which only happens after an app starts an OIDC login, and houston never does. houston
+    // does not speak OIDC: both must simply render the page, and a signed-in user goes
+    // straight in. A cross-site refusal here would break the tile for everyone on it.
+    await users().add('alice', PASSWORD, 'admin');
+    const front = await app();
+    const cookie = await signIn(front, 'alice');
+    for (const url of [
+      '/signin?iss=https%3A%2F%2Flogin.rocket.chat',
+      '/signin?code=okta-code&state=okta-state',
+    ]) {
+      const anonymous = await front.inject({ url, headers: { host: 'localhost', ...CROSS } });
+      expect({
+        url,
+        status: anonymous.statusCode,
+        form: anonymous.body.includes('action="/signin"'),
+      }).toEqual({ url, status: 200, form: true });
+      const signedIn = await front.inject({
+        url,
+        headers: { host: 'localhost', cookie, ...CROSS },
+      });
+      expect({ url, status: signedIn.statusCode, location: signedIn.headers.location }).toEqual({
+        url,
+        status: 303,
+        location: '/',
+      });
+    }
+  });
+
   it('treats a named allow-host as a trusted origin even when a proxy rewrote Host', async () => {
     // Splitting "may this Host reach us" from "is this Origin ours" must not break the proxy
     // case it exists for: a named host really is ours when the proxy rewrote Host.

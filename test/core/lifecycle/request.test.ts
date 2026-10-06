@@ -1,3 +1,6 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+
 import { createReq } from '../../../src/core/lifecycle/types';
 import {
   deriveIdpHost,
@@ -5,6 +8,7 @@ import {
   savedDefaultIsBillable,
   sayWhereThisIsGoing,
   unknownParams,
+  defaultDomainFromZone,
 } from '../../../src/core/lifecycle/request';
 
 import type * as ConfigNS from '../../../src/lib/config';
@@ -253,5 +257,70 @@ describe('a saved default cluster', () => {
     // A saved free cluster used the same way is silent -- that is what saving one is for.
     expect(said('default', 'kubernetes')[1]).toEqual([]);
     expect(said('k3s-prod', 'kubernetes')[1]).toEqual([]);
+  });
+});
+
+describe('the public name a cluster zone gives a workspace', () => {
+  // The zone is known once, on the cluster; every ticket typed it again as --domain.
+  const events: string[] = [];
+  const emit = (event: { message: string }): void => void events.push(event.message);
+  const noteFor = (zone: string): void => {
+    const dir = path.join(process.env.HOUSTON_HOME as string, 'clusters', 'support');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'cluster.json'),
+      JSON.stringify({
+        name: 'support',
+        region: 'us-east-1',
+        account: '1',
+        provider: 'eks',
+        expires: '',
+        zone,
+        created_at: '',
+      }),
+    );
+  };
+
+  it('defaults the domain to <name>.<zone> for a workspace on a cluster with a zone, and says so', async () => {
+    noteFor('rc.example.com');
+    const req = createReq({ version: '8.5.1', context: 'arn:aws:eks:us-east-1:1:cluster/support' });
+    await defaultDomainFromZone(req, 'ticket-1234', emit);
+    expect(req.domain).toBe('ticket-1234.rc.example.com');
+    expect(events.join(' ')).toContain('ticket-1234.rc.example.com');
+    expect(events.join(' ')).toContain('--domain');
+  });
+
+  it('leaves a workspace that already exists with the name it has', async () => {
+    // down then up is how a workspace comes back with its data; one made with its own
+    // --domain moved to <name>.<zone>, a new ROOT_URL and a new certificate order.
+    noteFor('rc.example.com');
+    const dir = path.join(process.env.HOUSTON_HOME as string, 'repros', 'ticket-1234');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'repro.json'), '{}');
+    const req = createReq({ version: '8.5.1', context: 'arn:aws:eks:us-east-1:1:cluster/support' });
+    await defaultDomainFromZone(req, 'ticket-1234', emit);
+    expect(req.domain).toBe('');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('leaves an explicit --domain alone, and a cluster without a zone alone', async () => {
+    noteFor('rc.example.com');
+    const typed = createReq({
+      version: '8.5.1',
+      context: 'arn:aws:eks:us-east-1:1:cluster/support',
+      domain: 'x.example.org',
+    });
+    await defaultDomainFromZone(typed, 'ticket-1234', emit);
+    expect(typed.domain).toBe('x.example.org');
+    noteFor('');
+    const plain = createReq({
+      version: '8.5.1',
+      context: 'arn:aws:eks:us-east-1:1:cluster/support',
+    });
+    await defaultDomainFromZone(plain, 'ticket-1234', emit);
+    expect(plain.domain).toBe('');
+    const docker = createReq({ version: '8.5.1' });
+    await defaultDomainFromZone(docker, 'ticket-1234', emit);
+    expect(docker.domain).toBe('');
   });
 });

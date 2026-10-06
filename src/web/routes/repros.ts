@@ -9,7 +9,7 @@ import { login } from '../../core/lifecycle/admin';
 import { createRepro } from '../../core/lifecycle/create-docker';
 import { teardown } from '../../core/lifecycle/destroy';
 import { describe, listRepros } from '../../core/lifecycle/inspect';
-import { resolveName } from '../../core/lifecycle/naming';
+import { deriveFor, resolveName } from '../../core/lifecycle/naming';
 import { maySetPrivilegedFields, setOwner } from '../../core/lifecycle/ownership';
 import { detail } from '../../core/lifecycle/payload';
 import {
@@ -222,7 +222,17 @@ export function register(app: FastifyInstance): void {
           streamOutput: true,
           monitorAttach: monitor.attach,
         }),
-      { label: (isTruthy(req.name) ? req.name : req.version) as string },
+      // A typed name is labelled -- and so audited -- as the workspace it makes: with
+      // accounts `gui-1` becomes `alice-gui-1`, and the audit said `create gui-1`, a name
+      // nothing on the box answers to. The same function the create uses. A derived name
+      // waits on the version lookup, so that label stays the version asked for, and a name
+      // that is not a string keeps the label earlier releases gave it.
+      {
+        label:
+          typeof req.name === 'string' && isTruthy(req.name)
+            ? deriveFor(req)
+            : ((isTruthy(req.name) ? req.name : req.version) as string),
+      },
     );
   });
 

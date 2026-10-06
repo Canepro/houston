@@ -12,7 +12,14 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-import { wrapWords, writeBox, writePanel, type WrapOptions } from '../../src/cli/render';
+import {
+  paint,
+  wrapWords,
+  writeBox,
+  writePanel,
+  writeTable,
+  type WrapOptions,
+} from '../../src/cli/render';
 
 type Wrapped = { lines: string[] } | { error: string };
 
@@ -170,4 +177,73 @@ it('draws every box exactly as earlier releases did', () => {
     return text;
   });
   expect(ours).toEqual(recorded);
+});
+
+describe('the column table', () => {
+  const capture = (): {
+    io: { writeOut: (t: string) => void; writeErr: (t: string) => void };
+    out: () => string;
+  } => {
+    let text = '';
+    return {
+      io: { writeOut: (t) => void (text += t), writeErr: () => undefined },
+      out: () => text,
+    };
+  };
+
+  it('pads by terminal cells, so a double-width name does not push the columns over', () => {
+    // `ljust` counts code points; a CJK cluster name is two cells per point, and a column
+    // padded by points wandered right of its header on a real screen.
+    const { io, out } = capture();
+    writeTable(
+      io,
+      ['NAME', 'REGION'],
+      [
+        ['支持', 'us-east-1'],
+        ['perf', 'eu-west-1'],
+      ],
+    );
+    expect(out()).toBe('NAME  REGION\n支持  us-east-1\nperf  eu-west-1\n');
+  });
+
+  it('measures a painted cell by what is visible, and never leaves trailing spaces', () => {
+    const { io, out } = capture();
+    writeTable(
+      io,
+      ['STATE', 'COST'],
+      [
+        ['\u001b[32mrunning\u001b[0m', '~$10.66'],
+        ['gone', 'nothing'],
+      ],
+    );
+    expect(out()).toBe('STATE    COST\n\u001b[32mrunning\u001b[0m  ~$10.66\ngone     nothing\n');
+    for (const line of out().split('\n')) expect(line).not.toMatch(/ $/u);
+  });
+});
+
+describe('paint', () => {
+  const host = (tty: boolean, env: Record<string, string> = {}) => ({
+    env: env as NodeJS.ProcessEnv,
+    isatty: () => tty,
+    columns: () => null,
+  });
+
+  it('colours on a terminal only, and honours NO_COLOR and FORCE_COLOR', () => {
+    // Jest is not a terminal, so every pinned output stays byte-identical; on a terminal
+    // the three tones are the GUI's: green running, amber wants you, red destroy.
+    expect(paint('ok', 'green', host(false))).toBe('ok');
+    expect(paint('ok', 'green', host(true))).toBe('\u001b[32mok\u001b[0m');
+    expect(paint('careful', 'amber', host(true))).toBe('\u001b[33mcareful\u001b[0m');
+    expect(paint('gone', 'red', host(true))).toBe('\u001b[31mgone\u001b[0m');
+    expect(paint('ok', 'green', host(true, { NO_COLOR: '1' }))).toBe('ok');
+    expect(paint('ok', 'green', host(false, { FORCE_COLOR: '1' }))).toBe('\u001b[32mok\u001b[0m');
+    expect(paint('ok', 'green', host(false, { FORCE_COLOR: '' }))).toBe('ok');
+    // 0 and false mean OFF, as Node and every colour library read FORCE_COLOR -- even on a
+    // terminal. Read as "set", FORCE_COLOR=0 turned colour on.
+    expect(paint('ok', 'green', host(true, { FORCE_COLOR: '0' }))).toBe('ok');
+    expect(paint('ok', 'green', host(true, { FORCE_COLOR: 'false' }))).toBe('ok');
+    expect(paint('ok', 'green', host(false, { FORCE_COLOR: 'true' }))).toBe(
+      '\u001b[32mok\u001b[0m',
+    );
+  });
 });

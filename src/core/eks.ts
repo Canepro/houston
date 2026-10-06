@@ -41,8 +41,11 @@ import {
   CreateFailedError,
   DockerError,
   PreflightError,
+  NotFoundError,
+  ValidationError,
 } from '../lib/errors';
 import { info, nullEmit, warn, type Emit, type EmittedPhase } from '../lib/events';
+import { mapLimit } from '../lib/map-limit';
 import { joinPath } from '../lib/home';
 import {
   CLUSTER_UNFINISHED,
@@ -57,21 +60,27 @@ import { safeDump } from '../lib/yaml-dump';
 import { awsCli, type AwsResult } from '../seams/aws-cli';
 
 import { ABSENT, PRESENT, REFUSED, answer, why, type Answer } from './kube/ask';
-import { storageClasses, workspaceNamespaces } from './kube/capabilities';
+import { storageClasses, workspaceNamespaces, metricsAvailable } from './kube/capabilities';
 import { ensureCertManager } from './kube/certmanager';
-import { assertContextKnown, contexts, forgetContext } from './kube/context';
-import { loadbalancerState, waitForLoadbalancer } from './kube/endpoints';
-import { userEnv } from './kube/exec';
+import { assertContextKnown, contexts, forgetContext, distribution } from './kube/context';
+import {
+  LOADBALANCER_INTERVAL,
+  LOADBALANCER_TRIES,
+  loadbalancerRead,
+  waitForLoadbalancer,
+} from './kube/endpoints';
+import { kube, userEnv } from './kube/exec';
 import { ensureIngress } from './kube/ingress';
-import { tools as allTools, tuning } from './kube/names';
+import { tools as allTools, tuning, CORE_TOOLS } from './kube/names';
 import { namespaceOwner } from './kube/namespace';
 import { reach, reachAdvice, reachOk, reachWhy } from './kube/reachability';
 import { apply } from './kube/release';
 import { newEnough, pretty, tool, toolPresent, which, type Tool } from './kube/tools';
 import { atomicWrite } from './runner/paths';
-import { updateConfig as updateLockedConfig } from './runner/locks';
+import { reproLock, updateConfig as updateLockedConfig } from './runner/locks';
 
 export { GUIDE_FILE, IAM_DOCUMENTS, guide, guidePath, iamDocument } from './eks-docs';
+import { iamDocument as readIamDocument } from './eks-docs';
 
 /**
  * What talking to AWS needs, and it is not the same question as what BUILDING a cluster
@@ -207,9 +216,17 @@ export interface CloudPreflight {
  * about credentials before `aws` exists produces a confusing second complaint about the
  * same absence.
  */
-export function blockers(pre: CloudPreflight): string[] {
+export function blockers(
+  pre: CloudPreflight,
+  { toBuild = false }: { toBuild?: boolean } = {},
+): string[] {
   const out: string[] = [];
+  // kubectl and helm are for BUILDING (prepare runs them after the money is spent), so a
+  // create refuses without them. Nothing else here needs helm, and a delete that refused
+  // for a tool it never runs would be the one command that cannot stop a bill.
+  const coreTools = new Set(Object.keys(CORE_TOOLS));
   for (const name of Object.keys(pre.tools).sort()) {
+    if (!toBuild && coreTools.has(name)) continue;
     const found = pre.tools[name] as Tool;
     if (!toolPresent(found)) {
       out.push(`${name} is not installed`);
@@ -239,8 +256,9 @@ export function blockers(pre: CloudPreflight): string[] {
   return out;
 }
 
+/** Whether this box could BUILD a cluster: the four tools, an identity, a region. */
 export function cloudReady(pre: CloudPreflight): boolean {
-  return blockers(pre).length === 0;
+  return blockers(pre, { toBuild: true }).length === 0;
 }
 
 /**
@@ -257,7 +275,16 @@ export function cloudReady(pre: CloudPreflight): boolean {
  * already asynchronous, so `Promise.all` states it with nothing to join.
  */
 export async function preflight(): Promise<CloudPreflight> {
-  const names = [...new Set([...Object.keys(tuning.CLOUD_PROVISION_TOOLS), IDENTITY_TOOL])];
+  // ALL FOUR TOOLS, not only the two that start the build. kubectl and helm are needed
+  // twenty minutes later, to prepare the cluster, and a create that checked only aws and
+  // eksctl left a cluster that billed and could not run a workspace yet.
+  const names = [
+    ...new Set([
+      ...Object.keys(tuning.CLOUD_PROVISION_TOOLS),
+      IDENTITY_TOOL,
+      ...Object.keys(CORE_TOOLS),
+    ]),
+  ];
   const probed = Object.fromEntries(
     await Promise.all(names.map(async (name) => [name, await tool(name)] as const)),
   );
@@ -270,6 +297,91 @@ export async function preflight(): Promise<CloudPreflight> {
       : Promise.resolve(identity({ error: `${IDENTITY_TOOL} is not installed` })),
   ]);
   return { tools: probed, identity: ident, region: resolvedRegion };
+}
+
+/** Add an existing EKS cluster to this server's kubeconfig without provisioning it. */
+export async function connectExisting(arn: string): Promise<{
+  context: string;
+  account: string;
+  principal: string;
+  region: string;
+  reachable: boolean;
+  access_reason: string;
+}> {
+  const match = arn.match(/^arn:[^:]+:eks:([^:]+):(\d{12}):cluster\/([^/]+)$/u);
+  if (match === null) throw new ValidationError('select a full EKS cluster ARN');
+  const [, region, account, name] = match;
+  if (region === undefined || account === undefined || name === undefined) {
+    throw new ValidationError('select a full EKS cluster ARN');
+  }
+  // Using an existing cluster needs an AWS identity, not the four provisioning tools
+  // or spending approval. Check the resolved account before writing kubeconfig.
+  const caller = await aws.whoami();
+  if (!identityKnown(caller)) {
+    throw new PreflightError(`AWS sign-in is required on the Houston server: ${caller.error}`);
+  }
+  if (caller.account !== account) {
+    throw new AuthorityGateError(
+      `cluster ${arn} belongs to account ${account}; this server is signed in to ${caller.account}`,
+      {
+        kind: 'cluster',
+        subject: arn,
+        approveWith: 'sign in to the selected AWS account',
+        code: 'GATE_WRONG_ACCOUNT',
+      },
+    );
+  }
+  const seen = await aws.describeCluster(name, region);
+  if (seen.state === ABSENT) throw new NotFoundError(`EKS cluster ${arn} was not found`);
+  if (seen.state !== PRESENT) {
+    throw new PreflightError(`EKS cluster ${arn} could not be read with this AWS identity`);
+  }
+  if (String(seen.doc.arn ?? '') !== arn) {
+    throw new PreflightError(`AWS returned a different cluster ARN for ${name} in ${region}`);
+  }
+  // update-kubeconfig selects its new entry as the process-wide current context. Hold
+  // one lock across read, write and restore so two GUI/CLI connections cannot leave
+  // each other's cluster selected. An initially unset context must stay unset too.
+  await reproLock('kubeconfig-connect', async () => {
+    const current = await kube.run(['kubectl', 'config', 'current-context']);
+    const previous = current.returncode === 0 ? current.stdout.trim() : '';
+    const env = userEnv();
+    let wrote: AwsResult | undefined;
+    let updateError: unknown;
+    try {
+      wrote = await awsCli.run(
+        ['aws', 'eks', 'update-kubeconfig', '--name', name, '--region', region, '--alias', arn],
+        { timeoutMs: asMs(IDENTITY_TIMEOUT), ...(env !== undefined ? { env } : {}) },
+      );
+    } catch (error) {
+      updateError = error;
+    }
+    const restore =
+      previous === ''
+        ? ['kubectl', 'config', 'unset', 'current-context']
+        : ['kubectl', 'config', 'use-context', previous];
+    const restored = await kube.run(restore);
+    if (restored.returncode !== 0) {
+      throw new PreflightError(
+        `connected ${arn}, but could not restore the previous kubectl context`,
+      );
+    }
+    if (updateError !== undefined) throw updateError;
+    if (wrote === undefined || wrote.returncode !== 0) {
+      throw new PreflightError(
+        `could not connect ${arn}: ${wrote === undefined ? 'AWS CLI did not answer' : oneLine(wrote)}`,
+      );
+    }
+  });
+  const reached = await reach(arn);
+  return {
+    context: arn,
+    account,
+    principal: caller.arn,
+    region,
+    reachable: reachOk(reached),
+    access_reason: reachOk(reached) ? '' : reachWhy(reached),
+  };
 }
 
 /**
@@ -296,6 +408,12 @@ export const OWNED_TAG_VALUE = 'houston';
  * the delete guards are built on.
  */
 export const EXPIRY_TAG_KEY = 'houston.io/expires';
+/**
+ * The DNS zone workspaces get their public names under, e.g. `rc.example.com` for
+ * `ticket-1234.rc.example.com`. Known once, at build time, and previously typed again as
+ * --domain on every ticket. On the cluster (true on every machine) and in the note.
+ */
+export const ZONE_TAG_KEY = 'houston.io/zone';
 
 /**
  * Days, and short on purpose. The safe case is the default: a reproduction cluster is
@@ -327,9 +445,17 @@ export const CLUSTER_DELETE_TIMEOUT = 2400;
  * abstracts exactly those differently, so it would hide the class of difference this
  * feature exists to expose.
  */
-export const K8S_VERSION = '1.33';
+//
+// The NEWEST version on EKS standard support, not Launchpad's 1.33: 1.33 left standard
+// support on 2026-07-29, and from then its control plane bills $0.60 an hour instead of
+// $0.10 -- about $12 a day for nothing a support ticket needs. `aws eks
+// describe-cluster-versions` listed 1.37 as the newest standard-support version on
+// 2026-10-06 (standard support to 2027-12-01). Move it when the next one is offered.
+export const K8S_VERSION = '1.37';
 export const NODE_INSTANCE_TYPE = 't3.large'; // Launchpad's stated minimum
-export const EBS_CSI_ADDON_VERSION = '1.47.0'; // Launchpad pins this exact version
+// Moves with K8S_VERSION. Launchpad pins 1.47.0, which EKS offers only up to 1.36; for 1.37
+// `aws eks describe-addon-versions` offered 1.55.0 and newer, with 1.66.0 the default.
+export const EBS_CSI_ADDON_VERSION = '1.66.0';
 export const DEFAULT_VPC_CIDR = '10.0.0.0/16';
 
 /**
@@ -397,12 +523,14 @@ export function clusterConfig(
     nodes = DEFAULT_NODES,
     subnets,
     expires = '',
+    zone = '',
     vpcCidr = DEFAULT_VPC_CIDR,
   }: {
     region: string;
     nodes?: number;
     subnets?: Record<string, string>;
     expires?: string;
+    zone?: string;
     vpcCidr?: string;
   },
 ): Record<string, unknown> {
@@ -421,6 +549,7 @@ export function clusterConfig(
       tags: {
         [OWNED_TAG_KEY]: OWNED_TAG_VALUE,
         ...(expires !== '' ? { [EXPIRY_TAG_KEY]: expires } : {}),
+        ...(zone !== '' ? { [ZONE_TAG_KEY]: zone } : {}),
       },
     },
     managedNodeGroups: [
@@ -470,10 +599,22 @@ export function clusterConfig(
  */
 export async function streamTool(
   argv: readonly string[],
-  { phase, emit, timeout }: { phase: EmittedPhase; emit: Emit; timeout: number },
+  {
+    phase,
+    emit,
+    timeout,
+    progress,
+  }: {
+    phase: EmittedPhase;
+    emit: Emit;
+    timeout: number;
+    /** A percentage read from a line, or null; the event carries the best seen so far. */
+    progress?: (line: string) => number | null;
+  },
 ): Promise<number> {
   const seen: string[] = [];
   const env = userEnv();
+  let best: number | null = null;
   const res = await awsCli.stream(argv, {
     timeoutMs: asMs(timeout),
     ...(env === undefined ? {} : { env }),
@@ -485,7 +626,13 @@ export async function streamTool(
         line.startsWith('[') || line.startsWith('2')
           ? line.split(']').slice(1).join(']').trim() || line
           : line;
-      info(emit, shown.slice(0, 200), { phase });
+      if (progress !== undefined) {
+        // NEVER BACKWARDS: eksctl waits on the cluster stack again after the node group,
+        // and a bar that jumped from 70 back to 35 would read as a failure.
+        const read = progress(shown);
+        if (read !== null && (best === null || read > best)) best = read;
+      }
+      info(emit, shown.slice(0, 200), best === null ? { phase } : { phase, pct: best });
     },
   });
   if (res.returncode !== 0) {
@@ -496,6 +643,35 @@ export async function streamTool(
     for (const line of seen.slice(-6)) warn(emit, line.slice(0, 200), { phase });
   }
   return res.returncode;
+}
+
+/**
+ * Where an eksctl create is, as a percentage, from the steps it reports doing.
+ *
+ * eksctl's messages are the only progress a twenty-five-minute build offers. In the order a
+ * real build printed them (us-east-1, 2026-10-05): the cluster stack, the long wait for the
+ * control plane, the first add-ons, the node group stack, the node ready, the storage and
+ * metrics add-ons, and the cluster ready. The control plane wait is most of the time, so the
+ * bar sits at 10% through it. The last 10% is houston's own prepare.
+ *
+ * PLANS ARE NOT PROGRESS. eksctl opens with what it WILL do -- "will create a CloudFormation
+ * stack for cluster itself and 1 managed nodegroup stack(s)", "will install them as EKS
+ * addons" -- and a task tree naming every step ("create managed nodegroup", "wait for
+ * control plane to become ready", "1 task: { create addons }"). Matched as progress, those
+ * put the bar at 85% in the first minute, and it never moves backwards, so it stood there
+ * for the whole build.
+ */
+export function eksctlProgress(line: string): number | null {
+  const text = line.toLowerCase().trim();
+  if (/\bwill\b|sequential|\btasks?:|[{}]/u.test(text)) return null;
+  if (/region is ready/u.test(text)) return 90;
+  if (/aws-ebs-csi-driver|metrics-server/u.test(text) && /addon/u.test(text)) return 85;
+  if (/created \d+ managed nodegroup|node "[^"]*" is ready/u.test(text)) return 80;
+  if (/nodegroup stack|stack "eksctl-[^"]*-nodegroup-/u.test(text)) return 65;
+  if (/creating addon|addon "[^"]*" active/u.test(text)) return 55;
+  if (/waiting for cloudformation stack "eksctl-[^"]*-cluster"/u.test(text)) return 10;
+  if (/building cluster stack|deploying stack "eksctl-[^"]*-cluster"/u.test(text)) return 5;
+  return null;
 }
 
 /**
@@ -612,6 +788,8 @@ export const DEFAULT_REGION_SWEEP: readonly string[] = [
  * one unreachable region must not hold the whole report.
  */
 export const SWEEP_TIMEOUT = 20;
+/** Regions asked at once. `ponytail:` six stays well under the AWS API's per-account rate; raise it if a sweep of 17 still drags. */
+export const SWEEP_WORKERS = 6;
 
 /** The first useful line of a failed AWS call, for a report to carry. */
 export function oneLine(res: AwsResult): string {
@@ -682,72 +860,98 @@ export interface Sweep {
 }
 
 /** One region's clusters, and what could not be reached in it. */
+/** One region's answer: what it holds, and what in it could not be read. */
 async function sweepOneRegion(
+  where: string,
+  ownedOnly: boolean,
+): Promise<{ clusters: SweptCluster[]; unreadable: { region: string; why: string }[] }> {
+  const clusters: SweptCluster[] = [];
+  const unreadable: { region: string; why: string }[] = [];
+  const res = await awsCli.run(
+    [
+      IDENTITY_TOOL,
+      'eks',
+      'list-clusters',
+      '--region',
+      where,
+      '--query',
+      'clusters',
+      '--output',
+      'json',
+    ],
+    { timeoutMs: asMs(SWEEP_TIMEOUT) },
+  );
+  if (res.returncode !== 0) {
+    unreadable.push({ region: where, why: oneLine(res) });
+    return { clusters, unreadable };
+  }
+  let names: string[];
+  try {
+    const parsed: unknown = JSON.parse(res.stdout || '[]');
+    if (!Array.isArray(parsed)) throw new TypeError('not a list');
+    names = parsed.map((entry) => String(entry));
+  } catch {
+    unreadable.push({ region: where, why: 'the cluster list could not be parsed' });
+    return { clusters, unreadable };
+  }
+  for (const name of names) {
+    const seen = await aws.describeCluster(name, where);
+    if (seen.state !== PRESENT) {
+      // The cluster is THERE -- list-clusters just named it -- and could not be
+      // described. Reported as unreadable rather than dropped, because a cluster
+      // silently missing from this list is the exact failure the function exists to
+      // prevent.
+      unreadable.push({ region: where, why: `${name} is there and could not be described` });
+      continue;
+    }
+    const doc = seen.doc;
+    const rawTags = doc.tags;
+    const tags =
+      rawTags !== null && typeof rawTags === 'object' ? (rawTags as Record<string, unknown>) : {};
+    const ours = tags[OWNED_TAG_KEY] === OWNED_TAG_VALUE;
+    if (ownedOnly && !ours) continue;
+    clusters.push({
+      name,
+      region: where,
+      ours,
+      status: String(doc.status ?? ''),
+      arn: String(doc.arn ?? ''),
+      created: String(doc.createdAt ?? ''),
+      expires: String(tags[EXPIRY_TAG_KEY] ?? ''),
+    });
+  }
+  return { clusters, unreadable };
+}
+
+/**
+ * Every region asked, six at a time, answers assembled in the order the regions were named.
+ *
+ * Seventeen regions one after another at up to twenty seconds each is why `cluster list`
+ * took minutes; the calls are independent reads. The ORDER of `clusters` and `unreadable`
+ * follows the argument order whatever finished first, because the CLI and the GUI print
+ * this document and a report must not vary from run to run.
+ */
+async function sweepTheRegions(
   asked: readonly string[],
   emit: Emit,
   out: Sweep,
   ownedOnly: boolean,
 ): Promise<void> {
-  for (const [index, where] of asked.entries()) {
+  let done = 0;
+  const answers = await mapLimit(asked, SWEEP_WORKERS, async (where) => {
+    const answer = await sweepOneRegion(where, ownedOnly);
+    done += 1;
     // `preflight` rather than a phase of its own: PHASES is a closed wire contract and a
     // sweep of regions is a connectivity check, which is what that phase already names.
-    info(emit, `[${String(index + 1)}/${String(asked.length)}] ${where}`, {
+    info(emit, `[${String(done)}/${String(asked.length)}] ${where}`, {
       phase: 'preflight',
-      pct: Math.trunc(((index + 1) * 100) / Math.max(asked.length, 1)),
+      pct: Math.trunc((done * 100) / Math.max(asked.length, 1)),
     });
-    const res = await awsCli.run(
-      [
-        IDENTITY_TOOL,
-        'eks',
-        'list-clusters',
-        '--region',
-        where,
-        '--query',
-        'clusters',
-        '--output',
-        'json',
-      ],
-      { timeoutMs: asMs(SWEEP_TIMEOUT) },
-    );
-    if (res.returncode !== 0) {
-      out.unreadable.push({ region: where, why: oneLine(res) });
-      continue;
-    }
-    let names: string[];
-    try {
-      const parsed: unknown = JSON.parse(res.stdout || '[]');
-      if (!Array.isArray(parsed)) throw new TypeError('not a list');
-      names = parsed.map((entry) => String(entry));
-    } catch {
-      out.unreadable.push({ region: where, why: 'the cluster list could not be parsed' });
-      continue;
-    }
-    for (const name of names) {
-      const seen = await aws.describeCluster(name, where);
-      if (seen.state !== PRESENT) {
-        // The cluster is THERE -- list-clusters just named it -- and could not be
-        // described. Reported as unreadable rather than dropped, because a cluster
-        // silently missing from this list is the exact failure the function exists to
-        // prevent.
-        out.unreadable.push({ region: where, why: `${name} is there and could not be described` });
-        continue;
-      }
-      const doc = seen.doc;
-      const rawTags = doc.tags;
-      const tags =
-        rawTags !== null && typeof rawTags === 'object' ? (rawTags as Record<string, unknown>) : {};
-      const ours = tags[OWNED_TAG_KEY] === OWNED_TAG_VALUE;
-      if (ownedOnly && !ours) continue;
-      out.clusters.push({
-        name,
-        region: where,
-        ours,
-        status: String(doc.status ?? ''),
-        arn: String(doc.arn ?? ''),
-        created: String(doc.createdAt ?? ''),
-        expires: String(tags[EXPIRY_TAG_KEY] ?? ''),
-      });
-    }
+    return answer;
+  });
+  for (const answer of answers) {
+    out.clusters.push(...answer.clusters);
+    out.unreadable.push(...answer.unreadable);
   }
 }
 
@@ -795,7 +999,7 @@ export async function sweepClusters({
     fallback: fallbackWhy,
     owned_only: ownedOnly,
   };
-  await sweepOneRegion(asked, emit, out, ownedOnly);
+  await sweepTheRegions(asked, emit, out, ownedOnly);
   return out;
 }
 
@@ -852,7 +1056,12 @@ export async function keepManifest(
  */
 export async function remember(
   name: string,
-  { region: where, account, expires = '' }: { region: string; account: string; expires?: string },
+  {
+    region: where,
+    account,
+    expires = '',
+    zone = '',
+  }: { region: string; account: string; expires?: string; zone?: string },
 ): Promise<void> {
   try {
     const target = pointerPath(name);
@@ -866,6 +1075,7 @@ export async function remember(
           account,
           provider: 'eks',
           expires,
+          zone,
           created_at: `${new Date().toISOString().slice(0, 19)}Z`,
         },
         null,
@@ -875,6 +1085,49 @@ export async function remember(
   } catch {
     // A pointer is a convenience; the tag is the authority.
   }
+}
+
+/** The region an EKS ARN names, or '' for any other context. */
+function regionOfContext(context: string): string {
+  return context.startsWith('arn:aws:eks:') ? (context.split(':')[3] ?? '') : '';
+}
+
+/** The DNS zone the build note holds for a cluster, or '' when this box has none. */
+export function zoneOf(name: string): string {
+  const record = remembered().find((entry) => entry.name === name);
+  const zone = record?.zone;
+  return typeof zone === 'string' ? zone : '';
+}
+
+/**
+ * Set or change a cluster's zone after the build: in the note here, and as a tag on the
+ * cluster so every other machine reads the same answer. Best effort on the tag -- the
+ * note is written first, so a refused tag still leaves this box able to default a name.
+ */
+export async function rememberZone(name: string, region: string, zone: string): Promise<void> {
+  const record = remembered().find((entry) => entry.name === name);
+  await remember(name, {
+    region: typeof record?.region === 'string' && record.region !== '' ? record.region : region,
+    account: typeof record?.account === 'string' ? record.account : '',
+    expires: typeof record?.expires === 'string' ? record.expires : '',
+    zone,
+  });
+  const seen = await aws.describeCluster(name, region);
+  if (seen.state !== PRESENT) return;
+  const arn = String(seen.doc.arn ?? '');
+  if (arn === '') return;
+  await awsCli.run(
+    [
+      IDENTITY_TOOL,
+      'eks',
+      'tag-resource',
+      '--resource-arn',
+      arn,
+      '--tags',
+      `${ZONE_TAG_KEY}=${zone}`,
+    ],
+    { timeoutMs: asMs(IDENTITY_TIMEOUT) },
+  );
 }
 
 /**
@@ -911,6 +1164,19 @@ export function forget(name: string): void {
  * before that change must not have it vanish from `doctor`'s warning -- the whole point
  * of that warning is a cluster nobody is thinking about any more.
  */
+/**
+ * The region a cluster was built in, from its local note, or '' when this box has none.
+ *
+ * `cluster delete` without `--region` looked in the AWS CLI's default region, found nothing,
+ * printed "nothing to delete" and left the cluster billing where `cluster create` had put
+ * it. The note written at build time already held the answer.
+ */
+export function rememberedRegion(name: string): string {
+  const record = remembered().find((entry) => entry.name === name);
+  const region = record?.region;
+  return typeof region === 'string' ? region : '';
+}
+
 export function remembered(): Record<string, unknown>[] {
   const out: Record<string, unknown>[] = [];
   const root = joinPath(config.home(), 'clusters');
@@ -945,7 +1211,7 @@ async function refuseACreateWeShouldNotMake(
 ): Promise<[CloudPreflight, string]> {
   const pre = await aws.preflight();
   const resolved = where !== '' ? where : pre.region;
-  const stopping = blockers(pre);
+  const stopping = blockers(pre, { toBuild: true });
   if (stopping.length > 0) {
     throw new PreflightError(`cannot build an EKS cluster from here: ${stopping.join('; ')}`);
   }
@@ -986,11 +1252,34 @@ async function refuseACreateWeShouldNotMake(
   return [pre, resolved];
 }
 
+/**
+ * Where the user's bare `kubectl` pointed before a build, put back: a context, or none.
+ *
+ * houston never moves it. eksctl writes its own context and makes it current, and `aws eks
+ * update-kubeconfig` does the same, so a person whose `kubectl` pointed at production
+ * found it pointing at the new, billing cluster. Read AFTER eksctl, "the previous context"
+ * was eksctl's own, and that is what got restored (measured on a real build, 2026-10-05).
+ */
+async function currentKubectlContext(): Promise<string> {
+  const pointed = await kube.run(['kubectl', 'config', 'current-context']);
+  return pointed.returncode === 0 ? pointed.stdout.trim() : '';
+}
+
+async function pointKubectlBack(previous: string): Promise<void> {
+  if ((await currentKubectlContext()) === previous) return;
+  await kube.run(
+    previous === ''
+      ? ['kubectl', 'config', 'unset', 'current-context']
+      : ['kubectl', 'config', 'use-context', previous],
+  );
+}
+
 /** Point kubectl at what was just built, and make it able to serve a workspace. */
 async function adoptTheNewCluster(
   emit: Emit,
   name: string,
   where: string,
+  previous: string,
 ): Promise<[string, Prepared | Record<string, never>]> {
   const described = await aws.describeCluster(name, where);
   const context = String(described.doc?.arn ?? '');
@@ -1001,9 +1290,12 @@ async function adoptTheNewCluster(
   let prepared: Prepared | Record<string, never> = {};
   if (context === '') return [context, prepared];
 
+  // `aws eks update-kubeconfig` switches the merged kubeconfig's current context to the new
+  // cluster; `previous` was read before eksctl ran, and is put back below.
   await awsCli.run(['aws', 'eks', 'update-kubeconfig', '--name', name, '--region', where], {
     timeoutMs: asMs(IDENTITY_TIMEOUT),
   });
+  await pointKubectlBack(previous);
   // AND A COPY BESIDE THE MANIFESTS. The merged kubeconfig above is the one kubectl uses
   // by default, and it is also the one that gets tidied, moved between machines, or
   // simply not there on somebody else's laptop -- at which point the only way back to
@@ -1043,15 +1335,18 @@ async function adoptTheNewCluster(
   // command is ceremony houston is imposing on itself. An ARN is also the worst possible
   // thing to ask somebody to retype.
   //
-  // Announced rather than done quietly, because it changes where an un-flagged `up`
+  // Announced rather than done quietly, because it changes where `up --runtime kubernetes`
   // lands, and a default that moved without saying so is worse than one you have to set.
+  // It does NOT move a plain `up` off Docker (lifecycle/request.ts inferRuntime), and the
+  // earlier wording said it did; people then ran `up` and got a Compose workspace.
   await updateLockedConfig((cfg) => {
     cfg[config.KUBE_CONTEXT_KEY] = context;
   });
   info(
     emit,
-    "set as this box's default cluster — `up` goes here without --context now (change " +
-      'with `houston config set kubernetes.context <name>`)',
+    "set as this box's default cluster — `houston up --runtime kubernetes` lands here " +
+      'without --context; a plain `up` still makes a Docker workspace (change with ' +
+      '`houston config set kubernetes.context <name>`)',
     { phase: 'provision' },
   );
   try {
@@ -1077,6 +1372,7 @@ async function buildTheCluster(
   name: string,
   pre: CloudPreflight,
   where: string,
+  zone: string,
 ): Promise<void> {
   // THE NOTE GOES DOWN BEFORE THE CALL, and is only cleared once eksctl has returned. A
   // note written afterwards describes nothing: the whole case it exists for is the
@@ -1108,6 +1404,7 @@ async function buildTheCluster(
   try {
     code = await aws.streamTool(['eksctl', 'create', 'cluster', '-f', kept], {
       phase: 'provision',
+      progress: eksctlProgress,
       emit,
       timeout: CLUSTER_CREATE_TIMEOUT,
     });
@@ -1120,13 +1417,16 @@ async function buildTheCluster(
     // before failing, and houston is not going to decide on its own to destroy them.
     throw new CreateFailedError(
       `eksctl could not build '${name}' in ${where} (exit ${String(code)}); its last lines ` +
-        'are above. A note has been kept: `houston doctor` reports it, because a partial ' +
-        'create can still be billing.',
+        'are above. A note has been kept: `houston doctor` and `houston cluster overview` ' +
+        'report it, because a partial create can still be billing. Stop the bill with ' +
+        `\`houston cluster delete ${name} --region ${where}\`; if that says there is no ` +
+        `cluster, \`eksctl delete cluster --name ${name} --region ${where} --wait\` removes ` +
+        'the stack it left.',
     );
   }
 
   clearJournal(entry);
-  await remember(name, { region: where, account: pre.identity.account, expires });
+  await remember(name, { region: where, account: pre.identity.account, expires, zone });
 }
 
 /**
@@ -1144,12 +1444,15 @@ export async function createCluster(
     nodes = DEFAULT_NODES,
     subnets,
     expiresDays = DEFAULT_EXPIRY_DAYS,
+    zone = '',
     emit = nullEmit,
   }: {
     region?: string;
     nodes?: number;
     subnets?: Record<string, string>;
     expiresDays?: number | null;
+    /** The DNS zone workspace names live under; '' for none. Tagged and noted. */
+    zone?: string;
     emit?: Emit;
   } = {},
 ): Promise<Record<string, unknown>> {
@@ -1159,6 +1462,7 @@ export async function createCluster(
   const doc = clusterConfig(name, {
     region: resolved,
     nodes,
+    zone,
     ...(subnets === undefined ? {} : { subnets }),
     expires,
   });
@@ -1170,10 +1474,17 @@ export async function createCluster(
     { phase: 'provision' },
   );
 
-  await buildTheCluster(doc, emit, expires, name, pre, resolved);
-  info(emit, `cluster '${name}' is up in ${resolved}`, { phase: 'provision' });
+  // Read BEFORE eksctl runs, which moves it; put back on a failed build too.
+  const previous = await currentKubectlContext();
+  try {
+    await buildTheCluster(doc, emit, expires, name, pre, resolved, zone);
+  } catch (error) {
+    await pointKubectlBack(previous);
+    throw error;
+  }
+  info(emit, `cluster '${name}' is up in ${resolved}`, { phase: 'provision', pct: 100 });
 
-  const [context, prepared] = await adoptTheNewCluster(emit, name, resolved);
+  const [context, prepared] = await adoptTheNewCluster(emit, name, resolved, previous);
   return {
     name,
     region: resolved,
@@ -1262,15 +1573,26 @@ async function forgetTheContexts(
   // `<iam-user>@<cluster>.<region>.eksctl.io`, whose user part varies.
   const suffix = `@${name}.${where}.eksctl.io`;
   const [known] = await contexts();
-  for (const alias of new Set(
-    known.filter((entry) => entry.endsWith(suffix) || entry.endsWith(`:cluster/${name}`)),
-  )) {
+  // An ARN with the same final name may belong to another account or region. The
+  // eksctl spelling omits the account entirely, so leave it if another account's
+  // ARN for this name and region is present rather than guessing its owner.
+  const ambiguousAlias = known.some(
+    (entry) =>
+      entry !== context &&
+      entry.startsWith('arn:aws:eks:') &&
+      entry.split(':')[3] === where &&
+      entry.endsWith(`:cluster/${name}`),
+  );
+  const remove = new Set(
+    known.filter((entry) => entry === context || (!ambiguousAlias && entry.endsWith(suffix))),
+  );
+  for (const alias of remove) {
     await forgetContext(alias);
   }
   // AND THE DEFAULT GOES WITH IT. A `kubernetes.context` pointing at a cluster that no
   // longer exists makes the next `up` fail on a context that cannot be found, which reads
   // as a bug in `up` rather than as the consequence of a delete.
-  if (config.defaultKubeContext() === context) {
+  if (config.defaultKubeContext() === context || remove.has(config.defaultKubeContext())) {
     await updateLockedConfig((cfg) => {
       cfg[config.KUBE_CONTEXT_KEY] = '';
     });
@@ -1293,14 +1615,47 @@ export async function deleteCluster(
   {
     region: where = '',
     force = false,
+    expectedArn = '',
     emit = nullEmit,
-  }: { region?: string; force?: boolean; emit?: Emit } = {},
+  }: { region?: string; force?: boolean; expectedArn?: string; emit?: Emit } = {},
 ): Promise<boolean> {
   const pre = await aws.preflight();
-  const resolved = where !== '' ? where : pre.region;
+  // Typed region, else the region the build note remembers, else the AWS CLI's default.
+  const resolved = where !== '' ? where : rememberedRegion(name) || pre.region;
   const stopping = blockers(pre);
   if (stopping.length > 0) {
     throw new PreflightError(`cannot delete an EKS cluster from here: ${stopping.join('; ')}`);
+  }
+
+  // A browser selection contains the full ARN. Refuse if the AWS identity changed
+  // after review; a same-name cluster in another account can carry our ownership tag.
+  const expected =
+    expectedArn !== ''
+      ? expectedArn.match(/^arn:[^:]+:eks:([^:]+):(\d{12}):cluster\/([^/]+)$/u)
+      : null;
+  if (
+    expectedArn !== '' &&
+    (expected === null || expected[1] !== resolved || expected[3] !== name)
+  ) {
+    throw new ValidationError('the selected EKS cluster ARN does not match its name and region');
+  }
+  const saved = remembered().filter((entry) => entry.name === name && entry.region === resolved);
+  const expectedAccount =
+    expected?.[2] ??
+    (saved.length === 1 && typeof saved[0]?.account === 'string'
+      ? (saved[0].account as string)
+      : '');
+  if (expectedAccount !== '' && expectedAccount !== pre.identity.account) {
+    throw new AuthorityGateError(
+      `cannot delete '${name}' in ${resolved}: selected account ${expectedAccount} differs from ` +
+        `the current AWS account ${pre.identity.account}. Reconnect to the selected account and re-check.`,
+      {
+        kind: 'cluster',
+        subject: name,
+        approveWith: 'use the selected AWS account',
+        code: 'GATE_WRONG_ACCOUNT',
+      },
+    );
   }
 
   const place = `'${name}' in ${resolved} (account ${pre.identity.account})`;
@@ -1332,8 +1687,21 @@ export async function deleteCluster(
     );
   }
 
+  if (expectedArn !== '' && String(mine.doc.arn ?? '') !== expectedArn) {
+    throw new AuthorityGateError(
+      `cannot delete '${name}': AWS returned ${String(mine.doc.arn ?? 'no ARN')} instead of ${expectedArn}`,
+      {
+        kind: 'cluster',
+        subject: name,
+        approveWith: 're-check the selected cluster',
+        code: 'GATE_WRONG_CLUSTER',
+      },
+    );
+  }
+
   const context = await confirmDeletion(emit, force, mine, place);
 
+  await releaseLoadBalancers(context, emit);
   info(emit, `deleting ${place} — this takes 10–20 minutes`, { phase: 'teardown' });
   // `--wait` is NOT optional. Without it eksctl returns as soon as the stack delete is
   // accepted, and the caller gets a success for a teardown that may still fail halfway
@@ -1356,6 +1724,512 @@ export async function deleteCluster(
 }
 
 /**
+ * Every LoadBalancer Service gone before eksctl is asked to delete the VPC.
+ *
+ * A LoadBalancer Service holds network interfaces inside the cluster's VPC, and while it
+ * exists the VPC delete hangs. The guide had the reader run a raw `kubectl delete svc -A`
+ * against the pinned kubeconfig first -- step 4 of the teardown, the step most likely to
+ * be skipped. houston installed that Service (Traefik's), so houston removes it, and waits
+ * for AWS to let go of the load balancer before it goes on. A context that cannot be
+ * reached skips this: the guards above have already decided a forced delete may proceed.
+ */
+async function releaseLoadBalancers(context: string, emit: Emit): Promise<void> {
+  if (context === '') return;
+  const res = await kube.run(
+    [
+      'kubectl',
+      '--context',
+      context,
+      'delete',
+      'svc',
+      '-A',
+      '--field-selector',
+      'spec.type=LoadBalancer',
+      '--ignore-not-found',
+    ],
+    { timeout: APPLY_TIMEOUT_S },
+  );
+  // A FAILED DELETE IS NOT YET A FAILURE. `kubectl delete` waits on each Service's
+  // load-balancer finalizer, which AWS clears only once the load balancer is gone, so a
+  // timeout is usually a delete that went through and is still letting go. It warned
+  // "could not be removed" about Services that were gone, and skipped the wait that would
+  // have said so. The read below decides, either way.
+  if (res.returncode !== 0) {
+    info(
+      emit,
+      `the load balancer Services were asked to go (${oneLine(res)}); checking whether they did`,
+      { phase: 'teardown' },
+    );
+  } else {
+    info(emit, 'load balancer released — waiting for AWS to let go of it', { phase: 'teardown' });
+  }
+  let refused = false;
+  for (let attempt = 0; attempt < LOADBALANCER_TRIES; attempt += 1) {
+    const read = await loadbalancerRead(context);
+    refused = read.refused;
+    // "Could not ask" is not "gone": read as nothing left, a refused read sent the VPC to
+    // eksctl with the load balancer still in it.
+    if (!read.refused && read.name === '' && read.address === '' && read.pending === 0) return;
+    await new Promise((resolve) => setTimeout(resolve, LOADBALANCER_INTERVAL * 1000));
+  }
+  warn(
+    emit,
+    refused
+      ? 'the cluster could not be read to confirm its load balancer is gone; eksctl may hang on the VPC'
+      : 'a load balancer is still there after waiting; eksctl may hang on the VPC',
+    { phase: 'teardown' },
+  );
+}
+
+/**
+ * Approve an AWS account for spending on this box, and optionally record the Let's
+ * Encrypt contact: the same two keys `houston config set` writes, for the GUI's build
+ * flow. Through the locked writer, like every config write, so a `serve` and a CLI run
+ * at the same moment cannot lose each other's change. The caller decides who may.
+ */
+export async function approveAccount(
+  account: string,
+  { acmeEmail = '' }: { acmeEmail?: string } = {},
+): Promise<{ account: string; approved: string[]; acme_email: string }> {
+  if (!/^[0-9]{12}$/u.test(account)) {
+    throw new ValidationError('`account` wants the 12-digit AWS account id');
+  }
+  if (acmeEmail !== '' && !acmeEmail.includes('@')) {
+    throw new ValidationError('`acme_email` wants an email address, or nothing');
+  }
+  let approved: string[] = [];
+  const cfg = await updateLockedConfig((current) => {
+    const known = new Set(
+      String(current[config.CLOUD_ACCOUNTS_KEY] ?? '')
+        .split(',')
+        .map((part) => part.trim())
+        .filter(Boolean),
+    );
+    known.add(account);
+    approved = [...known].sort();
+    current[config.CLOUD_ACCOUNTS_KEY] = approved.join(',');
+    if (acmeEmail !== '') current.acme_email = acmeEmail;
+  });
+  return { account, approved, acme_email: String(cfg.acme_email ?? '') };
+}
+
+/**
+ * Move a cluster's reminder date, `days` from today: the tag on the cluster and the note.
+ *
+ * The date is a reminder and nothing deletes on it, but extending it took `aws eks
+ * tag-resource` by hand, and until then doctor and the overview nagged about a cluster
+ * still in use. Only a cluster houston built: the same tag that authorises a delete.
+ */
+export async function keepCluster(
+  name: string,
+  { days, region: where = '' }: { days: number; region?: string },
+): Promise<{ name: string; region: string; expires: string; days: number }> {
+  const pre = await aws.preflight();
+  const region = where !== '' ? where : rememberedRegion(name) || pre.region;
+  const seen = await aws.describeCluster(name, region);
+  if (seen.state === ABSENT) {
+    throw new NotFoundError(
+      `no EKS cluster named '${name}' in ${region} — \`houston cluster list\` finds it in whichever region it is`,
+    );
+  }
+  if (seen.state !== PRESENT) {
+    throw new PreflightError(
+      `'${name}' in ${region} could not be read, so its tags cannot be changed`,
+    );
+  }
+  const tags = (seen.doc.tags ?? {}) as Record<string, unknown>;
+  if (tags[OWNED_TAG_KEY] !== OWNED_TAG_VALUE) {
+    throw new AuthorityGateError(
+      `'${name}' in ${region} was not created by houston — it carries no ${OWNED_TAG_KEY}=` +
+        `${OWNED_TAG_VALUE} tag, and houston changes only the clusters it built.`,
+      {
+        kind: 'cluster',
+        subject: `${name} (${region})`,
+        approveWith: `aws eks tag-resource --resource-arn <arn> --tags ${EXPIRY_TAG_KEY}=<date>`,
+        code: 'GATE_KEEP_UNOWNED',
+      },
+    );
+  }
+  const expires = expiryDate(days);
+  const arn = String(seen.doc.arn ?? '');
+  const res = await awsCli.run(
+    [
+      IDENTITY_TOOL,
+      'eks',
+      'tag-resource',
+      '--resource-arn',
+      arn,
+      '--tags',
+      `${EXPIRY_TAG_KEY}=${expires}`,
+    ],
+    { timeoutMs: asMs(IDENTITY_TIMEOUT) },
+  );
+  if (res.returncode !== 0)
+    throw new PreflightError(`the expiry tag could not be written: ${oneLine(res)}`);
+  const record = remembered().find((entry) => entry.name === name);
+  await remember(name, {
+    region,
+    account: typeof record?.account === 'string' ? record.account : pre.identity.account,
+    expires,
+    zone: typeof record?.zone === 'string' ? record.zone : '',
+  });
+  return { name, region, expires, days };
+}
+
+/** The cluster-scoped policy an access entry needs for Helm and namespaces. */
+const EKS_ADMIN_POLICY_ARN = 'arn:aws:eks::aws:cluster-access-policy/AmazonEKSAdminPolicy';
+/** The Kubernetes group the shipped RBAC document binds. */
+const ENGINEERS_GROUP = 'houston-engineers';
+
+/**
+ * Let a colleague run workspaces on a cluster: the EKS access entry, the cluster-scoped
+ * AWS policy, and the in-cluster RBAC the shipped document grants, in that order.
+ *
+ * The guide's colleague-access section: three aws commands and a kubectl apply, by hand,
+ * and "the first alone is not enough" -- with only the IAM half every kubectl says
+ * Unauthorized. An entry that already exists is not a failure: the policy and the RBAC
+ * are applied again, which is what makes a second run a repair rather than an error.
+ */
+export async function shareCluster(
+  name: string,
+  { user, region: where = '' }: { user: string; region?: string },
+): Promise<{
+  name: string;
+  region: string;
+  user: string;
+  principal: string;
+  already: boolean;
+  lines: string[];
+}> {
+  const pre = await aws.preflight();
+  const region = where !== '' ? where : rememberedRegion(name) || pre.region;
+  const seen = await aws.describeCluster(name, region);
+  if (seen.state === ABSENT) {
+    throw new NotFoundError(
+      `no EKS cluster named '${name}' in ${region} — \`houston cluster list\` finds it in whichever region it is`,
+    );
+  }
+  if (seen.state !== PRESENT) {
+    throw new PreflightError(
+      `'${name}' in ${region} could not be read, so nothing can be granted on it`,
+    );
+  }
+  // THE TAG IS THE GATE, as it is for keep and delete: this grants cluster admin, and the
+  // operator policy may create access entries on any cluster in the account.
+  const tags = (seen.doc.tags ?? {}) as Record<string, unknown>;
+  if (tags[OWNED_TAG_KEY] !== OWNED_TAG_VALUE) {
+    throw new AuthorityGateError(
+      `'${name}' in ${region} was not created by houston — it carries no ${OWNED_TAG_KEY}=` +
+        `${OWNED_TAG_VALUE} tag, and houston grants access only to the clusters it built.`,
+      {
+        kind: 'cluster',
+        subject: `${name} (${region})`,
+        approveWith: `aws eks create-access-entry --cluster-name ${name} --region ${region} --principal-arn <arn>`,
+        code: 'GATE_SHARE_UNOWNED',
+      },
+    );
+  }
+  const arn = String(seen.doc.arn ?? '');
+  const principal = user.includes(':') ? user : `arn:aws:iam::${pre.identity.account}:user/${user}`;
+  const entry = await awsCli.run(
+    [
+      IDENTITY_TOOL,
+      'eks',
+      'create-access-entry',
+      '--cluster-name',
+      name,
+      '--region',
+      region,
+      '--principal-arn',
+      principal,
+      '--type',
+      'STANDARD',
+      '--kubernetes-groups',
+      ENGINEERS_GROUP,
+    ],
+    { timeoutMs: asMs(IDENTITY_TIMEOUT) },
+  );
+  const already = entry.returncode !== 0 && entry.stderr.includes('ResourceInUseException');
+  if (entry.returncode !== 0 && !already) {
+    throw new PreflightError(
+      `the access entry for ${principal} could not be created: ${oneLine(entry)}`,
+    );
+  }
+  const policy = await awsCli.run(
+    [
+      IDENTITY_TOOL,
+      'eks',
+      'associate-access-policy',
+      '--cluster-name',
+      name,
+      '--region',
+      region,
+      '--principal-arn',
+      principal,
+      '--policy-arn',
+      EKS_ADMIN_POLICY_ARN,
+      '--access-scope',
+      'type=cluster',
+    ],
+    { timeoutMs: asMs(IDENTITY_TIMEOUT) },
+  );
+  if (policy.returncode !== 0 && !policy.stderr.includes('ResourceInUseException')) {
+    throw new PreflightError(`the cluster policy could not be associated: ${oneLine(policy)}`);
+  }
+  const rbac = await kube.run(['kubectl', '--context', arn, 'apply', '-f', '-'], {
+    input: readIamDocument('rbac'),
+    timeout: APPLY_TIMEOUT_S,
+  });
+  if (rbac.returncode !== 0) {
+    // HALF A GRANT is still a grant: the access entry and its AmazonEKSAdminPolicy are in
+    // place. Say so, and how to take them back, rather than leave a silent admin behind.
+    throw new PreflightError(
+      `the in-cluster RBAC could not be applied (${oneLine(rbac)}). ${principal} already has ` +
+        `an access entry on '${name}' with AmazonEKSAdminPolicy; run this again once kubectl ` +
+        `reaches the cluster, or take it back with \`aws eks delete-access-entry --cluster-name ` +
+        `${name} --region ${region} --principal-arn ${principal}\`.`,
+    );
+  }
+  return {
+    name,
+    region,
+    user,
+    principal,
+    already,
+    lines: [
+      `aws eks update-kubeconfig --name ${name} --region ${region}`,
+      `houston up --version <version> --name <ticket> --context ${name}`,
+    ],
+  };
+}
+
+/** One thing AWS still holds after a delete, and the command that removes it. */
+export interface Leftover {
+  kind: string;
+  id: string;
+  detail: string;
+  /** The command that removes it; '' when nothing ties it to this cluster. */
+  fix: string;
+  /** Tied to the deleted cluster by a tag eksctl or Kubernetes put on it. */
+  certain: boolean;
+}
+
+export interface Leftovers {
+  found: Leftover[];
+  unreadable: { kind: string; why: string }[];
+}
+
+/**
+ * What outlives a deleted cluster and keeps billing, read from AWS with the operator
+ * policy's own rights. "The command returned" is not "nothing is billing": a volume left
+ * by a workspace deleted with the cluster, a load balancer, a NAT gateway, an Elastic IP,
+ * a CloudFormation stack that rolled back half way.
+ *
+ * ONLY THIS CLUSTER'S. A region holds colleagues' clusters too, and a region-wide list of
+ * load balancers and NAT gateways, each with its delete command, hands out commands that
+ * break someone else's running cluster. So each resource is tied to `name` by a tag:
+ * CloudFormation's `aws:cloudformation:stack-name` on the network eksctl built (the NAT
+ * gateway, the Elastic IP), `kubernetes.io/cluster/<name>` on what Kubernetes created
+ * (the load balancer, and a volume when the EBS driver tags it). A Rocket.Chat volume
+ * that carries no cluster tag at all is shown as a candidate WITHOUT a command, and one
+ * tagged for another cluster is not shown.
+ */
+export async function sweepLeftovers(name: string, region: string): Promise<Leftovers> {
+  const out: Leftovers = { found: [], unreadable: [] };
+  const ownTag = `kubernetes.io/cluster/${name}`;
+  const stackFilter = `Name=tag:aws:cloudformation:stack-name,Values=eksctl-${name}-cluster`;
+  const ask = async (kind: string, args: string[]): Promise<unknown> => {
+    const res = await awsCli.run([IDENTITY_TOOL, ...args, '--region', region, '--output', 'json'], {
+      timeoutMs: asMs(SWEEP_TIMEOUT),
+    });
+    if (res.returncode !== 0) {
+      out.unreadable.push({ kind, why: oneLine(res) });
+      return null;
+    }
+    try {
+      return JSON.parse(res.stdout || 'null');
+    } catch {
+      out.unreadable.push({ kind, why: 'the answer could not be parsed' });
+      return null;
+    }
+  };
+  const rows = (value: unknown): string[][] =>
+    Array.isArray(value)
+      ? value
+          .filter(Array.isArray)
+          .map((row: unknown[]) =>
+            row.map((cell) => (cell === null || cell === undefined ? '' : String(cell))),
+          )
+      : [];
+  const taggedOwn = (value: unknown, idKey: string): Set<string> => {
+    const owned = new Set<string>();
+    const doc = (value ?? {}) as {
+      TagDescriptions?: { Tags?: { Key?: string; Value?: string }[] }[];
+    };
+    for (const entry of doc.TagDescriptions ?? []) {
+      const tags = entry.Tags ?? [];
+      const mine = tags.some(
+        (tag) => tag.Key === ownTag || (tag.Key === 'elbv2.k8s.aws/cluster' && tag.Value === name),
+      );
+      const id = (entry as Record<string, unknown>)[idKey];
+      if (mine && typeof id === 'string') owned.add(id);
+    }
+    return owned;
+  };
+
+  // Volumes: the Rocket.Chat ones (the EBS driver's created-for tag), then by cluster tag.
+  for (const [id, size, created, keys] of rows(
+    await ask('volume', [
+      'ec2',
+      'describe-volumes',
+      '--filters',
+      'Name=status,Values=available',
+      'Name=tag-key,Values=kubernetes.io/created-for/pvc/name',
+      '--query',
+      "Volumes[].[VolumeId,Size,CreateTime,join(',',Tags[].Key)]",
+    ]),
+  )) {
+    const tagKeys = (keys ?? '').split(',');
+    const detail = `${size ?? '?'} GB, created ${created ?? '?'}`;
+    if (tagKeys.includes(ownTag)) {
+      out.found.push({
+        kind: 'volume',
+        id: id ?? '',
+        detail: `${detail} — an IAM administrator deletes it`,
+        fix: `aws ec2 delete-volume --region ${region} --volume-id ${id ?? ''}`,
+        certain: true,
+      });
+    } else if (!tagKeys.some((key) => key.startsWith('kubernetes.io/cluster/'))) {
+      out.found.push({
+        kind: 'volume',
+        id: id ?? '',
+        certain: false,
+        fix: '',
+        detail: `${detail} — a Rocket.Chat volume not tagged with any cluster; check it is not another cluster's before deleting`,
+      });
+    }
+  }
+
+  // Load balancers: listed, then kept only when their tags name this cluster.
+  const classic = rows(
+    await ask('load balancer', [
+      'elb',
+      'describe-load-balancers',
+      '--query',
+      'LoadBalancerDescriptions[].[LoadBalancerName,DNSName]',
+    ]),
+  );
+  if (classic.length > 0) {
+    const owned = taggedOwn(
+      await ask('load balancer', [
+        'elb',
+        'describe-tags',
+        '--load-balancer-names',
+        ...classic.slice(0, 20).map((row) => row[0] ?? ''),
+      ]),
+      'LoadBalancerName',
+    );
+    for (const [id, dns] of classic) {
+      if (!owned.has(id ?? '')) continue;
+      out.found.push({
+        kind: 'load balancer',
+        id: id ?? '',
+        detail: dns ?? '',
+        certain: true,
+        fix: `aws elb delete-load-balancer --region ${region} --load-balancer-name ${id ?? ''}`,
+      });
+    }
+  }
+  const modern = rows(
+    await ask('load balancer', [
+      'elbv2',
+      'describe-load-balancers',
+      '--query',
+      'LoadBalancers[].[LoadBalancerName,DNSName,LoadBalancerArn]',
+    ]),
+  );
+  if (modern.length > 0) {
+    const owned = taggedOwn(
+      await ask('load balancer', [
+        'elbv2',
+        'describe-tags',
+        '--resource-arns',
+        ...modern.slice(0, 20).map((row) => row[2] ?? ''),
+      ]),
+      'ResourceArn',
+    );
+    for (const [id, dns, arn] of modern) {
+      if (!owned.has(arn ?? '')) continue;
+      out.found.push({
+        kind: 'load balancer',
+        id: id ?? '',
+        detail: dns ?? '',
+        certain: true,
+        fix: `aws elbv2 delete-load-balancer --region ${region} --load-balancer-arn ${arn ?? ''}`,
+      });
+    }
+  }
+
+  // The network eksctl built: tagged with its stack by CloudFormation.
+  for (const [id, vpc] of rows(
+    await ask('nat gateway', [
+      'ec2',
+      'describe-nat-gateways',
+      '--filter',
+      'Name=state,Values=available',
+      stackFilter,
+      '--query',
+      'NatGateways[].[NatGatewayId,VpcId]',
+    ]),
+  )) {
+    out.found.push({
+      kind: 'nat gateway',
+      id: id ?? '',
+      detail: `in ${vpc ?? '?'}`,
+      certain: true,
+      fix: `aws ec2 delete-nat-gateway --region ${region} --nat-gateway-id ${id ?? ''}`,
+    });
+  }
+  for (const [id, ip] of rows(
+    await ask('elastic ip', [
+      'ec2',
+      'describe-addresses',
+      '--filters',
+      stackFilter,
+      '--query',
+      'Addresses[?AssociationId==null].[AllocationId,PublicIp]',
+    ]),
+  )) {
+    out.found.push({
+      kind: 'elastic ip',
+      id: id ?? '',
+      detail: ip ?? '',
+      certain: true,
+      fix: `aws ec2 release-address --region ${region} --allocation-id ${id ?? ''}`,
+    });
+  }
+  for (const [id, status] of rows(
+    await ask('stack', [
+      'cloudformation',
+      'list-stacks',
+      '--query',
+      `StackSummaries[?starts_with(StackName, 'eksctl-${name}-') && StackStatus!='DELETE_COMPLETE'].[StackName,StackStatus]`,
+    ]),
+  )) {
+    out.found.push({
+      kind: 'stack',
+      id: id ?? '',
+      detail: status ?? '',
+      certain: true,
+      fix:
+        `eksctl delete cluster --name ${name} --region ${region} --wait, or if it says the cluster ` +
+        `does not exist: aws cloudformation delete-stack --region ${region} --stack-name ${id ?? ''}`,
+    });
+  }
+  return out;
+}
+
+/**
  * The StorageClass a fresh EKS cluster does NOT have, and the reason `cluster create` on
  * its own hands back something that cannot run a workspace.
  *
@@ -1370,6 +2244,60 @@ export async function deleteCluster(
  * scheduler put the pod in another, which fails in a way that reads as a scheduling
  * problem rather than a storage one.
  */
+/**
+ * The upstream metrics-server manifest, pinned. `stats` and the GUI's Containers tab read
+ * `kubectl top`, which needs it, and `cluster create` did not install it: the guide had
+ * the reader apply this by hand. kubectl fetches it, which is the kubectl seam's business.
+ */
+/** Seconds a `kubectl apply` of a small manifest may take over the network. */
+const APPLY_TIMEOUT_S = 120;
+
+export const METRICS_SERVER_VERSION = 'v0.7.2';
+export const METRICS_SERVER_MANIFEST =
+  'https://github.com/kubernetes-sigs/metrics-server/releases/download/' +
+  `${METRICS_SERVER_VERSION}/components.yaml`;
+
+/**
+ * metrics-server on a managed cluster that lacks it; adopted where it answers already.
+ *
+ * ONLY on a managed cluster. kind needs an insecure-TLS patch this manifest does not carry
+ * (and `stats` says so there), and k3s ships its own. A refused install is reported, not
+ * fatal: the cluster runs workspaces without it, only `stats` goes quiet.
+ */
+export async function installMetricsServer(
+  context: string,
+  distribution: string,
+  emit: Emit,
+  out: { already: string[]; metrics_server: boolean },
+): Promise<void> {
+  if (distribution !== 'eks') return;
+  if (await metricsAvailable(context)) {
+    out.already.push('metrics-server');
+    out.metrics_server = true;
+    return;
+  }
+  const res = await kube.run(
+    ['kubectl', '--context', context, 'apply', '-f', METRICS_SERVER_MANIFEST],
+    {
+      timeout: APPLY_TIMEOUT_S,
+    },
+  );
+  if (res.returncode !== 0) {
+    warn(
+      emit,
+      `metrics-server could not be installed: ${oneLine(res)} — \`houston stats\` will say how`,
+      {
+        phase: 'provision',
+      },
+    );
+    return;
+  }
+  info(emit, 'installing metrics-server — `houston stats` and the Containers tab read it', {
+    phase: 'provision',
+  });
+  out.metrics_server = true;
+}
+
 export const STORAGE_CLASS_NAME = 'gp3';
 
 export const STORAGE_CLASS = `apiVersion: storage.k8s.io/v1
@@ -1392,6 +2320,10 @@ export interface Prepared {
   cert_manager: boolean;
   cname_target: string;
   cname_pending: boolean;
+  /** The DNS zone workspace names live under, from --zone or the note; '' for none. */
+  zone: string;
+  /** metrics-server answering, installed here or already there; false where it is not ours to install. */
+  metrics_server: boolean;
   already: string[];
   kept: string;
 }
@@ -1411,7 +2343,7 @@ async function loadbalancerAddress(context: string, emit: Emit, out: Prepared): 
   out.cname_target = address;
   // WHICH KIND OF BLANK, so the CLI can say. "No ingress controller published one" and
   // "it was still coming when we stopped waiting" need different next actions.
-  out.cname_pending = address === '' && (await loadbalancerState(context))[2] > 0;
+  out.cname_pending = address === '' && (await loadbalancerRead(context)).pending > 0;
   // EMITTED, not merely returned. This is the one line an operator has to act on -- the
   // whole point of running `prepare` -- and it lived only in the returned document, so
   // the CLI printed it and the GUI did not. A fact that reaches only the return value is
@@ -1498,7 +2430,7 @@ async function storageAndIngress(context: string, emit: Emit, out: Prepared): Pr
  */
 export async function prepareCluster(
   context: string,
-  { emit = nullEmit }: { emit?: Emit } = {},
+  { emit = nullEmit, zone = '' }: { emit?: Emit; zone?: string } = {},
 ): Promise<Prepared> {
   // THE SHORT NAME, RESOLVED. `--context support` is the form `cluster create` prints in
   // its own closing line and the form the guide teaches, and an EKS context is really
@@ -1517,12 +2449,24 @@ export async function prepareCluster(
     cert_manager: false,
     cname_target: '',
     cname_pending: false,
+    zone: '',
+    metrics_server: false,
     already: [],
     kept: '',
   };
 
   await storageAndIngress(resolved, emit, out);
   await loadbalancerAddress(resolved, emit, out);
+  await installMetricsServer(resolved, await distribution(resolved), emit, out);
+  // The zone, set or changed after the build: noted here and tagged on the cluster.
+  const short = resolved.split('/').pop() ?? resolved;
+  if (zone !== '') {
+    await rememberZone(short, regionOfContext(resolved), zone);
+    info(emit, `zone ${zone} noted — workspaces here are named <name>.${zone} by default`, {
+      phase: 'provision',
+    });
+  }
+  out.zone = zone !== '' ? zone : zoneOf(short);
   return out;
 }
 

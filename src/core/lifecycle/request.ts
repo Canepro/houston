@@ -7,6 +7,10 @@
  * counts against this machine.
  */
 import * as config from '../../lib/config';
+
+import * as eks from '../eks';
+import * as paths from '../runner/paths';
+import { shortName } from '../kube/context';
 import { ValidationError } from '../../lib/errors';
 import { type Emit, info, nullEmit, warn } from '../../lib/events';
 import { truthyParam } from '../../lib/presets/common';
@@ -248,4 +252,34 @@ export function deriveIdpHost(req: CreateReq, emit: Emit = nullEmit): void {
  */
 export function missingMonitorAttach(_name: string, _emit: Emit): Record<string, unknown> {
   throw new ValidationError('monitoring attachment was not supplied by the caller');
+}
+
+/**
+ * A public name for a workspace on a cluster that carries a DNS zone, when none was typed.
+ *
+ * The zone is known once, on the cluster; every ticket typed it again as `--domain
+ * ticket-1234.rc.example.com`. `<name>.<zone>` is what that always was. Said out loud,
+ * because a name that appears on its own is a name nobody chose; `--domain` still wins,
+ * and a cluster with no zone changes nothing.
+ */
+export async function defaultDomainFromZone(
+  req: CreateReq,
+  name: string,
+  emit: Emit = nullEmit,
+): Promise<void> {
+  if (String(req.domain).trim() !== '' || String(req.context).trim() === '') return;
+  // ONLY A NEW WORKSPACE. `down` then `up` brings one back with what it had, and its
+  // recorded name (restored later, from the record) is part of that; a default here moved
+  // a workspace made with its own --domain to <name>.<zone> and a new certificate.
+  if (await paths.exists(name)) return;
+  const cluster = shortName(String(req.context).trim());
+  const zone = eks.zoneOf(cluster);
+  if (zone === '') return;
+  req.domain = `${name}.${zone}`;
+  info(
+    emit,
+    `public name defaulted to ${req.domain} from cluster ${cluster}'s zone — ` +
+      '`--domain <name>` chooses another',
+    { phase: 'preflight' },
+  );
 }

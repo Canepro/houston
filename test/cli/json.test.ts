@@ -322,13 +322,17 @@ describe('the capabilities document', () => {
     expect(rows['skill status']?.schema).toBe('houston.skill-status.v1');
     expect(rows.cluster?.schema).toBe('houston.cluster.v1');
     expect(rows.cluster?.schemas).toEqual([
+      'houston.cluster-connect.v1',
       'houston.cluster-create.v1',
       'houston.cluster-delete.v1',
       'houston.cluster-forget.v1',
       'houston.cluster-guide.v1',
       'houston.cluster-iam-policy.v1',
+      'houston.cluster-keep.v1',
       'houston.cluster-list.v1',
+      'houston.cluster-overview.v1',
       'houston.cluster-prepare.v1',
+      'houston.cluster-share.v1',
       'houston.cluster.v1',
     ]);
   });
@@ -392,6 +396,71 @@ describe('cluster guide --path --json', () => {
     expect(ran.envelope.data).toEqual({
       path: path.join(ROOT, 'data', 'docs', 'eks.md'),
     });
+  });
+});
+
+describe('cluster status by name', () => {
+  afterEach(() => {
+    jest.dontMock('../../src/core/cluster');
+  });
+
+  it('takes the bare name the other actions take, as well as --context', async () => {
+    const asked: string[] = [];
+    jest.doMock('../../src/core/cluster', () => ({
+      ...jest.requireActual('../../src/core/cluster'),
+      status: jest.fn(async (context: string) => {
+        asked.push(context);
+        return {
+          context,
+          reachable: false,
+          unreadable: ['cluster'],
+          gone: true,
+          reach_why: '',
+          reach_advice: '',
+        };
+      }),
+    }));
+    await run(['cluster', 'status', 'support', '--json']);
+    await run(['cluster', 'status', '--context', 'perf', '--json']);
+    expect(asked).toEqual(['support', 'perf']);
+  });
+});
+
+describe('cluster overview --json', () => {
+  afterEach(() => {
+    jest.dontMock('../../src/core/cluster');
+  });
+
+  it('is one envelope carrying the clusters, the totals and the next step', async () => {
+    jest.doMock('../../src/core/cluster', () => ({
+      ...jest.requireActual('../../src/core/cluster'),
+      overview: jest.fn(async () => ({
+        clusters: [],
+        failed: [],
+        preflight: {
+          tools_ok: true,
+          blockers: [],
+          account: '1',
+          identity: '',
+          region: 'us-east-1',
+          approved: true,
+        },
+        totals: { clusters: 0, billable: 0, usd_day: null, spend_usd: null, workspaces: 0 },
+        next: {
+          stage: 3,
+          cluster: '',
+          title: 'Build a cluster',
+          why: 'w',
+          command: 'houston cluster create support',
+        },
+        default: '',
+        unreadable: '',
+      })),
+    }));
+    const ran = await run(['cluster', 'overview', '--json']);
+    expect(ran.code).toBe(0);
+    expect(ran.envelope.schema).toBe('houston.cluster-overview.v1');
+    expect(ran.envelope.data).toMatchObject({ totals: { clusters: 0 }, next: { stage: 3 } });
   });
 });
 

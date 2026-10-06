@@ -415,7 +415,7 @@ describe('the simple engine rows', () => {
           check: 'engine-kernel',
           status: 'warn',
           message:
-            'engine kernel 6.19.0-arch1 — MongoDB 8.0 will not start (SERVER-121912); use an engine on kernel < 6.19 for RC versions that require Mongo 8',
+            'engine kernel 6.19.0-arch1 — MongoDB 8 and newer will not start (SERVER-121912); use an engine on kernel 7.0.14 or newer for RC versions that require Mongo 8',
         },
         {
           check: 'hub-auth',
@@ -742,7 +742,7 @@ describe('the Kubernetes rows', () => {
         check: 'kubernetes-cluster',
         status: 'ok',
         message:
-          "Using your cluster '' (k3s, 1 node, amd64), 1 workspace namespace(s) — houston creates namespaces in it and never removes the cluster itself",
+          "Using cluster '' (k3s, 1 node, amd64), 1 workspace namespace(s) — houston creates namespaces in it; only `houston cluster delete` removes a cluster, and only one houston built",
       },
       { check: 'kubernetes-skew', status: 'ok', message: 'kubectl matches the API server (1.36)' },
       { check: 'kubernetes-storage', status: 'ok', message: 'Storage: local-path (default)' },
@@ -778,6 +778,111 @@ describe('the Kubernetes rows', () => {
           "https: the CLUSTER's own ingress answers this host's :443, and a workspace name is served directly — TLS terminates in the cluster, from a cert-manager Secret (nodeport 172.16.0.2:443, kube-system/traefik)",
       },
     ]);
+  });
+
+  it('the cloud row names the stage: approve the account, or build', async () => {
+    jest.resetModules();
+    const tools = require('../../src/core/kube/tools') as typeof KubeToolsNS;
+    const names = require('../../src/core/kube/names') as typeof NamesNS;
+    const present: Record<string, KubeToolsNS.Tool> = {};
+    for (const [name, version, raw] of [
+      ['kubectl', [1, 36, 3], 'Client Version: v1.36.3'],
+      ['helm', [4, 2, 4], 'v4.2.4+g8f3f4c2'],
+      ['kind', [0, 32, 0], 'kind v0.32.0 go1.26.3 linux/amd64'],
+      ['eksctl', [0, 200, 0], '0.200.0'],
+    ] as [string, number[], string][]) {
+      present[name] = tools.makeTool({ name, path: `/usr/local/bin/${name}`, version, raw });
+    }
+    jest.doMock('../../src/core/kube/probe', () => ({
+      ...jest.requireActual('../../src/core/kube/probe'),
+      preflight: async (context = '') =>
+        tools.preflight({
+          tools: present,
+          clusterExists: true,
+          clusterReachable: true,
+          helmReachable: '',
+          storageClasses: ['local-path'],
+          defaultStorageClass: 'local-path',
+          ingressClasses: ['traefik'],
+          otherClusters: [],
+          namespaces: ['houston-a'],
+          distribution: 'k3s',
+          nodeCount: 1,
+          architectures: ['amd64'],
+          metrics: true,
+          loadbalancer: 'svclb-traefik',
+          context,
+          provider: names.PROVIDER_EXTERNAL,
+          willCreate: false,
+          probeFailed: '',
+          unreadable: [],
+        }),
+      skew: async () => ({ ok: true, client: [1, 36], server: [1, 36] }),
+    }));
+    jest.doMock('../../src/core/kube/endpoints', () => ({
+      ...jest.requireActual('../../src/core/kube/endpoints'),
+      ingressEndpoint: async () => ({
+        address: '172.16.0.2',
+        port: 443,
+        source: 'nodeport',
+        service: 'kube-system/traefik',
+        local: true,
+      }),
+      portClaimingCluster: async () => null,
+    }));
+    jest.doMock('../../src/core/kube/certmanager', () => ({
+      ...jest.requireActual('../../src/core/kube/certmanager'),
+      certManagerInstalled: async () => true,
+    }));
+    jest.doMock('../../src/core/kube/exec', () => {
+      const actual = jest.requireActual('../../src/core/kube/exec') as {
+        kube: Record<string, unknown>;
+      };
+      return {
+        ...actual,
+        kube: {
+          ...actual.kube,
+          run: async () => ({ returncode: 0, stdout: '[{"name": "rocketchat"}]', stderr: '' }),
+        },
+      };
+    });
+    jest.doMock('../../src/core/kube/context', () => ({
+      ...jest.requireActual('../../src/core/kube/context'),
+      activeContext: async () => '',
+    }));
+    jest.doMock('../../src/core/eks', () => ({
+      ...jest.requireActual('../../src/core/eks'),
+      aws: { preflight: async () => ({ tools: {}, identity: null, region: '' }) },
+      remembered: () => [],
+      cloudReady: () => true,
+      daysUntil: () => null,
+      identityPretty: () => 'alice in account 111122223333',
+      blockers: () => [],
+    }));
+    jest.doMock('../../src/lib/config', () => ({
+      ...jest.requireActual('../../src/lib/config'),
+      approvedAwsAccounts: () => new Set<string>(),
+    }));
+    const doctor = require('../../src/core/doctor') as typeof DoctorNS;
+    const cloud = Promise.resolve({
+      tools: { aws: { path: '/usr/local/bin/aws' } },
+      identity: { account: '111122223333', arn: 'arn:aws:iam::111122223333:user/alice', error: '' },
+      region: 'us-east-1',
+      ready: true,
+      blockers: [],
+    });
+    const rows = await doctor.checkKubernetes({
+      context: '',
+      dockerUp: true,
+      cloud,
+      owned: Promise.resolve([]),
+    });
+    const row = rows.find((entry) => entry.check === 'kubernetes-cloud');
+    // Ready is stage 1 done; the row says what stage 2 is and how to do it, so a person
+    // reading doctor knows where they are on the six-stage path.
+    expect(row?.message).toContain('AWS ready — alice in account 111122223333, region us-east-1');
+    expect(row?.message).toContain('stage 2');
+    expect(row?.message).toContain('houston config set cluster.approved_accounts 111122223333');
   });
 });
 
@@ -949,14 +1054,34 @@ describe('the remaining single-subject rows', () => {
         },
       ],
     ],
+    // Stopped with nothing on it breaks nothing: doctor exited 1 on a box that had simply
+    // finished with HTTPS, saying no names at all were unreachable.
     [
       { installed: true, dockerUp: true, running: false, routes: [] },
       [
         {
           check: 'edge',
+          status: 'ok',
+          message:
+            'Edge installed and stopped — no https workspace uses it. `houston edge start` when one does',
+        },
+      ],
+    ],
+    // ...and with a route on it, it is still the failure it always was.
+    [
+      { installed: true, dockerUp: true, running: false, routes: ['a'] },
+      [
+        {
+          check: 'edge',
           status: 'fail',
           message:
-            'Edge is NOT running — traefik is holding it is holding :443. Every https name on this box (0 route(s)) is unreachable. `houston edge start`',
+            'Edge is NOT running — traefik is holding it is holding :443. Every https name on this box (1 route(s)) is unreachable. `houston edge start`',
+        },
+        {
+          check: 'edge',
+          status: 'warn',
+          message:
+            '1 edge route(s) with no workspace: a — `down` cannot remove these, the workspace is what is gone. `houston edge delete a` forgets a name, its certificate and its key',
         },
       ],
     ],
@@ -1412,7 +1537,7 @@ describe('a MongoDB the engine kernel cannot run', () => {
   });
 
   it('is refused by the create path before any docker work, as a preflight failure', async () => {
-    // SERVER-121912: mongod 8.0 EXITS on kernel >= 6.19 with a message that reads like a
+    // SERVER-121912: mongod 8 EXITS on kernel 6.19 to 7.0.13 with a message that reads like a
     // volume or permission fault. `doctor` knew the rule but cannot know which release is
     // about to boot, so `up` pulled ~1.5 GB, created the containers and let mongod die.
     jest.resetModules();
@@ -1450,7 +1575,7 @@ describe('a MongoDB the engine kernel cannot run', () => {
       caught = error;
     }
     expect(caught).toBeInstanceOf(PreflightError);
-    expect(String((caught as Error).message)).toContain('mongod 8.0 exits');
+    expect(String((caught as Error).message)).toContain('MongoDB 8 and newer exit');
     // A wrong environment is a preflight failure, exit 3.
     expect((caught as { constructor: { exitCode: number } }).constructor.exitCode).toBe(3);
     expect(wrote).toEqual([]);

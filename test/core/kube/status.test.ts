@@ -203,7 +203,9 @@ describe('the state column', () => {
         return json({ items: namespaces.map((name) => ({ metadata: { name } })) });
       }
       if (argv.includes('jsonpath={.spec.replicas}')) return { stdout: replicas };
-      if (argv.includes('deployment')) return workload ? json({ kind: 'Deployment' }) : {};
+      if (argv.includes('deployment')) {
+        return workload ? json({ kind: 'Deployment', spec: { replicas: Number(replicas) } }) : {};
+      }
       if (argv.includes('pod') && argv.includes('-l')) {
         return json({ items: [{ status: { containerStatuses: [{ ready }] } }] });
       }
@@ -228,6 +230,28 @@ describe('the state column', () => {
     // And no namespace at all is still down.
     cluster({ namespaces: [] });
     expect(await kubernetesState('k', meta)).toBe('down');
+  });
+
+  it('asks the cluster its three questions at once, not one after another', async () => {
+    // On EKS every kubectl call first fetches a token. Four probes in a row made each list
+    // refresh -- every four seconds in the GUI -- and each workspace panel cost four round
+    // trips: about 10 s at an EKS-like 2.5 s a call, measured on a sandbox `serve`.
+    cluster({ ready: true });
+    const reply = kube.run;
+    let open = 0;
+    let most = 0;
+    kube.run = async (argv, options) => {
+      open += 1;
+      most = Math.max(most, open);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      open -= 1;
+      return await reply(argv, options);
+    };
+    expect(await kubernetesState('k', meta)).toBe('running');
+    expect(most).toBe(3);
+    // The replica count comes from the same read that says the workload is there.
+    cluster({ replicas: '0' });
+    expect(await kubernetesState('k', meta)).toBe('stopped');
   });
 
   it('calls a wedged workspace failed, and a refused probe still starting', async () => {

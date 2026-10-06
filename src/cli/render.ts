@@ -9,6 +9,7 @@
 import { stripText } from '../lib/format';
 
 import type { CliIo } from './app';
+import { type ConsoleEnvironment, PROCESS_CONSOLE, cellLen } from './error-panel';
 
 /** A string's length in code points, not UTF-16 units. */
 function width(value: string): number {
@@ -211,4 +212,71 @@ export function asciiOf(text: string): string {
     ' ': ' ',
   };
   return [...text].map((char) => map[char] ?? char).join('');
+}
+
+// ---------------------------------------------------------------------------- tables and tone
+
+/** An SGR sequence, the only kind of escape these renderers ever write. */
+const SGR = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'gu');
+
+/** A cell's width on the screen: terminal cells, the colour escapes not counted. */
+function visibleCells(cell: string): number {
+  return cellLen(cell.replace(SGR, ''));
+}
+
+/**
+ * A column table: a header row and the rows under it, each column as wide as its widest
+ * cell, two spaces between columns, no trailing spaces.
+ *
+ * TERMINAL CELLS, not code points: `ljust` counts points, and a CJK name is two cells per
+ * point, so a column padded by points wandered right of its header on a real screen. A
+ * painted cell is measured by what is visible, so colour never moves a column.
+ */
+export function writeTable(
+  io: CliIo,
+  head: readonly string[],
+  rows: readonly (readonly string[])[],
+): void {
+  const widths = head.map((title, column) =>
+    Math.max(visibleCells(title), ...rows.map((row) => visibleCells(row[column] ?? ''))),
+  );
+  const line = (cells: readonly string[]): string =>
+    cells
+      .map((cell, column) => {
+        const pad = column === cells.length - 1 ? 0 : (widths[column] ?? 0) - visibleCells(cell);
+        return cell + ' '.repeat(Math.max(0, pad));
+      })
+      .join('  ')
+      .replace(/ +$/u, '');
+  io.writeOut(`${line(head)}\n`);
+  for (const row of rows) io.writeOut(`${line(row)}\n`);
+}
+
+export type Tone = 'green' | 'amber' | 'red';
+
+const TONES: Readonly<Record<Tone, string>> = { green: '32', amber: '33', red: '31' };
+
+/**
+ * Whether stdout wants colour: a terminal, unless NO_COLOR; never a pipe, unless FORCE_COLOR.
+ *
+ * The usage-error panel stays uncoloured whatever this says (the owner's standing
+ * decision, in error-panel.ts); this is for the cluster renderers, which 1.x printed in
+ * colour and 2.0 did not. Jest is not a terminal, so every pinned output stays as it is.
+ */
+export function colourWanted(host: ConsoleEnvironment = PROCESS_CONSOLE): boolean {
+  const env = host.env;
+  if (env.NO_COLOR !== undefined && env.NO_COLOR !== '') return false;
+  // `FORCE_COLOR=0` (and `false`) means OFF, as Node and every colour library read it; any
+  // other set value forces it on. It read "set" as on, so FORCE_COLOR=0 turned colour on.
+  if (env.FORCE_COLOR !== undefined) return !['', '0', 'false'].includes(env.FORCE_COLOR);
+  return host.isatty(1);
+}
+
+/** `text` in one of the three tones, when the terminal wants it; the bare text otherwise. */
+export function paint(
+  text: string,
+  tone: Tone,
+  host: ConsoleEnvironment = PROCESS_CONSOLE,
+): string {
+  return colourWanted(host) ? `\u001b[${TONES[tone]}m${text}\u001b[0m` : text;
 }

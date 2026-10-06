@@ -246,6 +246,29 @@ describe('which notes a record produces', () => {
     expect((s.notes as string[]).some((note) => note.includes('/etc/hosts'))).toBe(true);
   });
 
+  it('names a managed cluster by its short name and region, and says it bills', () => {
+    // The Cluster row held the sixty-character ARN; the panel and `info` showed it as
+    // the only way to learn where a workspace ran, and nothing said the cluster costs.
+    const rowsFor = (context: string): [string, string][] =>
+      (noteGroupsOf(
+        record({
+          name: 'w',
+          project: 'houston-w',
+          rcImage: 'registry.rocket.chat/rocketchat/rocket.chat:8.5.1',
+          mongoFlavor: 'community',
+          versionSource: 'shipped',
+          extra: { runtime: 'kubernetes', namespace: 'houston-w', context, deployment: 'monolith' },
+        }),
+      ).find((group) => group.title === 'Kubernetes')?.rows ?? []) as [string, string][];
+    const eks = rowsFor('arn:aws:eks:us-east-1:1:cluster/support');
+    expect(eks).toContainEqual(['Cluster', 'support · us-east-1 · EKS']);
+    expect(eks.find(([key]) => key === 'Costs')?.[1]).toContain('bills by the hour');
+    // The local cluster reads as it always did, and costs nothing.
+    const kind = rowsFor(KUBE_CONTEXT);
+    expect(kind).toContainEqual(['Cluster', KUBE_CONTEXT]);
+    expect(kind.some(([key]) => key === 'Costs')).toBe(false);
+  });
+
   it('exports a kubeconfig only for the cluster houston itself made', () => {
     // On a cluster houston ADOPTED, `export KUBECONFIG=<houston's own>` is wrong three
     // ways -- it made no cluster, that file does not describe yours, and your kubectl
@@ -273,8 +296,17 @@ describe('which notes a record produces', () => {
     expect(ours).toContain(ownedKubeconfig());
     const adopted = noteText('default');
     expect(adopted).not.toContain('export KUBECONFIG=');
+    // "a cluster you supplied" was wrong for every EKS cluster houston built itself; the
+    // note describes the kubeconfig mechanism, which is the same either way.
+    expect(adopted).not.toContain('you supplied');
+    expect(adopted).toContain('an existing cluster');
     expect(adopted).not.toContain(ownedKubeconfig());
     expect(adopted).toContain("'default'");
+    // houston never moves kubectl's current context, so the note may not promise the
+    // commands below already reach this cluster: on a real EKS build the current context
+    // was the user's own, and "# expect <cluster>" sent them looking for a fault.
+    expect(adopted).not.toContain('# expect');
+    expect(adopted).toContain('# if it is not default: kubectl config use-context default');
   });
 
   it('says the MongoDB operator is shared exactly when it is used', () => {

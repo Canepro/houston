@@ -32,6 +32,7 @@ import * as sloModule from '../perf/slo';
 import * as timelineModule from '../perf/timeline';
 import * as verdictModule from '../perf/verdict';
 import { login } from './lifecycle/admin';
+import { grafanaUrlOf } from './lifecycle/inspect';
 import { resolveName } from './lifecycle/naming';
 import { requireDocker } from './lifecycle/preconditions';
 import * as journal from './journal';
@@ -609,7 +610,7 @@ export async function loadtestVerdict({
     : [];
   const passed = sloResults.length === 0 || sloResults.every((r) => r.ok);
 
-  const grafana = req.live ? `http://localhost:${String(config.MONITOR_PORTS[1])}` : null;
+  const grafana = req.live ? grafanaUrlOf(m) : null;
   const summary = run.summary ?? {};
   // The job's closing event. The CLI renders its own result, and the event would reach the
   // event log's sink with `passed` redacted as a secret.

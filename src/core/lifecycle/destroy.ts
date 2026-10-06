@@ -16,7 +16,7 @@ import { detach } from '../edge/networks';
 import { deregister as deregisterRoute } from '../edge/routes';
 import { clearWorkspace } from '../journal';
 import { deleteNamespace, namespaceFor } from '../kube/namespace';
-import { MONITORING_NAMESPACE, removeMonitoring } from '../kube/monitoring';
+import { MONITORING_NAMESPACE, removeGrafanaIngress, removeMonitoring } from '../kube/monitoring';
 import { removeOperator } from '../kube/operator';
 import { CONTEXT as KUBE_CONTEXT, RELEASE } from '../kube/names';
 import * as engine from '../runner/engine';
@@ -59,6 +59,7 @@ export async function removeTheClusterSide(
   volumes: boolean,
 ): Promise<void> {
   if (!volumes) return;
+  if (isTruthy(bag(meta.extra).tls)) await removeGrafanaIngress(target, { context, emit });
   // AFTER the namespace, never before: deleting it took this workspace's
   // MongoDBCommunity with it while the operator was still there to clear the finalizer.
   const ns = await namespaceFor(target);
@@ -193,11 +194,12 @@ export async function teardownKubernetes(
         'absent.',
       { phase: 'teardown' },
     );
-    return { name: target, removed: false, found, runtime: topology.KUBERNETES };
+    return { name: target, removed: false, found, runtime: topology.KUBERNETES, context };
   }
   await removeTheClusterSide(context, emit, meta, target, volumes);
   await dropTheEdgeRoute(emit, target, volumes);
-  return { name: target, removed: volumes, found, runtime: topology.KUBERNETES };
+  // `context` rides along so the CLI can say what a kept disk costs on a cloud cluster.
+  return { name: target, removed: volumes, found, runtime: topology.KUBERNETES, context };
 }
 
 /** Detach from the edge, bring the project down, and forget the name. */

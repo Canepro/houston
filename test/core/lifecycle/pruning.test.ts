@@ -10,6 +10,36 @@ import type * as JournalNS from '../../../src/core/journal';
 import type * as RecordNS from '../../../src/core/runner/record';
 import type * as ErrorsNS from '../../../src/lib/errors';
 
+it('Grafana public URL regression: pruning a TLS workspace removes its shared-namespace resources', async () => {
+  jest.resetModules();
+  const removedIngress = jest.fn(async () => undefined);
+  jest.doMock('../../../src/core/kube/monitoring', () => ({
+    ...jest.requireActual<object>('../../../src/core/kube/monitoring'),
+    removeGrafanaIngress: removedIngress,
+    removeMonitoring: async () => false,
+  }));
+  jest.doMock('../../../src/core/kube/namespace', () => ({
+    ...jest.requireActual<object>('../../../src/core/kube/namespace'),
+    deleteNamespace: async () => true,
+  }));
+  const record = require('../../../src/core/runner/record') as typeof RecordNS;
+  await record.writeRecord(
+    'w',
+    record.metadata({ name: 'w', extra: { runtime: 'kubernetes', context: 'prod', tls: 'local' } }),
+  );
+  const pruning = require('../../../src/core/lifecycle/pruning') as typeof PruningNS;
+  try {
+    const removed: string[] = [];
+    await pruning.pruneKubernetes('w', () => undefined, removed);
+    expect(removed).toEqual(['w']);
+    expect(removedIngress).toHaveBeenCalledWith('w', expect.objectContaining({ context: 'prod' }));
+  } finally {
+    jest.dontMock('../../../src/core/kube/monitoring');
+    jest.dontMock('../../../src/core/kube/namespace');
+    jest.resetModules();
+  }
+});
+
 interface Seen {
   message: string;
   level: string;

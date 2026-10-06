@@ -83,7 +83,13 @@ function prometheus(): Service {
   };
 }
 
-function grafana(): Service {
+/** The browser URL; a Kubernetes forward also reaches Grafana under /grafana. */
+export function grafanaUrl(publicUrl = '', subPath = false): string {
+  const local = `http://localhost:${GRAFANA_PORT}`;
+  return subPath ? `${(publicUrl || local).replace(/\/+$/u, '')}/grafana` : local;
+}
+
+function grafana(publicUrl = ''): Service {
   return {
     image: GRAFANA_IMAGE,
     environment: {
@@ -94,6 +100,12 @@ function grafana(): Service {
       GF_AUTH_ANONYMOUS_ORG_ROLE: 'Viewer',
       // Allow the houston web GUI to embed the k6 dashboard in an iframe.
       GF_SECURITY_ALLOW_EMBEDDING: 'true',
+      ...(publicUrl
+        ? {
+            GF_SERVER_ROOT_URL: `${grafanaUrl(publicUrl, true)}/`,
+            GF_SERVER_SERVE_FROM_SUB_PATH: 'true',
+          }
+        : {}),
     },
     volumes: [
       './monitoring/grafana/provisioning:/etc/grafana/provisioning:ro',
@@ -178,10 +190,10 @@ function opentelemetryLogsCollector(): Service {
  * them to the host interface (`compose.bindPorts` for `up --monitor`, or the attach
  * path directly) so they are never double-bound.
  */
-export function services(): Record<string, Service> {
+export function services(publicUrl = ''): Record<string, Service> {
   return {
     prometheus: prometheus(),
-    grafana: grafana(),
+    grafana: grafana(publicUrl),
     'node-exporter': nodeExporter(),
     'mongodb-exporter': mongodbExporter(),
     loki: loki(),
@@ -441,14 +453,26 @@ export function files(rcServices: readonly string[], project = ''): [string, str
 }
 
 /** What `up --monitor` prints once the stack is attached. */
-export function notes(): string[] {
+export function notes(url = grafanaUrl()): string[] {
   return [
-    `Grafana:    http://localhost:${GRAFANA_PORT}  (admin/admin; anonymous view enabled)`,
+    `Grafana:    ${url}  (admin/admin; anonymous view enabled)`,
     `Prometheus: http://localhost:${PROM_PORT}  (Status -> Targets: rocketchat, mongodb, node-exporter)`,
     'Dashboards auto-provisioned: Rocket.Chat Metrics, MongoDB, Node Exporter Full.',
     'k6 Load Test dashboard is provisioned too; it fills in while a ' +
       '`loadtest --live` run streams metrics.',
     `Container logs -> Loki: open the 'Rocket.Chat Logs' dashboard in Grafana ` +
-      `(http://localhost:${GRAFANA_PORT}/d/houston-logs) - no login needed.`,
+      `(${url}/d/houston-logs) - no login needed.`,
   ];
+}
+
+/** Detach recognises the generated lines even when the recorded hostname changed. */
+export function isMonitoringNote(note: unknown): boolean {
+  if (typeof note !== 'string') return false;
+  return (
+    notes().includes(note) ||
+    /^Grafana: {4}https?:\/\/\S+ {2}\(admin\/admin; anonymous view enabled\)$/u.test(note) ||
+    /^Container logs -> Loki: open the 'Rocket.Chat Logs' dashboard in Grafana \(https?:\/\/\S+\/d\/houston-logs\) - no login needed\.$/u.test(
+      note,
+    )
+  );
 }

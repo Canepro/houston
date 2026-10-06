@@ -45,7 +45,8 @@ export async function workspaceRouteYml(
     instances = 1,
     wildcardBase = '',
     local = false,
-  }: { instances?: number; wildcardBase?: string; local?: boolean } = {},
+    grafana = false,
+  }: { instances?: number; wildcardBase?: string; local?: boolean; grafana?: boolean } = {},
 ): Promise<string> {
   const backends: string[] = [];
   for (const service of rcServiceNames(instances)) {
@@ -54,6 +55,7 @@ export async function workspaceRouteYml(
   return routeYml(name, host, backends, {
     local,
     wildcard: wildcardBase !== '' ? `*.${wildcardBase}` : '',
+    grafanaBackend: grafana ? `http://${await backendContainer(name, 'grafana')}:3000` : '',
   });
 }
 
@@ -113,7 +115,8 @@ function routeYml(
     sticky = true,
     wildcard = '',
     local = false,
-  }: { sticky?: boolean; wildcard?: string; local?: boolean } = {},
+    grafanaBackend = '',
+  }: { sticky?: boolean; wildcard?: string; local?: boolean; grafanaBackend?: string } = {},
 ): string {
   const servers = backends.map((backend) => `          - url: "${backend}"`).join('\n');
   // certResolver rather than a static certificate: the edge requests per name, and Traefik
@@ -147,6 +150,13 @@ function routeYml(
     '      entryPoints: [websecure]\n' +
     `      service: ${key}\n` +
     tlsBlock +
+    (grafanaBackend
+      ? `    ${key}-grafana:\n` +
+        `      rule: "Host(\`${host}\`) && PathPrefix(\`/grafana\`)"\n` +
+        '      entryPoints: [websecure]\n' +
+        `      service: ${key}-grafana\n` +
+        tlsBlock
+      : '') +
     '  services:\n' +
     `    ${key}:\n` +
     '      loadBalancer:\n' +
@@ -156,6 +166,13 @@ function routeYml(
     // DDP websockets must not be bounced between instances mid-session.
     body +=
       '        sticky:\n          cookie:\n            name: rc_lb\n            secure: true\n';
+  }
+  if (grafanaBackend) {
+    body +=
+      `    ${key}-grafana:\n` +
+      '      loadBalancer:\n' +
+      '        servers:\n' +
+      `          - url: "${grafanaBackend}"\n`;
   }
   return body;
 }

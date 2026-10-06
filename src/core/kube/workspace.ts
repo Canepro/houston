@@ -101,8 +101,8 @@ async function prepareCluster(
   if (!plan.create && !isOurs(context)) {
     info(
       emit,
-      `using your ${plan.distribution} cluster '${context}' — houston creates a namespace ` +
-        'in it and never removes the cluster',
+      `using ${plan.distribution} cluster '${context}' — houston creates a namespace in ` +
+        'it; the cluster itself stays until `houston cluster delete`',
       { phase: 'provision', pct: 5 },
     );
   }

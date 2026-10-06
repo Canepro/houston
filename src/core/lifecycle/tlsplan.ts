@@ -32,6 +32,8 @@ import {
   normalizeDomain,
   tlsSpec,
   verify,
+  recordIssuance,
+  budgetWarning,
 } from '../tls';
 import { hostOwner, register as registerRoute } from '../edge/routes';
 import { installed as edgeInstalled } from '../edge/spec';
@@ -444,6 +446,11 @@ export async function publishKubernetesName(
     sleep = realSleep,
   }: { certReady?: boolean; emit?: Emit; sleep?: (seconds: number) => Promise<void> } = {},
 ): Promise<void> {
+  if (ktls.issuer?.mode === 'acme') {
+    recordIssuance(ktls.host, '', `${ktls.context}:workspace:${name}`);
+    const warning = budgetWarning(ktls.host);
+    if (warning) warn(emit, warning, { phase: 'tls' });
+  }
   // ONLY for the local issuer. A Let's Encrypt certificate is checked against the SYSTEM
   // store -- that is the whole claim being made about it -- and houston's own CA may not
   // even exist on a box that has only ever used `--domain`.

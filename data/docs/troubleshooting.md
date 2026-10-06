@@ -1,282 +1,98 @@
 # Troubleshooting
 
-Find the symptom, then the fix. **Start with `houston doctor`:** it checks the machine
-and names most of what follows before you run into it.
+Find the symptom, then the fix. **Start with `houston doctor`:** it checks the machine and
+names most of what follows. On EKS, see [the EKS guide's list](eks.md#when-it-goes-wrong);
+for what Kubernetes refuses, see [the Kubernetes guide](kubernetes.md#what-kubernetes-refuses).
 
-On EKS, the [EKS guide](eks.md#10--when-it-goes-wrong) has its own list.
-
-**Contents:** [Installing](#installing) · [Nothing starts](#nothing-starts) ·
-[HTTPS and certificates](#https-and-certificates) · [Kubernetes](#kubernetes) ·
-[Cost and cleanup](#cost-and-cleanup) · [The web GUI](#the-web-gui) ·
+**Contents:** [Installing](#installing) · [A workspace will not start](#a-workspace-will-not-start) ·
+[Kubernetes](#kubernetes) · [HTTPS and certificates](#https-and-certificates) ·
+[Left running](#left-running) · [The web GUI](#the-web-gui) ·
 [Engines and images](#engines-and-images)
 
 ---
 
 ## Installing
 
-### `houston --version` prints someone else's version
-
-Another npm package, `@rocket.chat/houston`, also installs a command called `houston`.
-Whichever comes first on your `PATH` runs. `command -v houston` shows which one that
-is. Uninstall the one you do not want, or put this one first on your `PATH`.
-
-### An old houston still runs after installing 2.x
-
-houston 1.x and rc-repro were installed with pipx, and an npm install does not replace
-a pipx command. See [Upgrading](upgrading.md#replacing-an-older-install).
-
-### Behind a proxy
-
-Run houston as `houston` (or `bin/houston` from a clone), not with `node` directly.
-That launcher makes Node use `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`, and passes a
-CA bundle named by `REQUESTS_CA_BUNDLE` or `CURL_CA_BUNDLE` to Node as
-`NODE_EXTRA_CA_CERTS`. Without that, `houston versions` falls back to the shipped list
-and `houston doctor` reports the release endpoint as unreachable. A variable you set
-yourself is left alone.
-
----
-
-## Nothing starts
-
-### `up` refuses before it creates anything
-
-Read the refusal: it names the fix. Most refusals are a check doing its job.
-
-| It says | It means |
+| You see | Do this |
 |---|---|
-| something about **memory** | the machine does not have room for another workspace. Remove one you are finished with (`houston down --name <name> --volumes`) or close something |
-| a **port** is in use | another workspace or program holds it. `--port` picks your own; without it houston picks a free one |
-| the **Docker daemon** is not running | start Docker Desktop, or `sudo systemctl start docker` |
-| `--fresh` is not supported on Kubernetes | it means "delete this workspace's data", and Kubernetes keeps the volume. Run `houston down --name <name> --volumes` first |
+| `houston --version` prints someone else's version | Another npm package also installs `houston`. `command -v houston` shows which runs; uninstall the other or reorder your `PATH`. |
+| An old houston still runs after installing 2.x | It was installed with pipx. See [Upgrading](upgrading.md#replacing-an-older-install). |
+| Behind a proxy, `houston versions` uses the shipped list | Run `houston` (or `bin/houston`), not `node` directly: the launcher passes `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and `REQUESTS_CA_BUNDLE` to Node. |
 
-### The workspace starts but Rocket.Chat never answers
+## A workspace will not start
+
+`up` refuses before it builds anything, and the refusal names the fix:
+
+| It says | Do this |
+|---|---|
+| something about **memory** | Remove a workspace you are done with: `houston down --name <name> --volumes`. |
+| a **port** is in use | Pass `--port`, or leave it out and houston picks a free one. |
+| the **Docker daemon** is not running | Start Docker Desktop, or `sudo systemctl start docker`. |
+| "already exists and is reused as-is" | `up` brings back the existing workspace. `--force` rebuilds it, `--fresh` also wipes its data; `houston upgrade` changes the version. |
+| a Docker Hub pull limit | Run `docker login`. |
+
+It starts but Rocket.Chat never answers:
 
 ```bash
 houston logs  --name <name> --tail 100
-houston stats --name <name>
+houston stats --name <name>          # a climbing restart count means it is out of memory
 ```
-
-The most common cause is the container being restarted for lack of memory: a climbing
-restart count is the sign. `houston doctor` reports how much memory is free.
-
-### `up` succeeded but the Kubernetes URL does nothing
-
-A Kubernetes workspace is reached through a port-forward that is tied to its pod. When
-the pod moves (an upgrade, a node event), the forward goes with it:
-
-```bash
-houston ready --name <name>      # starts the forward again
-```
-
-During an upgrade you may see *"the port-forward dropped while the pod was moving"*:
-it is coming back. *"something else already holds it"* is a real clash, and
-`ss -ltnp | grep <port>` names the program.
-
-### "`<name>` already exists and is reused as-is"
-
-`up` on an existing name brings back that workspace as it was, and ignores a different
-version or preset. Use `houston upgrade` for another version, or a new `--name`.
-
----
-
-## HTTPS and certificates
-
-### "the ingress controller's built-in placeholder certificate"
-
-cert-manager has not issued the certificate yet. On a new cluster that is normal for a
-minute or three.
-
-```bash
-houston tls-status --name <name>                              # check again
-kubectl -n houston-<name> get certificate                      # what it is waiting for
-```
-
-If it stays that way for more than a few minutes, the certificate order is stuck, and
-the usual cause is the next entry.
-
-### Let's Encrypt never validates
-
-The name must resolve to the right place, with port 443 reachable, **before** you
-create the workspace: Let's Encrypt checks by connecting to it.
-
-- On a cloud cluster, point the record at the load balancer
-  `houston cluster prepare --context <cluster>` prints, not at your machine.
-- On Cloudflare, set the record to **DNS only** (grey cloud). Proxied, Cloudflare
-  serves its own certificate and the name never reaches your cluster.
-- Check from outside your own cache: `dig +short <name> @1.1.1.1`.
-- A recreated cluster has a new address. Update the record.
-
-### "something in front is terminating TLS for this name"
-
-The certificate was issued, but the name still answers with another one. Something
-between the internet and your cluster is intercepting the connection: a proxy, a CDN,
-or another program holding the ports. `houston doctor` names a cluster that holds them.
-
-### The browser warns about a local certificate
-
-Expected until you run `houston trust-ca` once. A phone cannot use houston's local
-certificates at all; use `--domain` for anything you need to open on a device.
-
-### There is no "Local certificate" option in the GUI
-
-The cluster you picked is not on this machine. That option signs with houston's own
-certificate authority, and its private key must not leave this machine. Use a domain
-instead.
-
----
 
 ## Kubernetes
 
-Namespaces and names are lowercase: a workspace called `TICKET-1234` lives in
-`houston-ticket-1234`.
+| You see | Do this |
+|---|---|
+| `up` worked but the URL does nothing | The port-forward died with its pod: `houston ready --name <name>` starts it again. "something else already holds it": `ss -ltnp \| grep <port>` names the program. |
+| "no kubeconfig context named" | Add the cluster: `houston cluster connect <arn>` for EKS, or fix your kubeconfig. |
+| kubectl works but helm says "cluster unreachable" | A stale kubeconfig. Regenerate it (k3s: `sudo cat /etc/rancher/k3s/k3s.yaml > ~/.kube/config`; kind: `kind export kubeconfig --name <cluster>`). |
+| Every volume stays `Pending` | No default StorageClass: `houston cluster prepare --context <cluster>`. |
+| A colleague gets "access denied" or `Unauthorized` | On a cluster houston built: `houston cluster share <cluster> --user <their-iam-user>`. Otherwise its owner adds an EKS access entry. |
+| "no matching manifest for linux/arm64" | Rocket.Chat below 8.0.0 is amd64 only: use an amd64 node, 8.0.0 or newer, or Docker. |
+| "no chart deploys it" or "predates every values key houston sets" | Rocket.Chat below 3.7.2: use Docker. |
+| `env --set`, `seed --scale`, `loadtest` or `capacity` refuses | Docker only. The refusal names what to use instead. |
 
-### `--context support`: "no kubeconfig context named"
+Names are lowercase: `TICKET-1234` lives in namespace `houston-ticket-1234`.
 
-Your kubeconfig has no entry for that cluster. For EKS:
+## HTTPS and certificates
 
-```bash
-aws eks update-kubeconfig --name support --region us-east-1
-```
+| You see | Do this |
+|---|---|
+| "the ingress controller's built-in placeholder certificate" | Normal for a minute or three on a new cluster. `houston tls-status --name <name>` again; `kubectl -n houston-<name> get certificate` shows what it waits for. |
+| Let's Encrypt never validates | The name must point at the right place, port 443 open, **before** `up`. On a cloud cluster, point it at the address `houston cluster prepare --context <cluster>` prints. On Cloudflare use **DNS only**. Check with `dig +short <name> @1.1.1.1`. |
+| "something in front is terminating TLS for this name" | A proxy, CDN or another program is intercepting. `houston doctor` names a cluster holding the ports. |
+| The browser warns about a local certificate | Run `houston trust-ca` once, then `houston tls-status --name <name>` says it is trusted. Phones cannot use local certificates: use `--domain`. |
+| No "Local certificate" option in the GUI | The cluster is not on this machine; houston's CA key never leaves it. Use a domain. |
 
-After that, the short name works: `--context support`.
+## Left running
 
-### kubectl works but helm says "cluster unreachable"
-
-A kubeconfig left from an earlier install of the same cluster does this. Regenerate it:
-
-```bash
-sudo cat /etc/rancher/k3s/k3s.yaml > ~/.kube/config     # k3s
-kind export kubeconfig --name <cluster>                 # kind
-```
-
-`houston doctor` reports the same thing. Fix it before `up`, or the create builds a
-namespace and a database, fails at the chart, and rolls everything back.
-
-### Every volume stays `Pending` and Rocket.Chat never starts
-
-The cluster has no **default** StorageClass. EKS ships only `gp2`, not as default:
+A cloud cluster bills every hour it exists; only `houston cluster delete` stops it.
 
 ```bash
-houston cluster prepare --context <cluster>
+houston list               # workspaces on this machine
+houston cluster overview   # clusters this machine knows: state, cost per day, expiry, next step
+houston cluster list       # EKS clusters in every enabled AWS region
 ```
 
-### A colleague gets "access denied" on a cluster that works for you
-
-IAM decides whether someone may build a cluster; the cluster's own access entries
-decide whether they may use it. The creator is added automatically, everyone else
-needs an entry. The [EKS guide](eks.md) has the steps, and these print the policies:
-
-```bash
-houston cluster iam-policy engineer     # the IAM half
-houston cluster iam-policy rbac         # the in-cluster half
-```
-
-### "no matching manifest for linux/arm64", or a refusal about architecture
-
-Rocket.Chat below 8.0.0 is published for amd64 only, so an arm64 node (such as AWS
-Graviton) cannot run it. Add an amd64 node group, use Rocket.Chat 8.0.0 or newer, or
-use the Docker runtime, which emulates amd64 on an Apple Silicon Mac.
-
-### A refusal about the chart being "from another era"
-
-Below Rocket.Chat 3.7.2 the only Helm chart predates the settings houston needs. Use
-the Docker runtime for those versions.
-
-### `env --set` or `seed --scale` refuses
-
-Both work on Docker workspaces only. The refusal names what to use instead: a
-`helm upgrade` or `houston api` for settings, and `houston seed --name <name>` for data.
-
----
-
-## Cost and cleanup
-
-A cloud cluster bills from its first minute, whether or not anything runs in it. Only
-`houston cluster delete` stops the bill.
-
-### "Have I left anything running?"
-
-```bash
-houston list             # workspaces on this machine
-houston cluster list     # cloud clusters, in every enabled AWS region
-```
-
-Read the end of the `cluster list` output as carefully as the start. A region that
-could not be asked is listed separately, and it is **not** covered by the answer.
-`--force` also shows clusters houston did not build.
-
-### `doctor` says it has no local record of a cloud cluster
-
-That does not mean there is none. The local record is lost with a new `HOUSTON_HOME`,
-a rebuilt machine, or a cluster made elsewhere. Ask AWS with `houston cluster list`.
-
-### `cluster delete` refuses because the cluster still holds workspaces
-
-Remove them first. Each workspace's database is an EBS volume, and it is only deleted
-when the workspace is. Delete the cluster with a workspace still in it and the volume
-survives, unattached, and keeps billing. The [EKS guide](eks.md#9--tear-down-everything)
-has the full order.
-
-### A deleted cluster is still listed
-
-A cluster deleted outside houston (the AWS console, a colleague) leaves its kubeconfig
-entry behind:
-
-```bash
-houston cluster forget <context>
-```
-
-That removes the local entry and nothing else. It refuses a cluster that still answers.
-In the GUI, the card says **gone** and offers to forget it.
-
----
+| You see | Do this |
+|---|---|
+| `cluster list` names regions it could not read | Those are not covered: check them with `aws eks list-clusters --region <region>`. |
+| `doctor` has no local record of a cloud cluster | That is not "there is none": ask AWS with `houston cluster list`. |
+| `cluster delete` refuses: it holds workspaces | Remove them first, see [Stop the bill](eks.md#stop-the-bill-delete-the-cluster). |
+| A cluster deleted outside houston is still listed | `houston cluster forget <context>` removes its kubeconfig entry. |
 
 ## The web GUI
 
-### A cluster card shows `?` for a few seconds
-
-By design. The page draws at once and each card fills itself in. `?` means "not read
-yet" or "could not be read", never zero; a card that cannot read its cluster says why.
-
-### The log field shows nothing for a while
-
-Long steps report what they are doing, for example *"still installing (1m30s)"*. If
-nothing appears for more than a minute or two, check the job in the Activity list and
-`houston logs --name <name>`.
-
-### A control I expected is not there
-
-Options a runtime or cluster cannot honour are removed, not greyed out. The Advanced
-section says what was removed and why.
-
-### `serve` refuses to start on a reachable address
-
-Either nothing protects the sign-in (see [Reaching it from another
-machine](gui.md#reaching-it-from-another-machine)), or there are no accounts yet: the
-one-time setup link only works while `serve` listens on this machine alone. Create the
-first account first, then open it up.
-
----
+| You see | Do this |
+|---|---|
+| A cluster card says **Reading…** | It is being read. **Not read** or `?` means it could not be read, never zero. |
+| The job log is quiet for a while | Long steps say "still installing (1m30s)". Over a couple of minutes, check **Activity** and `houston logs --name <name>`. |
+| A control is missing | Options a runtime or cluster cannot honour are removed. Offline and "Don't pull images" are command-line only (`--offline`, `--no-pull`). |
+| `serve` refuses to start on a reachable address | See [Reaching it from another machine](gui.md#reaching-it-from-another-machine), and create the first account before opening it up. |
 
 ## Engines and images
 
-### Apple Silicon
-
-Only the MongoDB image for MongoDB below 8 (Rocket.Chat below 8) is amd64 only, so it
-runs emulated and boots more slowly. Everything else runs natively.
-
-### Podman
-
-Podman works through its Docker socket helper (`podman-mac-helper` on a Mac).
-
-### MongoDB 8 fails to start on a new kernel
-
-Linux kernel 6.19 and newer cannot run MongoDB 8.0
-([SERVER-121912](https://jira.mongodb.org/browse/SERVER-121912)). `houston doctor`
-warns when it sees this. Use an engine on an older kernel until MongoDB ships a fix.
-
-### Docker Hub rate limits
-
-Anonymous pulls from Docker Hub are rate-limited, and `registry.rocket.chat` counts
-against Hub too. Run `docker login`. `up` names this cause directly rather than
-reporting a bare pull failure.
+| You see | Do this |
+|---|---|
+| Slow on Apple Silicon | Rocket.Chat below 8 and MongoDB below 8 are amd64 only and run emulated. Everything newer runs natively. |
+| Podman | Works through its Docker socket helper (`podman-mac-helper` on a Mac). |
+| MongoDB 8 fails on Linux kernel 6.19 through 7.0.13 | [SERVER-121912](https://jira.mongodb.org/browse/SERVER-121912): use an engine on kernel 7.0.14 or newer (on a Mac or Windows, update Docker Desktop), or a Rocket.Chat version paired with MongoDB 7.0. `houston doctor` warns; `docker info --format '{{.KernelVersion}}'` shows the kernel. |

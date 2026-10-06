@@ -32,6 +32,25 @@ describe('the shipped skill file', () => {
     expect(fs.readFileSync(generator.TARGET, 'utf8')).toBe(fresh);
   });
 
+  it('names the safe cluster read, and keep and share among what to ask about first', () => {
+    // An agent was told to ask before `cluster create` and `cluster delete`, but not before
+    // `keep` (it moves a cluster's deletion date) or `share` (it grants AWS access), and
+    // was never told which cluster command only reads.
+    const shipped = fs.readFileSync(generator.TARGET, 'utf8');
+    expect(shipped).toContain('`houston cluster overview --json` | the safe read');
+    const ask = shipped.slice(
+      shipped.indexOf('### Ask a person first'),
+      shipped.indexOf('## Three standing rules'),
+    );
+    expect({
+      keep: ask.includes('`cluster keep`'),
+      share: ask.includes('`cluster share`'),
+    }).toEqual({
+      keep: true,
+      share: true,
+    });
+  });
+
   it('is what the two project copies hold, byte for byte', () => {
     const shipped = fs.readFileSync(generator.TARGET, 'utf8');
     for (const copy of generator.PROJECT_COPIES) {

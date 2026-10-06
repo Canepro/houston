@@ -88,7 +88,8 @@ export async function register(
     instances = 1,
     local = false,
     passthrough = '',
-  }: { instances?: number; local?: boolean; passthrough?: string } = {},
+    grafana = false,
+  }: { instances?: number; local?: boolean; passthrough?: string; grafana?: boolean } = {},
 ): Promise<boolean> {
   fs.mkdirSync(paths.dynamicDir(), { recursive: true });
   if (passthrough !== '') {
@@ -102,6 +103,7 @@ export async function register(
     await workspaceRouteYml(name, host, {
       instances,
       local,
+      grafana,
       wildcardBase: covered ? (door as Edge).domain : '',
     }),
   );

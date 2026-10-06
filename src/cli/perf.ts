@@ -4,12 +4,12 @@ import * as os from 'node:os';
 import { actor as auditActor } from '../core/audit';
 import * as coreLoadtest from '../core/loadtest';
 import * as lifecycleAdmin from '../core/lifecycle/admin';
+import { grafanaUrlOf } from '../core/lifecycle/inspect';
 import * as lifecycleNaming from '../core/lifecycle/naming';
 import * as lifecyclePreconditions from '../core/lifecycle/preconditions';
 import * as rcapi from '../core/rcapi';
 import * as runnerHost from '../core/runner/host';
 import * as runnerRecord from '../core/runner/record';
-import * as config from '../lib/config';
 import { NotReadyError, ReproError, errorText } from '../lib/errors';
 import { nullEmit } from '../lib/events';
 import { JsonFloat } from '../lib/jsonout';
@@ -654,7 +654,7 @@ export async function runLoadtestCli(
         say(
           io,
           '  live: k6 metrics streaming into Prometheus — open the ' +
-            `'k6 Load Test' dashboard in Grafana (http://localhost:${String(config.MONITOR_PORTS[1])}), ` +
+            `'k6 Load Test' dashboard in Grafana (${grafanaUrlOf(meta)}), ` +
             'or Explore -> k6_*',
         );
       }

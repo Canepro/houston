@@ -9,7 +9,7 @@
  * at every call site.
  */
 import * as config from '../../lib/config';
-import { notes as monitoringNotes } from '../../lib/monitoring';
+import { grafanaUrl, notes as monitoringNotes } from '../../lib/monitoring';
 import { toText } from '../../lib/format';
 import * as presets from '../../lib/presets/index';
 import { ACME_ISSUER, CA_ISSUER, tlsSecretFor } from '../kube/certmanager';
@@ -448,13 +448,19 @@ export function howToWorkWithIt(
           commands: [`export KUBECONFIG=${ownedKubeconfig()}`],
         })
       : noteGroup('1 · Your kubectl already reaches this workspace', {
+          // houston never moves kubectl's current context (a build puts it back where it
+          // was), so the commands below reach this cluster only once it is pointed here.
+          // "Every command below runs against '<context>'" and "# expect <context>" read as
+          // a promise that was false on any box whose kubectl pointed somewhere else.
           body: [
-            'This workspace lives in a cluster you supplied, so there is nothing to ' +
-              'export -- houston used the kubeconfig you already have and wrote none ' +
-              `of its own. Every command below runs against context '${context}'; add ` +
-              `\`--context ${context}\` to any of them if you work in more than one.`,
+            'This workspace lives in an existing cluster, so there is nothing to ' +
+              'export -- houston used the kubeconfig this machine already has and wrote ' +
+              'none of its own. The commands below use kubectl’s current context; point it ' +
+              `at '${context}' first, or add \`--context ${context}\` to each of them.`,
           ],
-          commands: [`kubectl config current-context   # expect ${context}`],
+          commands: [
+            `kubectl config current-context   # if it is not ${context}: kubectl config use-context ${context}`,
+          ],
         }),
     openTheWayIn(ns, release, root, port, addr),
     // HTTPS, WHICH THIS RUNTIME'S NOTES SAID NOTHING ABOUT, and it must NOT reuse the
@@ -480,13 +486,29 @@ export function kubernetesNoteGroups(meta: Metadata): NoteGroup[] {
   const root = meta.rootUrl || `http://localhost:${String(port)}`;
   const [addr, mongoGroup, shared] = kubernetesMongoGroup(bindHost, extra, meta, ns);
   const [forward, reach] = forwardAndReachNotes(addr, bindHost, extra, meta, ns, port, root);
+  // A managed cluster by the name a person knows, its region and its kind; the ARN is
+  // what a command needs and the summary carries it as `context`. And the one fact about
+  // a managed cluster nothing on the workspace said: it bills whether or not this runs.
+  const managed = /^arn:aws:eks:/u.test(context);
+  const clusterRow = managed
+    ? `${context.split('/').pop() ?? context} · ${context.split(':')[3] ?? ''} · EKS`
+    : context;
   return [
     noteGroup('Kubernetes', {
       rows: [
-        ['Cluster', context],
+        ['Cluster', clusterRow],
         ['Namespace', ns],
         ['Arrangement', micro ? 'microservices' : 'monolith'],
         ['Pods', `about ${String(pods)}`],
+        ...(managed
+          ? [
+              [
+                'Costs',
+                'the cluster bills by the hour whether or not this workspace runs — ' +
+                  '`houston cluster overview` prices it',
+              ] as [string, string],
+            ]
+          : []),
       ],
     }),
     mongoGroup,
@@ -494,6 +516,12 @@ export function kubernetesNoteGroups(meta: Metadata): NoteGroup[] {
     ...reach,
     ...howToWorkWithIt(meta, ns, context, release, root, port, addr, shared),
     noteGroup('Monitoring', {
+      rows: isTruthy(extra.monitoring)
+        ? [
+            ['Grafana', grafanaUrl(isTruthy(extra.tls) ? meta.publicUrl : '', true)],
+            ['Login', 'admin/admin; anonymous Viewer'],
+          ]
+        : [],
       body: [
         'Prometheus and Grafana are shared by the cluster, not installed per ' +
           `workspace: this puts one stack in ${MONITORING_NAMESPACE}, and \`--off\` ` +
@@ -536,7 +564,10 @@ export function composeNoteGroups(meta: Metadata): NoteGroup[] {
     );
   }
   if (isTruthy(extra.monitoring)) {
-    groups.push(noteGroup('Monitoring', { body: monitoringNotes() }));
+    const publicUrl = isTruthy(extra.tls) ? meta.publicUrl : '';
+    groups.push(
+      noteGroup('Monitoring', { body: monitoringNotes(grafanaUrl(publicUrl, !!publicUrl)) }),
+    );
   }
   return groups;
 }

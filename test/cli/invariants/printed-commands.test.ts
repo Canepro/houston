@@ -197,6 +197,34 @@ describe('a printed instruction names a command that exists', () => {
     expect(wrong).toEqual([]);
   });
 
+  it('never prints a backticked `--flag` that no houston command has', () => {
+    // The same convention, one level down: a bare `--flag` in backticks is an instruction
+    // too. doctor told people to use `--ctx.context <other>`, a flag no command has ever
+    // had, and the verb check above never saw it because no `houston` preceded it.
+    const known = new Set(['--help', '--version', '--json']);
+    for (const spec of COMMAND_SPECS) {
+      for (const option of spec.options) for (const long of option.long.split('/')) known.add(long);
+    }
+    // Flags that belong to another tool and are quoted as that tool's: each names the
+    // tool it is for, so a new entry here is a decision and not a shrug.
+    const foreign = new Map([['--disable', 'k3s install (traefik, servicelb)']]);
+    for (const flag of foreign.keys()) known.add(flag);
+    const wrong: string[] = [];
+    let seen = 0;
+    for (const file of productionSources()) {
+      for (const { text, line } of printedText(file)) {
+        for (const match of text.matchAll(/`(--[a-z][a-z0-9.-]*)/gu)) {
+          seen += 1;
+          const flag = match[1] as string;
+          if (!known.has(flag))
+            wrong.push(`${path.basename(file.getFilePath())}:${String(line)} ${flag}`);
+        }
+      }
+    }
+    expect(seen).toBeGreaterThan(10);
+    expect(wrong).toEqual([]);
+  });
+
   it('never prints an `edge` action the command does not handle', () => {
     const edge = COMMAND_SPECS.find((spec) => spec.path === 'edge');
     expect(edge).toBeDefined();

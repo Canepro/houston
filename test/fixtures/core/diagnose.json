@@ -11,7 +11,7 @@
         "12257600",
         "incompatibility with this version of mongodb"
       ],
-      "MongoDB refused to start: this host's Linux kernel (>= 6.19) is incompatible with MongoDB 8.0 (SERVER-121912) - it is NOT a volume/permission problem. Use an engine/VM on kernel < 6.19 for RC versions that require Mongo 8.0. See https://jira.mongodb.org/browse/SERVER-121912"
+      "MongoDB refused to start: this host's Linux kernel (6.19 through 7.0.13) is incompatible with MongoDB 8 and newer (SERVER-121912) - it is NOT a volume/permission problem. Use an engine/VM on kernel 7.0.14 or newer for RC versions that require Mongo 8. See https://jira.mongodb.org/browse/SERVER-121912"
     ],
     [
       ["no matching manifest", "no match for platform", "does not match the specified platform"],
@@ -51,7 +51,7 @@
   ],
   "matches": [
     "Docker Hub's anonymous pull rate limit was hit. Run `docker login` (Hub username + a Personal Access Token) and retry. Note: registry.rocket.chat images still count against Docker Hub for anonymous clients.",
-    "MongoDB refused to start: this host's Linux kernel (>= 6.19) is incompatible with MongoDB 8.0 (SERVER-121912) - it is NOT a volume/permission problem. Use an engine/VM on kernel < 6.19 for RC versions that require Mongo 8.0. See https://jira.mongodb.org/browse/SERVER-121912",
+    "MongoDB refused to start: this host's Linux kernel (6.19 through 7.0.13) is incompatible with MongoDB 8 and newer (SERVER-121912) - it is NOT a volume/permission problem. Use an engine/VM on kernel 7.0.14 or newer for RC versions that require Mongo 8. See https://jira.mongodb.org/browse/SERVER-121912",
     "The image has no build for this CPU architecture (e.g. arm64). Pick an image/tag that ships this arch, or run the engine with emulation.",
     "MongoDB is up but its replica set never initialised (no primary). This is common under amd64-on-arm64 emulation (e.g. the bitnami/legacy Mongo image); prefer a natively-supported Mongo flavor/version for this host.",
     "The image tag was not found in the registry - check the RC version / Mongo tag actually exists (or use --offline with a cached image).",

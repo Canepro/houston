@@ -605,6 +605,20 @@ export async function workloadExists(
   name: string,
   { context }: { context: string },
 ): Promise<boolean> {
+  return (await workloadReplicas(name, { context })) !== null;
+}
+
+/**
+ * The Rocket.Chat Deployment's DESIRED replica count, or null when there is no Deployment;
+ * -1 when it carries no count. Presence and count from ONE read, where the state column
+ * asked `workloadExists` and then `desiredReplicas` -- two round trips for one object.
+ *
+ * RAISES on a refused read, for the reason `workloadExists` gives.
+ */
+export async function workloadReplicas(
+  name: string,
+  { context }: { context: string },
+): Promise<number | null> {
   const answer = await askObject('deployment', `${RELEASE}-rocketchat`, {
     namespace: await namespaceFor(name),
     context,
@@ -615,5 +629,7 @@ export async function workloadExists(
         (answerWhy(answer) || 'the API server did not answer'),
     );
   }
-  return present(answer);
+  if (!present(answer)) return null;
+  const replicas = mapOf(answer.doc.spec).replicas;
+  return typeof replicas === 'number' ? replicas : -1;
 }

@@ -224,20 +224,30 @@ cluster parameter at all. AWS IAM decides who may build a cluster and the cluste
 decides who may use it, so `houston cluster iam-policy` ships three documents from `data/iam/`.
 [`eks.md`](eks.md), which `houston cluster guide` prints, is the procedure.
 
+**One answer about clusters, rendered twice.** `cluster.overview()` in `core/cluster.ts`
+reads every AWS context through `status()` (the ledger: nodes, workspaces, cost, who
+built it from the cluster's own tags, expiry, whether it is prepared and whether its DNS
+zone answers) and every other with a glance (whether it answers, its distribution and
+its workspaces); `whereOf()` decides which, from the context name and the API server,
+never a probe. It adds the AWS totals and the preflight, and asks `nextStep()` for the
+AWS stage, a pure table over the six stages every screen names. `houston cluster overview` prints
+it; `/api/clusters/overview` serves it to the Clusters page, Home's Needs you and the
+EKS setup flow. Neither front-end decides what exists, what it costs or what comes next.
+
 ## Where things live
 
 One line per directory. Where a line uses `·`, it separates ranks, bottom first.
 `git ls-files src` is the authority on what exists (tests live in `test/`), and each module's
 header comment says what it is for.
 
-- **`lib/`**, below every service: `errors` `events` `jsonout` `config` `lock` `context`, the registries `audit` `journal` `teammode`, then `compose` `versions` `monitoring` `mongo-kernel` `redact` `seed-profiles` `targz`, and the exact-format modules `format` `float-text` `json-text` `yaml-dump` `close-matches` `mkdir-parents` `tempdir` `login-name` `platform-name` `home` `version-spec` `unicode-tables`
+- **`lib/`**, below every service: `errors` `events` `jsonout` `config` `lock` `context`, the registries `audit` `journal` `teammode`, then `compose` `versions` `monitoring` `mongo-kernel` `redact` `seed-profiles` `targz`, and the exact-format modules `format` `float-text` `json-text` `yaml-dump` `close-matches` `mkdir-parents` `tempdir` `login-name` `platform-name` `home` `version-spec` `unicode-tables`, and `map-limit` (a bounded concurrent map the cluster ledger and the region sweep share)
 - **`lib/presets/`**, the dynamic scenarios (static presets are YAML in `data/presets/`): `types` · `registry` · `common` `scenario` · `keycloak` · `email` `ldap` `livechat` `multi-instance` `oidc` `s3-minio` `saml` · `index`
 - **`seams/`**, the only doors out: `exec` `docker-cli` `kubectl` `aws-cli` `rc-http`
 - **`seams/fs/`**: `lock`
 - **`core/`**, the shared brain. REST and cloud: `rcapi` `eks` `eks-docs` `cluster` `topology`. HTTPS: `tls` `tls-local`. Data: `backup` `backup-compat` `database-of` `upgrade` `envvars` `monitor` `data` `configimport` `scaleseed` `loadtest` `postready`. Diagnosis: `diagnose` `doctor`. Records: `journal` `recovery` `eventlog` `audit`. People: `users` `sessions` `firstrun`. The home: `skill` `migrate` `promote`
 - **`core/runner/`**, Docker per workspace: `paths` `locks` · `engine` `record` · `host` `ports` `queries`
 - **`core/edge/`**, the shared Traefik edge: `paths` `types` · `engine` · `acme` `networks` · `routeyml` · `spec` · `routes` · `runtime`
-- **`core/kube/`**, the Kubernetes domain half, which selects by label and never by name prefix: `names` · `exec` · `ask` `tools` · `capabilities` `reachability` `replicaset` · `context` · `cluster` `endpoints` `namespace` · `manifests` `probe` `scale` `status` `transfer` · `release` · `operator` · `chart` `monitoring` · `certmanager` `forward` · `ingress` · `workspace`
+- **`core/kube/`**, the Kubernetes domain half, which selects by label and never by name prefix: `names` · `exec` · `ask` `tools` · `capabilities` `reachability` `replicaset` · `context` · `cluster` `endpoints` `namespace` · `manifests` `probe` `scale` `status` `transfer` · `release` · `operator` · `chart` `monitoring` · `certmanager` `forward` · `ingress` `grafana-ingress` · `workspace`
 - **`core/lifecycle/`**, create, inspect, change and destroy, with no façade (import the module that defines a name): `types` `notes` `admin` · `naming` `request` `ports` `tlsplan` · `sizing` `seeding` `ownership` `inspect` · `preconditions` `payload` `ready` · `state` · `destroy` `pruning` · `create-k8s` · `create-docker`
 - **`perf/`**, what `loadtest` and `capacity` measure: `timings` `slo` `baseline` · `rcmetrics` `resources` `mongoprof` `constrain` `k6` `verdict` `timeline` · `report`
 - **`seed/`**, sample data planned before anything is created and read back after: `kinds` · `wording` · `plan` · `apply` `repairs` · `check`
@@ -269,9 +279,11 @@ stays green. A browser test compares the fixture with the real payload, and
 ## Performance: what is allowed to be slow
 
 Each read of a remote cluster is a round trip, a second or two against EKS, so each operation
-has a budget. The GUI's cluster list (`GET /api/clusters`) probes **nothing**, because the
-page draws every card from it and one slow cluster must not slow the page. Each card then
-fetches its own status (`GET /api/clusters/status`), which may probe. `up` and `cluster create` take minutes, and must **say what they are doing while
+has a budget. The GUI's cluster list (`GET /api/clusters`) probes **nothing**, so the page
+draws its cards at once. The Clusters page, Home and step 1 of Create then read one
+`GET /api/clusters/overview`, which reads every cluster with bounded concurrency (and a
+cluster on this machine only lightly); `GET /api/clusters/status` is read only when a
+local cluster's own page is opened. `up` and `cluster create` take minutes, and must **say what they are doing while
 they do it**.
 Independent reads run concurrently. A step that prints nothing until it returns, like
 `helm install --wait`, is where somebody decides the tool has hung and kills it, leaving a

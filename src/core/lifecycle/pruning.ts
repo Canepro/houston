@@ -23,6 +23,7 @@ import {
   waitNamespaceGone,
 } from '../kube/namespace';
 import { OPERATOR_NAMESPACE } from '../kube/operator';
+import { MONITORING_NAMESPACE, removeGrafanaIngress, removeMonitoring } from '../kube/monitoring';
 import { workloadExists } from '../kube/status';
 import * as engine from '../runner/engine';
 import { reproLock } from '../runner/locks';
@@ -298,6 +299,11 @@ export async function pruneKubernetes(name: string, emit: Emit, removed: string[
   // Same route the Kubernetes branch of `teardown` now drops, for the same reason: `prune`
   // bypasses `teardown()` entirely, so it has to do this itself or the edge is left
   // pointing at a namespace that no longer exists.
+  if (isTruthy(extra.tls)) await removeGrafanaIngress(name, { context, emit });
+  const grafanaPid = extra.grafana_pid;
+  if (isTruthy(grafanaPid))
+    stopPortForward(Number(grafanaPid), { namespace: MONITORING_NAMESPACE });
+  if (isTruthy(extra.monitoring)) await removeMonitoring({ context, excluding: ns, emit });
   deregisterRoute(name);
   await paths.remove(name);
   // Its repair notes with it, as `teardown` does: see `journal.WORKSPACE_KINDS`.

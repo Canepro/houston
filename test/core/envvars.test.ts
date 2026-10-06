@@ -316,10 +316,12 @@ describe('applying an env change', () => {
 
   async function typescriptRun(
     caseData: Record<string, unknown>,
-  ): Promise<Captured & { error: unknown }> {
+  ): Promise<Captured & { error: unknown; order: string[] }> {
     jest.resetModules();
     const captured: Record<string, unknown> = {};
     const events: Seen[] = [];
+    // The recreate, the wait for Rocket.Chat and the events, in the order they happened.
+    const order: string[] = [];
     // Through JSON, so a case's own document keeps a `__proto__` key as an own one -- as the
     // YAML reader makes it -- and is not mutated for the next run.
     const doc =
@@ -367,7 +369,14 @@ describe('applying an env change', () => {
       ...jest.requireActual('../../src/core/runner/engine'),
       up: async (n: string, options: { pull?: boolean; forceRecreate?: string }) => {
         captured['up'] = [n, options.pull, options.forceRecreate];
+        order.push('up');
         return 0;
+      },
+    }));
+    jest.doMock('../../src/core/lifecycle/ready', () => ({
+      waitServing: async (waited: { name: string }) => {
+        order.push(`wait ${waited.name}`);
+        return {};
       },
     }));
     jest.doMock('../../src/core/lifecycle/naming', () => ({ resolveName: async (n: string) => n }));
@@ -393,6 +402,7 @@ describe('applying an env change', () => {
           restart: caseData.restart as boolean,
           emit: ((event: Seen) => {
             events.push({ message: event.message, level: event.level, phase: event.phase });
+            order.push(`event ${event.message}`);
           }) as never,
         },
       );
@@ -415,7 +425,8 @@ describe('applying an env change', () => {
       upArgs: [],
       events,
       up: captured['up'] ?? null,
-    } as Captured & { error: unknown };
+      order,
+    } as Captured & { error: unknown; order: string[] };
   }
 
   const CASES: { name: string; data: Record<string, unknown> }[] = [
@@ -529,6 +540,23 @@ describe('applying an env change', () => {
     }
   });
 
+  it('waits until Rocket.Chat answers before it says the restart is done', async () => {
+    // It returned as soon as compose had recreated the container, and a `seed` typed
+    // straight after refused "repro not ready" while the new container booted. The wait
+    // prints nothing of its own, so the events stay those earlier releases printed.
+    const mine = await typescriptRun({
+      name: 'e',
+      sets: { A: '1' },
+      unset: [],
+      restart: true,
+      existingEnv: null,
+    });
+    expect(mine.error).toBeNull();
+    expect(
+      mine.order.filter((step) => !step.startsWith('event ') || step.includes('restarted')),
+    ).toEqual(['up', 'wait e', "event 'e' restarted with the new environment"]);
+  });
+
   it('matches earlier releases for every shape a hand-edited extra can take', async () => {
     // Earlier releases read a recorded env list as key/value PAIRS and refuse what is not
     // one, and refuse an `extra` that is not a mapping -- both before anything is written.
@@ -588,7 +616,7 @@ describe('applying an env change', () => {
       };
       const recorded = RECORDED.shapes[index] as Captured & { error: unknown };
       const mine = await typescriptRun(data);
-      expect({ shape, ...mine, upArgs: undefined }).toEqual({
+      expect({ shape, ...mine, upArgs: undefined, order: undefined }).toEqual({
         shape,
         ...recorded,
         upArgs: undefined,

@@ -71,6 +71,34 @@ describe('announcing readiness', () => {
 });
 
 describe('bringing a route back', () => {
+  it('Grafana public URL regression: restores the monitored router after start or reuse', async () => {
+    jest.resetModules();
+    const register = jest.fn(async () => false);
+    jest.doMock('../../../src/core/edge/routes', () => ({
+      ...jest.requireActual<object>('../../../src/core/edge/routes'),
+      register,
+    }));
+    jest.doMock('../../../src/core/edge/engine', () => ({
+      ...jest.requireActual<object>('../../../src/core/edge/engine'),
+      running: async () => true,
+    }));
+    try {
+      const ready = require('../../../src/core/lifecycle/ready') as typeof ReadyNS;
+      const record = require('../../../src/core/runner/record') as typeof RecordNS;
+      await ready.restoreRoute(
+        record.metadata({
+          name: 'w',
+          publicUrl: 'https://h',
+          extra: { tls: 'acme', monitoring: true },
+        }),
+      );
+      expect(register).toHaveBeenCalledWith('w', 'h', expect.objectContaining({ grafana: true }));
+    } finally {
+      jest.dontMock('../../../src/core/edge/engine');
+      jest.dontMock('../../../src/core/edge/routes');
+      jest.resetModules();
+    }
+  });
   afterEach(() => {
     jest.dontMock('../../../src/core/edge/routes');
     jest.resetModules();

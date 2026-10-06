@@ -177,6 +177,8 @@ export interface JobSummary {
   finished_at: number | null;
   n_events: number;
   error: string | null;
+  /** Where a cluster job acts, its AWS region; '' for every other job. */
+  region: string;
 }
 
 export class Job<Result = unknown> {
@@ -188,6 +190,12 @@ export class Job<Result = unknown> {
   error: string | null = null;
   errorKind: string | null = null;
   resultDropped = false;
+  /**
+   * A cluster build's region. Its label is only the cluster's NAME, and a name is unique per
+   * region, not per account: matching on the name alone hid a different, billing cluster of
+   * the same name in another region while this one was built.
+   */
+  region = '';
   private emitted = 0;
 
   constructor(
@@ -233,6 +241,7 @@ export class Job<Result = unknown> {
       finished_at: this.finishedAt,
       n_events: this.nEvents,
       error: this.error,
+      region: this.region,
     };
   }
 
@@ -248,6 +257,7 @@ export type JobTarget<Result> = (emit: Emit) => Result | Promise<Result>;
 export interface SubmitOptions {
   label?: string;
   actor?: string;
+  region?: string;
 }
 
 declare module 'fastify' {
@@ -298,6 +308,7 @@ export class JobManager {
     this.nextId += 1;
     const id = `job_${this.nextId.toString(16).padStart(10, '0')}`;
     const job = new Job<Result>(id, kind, label, actor, pool !== undefined);
+    job.region = options.region ?? '';
     auditService.audit(actor, kind, label, { origin: request.origin });
     this.jobs.set(id, job);
     this.evict();

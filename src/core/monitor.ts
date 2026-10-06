@@ -16,6 +16,7 @@ import { DockerError, NotReadyError, ValidationError, errorText } from '../lib/e
 import { type Emit, info, nullEmit, warn } from '../lib/events';
 import { toInt, quotedText, toText, isTruthy, valueKind, expectedText } from '../lib/format';
 import * as monitoring from '../lib/monitoring';
+import { register as registerRoute } from './edge/routes';
 
 import { login } from './lifecycle/admin';
 import { resolveName } from './lifecycle/naming';
@@ -106,10 +107,17 @@ function listChecked(value: unknown): unknown[] {
  * `String(note)` made a `["Grafana: ..."]` list the note it held.
  */
 function notesWithoutMonitoring(extra: Bag): unknown[] {
-  const ours = monitoring.notes();
-  return listChecked(held(extra, 'notes', [])).filter(
-    (note) => !(typeof note === 'string' && ours.includes(note)),
-  );
+  return listChecked(held(extra, 'notes', [])).filter((note) => !monitoring.isMonitoringNote(note));
+}
+
+async function updateDockerRoute(m: Metadata, grafana: boolean): Promise<void> {
+  const extra = bagOf(m.extra);
+  if (!isTruthy(extra.tls) || !m.publicUrl) return;
+  await registerRoute(m.name, new URL(m.publicUrl).hostname, {
+    instances: typeof extra.instances === 'number' ? extra.instances : 1,
+    local: extra.tls === 'local',
+    grafana,
+  });
 }
 
 /**
@@ -164,13 +172,19 @@ export async function attachLocked(target: string, emit: Emit = nullEmit): Promi
   }
 
   const services = setDefault(doc, 'services', m.name);
-  Object.assign(services, monitoring.bindPorts(monitoring.services(), detectBind(doc, m.name)));
+  const publicUrl = isTruthy(bagOf(m.extra).tls) ? m.publicUrl : '';
+  const grafana = monitoring.grafanaUrl(publicUrl, !!publicUrl);
+  const notes = monitoring.notes(grafana);
+  Object.assign(
+    services,
+    monitoring.bindPorts(monitoring.services(publicUrl), detectBind(doc, m.name)),
+  );
   Object.assign(setDefault(doc, 'volumes', m.name), monitoring.volumes());
   const extra = bagOf(m.extra);
   m.extra = extra;
   extra.monitoring = true;
   extra.monitoring_ports = [...config.MONITOR_PORTS];
-  extra.notes = [...notesWithoutMonitoring(extra), ...monitoring.notes()];
+  extra.notes = [...notesWithoutMonitoring(extra), ...notes];
   const targets = rcServicesIn(doc);
   await write(
     m.name,
@@ -183,18 +197,18 @@ export async function attachLocked(target: string, emit: Emit = nullEmit): Promi
   if ((await up(m.name, { pull: true })) !== 0) {
     throw new DockerError('`docker compose up` failed bringing up monitoring');
   }
-  const grafana = `http://localhost:${String(config.MONITOR_PORTS[1])}`;
+  await updateDockerRoute(m, true);
   // The detail is ONE key named `data` inside the event's data: it nests, on the stream
   // and in houston.log, as it always has, and the wire keeps that shape.
   info(emit, `monitoring attached to ${quotedText(m.name)}`, {
     phase: 'done',
-    data: { data: { grafana_url: grafana, notes: monitoring.notes() } },
+    data: { data: { grafana_url: grafana, notes } },
   });
   return {
     name: m.name,
     monitoring: true,
     grafana_url: grafana,
-    notes: monitoring.notes(),
+    notes,
   };
 }
 
@@ -235,7 +249,9 @@ export async function attachKubernetes(target: string, emit: Emit = nullEmit): P
   const { forwardReachable, grafanaForward } = await import('./kube/forward');
   const m = await readMeta(target);
   const [namespace, context] = await kubeTarget(m);
-  await checkMonitorPorts(m.name);
+  const extra = bagOf(m.extra);
+  const publicUrl = isTruthy(extra.tls) ? m.publicUrl : '';
+  if (!publicUrl) await checkMonitorPorts(m.name);
   try {
     const auth = await login(m);
     if (!(await setSetting(m.rootUrl, auth, adminPass(m), monitoring.RC_METRICS_SETTING, true))) {
@@ -247,27 +263,49 @@ export async function attachKubernetes(target: string, emit: Emit = nullEmit): P
     );
   }
 
-  await k8s.ensureMonitoring({ context, emit });
+  await k8s.ensureMonitoring({ context, emit, publicUrl });
+  if (publicUrl) {
+    const { ensureGrafanaIngress } = await import('./kube/grafana-ingress');
+    await ensureGrafanaIngress(m.name, {
+      context,
+      publicUrl,
+      ingressClass: toText(extra.ingress_class),
+      issuer: { mode: toText(extra.tls), acmeStaging: Boolean(extra.tls_staging) },
+      emit,
+    });
+  }
   await k8s.setMonitoringLabel(namespace, { context, wanted: true });
   const port = config.MONITOR_PORTS[1];
-  const pid = await grafanaForward({
-    context,
-    hostPort: port,
-    bindHost: toText(bagOf(m.extra).bind_host),
-  });
+  const previousPid = extra.grafana_pid;
+  if (isTruthy(previousPid))
+    stopPortForward(toInt(previousPid), { namespace: k8s.MONITORING_NAMESPACE });
+  // Public workspaces use the Ingress, so several of them can share a cluster without
+  // competing for this box's single localhost:5050 forward.
+  const pid = publicUrl
+    ? 0
+    : await grafanaForward({
+        context,
+        hostPort: port,
+        bindHost: toText(bagOf(m.extra).bind_host),
+      });
   await updateMeta(m.name, (meta) => {
     const extra = bagOf(meta.extra);
     meta.extra = extra;
     extra.monitoring = true;
-    extra.monitoring_ports = [port];
-    extra.grafana_pid = pid;
+    if (publicUrl) {
+      delete extra.monitoring_ports;
+      delete extra.grafana_pid;
+    } else {
+      extra.monitoring_ports = [port];
+      extra.grafana_pid = pid;
+    }
   });
-  const grafana = `http://localhost:${String(port)}`;
+  const grafana = monitoring.grafanaUrl(publicUrl, true);
   // Don't hand over a URL that has not answered yet. `port-forward` returns a pid before
   // it binds the socket, and the workspace path already carries a test named for this
   // exact mistake — so this waits, and says so rather than printing a link that quietly
   // does not work.
-  if (!(await forwardReachable(port))) {
+  if (!publicUrl && !(await forwardReachable(port))) {
     warn(
       emit,
       `Grafana is installed but ${grafana} is not answering yet; ` +
@@ -297,6 +335,7 @@ export async function detachKubernetes(target: string, emit: Emit = nullEmit): P
   const k8s = await import('./kube/monitoring');
   const m = await readMeta(target);
   const [namespace, context] = await kubeTarget(m);
+  if (isTruthy(bagOf(m.extra).tls)) await k8s.removeGrafanaIngress(m.name, { context, emit });
   let rcOk = false;
   // EMITTED, not silent. Removing the shared stack can take minutes — it deletes operator
   // custom resources and then uninstalls a release — and this function used to say nothing
@@ -358,6 +397,7 @@ export async function detach(name: string, emit: Emit = nullEmit): Promise<Bag> 
 export async function detachLocked(target: string, emit: Emit = nullEmit): Promise<Bag> {
   const m = await readMeta(target);
   const doc = await readCompose(m.name);
+  await updateDockerRoute(m, false);
   let rcOk = false;
   // Same reasoning as the Kubernetes path above: this had two emits and the last one was
   // at the end, so there was nothing to tell "working" from "wedged".

@@ -14,6 +14,7 @@ import type * as EventlogNS from '../core/eventlog';
 import type * as KubeContextNS from '../core/kube/context';
 import type * as KubeAskNS from '../core/kube/ask';
 import type * as PreconditionsNS from '../core/lifecycle/preconditions';
+import type * as RequestNS from '../core/lifecycle/request';
 import type * as KubeNamespaceNS from '../core/kube/namespace';
 import type * as KubeClusterNS from '../core/kube/cluster';
 import type * as KubeReachabilityNS from '../core/kube/reachability';
@@ -106,7 +107,7 @@ import { cliActorAndOrigin } from './handlers/actor';
 import * as https from './handlers/https';
 import { confirm } from './handlers/prompt';
 import { usersCommand } from './handlers/users';
-import { ljust, asciiOf, wrapWords, say, writeBox, writePanel } from './render';
+import { ljust, asciiOf, wrapWords, say, writeBox, writePanel, paint, writeTable } from './render';
 import { PROCESS_CONSOLE, consoleColumns, type ConsoleEnvironment } from './error-panel';
 import { runWithContext } from '../lib/context';
 import { capabilities } from './capabilities';
@@ -171,7 +172,9 @@ const defaultConfirm = confirm;
  * An explicit name, else the default -- WITH the CLI's actor, so a name typed without the
  * owner prefix finds the workspace its owner made (`up --name test` makes `alice-test` once
  * accounts exist). Only where the CLI has always resolved this way: `use`, `env`, `backup`,
- * `backups`, `restore` and `upgrade` hand the name over as typed.
+ * `backups`, `restore` and `upgrade` hand the name over as typed. `chown` joined in 2.x:
+ * earlier releases refused `chown --name test` with exit 4 while every lifecycle command
+ * took it, and a refusal is the only answer that changes.
  */
 async function target(name: string): Promise<string> {
   const naming = require('../core/lifecycle/naming') as typeof NamingNS;
@@ -1328,9 +1331,8 @@ async function dispatch(
       return { ...page, lines };
     }
     case 'chown': {
-      const naming = require('../core/lifecycle/naming') as typeof NamingNS;
       const ownership = require('../core/lifecycle/ownership') as typeof OwnershipNS;
-      return await ownership.setOwner(await naming.resolveName(text(o.name)), text(o.to), {
+      return await ownership.setOwner(await target(text(o.name)), text(o.to), {
         by: (require('../core/audit') as typeof AuditNS).actor(),
       });
     }
@@ -1406,7 +1408,8 @@ async function runCluster(
   const emit = emitOf(invocation, io);
   if (action === 'status') {
     const cluster = require('../core/cluster') as typeof ClusterNS;
-    const report = await cluster.status(text(o.context), emit);
+    // A bare name, as create/delete/keep/share take it, or --context: the same cluster.
+    const report = await cluster.status(text(o.context) || text(a.name), emit);
     const unreadable = Array.isArray(report.unreadable) ? report.unreadable : [];
     if (active()) {
       for (const missing of unreadable) {
@@ -1419,7 +1422,11 @@ async function runCluster(
     if (report.context === '' || report.reachable === false) {
       const message =
         `cluster ${report.context || '(none)'} is not usable from here: ` +
-        (report.context === '' ? 'no context is configured' : 'it is not reachable');
+        (report.context === ''
+          ? 'no context is configured'
+          : report.gone === true
+            ? 'AWS says it no longer exists, so nothing there is billing'
+            : 'it is not reachable');
       // A PreflightError: the message and no details. The envelope carried the whole ledger
       // row as `error.details`, which the established envelope never has.
       if (active()) throw new PreflightError(message);
@@ -1439,6 +1446,19 @@ async function runCluster(
       // stdout and never the advice, so a cluster AWS says is deleted -- and costs nothing
       // -- read as one that is down.
       say(io, `cluster   ${report.context}`);
+      if (report.gone === true) {
+        // AWS gave a definite no. That is ONE verdict: the cluster is gone, nothing there is
+        // billing, and only the kubeconfig entry is left. This printed "NOT a report that the
+        // cluster is empty" on stderr and "no longer exists, not costing anything" on stdout,
+        // two verdicts on one cluster, and readers believed the louder one.
+        const short = report.context.split('/').pop() ?? report.context;
+        io.writeErr(
+          `${quotedText(report.context)} no longer exists in AWS — nothing there is billing. ` +
+            'The kubeconfig entry naming it is left over; ' +
+            `\`houston cluster forget ${short}\` removes it.\n`,
+        );
+        return commandOutcome(undefined, 3);
+      }
       io.writeErr(
         `${quotedText(report.context)} cannot be read: ` +
           `${report.reach_why || 'it is not answering'}. Nothing below could be read — ` +
@@ -1488,6 +1508,14 @@ async function runCluster(
     }
     return found;
   }
+  if (action === 'connect') {
+    const arn = stripText(text(a.name) || text(o.context));
+    if (arn === '')
+      throw new ValidationError(
+        '`cluster connect` needs the full EKS ARN from `houston cluster list --force`.',
+      );
+    return await eks.connectExisting(arn);
+  }
   if (action === 'create') {
     const name = text(a.name);
     if (name === '')
@@ -1520,6 +1548,7 @@ async function runCluster(
     return await eks.createCluster(name, {
       region: text(o.region),
       nodes: number(o.nodes) || eks.DEFAULT_NODES,
+      zone: stripText(text(o.zone)),
       ...(Object.keys(subnets).length === 0 ? {} : { subnets }),
       expiresDays,
       emit,
@@ -1527,25 +1556,27 @@ async function runCluster(
   }
   if (action === 'delete') {
     const name = text(a.name);
-    const region = text(o.region);
     if (name === '')
       throw new ValidationError(
         "`cluster delete` needs the cluster's name, e.g. `houston cluster delete support`.",
       );
+    // Typed, else where the build note says it was built, else the AWS CLI's default -- and
+    // ALWAYS named below. Without --region this looked in the default region, said "nothing
+    // to delete", and the cluster billed on where `cluster create` had put it.
+    const region = text(o.region) || eks.rememberedRegion(name) || (await eks.preflight()).region;
     // READ BEFORE ASKING: consent to destroy something that is not there is how people learn
     // to type `y` at a prompt that means nothing. ONLY a definite ABSENT short-circuits;
     // REFUSED goes on through the prompt into the guards inside `deleteCluster`, which are
     // the real gate either way.
-    const seen = await eks.describeCluster(name, region || (await eks.preflight()).region);
+    const seen = await eks.describeCluster(name, region);
     if (seen.state === (require('../core/kube/ask') as typeof KubeAskNS).ABSENT) {
       if (active()) return { name, deleted: false };
       const context = require('../core/kube/context') as typeof KubeContextNS;
       const known = (await context.contexts())[0];
       say(
         io,
-        `no EKS cluster named ${quotedText(name)}` +
-          (region ? ` in ${region}` : '') +
-          ' — nothing to delete.' +
+        `no EKS cluster named ${quotedText(name)} in ${region} — nothing to delete.` +
+          ' `houston cluster list` finds it in whichever region it is; then `--region <that>`.' +
           (known.includes(name)
             ? ' That name is a kubeconfig context on this machine; ' +
               `\`houston cluster forget ${name}\` clears the entry, and ` +
@@ -1557,27 +1588,31 @@ async function runCluster(
     // The prompt is not the gate -- the TAG is -- but a 15-minute destructive operation on
     // somebody's AWS account still asks. Not under --json, where it has never asked.
     if (!bool(o.yes) && !active()) {
-      const question =
-        `Delete EKS cluster ${quotedText(name)}` +
-        (region ? ` in ${region}` : '') +
-        '? This destroys the cluster, its nodes and its volumes.';
+      // Red on a terminal, like every word here that is about to destroy something.
+      const question = paint(
+        `Delete EKS cluster ${quotedText(name)} in ${region}` +
+          '? This destroys the cluster, its nodes and its volumes.',
+        'red',
+      );
       if (!(await (dependencies.confirm ?? defaultConfirm)(question))) throw new Aborted();
     }
-    return {
-      name,
-      deleted: await eks.deleteCluster(name, { region, force: bool(o.force), emit }),
-    };
+    const deleted = await eks.deleteCluster(name, { region, force: bool(o.force), emit });
+    // "The command returned" is not "nothing is billing": what AWS still holds, and the
+    // fix for each, read with the operator policy's own rights. Additive on the envelope.
+    return deleted
+      ? { name, deleted, region, leftovers: await eks.sweepLeftovers(name, region) }
+      : { name, deleted };
   }
   if (action === 'prepare') {
     const config = require('../lib/config') as typeof ConfigNS;
-    const context = text(o.context) || config.defaultKubeContext();
+    const context = text(o.context) || text(a.name) || config.defaultKubeContext();
     if (context === '')
       throw new ValidationError(
         '`cluster prepare` needs --context <name>, or a default from ' +
           '`houston config set kubernetes.context <name>`.',
       );
     // The resolved context rides along for the renderer, out of the --json envelope.
-    const prepared = await eks.prepareCluster(context, { emit });
+    const prepared = await eks.prepareCluster(context, { emit, zone: stripText(text(o.zone)) });
     Object.defineProperty(prepared, '__context', { enumerable: false, value: context });
     return prepared;
   }
@@ -1606,6 +1641,31 @@ async function runCluster(
           `\`kubectl config delete-context ${known}\``,
       );
     return { context: known, forgotten: true };
+  }
+  if (action === 'keep') {
+    const name = text(a.name);
+    if (name === '')
+      throw new ValidationError(
+        "`cluster keep` needs the cluster's name, e.g. `houston cluster keep support --days 7`.",
+      );
+    const days = number(o.days) || 7;
+    if (days < 1)
+      throw new ValidationError('--days wants a whole number of days from today, at least 1');
+    return await eks.keepCluster(name, { days, region: text(o.region) });
+  }
+  if (action === 'share') {
+    const name = text(a.name);
+    const user = stripText(text(o.user));
+    if (name === '' || user === '')
+      throw new ValidationError(
+        "`cluster share` needs the cluster's name and --user <iam-user>, e.g. " +
+          '`houston cluster share support --user bob`.',
+      );
+    return await eks.shareCluster(name, { user, region: text(o.region) });
+  }
+  if (action === 'overview') {
+    const cluster = require('../core/cluster') as typeof ClusterNS;
+    return await cluster.overview(emit);
   }
   throw new ValidationError(`unknown cluster action '${action}'`);
 }
@@ -1639,6 +1699,255 @@ function unknownOr(value: unknown): string {
   return value === null || value === undefined ? '?' : toTextAny(value);
 }
 
+/**
+ * Where the cluster is and who built it, on one line under the context: the facts the
+ * ledger reads from the cluster's own tags, so they are true on every machine.
+ */
+function renderClusterAbout(io: CliIo, report: Bag): void {
+  if (!isTruthy(report.name) && !isTruthy(report.region)) return;
+  const where = toText(report.where) || 'aws';
+  const place =
+    where === 'local'
+      ? 'this machine'
+      : where === 'elsewhere'
+        ? 'elsewhere'
+        : toText(report.region) || 'local';
+  const parts = [toText(report.name), place, toText(report.distribution)].filter(
+    (part) => part !== '',
+  );
+  if (report.made_by_houston === true) parts.push('built by houston');
+  else if (report.made_by_houston === false) parts.push('built by you');
+  if (isTruthy(report.created_at)) parts.push(`created ${toText(report.created_at).slice(0, 10)}`);
+  if (typeof report.expires_in_days === 'number') {
+    const days = report.expires_in_days;
+    parts.push(
+      days < 0
+        ? paint(`expired ${String(-days)} d ago (${toText(report.expires)})`, 'amber')
+        : `expires in ${String(days)} d (${toText(report.expires)})`,
+    );
+  }
+  say(io, `about     ${parts.join(' · ')}`);
+  const ready = report.ready;
+  // NOT A CHECKLIST off AWS: a local install shipped its storage class and ingress, and
+  // "ready ... cert-manager" read as houston having set them up. It says what is there.
+  if (where !== 'aws' && ready !== null && ready !== undefined && typeof ready === 'object') {
+    const r = bag(ready);
+    const facts: string[] = [];
+    if (r.storage_class !== null) facts.push(`storage class ${toText(r.storage_class) || 'none'}`);
+    if (r.ingress_class !== null) facts.push(`ingress ${toText(r.ingress_class) || 'none'}`);
+    if (r.cert_manager === true) facts.push('cert-manager');
+    if (facts.length > 0) say(io, `uses      ${facts.join(' · ')}`);
+    return;
+  }
+  if (ready !== null && ready !== undefined && typeof ready === 'object') {
+    const r = bag(ready);
+    const facts: string[] = [];
+    if (r.storage_class !== null) facts.push(`storage ${toText(r.storage_class) || 'none'}`);
+    if (r.ingress_class !== null) facts.push(`ingress ${toText(r.ingress_class) || 'none'}`);
+    if (r.cert_manager === true) facts.push('cert-manager');
+    else if (r.cert_manager === false) facts.push('no cert-manager');
+    const zone = toText(report.zone);
+    if (zone !== '' && r.dns_answers === true) facts.push(`DNS for *.${zone} answers`);
+    else if (zone !== '' && r.dns_answers === false)
+      facts.push(paint(`DNS for *.${zone} does not answer yet`, 'amber'));
+    else if (zone === '' && isTruthy(r.cname_target)) facts.push('no DNS zone (`--zone` sets one)');
+    if (facts.length > 0) say(io, `ready     ${facts.join(' · ')}`);
+  }
+}
+
+/** What the cluster has cost, and the one next thing to do with it. */
+function renderClusterNext(io: CliIo, report: Bag): void {
+  if (typeof report.spend_usd === 'number')
+    say(io, `spent     ~$${report.spend_usd.toFixed(2)} so far`);
+  // Only a full ledger can say what is next; a partial one (an older --json replayed, a
+  // test double with three keys) gets the facts above and nothing invented below them.
+  if (typeof report.name !== 'string' || !('ready' in report) || !('zone' in report)) return;
+  const cluster = require('../core/cluster') as typeof ClusterNS;
+  const next = cluster.nextStep({
+    tools_ok: true,
+    approved: true,
+    account: '',
+    clusters: [report as unknown as ClusterNS.Ledger],
+    building: [],
+    failed: [],
+    default_context: toText(report.context),
+  });
+  say(io, `next      ${next.title}`);
+  if (next.command !== '') say(io, `          ${next.command}`);
+}
+
+/**
+ * The WHERE cell of `list`: the kind of cluster, in eight cells. `k8s` said nothing
+ * about which cluster; `eks` and `kind` say what a person needs to know at a glance, and
+ * the row's `context` says exactly which. k3s cannot be told from its name, so it stays k8s.
+ */
+function whereWord(row: Bag): string {
+  if (display(row.runtime) !== 'kubernetes') return 'compose';
+  const context = toText(row.context);
+  if (context.startsWith('arn:aws:eks:')) return 'eks';
+  if (context.startsWith('kind-')) return 'kind';
+  return 'k8s';
+}
+
+/** One ledger row of the overview table, the words both front-ends use for a state. */
+/** The state word both front-ends use, green only when it is running. */
+function stateWord(c: Bag): string {
+  return isTruthy(c.gone)
+    ? 'gone'
+    : c.reachable === true
+      ? paint('running', 'green')
+      : c.reach_status === 'denied'
+        ? 'refusing'
+        : c.reach_status === 'no-context'
+          ? 'no credentials'
+          : 'not answering';
+}
+
+/** A row for a cluster that does not bill: what it is, whether it answers, what it holds. */
+function plainRow(c: Bag, cost: string): string[] {
+  return [
+    toText(c.name) || toText(c.context),
+    toText(c.distribution) || '?',
+    stateWord(c),
+    Array.isArray(c.workspaces) ? String(c.workspaces.length) : '?',
+    cost,
+  ];
+}
+
+function overviewRow(c: Bag): string[] {
+  const state = stateWord(c);
+  const types = isTruthy(c.instance_types) ? Object.entries(bag(c.instance_types)) : [];
+  const nodes =
+    types.length > 0
+      ? nodeShape(types.sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)))
+      : unknownOr(c.nodes);
+  const workspaces = Array.isArray(c.workspaces) ? String(c.workspaces.length) : '?';
+  const cost = bag(c.cost);
+  const perDay = isTruthy(c.gone)
+    ? 'nothing'
+    : c.cost === null || c.cost === undefined
+      ? '?'
+      : Number(cost.usd_hr) === 0
+        ? 'free'
+        : `~$${(Number(cost.usd_hr) * 24).toFixed(2)}`;
+  const days = c.expires_in_days;
+  const expires =
+    typeof days === 'number'
+      ? days < 0
+        ? paint(`${String(-days)} d ago`, 'amber')
+        : days === 0
+          ? paint('today', 'amber')
+          : `in ${String(days)} d`
+      : '—';
+  const built = c.made_by_houston === true ? 'houston' : c.made_by_houston === false ? 'you' : '?';
+  return [
+    toText(c.name) || toText(c.context),
+    toText(c.region) || 'local',
+    state,
+    nodes,
+    workspaces,
+    perDay,
+    expires,
+    built,
+  ];
+}
+
+/**
+ * `cluster overview`: every known cluster as a table, the totals, and what to do next.
+ *
+ * The one answer both front-ends render (`cluster.overview`), so the terminal and the
+ * Clusters page cannot disagree. Colour only on a terminal, and only as a signal: a running
+ * state green, a cluster expiring within two days amber, one past its date red, and the
+ * count of billing clusters amber -- the GUI's own rule.
+ */
+function renderClusterOverview(io: CliIo, result: Bag): void {
+  const clusters = Array.isArray(result.clusters) ? (result.clusters as Bag[]) : [];
+  const failed = Array.isArray(result.failed) ? (result.failed as Bag[]) : [];
+  // WHERE IT LIVES decides the table: a cluster on this machine has nothing to approve,
+  // build or pay for, so it is not in the AWS table, its totals or its next step. A
+  // document from before `where` existed is all AWS, which is all it could hold.
+  const where = (c: Bag): string => toText(c.where) || 'aws';
+  const plain: [string, string, string][] = [
+    ['local', 'ON THIS MACHINE', 'free'],
+    ['elsewhere', 'ELSEWHERE', 'not priced'],
+  ];
+  for (const [kind, heading, cost] of plain) {
+    const here = clusters.filter((c) => where(c) === kind);
+    if (here.length === 0) continue;
+    say(io, heading);
+    writeTable(
+      io,
+      ['NAME', 'KIND', 'STATE', 'WORKSPACES', 'COST'],
+      here.map((c) => plainRow(c, cost)),
+    );
+    say(io, '');
+  }
+  const rows = clusters.filter((c) => where(c) === 'aws').map(overviewRow);
+  for (const build of failed) {
+    rows.push([
+      toText(build.name),
+      toText(build.region) || '?',
+      paint(build.present === false ? 'failed build (gone)' : 'failed build', 'amber'),
+      '?',
+      '?',
+      build.present === false ? 'nothing' : '?',
+      '—',
+      'houston',
+    ]);
+  }
+  if (clusters.length === 0 && failed.length === 0) {
+    say(
+      io,
+      'no cluster known on this box — a local one appears with `houston up --runtime ' +
+        'kubernetes`; a managed one is built with `houston cluster create`',
+    );
+  } else if (rows.length === 0) {
+    say(io, 'IN AWS');
+    say(io, 'no cluster in AWS yet');
+  } else {
+    say(io, 'IN AWS');
+    writeTable(
+      io,
+      ['NAME', 'REGION', 'STATE', 'NODES', 'WORKSPACES', 'COST/DAY', 'EXPIRES', 'BUILT BY'],
+      rows,
+    );
+    const t = bag(result.totals);
+    const n = Number(t.clusters) || 0;
+    const billing = Number(t.billable) || 0;
+    const w = Number(t.workspaces) || 0;
+    // PARTIAL IS SAID. A billing cluster whose rate could not be read, or whose workspace
+    // list could not be listed, is left out of a sum -- so the sum says so, as a `?` in a
+    // row does, rather than reading as the whole bill.
+    const unpriced = Number(t.unpriced) || 0;
+    const unread = Number(t.unread) || 0;
+    const perDay =
+      t.usd_day === null || t.usd_day === undefined
+        ? 'cost ?'
+        : `~$${Number(t.usd_day).toFixed(2)}/day` +
+          (unpriced > 0 ? ` + ${String(unpriced)} not priced` : '');
+    const parts = [
+      `${String(n)} cluster${n === 1 ? '' : 's'}`,
+      billing > 0 ? paint(`${String(billing)} billing`, 'amber') : '0 billing',
+      perDay,
+    ];
+    if (t.spend_usd !== null && t.spend_usd !== undefined)
+      parts.push(`spent so far ~$${Number(t.spend_usd).toFixed(2)}`);
+    parts.push(
+      `${String(w)}${unread > 0 ? '+' : ''} workspace${w === 1 && unread === 0 ? '' : 's'}`,
+    );
+    say(io, '');
+    say(io, parts.join(' · '));
+  }
+  const next = bag(result.next);
+  say(io, `next  ${toText(next.title)}`);
+  if (isTruthy(next.why)) say(io, `      ${toText(next.why)}`);
+  if (isTruthy(next.command)) say(io, `      ${toText(next.command)}`);
+  if (isTruthy(result.unreadable))
+    io.writeErr(
+      `the kubeconfig could not be fully listed (${toText(result.unreadable)}) — there may be clusters missing above\n`,
+    );
+}
+
 /** `n`x `type` for each instance type, `unlabelled` for a node with no type label. */
 function nodeShape(entries: [string, unknown][]): string {
   return entries.map(([type, count]) => `${toTextAny(count)}x ${type || 'unlabelled'}`).join(', ');
@@ -1651,7 +1960,10 @@ function nodeShape(entries: [string, unknown][]): string {
  * workspaces could not be listed.
  */
 function renderClusterShape(io: CliIo, report: Bag): void {
-  const owned = isTruthy(report.ours) ? "houston's own" : 'yours';
+  // `ours` is the kind-cluster switch and never true for EKS; the tag houston writes at
+  // build time decides for a managed cluster. null (could not tell) reads as yours.
+  const owned =
+    isTruthy(report.ours) || report.made_by_houston === true ? "houston's own" : 'yours';
   say(
     io,
     `${toText(report.distribution) || 'unknown'} · ${owned} · ${unknownOr(report.nodes)} node(s)`,
@@ -2466,6 +2778,15 @@ export function renderHuman(invocation: Invocation, value: unknown, io: CliIo): 
         io.writeOut(`✓ ${quotedText(name)} down (${kept}).\n`);
         io.writeOut(`  bring it back: houston up --version <same> --name ${name}\n`);
         io.writeOut('  delete for good: add --volumes, or run `houston prune`\n');
+        // ON A CLOUD CLUSTER the kept disk is a bill: small, but it outlives the cluster
+        // if the cluster goes first, and `cluster delete` refuses while it exists.
+        const request = require('../core/lifecycle/request') as typeof RequestNS;
+        if (kube && request.savedDefaultIsBillable(display(result.context))) {
+          io.writeOut(
+            '  its 8 GB disk keeps billing (about $0.64 a month) and `houston cluster delete` ' +
+              `will refuse while it exists — \`houston down --name ${name} --volumes\` removes it\n`,
+          );
+        }
       }
       return;
     }
@@ -2556,7 +2877,7 @@ export function renderHuman(invocation: Invocation, value: unknown, io: CliIo): 
         io.writeOut(
           `${mark}${ljust(display(row.name), 19)} ${shared ? `${ljust(owner, 12)} ` : ''}` +
             `${ljust(display(row.rc_version), 9)} ${ljust(display(row.mongo_tag), 7)} ` +
-            `${ljust(display(row.runtime) === 'kubernetes' ? 'k8s' : 'compose', 8)} ` +
+            `${ljust(whereWord(row), 8)} ` +
             `${ljust(display(row.host_port), 6)} ${ljust(display(row.state), 10)} ` +
             `${isTruthy(row.public_url) ? display(row.public_url) : display(row.root_url)}\n`,
         );
@@ -2955,11 +3276,6 @@ export function renderHuman(invocation: Invocation, value: unknown, io: CliIo): 
                 `${isTruthy(row.ours) ? 'houston' : "not houston's"}  created ${when || '?'}${due}`,
             );
           }
-          say(
-            io,
-            '  `houston cluster status --context <name>` prices one of them ' +
-              "— the cluster's own name is enough.",
-          );
         }
         // NO REASSURING LINE WHEN NOTHING WAS SWEPT, and "houston" in it unless --force
         // widened the sweep. Then, said last and plainly, every region that could NOT be
@@ -2988,6 +3304,31 @@ export function renderHuman(invocation: Invocation, value: unknown, io: CliIo): 
             'swept a built-in region list because the account could not be asked which are ' +
               `enabled (${toTextAny(result.fallback)})`,
           );
+        // ENDS WITH WHAT TO DO NEXT, as every cluster action does: pricing the first one
+        // found -- by its own name, which is enough -- or, with none, how to get one.
+        say(
+          io,
+          clusters.length > 0
+            ? `next  houston cluster status --context ${toTextAny(clusters[0]?.name)}`
+            : 'next  houston cluster guide',
+        );
+      } else if (action === 'connect') {
+        say(io, `connected ${display(result.context)} in account ${display(result.account)}`);
+        if (result.reachable === true) {
+          say(
+            io,
+            'Kubernetes responds; workspace permissions and preparation still need checking.',
+          );
+          say(io, `next  houston cluster status --context ${display(result.context)}`);
+          say(
+            io,
+            `then  houston up --version <version> --name <ticket> --context ${display(result.context)}`,
+          );
+        } else
+          say(
+            io,
+            `Kubernetes access is not ready: ${display(result.access_reason)}. Check the EKS access entry for ${display(result.principal)}.`,
+          );
       } else if (action === 'prepare') {
         // The context it RESOLVED, not --context as typed (empty when the default was used),
         // and the adopted and next-command lines.
@@ -3008,12 +3349,35 @@ export function renderHuman(invocation: Invocation, value: unknown, io: CliIo): 
             '  then: houston up --version 8.5.1 --name t1 --runtime kubernetes ' +
               `--context ${context} --domain <your name>`,
           );
-      } else if (action === 'forget')
+        const short = (display(result.context) || context).split('/').pop() ?? context;
+        say(io, `next  houston up --version <version> --name <ticket> --context ${short}`);
+      } else if (action === 'forget') {
         io.writeOut(`forgot ${display(result.context)} — the cluster itself was not touched\n`);
-      else if (action === 'create') {
-        // The name as given, the expiry or its absence, and the line people copy.
+        say(io, 'next  houston cluster overview');
+      } else if (action === 'overview') renderClusterOverview(io, result);
+      else if (action === 'share') {
+        say(
+          io,
+          `${display(result.principal)} may run workspaces on ${quotedText(display(result.name))}` +
+            (isTruthy(result.already) ? ' (the access entry was already there)' : ''),
+        );
+        say(io, '  they run, once and then per ticket:');
+        for (const line of Array.isArray(result.lines) ? (result.lines as unknown[]) : [])
+          say(io, `    ${display(line)}`);
+        say(io, 'next  houston cluster overview');
+      } else if (action === 'keep') {
+        say(
+          io,
+          `kept ${quotedText(display(result.name))} until ${display(result.expires)} ` +
+            `(${display(result.days)} d) — a reminder tag; \`houston doctor\` and ` +
+            '`houston cluster overview` say so once it passes',
+        );
+        say(io, 'next  houston cluster overview');
+      } else if (action === 'create') {
+        // The expiry or its absence, and the line people copy. NOT "cluster 'X' is up in R":
+        // createCluster emits that as an event and emitOf prints every event, so the summary
+        // repeated it one line under the first.
         const name = display(invocation.arguments.name);
-        say(io, `cluster ${quotedText(name)} is up in ${display(result.region)}`);
         if (isTruthy(result.expires))
           say(
             io,
@@ -3026,6 +3390,17 @@ export function renderHuman(invocation: Invocation, value: unknown, io: CliIo): 
           '  point a workspace at it: houston up --version 8.5.1 ' +
             `--name TICKET-1234 --context ${name} --domain <your name>`,
         );
+        const prepared = bag(result.prepared);
+        if (isTruthy(prepared.cname_target)) {
+          const zone = toText(prepared.zone) || '<your zone>';
+          say(
+            io,
+            `next  point *.${zone} at ${toText(prepared.cname_target)} (a CNAME, once, at your DNS provider), then:`,
+          );
+          say(io, `      houston up --version <version> --name <ticket> --context ${name}`);
+        } else {
+          say(io, `next  houston up --version <version> --name <ticket> --context ${name}`);
+        }
       } else if (action === 'delete') {
         if (result.said !== true)
           io.writeOut(
@@ -3033,11 +3408,48 @@ export function renderHuman(invocation: Invocation, value: unknown, io: CliIo): 
               ? `cluster ${quotedText(display(result.name))} is gone\n`
               : `no cluster named ${quotedText(display(result.name))} to delete\n`,
           );
+        if (result.deleted === true && isTruthy(result.leftovers)) {
+          const left = bag(result.leftovers);
+          const found = Array.isArray(left.found) ? (left.found as Bag[]) : [];
+          const unreadable = Array.isArray(left.unreadable) ? (left.unreadable as Bag[]) : [];
+          const region = display(result.region);
+          if (found.length === 0 && unreadable.length === 0) {
+            say(
+              io,
+              `nothing in ${region} is billing — AWS holds no volume, load balancer, NAT gateway, address or stack of it`,
+            );
+          } else {
+            // Tied to this cluster by a tag: with the command. Not tied: to check, without
+            // one -- in a region that holds colleagues' clusters, a command for something
+            // nothing ties to this cluster is a command that can break theirs.
+            const tied = found.filter((row) => row.certain !== false);
+            const loose = found.filter((row) => row.certain === false);
+            if (tied.length > 0)
+              say(io, `left behind in ${region} — each one bills until it is removed:`);
+            for (const row of tied) {
+              say(io, `  ${display(row.kind)}  ${display(row.id)}  ${display(row.detail)}`);
+              say(io, `    ${display(row.fix)}`);
+            }
+            if (loose.length > 0)
+              say(io, `in ${region}, not tied to this cluster by any tag — check before deleting:`);
+            for (const row of loose)
+              say(io, `  ${display(row.kind)}  ${display(row.id)}  ${display(row.detail)}`);
+            for (const row of unreadable) {
+              say(
+                io,
+                `  ${display(row.kind)}: could not be read (${display(row.why)}) — check it in AWS`,
+              );
+            }
+          }
+          say(io, 'next  houston cluster list   # every region, so nothing is missed');
+        }
       } else {
         // A reachable cluster: runCluster answered the other two stops itself.
         say(io, `cluster   ${display(result.context, '(none)')}`);
+        renderClusterAbout(io, result);
         renderClusterShape(io, result);
         renderClusterCost(io, result);
+        renderClusterNext(io, result);
       }
       return;
     case 'serve':

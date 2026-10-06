@@ -5,8 +5,9 @@
  */
 import { CreateFailedError, DockerError } from '../../lib/errors';
 import { info, nullEmit, warn, type Emit } from '../../lib/events';
+import { dashboard } from '../../lib/monitoring';
 
-import { absent, askObject, present, refused, why } from './ask';
+import { absent, askList, askObject, present, refused, require_, why } from './ask';
 import { workspaceNamespaces } from './capabilities';
 import { helmEnv, kube } from './exec';
 import {
@@ -15,10 +16,14 @@ import {
   HELM_REPO_URL,
   INSTALL_TIMEOUT,
   NAMESPACE_PREFIX,
+  OWNER_SELECTOR,
+  OWNER_LABEL_KEY,
+  OWNER_LABEL_VALUE,
+  WORKSPACE_LABEL,
   isOurs,
 } from './names';
 import { OPERATOR_NAMESPACE, releaseInstalled } from './operator';
-import { clearPendingRelease, helmRollbackOnFailure, releaseState } from './release';
+import { apply, clearPendingRelease, helmRollbackOnFailure, releaseState } from './release';
 import type { Sleep } from './replicaset';
 
 const realSleep: Sleep = (seconds) => new Promise((resolve) => setTimeout(resolve, seconds * 1000));
@@ -60,6 +65,126 @@ export const GRAFANA_SERVICE = 'monitoring-grafana-service';
 export const GRAFANA_DEPLOYMENT = 'monitoring-grafana-deployment';
 
 export const GRAFANA_PORT = 3000;
+export const GRAFANA_INGRESS_LABEL = 'houston.io/grafana-ingress';
+
+function bag(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function containersOf(doc: Record<string, unknown>): Record<string, unknown>[] {
+  const containers = bag(bag(bag(doc.spec).template).spec).containers;
+  return Array.isArray(containers) ? containers.map(bag) : [];
+}
+
+const GRAFANA_ENV = {
+  GF_SERVER_SERVE_FROM_SUB_PATH: 'true',
+  GF_AUTH_ANONYMOUS_ENABLED: 'true',
+  GF_AUTH_ANONYMOUS_ORG_ROLE: 'Viewer',
+  GF_SECURITY_ALLOW_EMBEDDING: 'true',
+};
+
+/** Share the same Logs dashboard as Docker, using the chart's Loki datasource. */
+async function ensureLogsDashboard(context: string): Promise<void> {
+  const name = `${MONITORING_RELEASE}-houston-logs`;
+  // APPLY_TIMEOUT for every must-answer question on the attach path, for the reason
+  // `removeGrafanaIngress` gives: a refusal fails the job, and nobody is waiting on a screen.
+  const seen = require_(
+    await askObject('grafanadashboard', name, {
+      context,
+      namespace: MONITORING_NAMESPACE,
+      timeout: APPLY_TIMEOUT,
+    }),
+    'the shared Logs dashboard',
+    { context },
+  );
+  if (present(seen) && bag(bag(seen.doc.metadata).labels)[OWNER_LABEL_KEY] !== OWNER_LABEL_VALUE)
+    throw new CreateFailedError(`refusing to replace '${name}': it is not owned by houston`);
+  await apply(
+    JSON.stringify({
+      apiVersion: 'grafana.integreatly.org/v1beta1',
+      kind: 'GrafanaDashboard',
+      metadata: {
+        name,
+        namespace: MONITORING_NAMESPACE,
+        labels: { [OWNER_LABEL_KEY]: OWNER_LABEL_VALUE, dashboards: 'grafana' },
+      },
+      spec: {
+        allowCrossNamespaceImport: true,
+        folder: 'General',
+        instanceSelector: { matchLabels: { grafana: 'dashboards' } },
+        datasources: [{ inputName: 'DS_LOKI', datasourceName: 'loki' }],
+        // Docker provisions a fixed UID; the operator resolves ${DS_LOKI} to
+        // this cluster's chart-provisioned datasource named "loki".
+        json: dashboard('houston-logs.json').replaceAll('"DS_LOKI"', '"${DS_LOKI}"'),
+      },
+    }),
+    { context, namespace: MONITORING_NAMESPACE },
+  );
+}
+
+/** The chart has no values for anonymous viewing or embedding, so configure its CR. */
+async function configureGrafana(context: string, rootUrl: string): Promise<boolean> {
+  const seen = require_(
+    await askObject('grafana', `${MONITORING_RELEASE}-grafana`, {
+      context,
+      namespace: MONITORING_NAMESPACE,
+      timeout: APPLY_TIMEOUT,
+    }),
+    'the shared Grafana configuration',
+    { context },
+  );
+  if (!present(seen)) throw new CreateFailedError('the monitoring chart did not create Grafana');
+  const spec = bag(seen.doc.spec);
+  const containers = containersOf(bag(spec.deployment));
+  const grafana = containers.find((container) => container.name === 'grafana');
+  if (grafana === undefined)
+    throw new CreateFailedError('the shared Grafana has no container configuration');
+  const env = Array.isArray(grafana.env) ? grafana.env.map(bag) : [];
+  const wanted = { ...GRAFANA_ENV, GF_SERVER_ROOT_URL: rootUrl };
+  if (
+    Object.entries(wanted).every(([name, value]) =>
+      env.some((entry) => entry.name === name && entry.value === value),
+    )
+  )
+    return false;
+  const updated = env.filter((entry) => !(String(entry.name) in wanted));
+  updated.push(...Object.entries(wanted).map(([name, value]) => ({ name, value })));
+  const res = await kube.run(
+    [
+      'kubectl',
+      '--context',
+      context,
+      '-n',
+      MONITORING_NAMESPACE,
+      'patch',
+      'grafana',
+      `${MONITORING_RELEASE}-grafana`,
+      '--type=merge',
+      '-p',
+      JSON.stringify({
+        spec: {
+          deployment: {
+            spec: {
+              template: {
+                spec: {
+                  containers: containers.map((container) =>
+                    container === grafana ? { ...container, env: updated } : container,
+                  ),
+                },
+              },
+            },
+          },
+        },
+      }),
+    ],
+    { own: isOurs(context), timeout: APPLY_TIMEOUT },
+  );
+  if (res.returncode !== 0)
+    throw new CreateFailedError(`could not configure shared Grafana: ${why(res)}`);
+  return true;
+}
 
 /**
  * Up to four minutes. The operator has to reconcile a Grafana CR into a Deployment and then
@@ -111,12 +236,47 @@ export async function waitForGrafana({
   context,
   emit = nullEmit,
   sleep = realSleep,
+  rootUrl = '',
 }: {
   context: string;
   emit?: Emit;
   sleep?: Sleep;
+  rootUrl?: string;
 }): Promise<void> {
   for (let attempt = 0; attempt < GRAFANA_WAIT_TRIES; attempt += 1) {
+    if (rootUrl) {
+      const seen = require_(
+        await askObject('deployment', GRAFANA_DEPLOYMENT, {
+          context,
+          namespace: MONITORING_NAMESPACE,
+          timeout: APPLY_TIMEOUT,
+        }),
+        'the shared Grafana deployment',
+        { context },
+      );
+      if (present(seen)) {
+        const spec = bag(seen.doc.spec);
+        const status = bag(seen.doc.status);
+        const env = containersOf(seen.doc).find((container) => container.name === 'grafana')?.env;
+        const wanted = { ...GRAFANA_ENV, GF_SERVER_ROOT_URL: rootUrl };
+        if (
+          Array.isArray(env) &&
+          Object.entries(wanted).every(([name, value]) =>
+            env.some((entry: unknown) => bag(entry).name === name && bag(entry).value === value),
+          ) &&
+          Number(status.observedGeneration) >= Number(bag(seen.doc.metadata).generation) &&
+          Number(status.updatedReplicas) === Number(spec.replicas ?? 1) &&
+          Number(status.availableReplicas) >= Number(spec.replicas ?? 1)
+        )
+          return;
+      }
+      if (attempt % 5 === 0)
+        info(emit, 'waiting for Grafana to reconcile its /grafana configuration', {
+          phase: 'monitor',
+        });
+      await sleep(GRAFANA_WAIT_INTERVAL);
+      continue;
+    }
     const res = await kube.run(
       [
         'kubectl',
@@ -161,21 +321,71 @@ export async function waitForGrafana({
 export async function ensureMonitoring({
   context,
   emit = nullEmit,
+  publicUrl = '',
 }: {
   context: string;
   emit?: Emit;
+  publicUrl?: string;
 }): Promise<void> {
   await kube.run(['helm', 'repo', 'add', HELM_REPO, HELM_REPO_URL, '--force-update'], {
     timeout: APPLY_TIMEOUT,
     env: helmEnv(context),
   });
-  if (await monitoringInstalled(context)) {
+  const installed = await monitoringInstalled(context);
+  let values: Record<string, unknown> = {};
+  if (installed) {
+    const result = await kube.run(
+      [
+        'helm',
+        'get',
+        'values',
+        MONITORING_RELEASE,
+        '-n',
+        MONITORING_NAMESPACE,
+        '--kube-context',
+        context,
+        '-o',
+        'json',
+      ],
+      { timeout: APPLY_TIMEOUT, env: helmEnv(context) },
+    );
+    if (result.returncode !== 0)
+      throw new DockerError(`could not read shared monitoring values: ${why(result)}`);
+    try {
+      values = bag(JSON.parse(result.stdout));
+    } catch {
+      throw new DockerError('could not read shared monitoring values: invalid JSON');
+    }
+  }
+  const ingress = bag(values.ingress);
+  const grafana = bag(ingress.grafana);
+  const existingHost = typeof grafana.host === 'string' ? grafana.host : '';
+  const publicHost = publicUrl ? new URL(publicUrl).host : '';
+  // The first public host becomes canonical; later hosts share relative paths without
+  // flipping this shared setting and restarting everybody's Grafana.
+  const host =
+    existingHost && !(existingHost === 'localhost:5050' && publicHost)
+      ? existingHost
+      : publicHost || 'localhost:5050';
+  const tls = publicHost !== '' || ingress.tls === true;
+  const rootUrl = `${tls ? 'https' : 'http'}://${host}/grafana/`;
+  const upgrade =
+    !installed ||
+    grafana.path !== '/grafana' ||
+    existingHost !== host ||
+    ingress.enabled !== false ||
+    ingress.tls !== tls;
+  if (!upgrade) {
     info(emit, 'monitoring stack already on this cluster (shared)', { phase: 'monitor' });
+    if (await configureGrafana(context, rootUrl)) await waitForGrafana({ context, emit, rootUrl });
+    await ensureLogsDashboard(context);
     return;
   }
   info(
     emit,
-    `installing the monitoring stack in ${MONITORING_NAMESPACE} (once per cluster, ~1 GB)`,
+    installed
+      ? 'upgrading the SHARED monitoring stack to serve /grafana; Grafana restarts, and existing port-forwards must be re-established with `houston monitor`'
+      : `installing the monitoring stack in ${MONITORING_NAMESPACE} (once per cluster, ~1 GB)`,
     { phase: 'monitor' },
   );
   // Deliberately NOT `--wait`. This chart creates grafana-operator custom resources in the
@@ -188,7 +398,7 @@ export async function ensureMonitoring({
     [
       'helm',
       'upgrade',
-      '--install',
+      ...(installed ? ['--reuse-values'] : ['--install']),
       MONITORING_RELEASE,
       MONITORING_CHART,
       '--kube-context',
@@ -196,6 +406,14 @@ export async function ensureMonitoring({
       '-n',
       MONITORING_NAMESPACE,
       '--create-namespace',
+      '--set',
+      'ingress.enabled=false',
+      '--set',
+      'ingress.grafana.path=/grafana',
+      '--set-string',
+      `ingress.grafana.host=${host}`,
+      '--set',
+      `ingress.tls=${String(tls)}`,
       '--set',
       'operator.prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false',
       '--set',
@@ -209,7 +427,71 @@ export async function ensureMonitoring({
   if (res.returncode !== 0) {
     throw new CreateFailedError(`could not install the monitoring stack: ${why(res)}`);
   }
-  await waitForGrafana({ context, emit });
+  await configureGrafana(context, rootUrl);
+  await waitForGrafana({ context, emit, rootUrl });
+  await ensureLogsDashboard(context);
+}
+
+/** Remove only Houston-labelled Grafana routes, certificates and secrets. */
+export async function removeGrafanaIngress(
+  workspace: string,
+  { context, emit = nullEmit }: { context: string; emit?: Emit },
+): Promise<void> {
+  const selector =
+    `${OWNER_SELECTOR},${GRAFANA_INGRESS_LABEL}=true` +
+    (workspace ? `,${WORKSPACE_LABEL}=${workspace}` : '');
+  // APPLY_TIMEOUT, NOT THE PROBE'S 8 s. These questions must be answered -- a refusal fails
+  // the job -- and they run inside a teardown that has just waited a minute for a namespace
+  // to go, where nobody is waiting on a screen. MEASURED on EKS over a slow link: the
+  // workspace's namespace and volume were gone when the certificate question hit 8 s, and
+  // the whole `down` failed for a Grafana route.
+  const crd = require_(
+    await askObject('customresourcedefinition', 'certificates.cert-manager.io', {
+      context,
+      timeout: APPLY_TIMEOUT,
+    }),
+    'the certificate API',
+    { context },
+  );
+  const kinds = present(crd) ? ['ingress', 'certificate', 'secret'] : ['ingress', 'secret'];
+  for (const kind of kinds) {
+    const seen = require_(
+      await askList(kind, {
+        context,
+        namespace: MONITORING_NAMESPACE,
+        selector,
+        timeout: APPLY_TIMEOUT,
+      }),
+      `Grafana ${kind} resources`,
+      { context },
+    );
+    if (!present(seen)) continue;
+    if (!Array.isArray(seen.doc.items))
+      throw new DockerError(`could not read Grafana ${kind} resources: invalid list`);
+    if (seen.doc.items.length === 0) continue;
+    info(emit, `removing Grafana ${kind} resources${workspace ? ` for '${workspace}'` : ''}`, {
+      phase: 'monitor',
+    });
+    const result = await kube.run(
+      [
+        'kubectl',
+        '--context',
+        context,
+        '-n',
+        MONITORING_NAMESPACE,
+        'delete',
+        kind,
+        '-l',
+        selector,
+        '--ignore-not-found',
+        '--wait=true',
+        '--timeout=120s',
+      ],
+      { own: isOurs(context), timeout: APPLY_TIMEOUT },
+    );
+    if (result.returncode !== 0)
+      throw new DockerError(`could not remove Grafana ${kind} resources: ${why(result)}`);
+  }
 }
 
 /**
@@ -529,6 +811,7 @@ export async function removeMonitoring({
     );
     return false;
   }
+  await removeGrafanaIngress('', { context, emit });
   await removeGrafanaResources(context, emit);
   await uninstallMonitoringRelease(context, emit);
   // THE PROMETHEUS VOLUME, which helm does not take with the release. A StatefulSet's

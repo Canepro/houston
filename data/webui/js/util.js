@@ -155,7 +155,8 @@ function setView(v) {
                             ["#btn-clusters", "clusters"],
                             ["#btn-scenarios", "scenarios"]]) {
     const b = $(id);
-    if (b) b.toggleAttribute("aria-current", VIEW === name);
+    // A cluster's own view is still "Clusters" in the top bar.
+    if (b) b.toggleAttribute("aria-current", VIEW === name || (name === "clusters" && VIEW === "cluster"));
   }
 }
 function goHome() {
@@ -209,7 +210,23 @@ function restartsClimbing(workspace, service, count) {
   return before !== undefined && count > before;
 }
 
-async function loadRepros() {
+// ONE READ AT A TIME. The 4 s timer asked again whether or not the last read had answered,
+// and on Kubernetes a read is several cluster round trips: against a slow cluster the
+// page held eight reads open at once, measured, a queue that grew for as long as a read
+// took more than 4 s. Calls that arrive while one runs share ONE more read after it, and
+// are answered by that one -- they asked after the running read began, so it cannot know
+// what their action changed.
+let reproRead = null;
+let reproNext = null;
+function loadRepros() {
+  if (!reproRead) {
+    reproRead = readRepros().finally(() => { reproRead = null; });
+    return reproRead;
+  }
+  if (!reproNext) reproNext = reproRead.then(() => { reproNext = null; return loadRepros(); });
+  return reproNext;
+}
+async function readRepros() {
   try {
     const [{ repros }, health] = await Promise.all([
       api("/api/repros"), api("/api/health").catch(() => ({ docker: false })),
@@ -269,7 +286,8 @@ async function refreshKube() {
 // runtime -- it is one engine of two now, and a workspace can run in either.
 function paintEngines() {
   const k = KUBE || {};
-  const kube = !k.usable ? "not set up"
+  // CONTEXTS AND NONE CURRENT is not "not set up": the Clusters page lists them running.
+  const kube = !k.usable ? (k.tools_ready && !k.context && k.contexts ? "no current context" : "not set up")
     : k.reachable ? `${k.distribution || "cluster"} ${k.context || ""}`.trim()
     : k.can_provision ? "no cluster yet" : "no cluster";
   const el = $("#sb-engines");

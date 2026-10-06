@@ -64,6 +64,41 @@ describe('a workspace backend', () => {
 });
 
 describe('a workspace route', () => {
+  it.each([false, true])(
+    'Grafana public URL regression: adds the path router with shared TLS (local=%s)',
+    async (local) => {
+      const body = await workspaceRouteYml('w', 'h.example.com', {
+        local,
+        grafana: true,
+        instances: 2,
+      });
+      const doc = YAML.parse(body) as {
+        http: {
+          routers: Record<string, { rule: string; tls: unknown; service: string }>;
+          services: Record<
+            string,
+            { loadBalancer: { servers: { url: string }[]; sticky?: unknown } }
+          >;
+        };
+      };
+      expect(Object.keys(doc.http.routers)).toEqual(['w', 'w-grafana']);
+      expect(doc.http.routers['w-grafana']).toMatchObject({
+        rule: 'Host(`h.example.com`) && PathPrefix(`/grafana`)',
+        service: 'w-grafana',
+        tls: doc.http.routers.w?.tls,
+      });
+      expect(doc.http.services['w-grafana']?.loadBalancer.servers).toEqual([
+        { url: 'http://houston-w-grafana-1:3000' },
+      ]);
+      expect(doc.http.services['w-grafana']?.loadBalancer).not.toHaveProperty('sticky');
+      expect(doc.http.services.w?.loadBalancer).toHaveProperty('sticky');
+      expect(
+        Object.keys(
+          (YAML.parse(await workspaceRouteYml('w', 'h.example.com')) as typeof doc).http.routers,
+        ),
+      ).toEqual(['w']);
+    },
+  );
   it('parses as YAML whose router serves the workspace’s own service', async () => {
     // Traefik skips a file it cannot parse and says so only in its own log, so the name
     // simply never answers.

@@ -109,15 +109,15 @@ function pick(options: Record<string, unknown>, keys: string[]): Record<string, 
 }
 
 describe('the declarative command foundation', () => {
-  test('registers all 40 unique paths and all 174 logical flags from one source', () => {
+  test('registers all 40 unique paths and all 177 logical flags from one source', () => {
     const specs: readonly CommandSpec[] = COMMAND_SPECS;
     const root = buildCli({ execute: async () => null });
     const paths = specs.map((spec) => spec.path);
     expect(paths).toHaveLength(40);
     expect(new Set(paths).size).toBe(40);
-    expect(specs.reduce((total, spec) => total + spec.options.length, 0)).toBe(163);
+    expect(specs.reduce((total, spec) => total + spec.options.length, 0)).toBe(166);
     const described = describeCommands();
-    expect(described.reduce((total, command) => total + command.flags.length, 0)).toBe(174);
+    expect(described.reduce((total, command) => total + command.flags.length, 0)).toBe(177);
     expect(described.filter((command) => command.json)).toHaveLength(12);
     expect(described.filter((command) => command.streams).map((command) => command.name)).toEqual([
       'ready',
@@ -298,12 +298,16 @@ describe('the declarative command foundation', () => {
     const clusterByAction = {
       status: 'houston.cluster.v1',
       list: 'houston.cluster-list.v1',
+      connect: 'houston.cluster-connect.v1',
       guide: 'houston.cluster-guide.v1',
       'iam-policy': 'houston.cluster-iam-policy.v1',
       create: 'houston.cluster-create.v1',
       prepare: 'houston.cluster-prepare.v1',
       delete: 'houston.cluster-delete.v1',
       forget: 'houston.cluster-forget.v1',
+      keep: 'houston.cluster-keep.v1',
+      share: 'houston.cluster-share.v1',
+      overview: 'houston.cluster-overview.v1',
     } as const;
     const clusterSchemas = Object.values(clusterByAction).sort();
     expect(described.get('cluster')).toMatchObject({
@@ -384,5 +388,30 @@ describe('the declarative command foundation', () => {
     } finally {
       write.mockRestore();
     }
+  });
+});
+
+describe('the cluster options', () => {
+  test('--nodes defaults to 3 and says so once', () => {
+    // The option carried defaultValue 0 with "Default 3" in its description, so help printed
+    // `Default 3 … [default: 0]` on one flag. The handler substitutes DEFAULT_NODES for 0,
+    // which is how both were true at once.
+    const option = COMMAND_SPECS.find((spec) => spec.path === 'cluster')?.options.find(
+      (candidate) => candidate.key === 'nodes',
+    );
+    expect(option?.defaultValue).toBe(3);
+    expect(option?.description).not.toContain('Default 3');
+  });
+});
+
+describe('the cluster zone option', () => {
+  test('--zone exists for create and prepare', () => {
+    // Typed once on the cluster instead of again as --domain on every ticket.
+    const option = COMMAND_SPECS.find((spec) => spec.path === 'cluster')?.options.find(
+      (candidate) => candidate.key === 'zone',
+    );
+    expect(option?.long).toBe('--zone');
+    expect(option?.description).toContain('create');
+    expect(option?.description).toContain('prepare');
   });
 });

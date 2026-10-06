@@ -20,6 +20,7 @@ import { CLUSTER_MB, WORKSPACE_MB } from '../../../src/core/lifecycle/sizing';
 import { CREATE_POLICY_KEY, PRIVILEGED_CREATE_FIELDS } from '../../../src/core/lifecycle/types';
 import * as host from '../../../src/core/runner/host';
 import * as users from '../../../src/core/users';
+import { metadata, writeRecord } from '../../../src/core/runner/record';
 import * as config from '../../../src/lib/config';
 import { createApp, type AppOptions } from '../../../src/web/app';
 import { JobManager } from '../../../src/web/jobs';
@@ -62,6 +63,60 @@ async function signIn(app: FastifyInstance, user = 'alice', role = 'admin'): Pro
 }
 
 const as = (cookie: string) => ({ host: 'localhost', cookie });
+
+it('Grafana public URL regression: permits the monitored HTTPS origin in the GUI iframe policy', async () => {
+  const app = await appWith({ accounts: false });
+  await writeRecord(
+    'w',
+    metadata({
+      name: 'w',
+      publicUrl: 'https://rc.example.test',
+      extra: { tls: 'local', monitoring: true },
+    }),
+  );
+  await writeRecord(
+    'bare',
+    metadata({
+      name: 'bare',
+      publicUrl: 'https://unserved.example.test',
+      extra: { monitoring: true },
+    }),
+  );
+  const response = await app.inject({ url: '/', headers: { host: 'localhost' } });
+  expect(response.statusCode).toBe(200);
+  expect(String(response.headers['content-security-policy'])).toContain(
+    "frame-src 'self' http://localhost:5050 https://rc.example.test;",
+  );
+  expect(String(response.headers['content-security-policy'])).not.toContain(
+    'https://unserved.example.test',
+  );
+});
+
+it('Grafana public URL regression: refreshes the iframe policy when cached HTML is revalidated', async () => {
+  const app = await appWith({ accounts: false });
+  const before = await app.inject({ url: '/', headers: { host: 'localhost' } });
+  expect(String(before.headers['content-security-policy'])).not.toContain(
+    'https://later.example.test',
+  );
+  await writeRecord(
+    'later',
+    metadata({
+      name: 'later',
+      publicUrl: 'https://later.example.test',
+      extra: { tls: 'local', monitoring: true },
+    }),
+  );
+  for (const conditional of [
+    { 'if-none-match': String(before.headers.etag) },
+    { 'if-modified-since': String(before.headers['last-modified']) },
+  ]) {
+    const after = await app.inject({ url: '/', headers: { host: 'localhost', ...conditional } });
+    expect(after.statusCode).toBe(304);
+    expect(String(after.headers['content-security-policy'])).toContain(
+      'https://later.example.test',
+    );
+  }
+});
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-meta-'));

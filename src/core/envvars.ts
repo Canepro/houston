@@ -34,6 +34,7 @@ import { redactEnv } from '../lib/redact';
 import { login } from './lifecycle/admin';
 import { resolveName } from './lifecycle/naming';
 import { requireDocker } from './lifecycle/preconditions';
+import { waitServing } from './lifecycle/ready';
 import { settingIds } from './rcapi';
 import { up } from './runner/engine';
 import { reproLock } from './runner/locks';
@@ -541,6 +542,13 @@ export async function setEnvLocked(
   if ((await up(target, { pull: false, forceRecreate: rcServices[0] })) !== 0) {
     throw new DockerError('`docker compose up` failed applying the env change');
   }
+  // WAITED FOR, so the command returns when Rocket.Chat answers again. It returned as soon
+  // as compose had recreated the container, and a `seed` typed straight after refused
+  // "repro not ready" while the new container booted. No line of its own: the wait sits
+  // under the "recreating" line, and "restarted" is said once it is true. A container the
+  // new environment stops from serving is a NotReadyError (exit 5) naming why, not a
+  // success; the change is written either way, so `env --unset` is the way back.
+  await waitServing(await readMeta(target), emit, 300.0);
   info(emit, `${quotedText(target)} restarted with the new environment`, { phase: 'done' });
   return { name: target, restarted: true, overrides: shown(overrides) };
 }

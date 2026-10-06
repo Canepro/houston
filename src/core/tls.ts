@@ -328,17 +328,20 @@ const todayIso = () => new Date().toISOString().slice(0, 10);
 /**
  * Note that `host` needed a certificate of its own.
  *
- * Keyed by name and only ever written ONCE per name: re-registering an existing name
+ * Keyed by host and optional certificate identity, written ONCE per certificate:
+ * Kubernetes issues separate workspace and Grafana certificates on the same host.
+ * Re-registering an existing name
  * reuses its certificate and costs nothing, so overwriting the date would make a
  * long-lived workspace look like a fresh request every time it is recreated. Best-effort
  * -- a tally must never stop the work.
  */
-export function recordIssuance(host: string, when = ''): void {
+export function recordIssuance(host: string, when = '', certificate = ''): void {
   if (host === '') return;
   try {
     const issued = readIssued();
-    if (host in issued) return;
-    issued[host] = when || todayIso();
+    const key = certificate ? `${host}#${certificate}` : host;
+    if (key in issued) return;
+    issued[key] = when || todayIso();
     fs.mkdirSync(acmeDir(), { recursive: true });
     const temporary = `${issuedPath()}.tmp`;
     const ordered = Object.fromEntries(
@@ -353,12 +356,12 @@ export function recordIssuance(host: string, when = ''): void {
   }
 }
 
-/** How many distinct names under `domain` were first seen in the last `days`. */
+/** How many distinct certificates under `domain` were first seen in the last `days`. */
 export function recentIssuances(domain: string, days = 7): number {
   const cutoff = Date.now() - days * 86_400_000;
   let count = 0;
   for (const [host, day] of Object.entries(readIssued())) {
-    if (registrableDomain(host) !== domain) continue;
+    if (registrableDomain(host.split('#')[0] ?? host) !== domain) continue;
     const when = Date.parse(`${String(day)}T00:00:00Z`);
     if (Number.isNaN(when)) continue;
     // Strictly newer than the cutoff, as it always was.
@@ -659,6 +662,22 @@ async function handshake(
 }
 
 /** Whether the endpoint validates under the requested trust store. */
+/**
+ * What THIS MACHINE trusts: Node's bundled roots plus the operating system's store.
+ *
+ * Without a `ca` option Node checks only the roots it ships with, so a CA `trust-ca` had
+ * put into the system store never counted, and `tls-status` said "Not trusted by this
+ * machine yet" straight after it ran. The bundled roots stay, so a public certificate is
+ * judged as it always was. Read on every check, not cached: `serve` outlives a `trust-ca`.
+ */
+function machineRoots(): string[] {
+  try {
+    return [...tlsSocket.getCACertificates('bundled'), ...tlsSocket.getCACertificates('system')];
+  } catch {
+    return [...tlsSocket.rootCertificates];
+  }
+}
+
 async function certificateAccepted(
   host: string,
   port: number,
@@ -672,9 +691,9 @@ async function certificateAccepted(
   // crashed its caller instead of reporting. Hit live: a fresh HOUSTON_HOME going straight
   // to `--domain` has never minted a local certificate, so `ca/ca.crt` is simply not
   // there, and `up` ended in a stack trace after the workspace had been built.
-  let ca: Buffer | undefined;
+  let ca: Buffer | string[];
   try {
-    ca = cafile !== '' ? fs.readFileSync(cafile) : undefined;
+    ca = cafile !== '' ? fs.readFileSync(cafile) : machineRoots();
   } catch {
     return false;
   }
@@ -683,7 +702,7 @@ async function certificateAccepted(
       host,
       port,
       servername: net.isIP(servername) === 0 ? servername : undefined,
-      ...(ca === undefined ? {} : { ca }),
+      ca,
       rejectUnauthorized: true,
       timeout: Math.round(timeout * 1000),
     });

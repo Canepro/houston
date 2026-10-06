@@ -1,6 +1,6 @@
 'use strict';
 
-const EXPECTED = 112;
+const EXPECTED = 145;
 
 module.exports = (results) => {
   const wanted = process.env.BROWSER_GATE_PROBE === 'count' ? EXPECTED + 1 : EXPECTED;

@@ -11,6 +11,13 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as tlsSocket from 'node:tls';
 
+// The machine's trust store is the one thing stubbed: it answers as Node does unless a case
+// says otherwise, and no case touches this box's own store.
+jest.mock('node:tls', () => {
+  const actual = jest.requireActual<typeof tlsSocket>('node:tls');
+  return { ...actual, getCACertificates: jest.fn(actual.getCACertificates) };
+});
+
 import * as config from '../../src/lib/config';
 import { ValidationError } from '../../src/lib/errors';
 
@@ -102,6 +109,12 @@ describe('a user-supplied hostname', () => {
 });
 
 describe('the certificate budget', () => {
+  it('Grafana public URL regression: counts two certificates for one host and deduplicates reuse', () => {
+    recordIssuance('rc.grafana-regression.test', '', 'workspace');
+    recordIssuance('rc.grafana-regression.test', '', 'grafana');
+    recordIssuance('rc.grafana-regression.test', '', 'grafana');
+    expect(recentIssuances('grafana-regression.test')).toBe(2);
+  });
   it('counts a name ONCE, however often the workspace is recreated', () => {
     // Re-registering an existing name reuses its certificate and costs nothing, so
     // overwriting the date would make a long-lived workspace look like a fresh request
@@ -296,6 +309,26 @@ describe('what is ACTUALLY being served', () => {
     // `trust-ca` has run.
     expect(report.trusted_via_ca).toBe(true);
     expect(report.trusted).toBe(false);
+  }, 60_000);
+
+  it('counts a CA in the system store as trusted, which is what trust-ca puts there', async () => {
+    // Node checks only its bundled roots unless told otherwise, so after `trust-ca` had put
+    // houston's CA into the system store, `tls-status` still said "Not trusted by this
+    // machine yet". The system store is stubbed here; this box's own is left alone.
+    await serving('localhost');
+    const [, caCrt] = await ensureCa();
+    const roots = jest.mocked(tlsSocket.getCACertificates);
+    const real = jest.requireActual<typeof tlsSocket>('node:tls').getCACertificates;
+    roots.mockImplementation((kind) => (kind === 'system' ? [fs.readFileSync(caCrt, 'utf8')] : []));
+    try {
+      const report = await verify('localhost', { port, timeout: 5, cafile: caCrt });
+      expect({ trusted: report.trusted, viaCa: report.trusted_via_ca }).toEqual({
+        trusted: true,
+        viaCa: true,
+      });
+    } finally {
+      roots.mockImplementation(real);
+    }
   }, 60_000);
 
   it('reads the names out of the SANs, which is where they may only exist', async () => {

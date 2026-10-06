@@ -55,6 +55,8 @@ export interface Spec {
   mongoShell: string;
   oplog: boolean;
   rootUrl: string;
+  /** houston-served TLS, independently of a customer's --root-url proxy. */
+  publicUrl: string;
   hostPort: number;
   regToken: string | null;
   preset: Preset;
@@ -91,6 +93,7 @@ export function spec(fields: Partial<Spec> & Pick<Spec, 'projectName' | 'preset'
     mongoShell: '',
     oplog: false,
     rootUrl: '',
+    publicUrl: '',
     hostPort: 0,
     regToken: null,
     monitoring: false,
@@ -346,7 +349,7 @@ function addDepends(svc: Service, extra: readonly string[]): void {
 /** The Prometheus/Grafana add-on, wired to every Rocket.Chat instance. */
 function attachMonitoring(doc: ComposeDoc, rcServices: Record<string, Service>, s: Spec): void {
   if (!s.monitoring) return;
-  deepMerge(doc.services, monitoring.services()); // bare ports; bound below
+  deepMerge(doc.services, monitoring.services(s.publicUrl)); // bare ports; bound below
   Object.assign(doc.volumes, monitoring.volumes());
   for (const svc of Object.values(rcServices)) {
     (svc.environment as Record<string, string>)[monitoring.RC_METRICS_ENV] = 'true';

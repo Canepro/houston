@@ -41,6 +41,7 @@ command takes it and read the last line (see [The output contract](#the-output-c
 | pause it, resume it | `houston stop --name <n>`, `houston start --name <n>` | |
 | tear it down | `houston down --name <n> --volumes --yes --json` | only workspaces you created; backup bundles in `~/.houston/backups/` are kept |
 | which MongoDB goes with a version | `houston versions 7.4.1` | |
+| what clusters there are, and their cost | `houston cluster overview --json` | the safe read: every cluster, its state, cost a day, reminder date and next step; it changes nothing and buys nothing |
 
 ### Naming
 
@@ -78,8 +79,10 @@ From `houston info --name <n> --json`:
 
 ### Ask a person first
 
-- anything that touches a cloud cluster: `cluster create`, `cluster delete`, `up` with
-  `--context` naming a cloud cluster, or `up --runtime kubernetes` without `--context`
+- anything that touches a cloud cluster: `cluster create`, `cluster delete`,
+  `cluster keep` (it moves the date a cluster is meant to go by), `cluster share` (it
+  grants somebody access in AWS and in the cluster), `up` with `--context` naming a
+  cloud cluster, or `up --runtime kubernetes` without `--context`
   when `houston doctor --json` names a cloud cluster as the one it would use. If a ticket
   needs EKS and no cluster exists, say so and ask; never create one. A local Kubernetes
   workspace is a stand-in only if the person agrees;
@@ -127,7 +130,7 @@ From `houston info --name <n> --json`:
 Every `--json` reply is one envelope:
 
 ```json
-{"schema":"houston.info.v1","contract":2,"houston_version":"2.0.0",
+{"schema":"houston.info.v1","contract":2,"houston_version":"2.1.0",
  "generated_at":"...","ok":true,"data":{...},"warnings":[],"error":null}
 ```
 

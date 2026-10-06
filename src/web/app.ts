@@ -9,6 +9,7 @@ import { parse as parseQuery } from 'node:querystring';
 
 import { asPayload, PreflightError, ReproError } from '../lib/errors';
 import { MONITOR_PORTS } from '../lib/config';
+import { grafanaFrameOrigins } from '../core/lifecycle/inspect';
 import { installJobs, type JobManager } from './jobs';
 import { markFormBody, RequestValidationError } from './route-deps';
 import { installRouteCompleteness, routeRequirement } from './route-table';
@@ -54,11 +55,11 @@ export function requireSafeServePosture(posture: ServePosture): void {
   }
 }
 
-export function contentSecurityPolicy(): string {
+export function contentSecurityPolicy(grafanaOrigins: readonly string[] = []): string {
   return (
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
     "img-src 'self' data:; connect-src 'self' ws: wss:; " +
-    `frame-src 'self' http://localhost:${String(MONITOR_PORTS[1])}; ` +
+    `frame-src 'self' http://localhost:${String(MONITOR_PORTS[1])}${grafanaOrigins.length > 0 ? ` ${grafanaOrigins.join(' ')}` : ''}; ` +
     "base-uri 'none'; form-action 'self'; object-src 'none'"
   );
 }
@@ -287,6 +288,15 @@ export async function createApp(options: AppOptions = {}): Promise<FastifyInstan
       reply.header('content-type', 'application/json');
     }
     done(null, payload);
+  });
+  app.addHook('onSend', async (request, reply, payload) => {
+    if (
+      request.routeOptions.url === '/' &&
+      (String(reply.getHeader('content-type')).startsWith('text/html') || reply.statusCode === 304)
+    ) {
+      reply.header('Content-Security-Policy', contentSecurityPolicy(await grafanaFrameOrigins()));
+    }
+    return payload;
   });
   registerAll(app);
   app.setErrorHandler((error, _request, reply) => {

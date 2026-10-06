@@ -108,8 +108,45 @@ async function doPrune() {
 let JOB = null;
 
 function openJob(title) { ctx.$("#job-title").textContent = title; ctx.$("#job-log").textContent = ""; ctx.$("#job-dialog").showModal(); }
+// What each phase of a job DOES, as a step in the create dialog's progress.
+const PHASE_STEP = {
+  preflight: "Checking this machine", resolve: "Looking up the version", provision: "Preparing the cluster",
+  plan: "Working out what to build", pull: "Pulling images", create: "Writing the workspace",
+  boot: "Starting the containers", wait: "Waiting for Rocket.Chat to answer", post_ready: "Applying settings",
+  tls: "Setting up HTTPS", seed: "Adding sample data", monitor: "Attaching monitoring",
+};
 function logLine(ev) {
-  const line = ctx.el("div", { class: ev.level }, (ev.pct != null ? `[${Math.round(ev.pct)}%] ` : "") + ev.message);
+  const text = (ev.pct != null ? `[${Math.round(ev.pct)}%] ` : "") + ev.message;
+  // A job shown INSIDE another dialog (Create a workspace) lists its events as steps:
+  // the newest one is running, everything before it is done.
+  const list = JOB && JOB.view && JOB.view.list;
+  // The closing "done" says nothing the heading above the list does not.
+  if (list && ev.level !== "error" && (ev.terminal || ev.message === "done")) return;
+  if (list) {
+    const bad = ev.level === "error";
+    const warn = ev.level === "warn";
+    const after = !!(JOB && JOB.finished);
+    // ONE STEP PER PHASE. A create streams every docker pull line -- hundreds of "Downloading
+    // 3.1MB" -- and a list of those is a log, not progress. A phase is one step, named for
+    // what it does, with its latest line under it; a warning or an error stands alone.
+    const phase = ev.phase || "info";
+    const last = list.lastElementChild;
+    if (!bad && !warn && !after && last && last.dataset.phase === phase && last.querySelector(".s.run")) {
+      last.querySelector(".msg").textContent = text;
+      return;
+    }
+    for (const s of list.querySelectorAll(".s.run")) { s.className = "s y"; s.textContent = "✓"; }
+    const label = !bad && !warn ? PHASE_STEP[phase] : "";
+    const item = ctx.el("li", { "data-phase": bad || warn ? "" : phase },
+      ctx.el("span", { class: "s " + (bad ? "x" : warn ? "n" : after ? "w" : "run") }, bad ? "✗" : warn ? "!" : after ? "i" : "·"),
+      ctx.el("span", { class: bad ? "error" : warn ? "warn" : "" },
+        label || text, label ? ctx.el("span", { class: "m msg", style: "display:block" }, text) : ctx.el("span", { class: "msg", hidden: "" })));
+    list.append(item);
+    const scroller = list.closest(".wzd-b");
+    if (scroller) scroller.scrollTop = scroller.scrollHeight;
+    return;
+  }
+  const line = ctx.el("div", { class: ev.level }, text);
   const pre = ctx.$("#job-log"); pre.append(line); pre.scrollTop = pre.scrollHeight;
 }
 function closeJobStream() {
@@ -117,10 +154,12 @@ function closeJobStream() {
   JOB = null;
 }
 
-function streamJob(jobId, title, onResult) {
+// `view`, when given, is where the job shows itself instead of the job dialog:
+// { list, title, dialog, failed } -- Create a workspace streams into its own last step.
+function streamJob(jobId, title, onResult, view = null) {
   closeJobStream();                       // a new job supersedes whatever was showing
-  openJob(title);
-  JOB = { id: jobId, title, onResult, idx: 0, es: null, retries: 0, finished: false };
+  if (!view) openJob(title);
+  JOB = { id: jobId, title, onResult, idx: 0, es: null, retries: 0, finished: false, view };
   connectJob(JOB);
 }
 
@@ -149,9 +188,25 @@ function connectJob(job) {
 function finishJob(job, failed, data) {
   job.finished = true;
   if (job.es) { try { job.es.close(); } catch (_) { /* already closed */ } }
-  ctx.$("#job-title").textContent = failed ? "Failed" : "Done";
+  if (job.view) {
+    for (const s of job.view.list.querySelectorAll(".s.run")) { s.className = failed ? "s x" : "s y"; s.textContent = failed ? "✗" : "✓"; }
+    if (failed && job.view.failed) job.view.failed(data);
+  } else ctx.$("#job-title").textContent = failed ? "Failed" : "Done";
   if (!failed && job.onResult && data.result) job.onResult(data.result);
+  if (!failed) reloadForPublicGrafana(data.result, false, job);
   ctx.loadRepros().then(ctx.refreshDetail);
+}
+
+// A document's frame-src policy is fixed at page load. Reload after a successful
+// public monitoring attachment, once the reader has closed its result, so the
+// server can allow that workspace's Grafana origin for the k6 dashboard.
+function reloadForPublicGrafana(result, detached = false, job = null) {
+  if (!result || !result.monitoring) return;
+  const url = result && (result.grafana_url || (result.monitoring && result.monitoring.grafana_url));
+  if (!url || !url.startsWith("https://")) return;
+  if (detached) { location.reload(); return; }
+  logLine({ level: "info", message: "Close this result to reload the GUI and enable the public Grafana dashboard." });
+  ((job && job.view && job.view.dialog) || ctx.$("#job-dialog")).addEventListener("close", () => location.reload(), { once: true });
 }
 
 // The slow path, for when SSE cannot be kept open. Ten seconds rather than the
@@ -218,18 +273,21 @@ async function reconcileJob(job) {
 }
 
 // The job keeps running server-side when the dialog is dismissed, and there is no
-// job list to reopen it from -- so poll for the outcome rather than losing it.
+// job list to reopen it from -- so poll for the outcome rather than losing it. UNTIL IT
+// ENDS: this gave up after 900 seconds, and a cluster build takes twenty minutes, so the
+// one job long enough to be dismissed was the one whose ending was never announced.
 async function watchDetachedJob(job) {
   ctx.toast(`${job.title} continues in the background`, "info");
-  for (let i = 0; i < 900; i++) {
+  for (;;) {
     await new Promise((r) => setTimeout(r, 1000));
     let state;
     try { state = await ctx.api(`/api/jobs/${job.id}`); } catch (_) { return; }
     if (ctx.jobActive(state.status)) continue;
     ctx.toast(state.status === "error" ? `${job.title} failed: ${state.error || ""}` : `${job.title} finished`,
           state.status === "error" ? "error" : "ok");
+    if (state.status !== "error") reloadForPublicGrafana(state.result, true);
     ctx.loadRepros().then(ctx.refreshDetail);
-    return;
+    return state;
   }
 }
 

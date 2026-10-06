@@ -2275,14 +2275,15 @@ export const COMMAND_SPECS = [
     id: 'cluster',
     path: 'cluster',
     description:
-      'What a Kubernetes cluster is holding, and what it is costing.\n\nNEW TO THIS? `houston cluster guide` prints the whole EKS walkthrough — what to\ninstall, which permissions to grant, and the six commands from an empty AWS\naccount to a workspace on a real domain and back to nothing.\n\nA peer of `edge`: the cluster is not a workspace, so it never appears in `list`\nand `prune`/`down` cannot describe it — but something holding your workspaces,\nyour volumes and, on a managed cluster, your money should be answerable, and\nthis is where it answers.\n\n`status` is read-only and free on every distribution — kind, an adopted k3s or a\nmanaged one. `create` and `delete` are neither, and they are deliberately their\nown verb: `up` can never build a cloud cluster, at any lifecycle, under any flag,\nbecause it is the command you run per ticket and this one takes twenty minutes and\nreal money.\n\n`create` makes a NEW VPC unless `--subnet <az>=<id>` names an existing one, and it\nis gated on the AWS account having been approved on this box. `delete` removes only\na cluster houston built, proved by a tag on the cluster itself rather than by its\nname.\n\nNothing here reports a zero it did not read. A cluster that cannot be reached\nshows `?` rather than "0 workspaces, nothing running" — a ledger whose job is to\nstop a cluster being forgotten must not be the thing that says it is empty.',
+      "Inspect and manage the Kubernetes clusters that hold workspaces.\n\nNEW TO EKS? Build a cluster houston manages, or find one it already built:\n  houston cluster create <name> --zone <dns-zone>   # about 20 minutes; bills by the hour\n  houston cluster list --force                      # EKS clusters in every enabled region\n  houston cluster connect <full-eks-arn>\n  houston up --version <version> --name <ticket> --context <full-eks-arn>\n\n`create` ends with the one DNS record (a CNAME) to add so workspaces get public names;\n`houston cluster overview` repeats it until it answers. `connect` checks the AWS account\nand adds the cluster to this server's kubeconfig. It does not create a cluster. `up` creates a workspace, never a cloud cluster.\nThe GUI uses the Houston server's AWS identity; a CLI command uses the identity\nfrom its own shell. See `houston cluster guide` for SSO, roles, keys and access.\n\n`status` also works for local and other Kubernetes contexts. `create` builds a new\nEKS cluster and starts an AWS bill; `delete` stops one only after checking ownership.\nAn unreadable cost or resource is shown as `?`, never as zero.",
     arguments: [
       {
         name: 'action',
         value: 'string',
         required: false,
         defaultValue: 'status',
-        description: 'status | list | guide | iam-policy | create | prepare | delete | forget',
+        description:
+          'status | list | connect | guide | iam-policy | create | prepare | delete | forget | keep | share | overview',
       },
       {
         name: 'name',
@@ -2290,7 +2291,7 @@ export const COMMAND_SPECS = [
         required: false,
         defaultValue: '',
         description:
-          "the cluster's name, for `create` and `delete`; which document, for `iam-policy`",
+          "the cluster's name (status, create, prepare, delete, keep, share); full ARN (connect); which document, for `iam-policy`",
       },
     ],
     options: [
@@ -2324,9 +2325,8 @@ export const COMMAND_SPECS = [
         value: 'integer',
         required: false,
         repeatable: false,
-        defaultValue: 0,
-        description:
-          'how many nodes (create). Default 3; Launchpad sizes 5 for a production workspace',
+        defaultValue: 3,
+        description: 'how many nodes (create). Launchpad sizes 5 for a production workspace',
         hidden: false,
         negatablePair: false,
       },
@@ -2339,6 +2339,42 @@ export const COMMAND_SPECS = [
         defaultValue: '',
         description:
           'days until you expect to be finished with this cluster, or `never` (create). Default 7. A REMINDER only — nothing deletes on it',
+        hidden: false,
+        negatablePair: false,
+      },
+      {
+        key: 'days',
+        long: '--days',
+        value: 'integer',
+        required: false,
+        repeatable: false,
+        defaultValue: 7,
+        description:
+          'days from today to keep the cluster (keep). Moves the reminder tag; nothing deletes on it',
+        hidden: false,
+        negatablePair: false,
+      },
+      {
+        key: 'user',
+        long: '--user',
+        value: 'string',
+        required: false,
+        repeatable: false,
+        defaultValue: '',
+        description:
+          'the IAM user name, or a full principal ARN, to let run workspaces on the cluster (share)',
+        hidden: false,
+        negatablePair: false,
+      },
+      {
+        key: 'zone',
+        long: '--zone',
+        value: 'string',
+        required: false,
+        repeatable: false,
+        defaultValue: '',
+        description:
+          'the DNS zone workspace names live under, e.g. rc.example.com (create, prepare). Point *.<zone> at the cluster once; `up --context` then names each workspace <name>.<zone> unless --domain says otherwise',
         hidden: false,
         negatablePair: false,
       },
@@ -2398,12 +2434,16 @@ export const COMMAND_SPECS = [
         byValue: {
           status: 'houston.cluster.v1',
           list: 'houston.cluster-list.v1',
+          connect: 'houston.cluster-connect.v1',
           guide: 'houston.cluster-guide.v1',
           'iam-policy': 'houston.cluster-iam-policy.v1',
           create: 'houston.cluster-create.v1',
           prepare: 'houston.cluster-prepare.v1',
           delete: 'houston.cluster-delete.v1',
           forget: 'houston.cluster-forget.v1',
+          keep: 'houston.cluster-keep.v1',
+          share: 'houston.cluster-share.v1',
+          overview: 'houston.cluster-overview.v1',
         },
       },
       streams: false,

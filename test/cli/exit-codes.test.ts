@@ -63,6 +63,29 @@ describe("earlier releases' exit codes and stable errors, through actual argv", 
     });
   });
 
+  test('a cluster AWS says is gone is one message, not empty-and-not-empty', async () => {
+    jest.doMock('../../src/core/cluster', () => ({
+      status: jest.fn(async () => ({
+        context: 'arn:aws:eks:eu-west-1:111122223333:cluster/old',
+        reachable: false,
+        gone: true,
+        unreadable: [],
+        reach_status: 'down',
+        reach_why: 'nothing answered',
+        reach_advice:
+          'AWS says this cluster no longer exists, so it is not costing anything. ' +
+          'The kubeconfig entry naming it is left over -- `houston cluster forget old` removes it.',
+      })),
+    }));
+    const result = await command(['cluster', 'status']);
+    expect(result.code).toBe(3);
+    // stderr said "NOT a report that the cluster is empty" while stdout said it no longer
+    // exists and costs nothing: two verdicts on one cluster. Gone is one verdict.
+    expect(result.stderr).not.toContain('NOT a report that the cluster is empty');
+    expect(result.stderr).toContain('no longer exists in AWS');
+    expect(result.stderr).toContain('houston cluster forget old');
+  });
+
   test('a refused destructive down is exit 5 in human mode', async () => {
     // A workspace that EXISTS: `down` resolves the name first, as earlier releases do, so a
     // name with no record is exit 4 before the teardown is ever reached.

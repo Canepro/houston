@@ -272,11 +272,15 @@ async function edgeStatus(io: CliIo): Promise<number> {
   ];
   if (domain !== '') rows.push(['GUI name', domain]);
   writePanel(io, 'houston edge', rows);
-  if (!st.running) {
+  if (!st.running && (st.routes.length > 0 || domain !== '')) {
     say(
       io,
       '  ⚠ every https name on this box is unreachable while it is stopped — `houston edge start`',
     );
+  } else if (!st.running) {
+    // Nothing to reach: "every https name is unreachable" above "no names registered yet"
+    // was the same false alarm doctor raised about a box that had finished with HTTPS.
+    say(io, '  stopped — no https workspace uses it; `houston edge start` when one does.');
   } else {
     // "running" was the whole answer here, and running is not reachable.
     const claim = await portClaimNote();

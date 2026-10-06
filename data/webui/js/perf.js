@@ -242,9 +242,28 @@ ctx.$("#session-all").addEventListener("click", () => {
   if (confirm("Sign out of every browser you have signed in from?")) signOut(true);
 });
 ctx.$(".brand").addEventListener("click", ctx.goHome);
-// Refresh re-probes the cluster too, which the poll deliberately does not: that is
-// what somebody presses after installing k3s or starting a cluster.
-ctx.$("#btn-refresh").addEventListener("click", () => { ctx.loadRepros(); ctx.refreshKube(); });
+// Refresh re-reads the page on screen, and re-probes the cluster too, which the poll
+// deliberately does not: that is what somebody presses after installing k3s or starting
+// a cluster. It used to stop at the list and the engines, which the four-second poll
+// already reads -- so on Home, Clusters or a workspace nothing visibly changed.
+ctx.$("#btn-refresh").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  if (button.disabled) return;
+  button.disabled = true;
+  button.textContent = "Refreshing…";
+  try {
+    await Promise.all([
+      ctx.VIEW === "home" && !ctx.SELECTED ? ctx.refreshHome(true) : null,
+      ctx.loadRepros(), ctx.refreshKube(),
+      ctx.VIEW === "clusters" || ctx.VIEW === "cluster" ? ctx.clRefresh() : null,
+      ctx.VIEW === "workspace" ? ctx.refreshDetail() : null,
+      ctx.VIEW === "activity" ? ctx.openJobs() : null,
+    ]);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Refresh";
+  }
+});
 
 Object.defineProperties(ctx, {
   "fmtWhen": { enumerable: true, get: () => fmtWhen },

@@ -47,7 +47,7 @@ export function escapeHtml(value: string): string {
     .replaceAll("'", '&#x27;');
 }
 
-/** `data-theme="dark"` for a fixed choice, or nothing so CSS decides. */
+/** `data-theme="dark"` for a fixed choice, or nothing: the light theme, the default. */
 export function themeAttr(value: string | null | undefined): string {
   const selected = stripText(value || '');
   return selected === 'dark' || selected === 'light' ? ` data-theme="${selected}"` : '';

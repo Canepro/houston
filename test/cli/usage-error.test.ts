@@ -184,6 +184,80 @@ function lastLine(text: string): string {
  * file built with a broken accounts file, as the recorded runs had. Its path is spelt
  * `<home>` in a verdict, as it is in the recorded ones.
  */
+/**
+ * RE-RECORDING, deliberately and narrowly. The verdicts are earlier releases' answers and
+ * stay so -- except where a command has since grown an action or an option those releases
+ * never had: for `cluster --bogus` earlier releases could not suggest `--user`, because they
+ * had no `--user`. `USAGE_RECORD_FOR=<command>` records that ONE command's cases from
+ * this build's verdicts (new keys and changed ones) and leaves every other command's
+ * recording exactly as it was; the diff of the fixture shows what moved, and the commit
+ * that moves it says why. Never set in CI.
+ */
+// Not HOUSTON_*: test/testsetup.ts scrubs that prefix from the environment on purpose.
+const RECORD_FOR = process.env.USAGE_RECORD_FOR ?? '';
+let recordedSomething = false;
+
+function record(recorded: Recorded, key: string, verdict: unknown): void {
+  const text = JSON.stringify(verdict);
+  let at = RECORDED.verdicts.findIndex((entry) => JSON.stringify(entry) === text);
+  if (at < 0) {
+    RECORDED.verdicts.push(verdict as Verdict);
+    at = RECORDED.verdicts.length - 1;
+  }
+  (recorded as Record<string, number>)[key] = at;
+  recordedSomething = true;
+}
+
+/** The fixture's own layout: one compact verdict per line, one compact case key per line. */
+function serializeRecorded(): string {
+  const lines: string[] = ['{', '  "verdicts": ['];
+  RECORDED.verdicts.forEach((verdict, index) => {
+    lines.push(
+      `    ${JSON.stringify(verdict)}${index === RECORDED.verdicts.length - 1 ? '' : ','}`,
+    );
+  });
+  lines.push('  ],', '  "cases": {');
+  const mapLines = (map: Recorded, indent: string): string[] => {
+    const keys = Object.keys(map);
+    return keys.map(
+      (key, index) =>
+        `${indent}${JSON.stringify(key)}: ${String(map[key])}${index === keys.length - 1 ? '' : ','}`,
+    );
+  };
+  const groups = Object.entries(RECORDED.cases);
+  groups.forEach(([name, value], index) => {
+    const last = index === groups.length - 1 ? '' : ',';
+    if (name === 'brokenHomes') {
+      lines.push(`    ${JSON.stringify(name)}: {`);
+      const homes = Object.entries(value as Record<string, Recorded>);
+      homes.forEach(([home, map], at) => {
+        lines.push(
+          `      ${JSON.stringify(home)}: {`,
+          ...mapLines(map, '        '),
+          `      }${at === homes.length - 1 ? '' : ','}`,
+        );
+      });
+      lines.push(`    }${last}`);
+    } else {
+      lines.push(
+        `    ${JSON.stringify(name)}: {`,
+        ...mapLines(value as Recorded, '      '),
+        `    }${last}`,
+      );
+    }
+  });
+  lines.push('  }', '}');
+  return `${lines.join('\n')}\n`;
+}
+
+afterAll(() => {
+  if (RECORD_FOR === '' || !recordedSomething) return;
+  fs.writeFileSync(
+    path.join(__dirname, '..', 'fixtures', 'cli', 'usage-error.json'),
+    serializeRecorded(),
+  );
+});
+
 async function compare(
   cases: readonly (readonly [readonly string[], number | null])[],
   recorded: Recorded,
@@ -192,9 +266,20 @@ async function compare(
   const mismatches: unknown[] = [];
   for (const [argv, columns] of cases) {
     const typescriptOutcome = await typescript(argv, columns, houstonHome);
-    const at = recorded[caseKey(argv, columns)];
+    const key = caseKey(argv, columns);
+    const at = recorded[key];
     const expected = at === undefined ? undefined : RECORDED.verdicts[at];
+    const recording = RECORD_FOR !== '' && argv[0] === RECORD_FOR;
     if (expected === undefined) {
+      if (recording) {
+        const ranIn = houstonHome ?? process.env.HOUSTON_HOME ?? '';
+        record(
+          recorded,
+          key,
+          JSON.parse(JSON.stringify(shape(typescriptOutcome)).split(ranIn).join('<home>')),
+        );
+        continue;
+      }
       mismatches.push({ argv, columns, recorded: '<no recorded verdict>' });
       continue;
     }
@@ -206,6 +291,10 @@ async function compare(
     const ranIn = houstonHome ?? process.env.HOUSTON_HOME ?? '';
     const ours = JSON.stringify(shape(typescriptOutcome)).split(ranIn).join('<home>');
     if (ours !== JSON.stringify(expected)) {
+      if (recording) {
+        record(recorded, key, JSON.parse(ours));
+        continue;
+      }
       mismatches.push({ argv, columns, recorded: expected, typescript: JSON.parse(ours) });
     }
   }
@@ -366,7 +455,7 @@ describe("the CLI's verdict on an argv is the one earlier releases gave", () => 
 
   test('every int and float option reads its digits and spaces as earlier releases did', async () => {
     const numeric = numericOptions();
-    expect(numeric).toHaveLength(18);
+    expect(numeric).toHaveLength(19); // --days joined the 18 (cluster keep)
     const cases = numeric.flatMap(([spec, { long }]) =>
       NUMBER_TEXTS.map(
         (text) => [[...spec.path.split(' '), ...required(spec), long, text], null] as const,
@@ -383,7 +472,7 @@ describe("the CLI's verdict on an argv is the one earlier releases gave", () => 
     // 5`, and the 2**53 deviation reached even a value earlier releases throw away. The
     // reverse order, where the kept text is the bad one, is a usage error in both.
     const numeric = numericOptions();
-    expect(numeric).toHaveLength(18);
+    expect(numeric).toHaveLength(19); // --days joined the 18 (cluster keep)
     const cases = numeric.flatMap(([spec, option]) => {
       const base = [...spec.path.split(' '), ...required(spec)];
       const first = option.short ?? option.long;

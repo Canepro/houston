@@ -74,9 +74,12 @@ export function register(app: FastifyInstance): void {
         can_provision: kube.tools.canProvision(pre),
         nodes: pre.nodeCount,
         workspaces: pre.namespaces.length,
+        // How many the kubeconfig names: with none current, the footer says so rather
+        // than "not set up" beside a Clusters page listing them as running.
+        contexts: (await kubeClusters()).length,
       };
     } catch {
-      return { usable: false, reachable: false };
+      return { usable: false, reachable: false, contexts: 0 };
     }
   });
 

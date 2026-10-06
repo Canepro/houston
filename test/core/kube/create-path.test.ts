@@ -18,6 +18,8 @@ import type * as PortsNS from '../../../src/core/lifecycle/ports';
 import type * as ReadyNS from '../../../src/core/lifecycle/ready';
 import type * as SeedingNS from '../../../src/core/lifecycle/seeding';
 import type * as SizingNS from '../../../src/core/lifecycle/sizing';
+import type * as TlsplanNS from '../../../src/core/lifecycle/tlsplan';
+import type * as RoutesNS from '../../../src/core/edge/routes';
 
 import { PreflightError, ValidationError } from '../../../src/lib/errors';
 import { nullEmit } from '../../../src/lib/events';
@@ -30,6 +32,7 @@ import { usedPorts } from '../../../src/core/runner/ports';
 import { readMeta } from '../../../src/core/runner/record';
 import * as topology from '../../../src/core/topology';
 
+import { register, routeHost } from '../../../src/core/edge/routes';
 import { kube } from '../../../src/core/kube/exec';
 import { CONTEXT } from '../../../src/core/kube/names';
 import { namespaceFor } from '../../../src/core/kube/namespace';
@@ -42,7 +45,26 @@ let mockCreate: ((options: Record<string, unknown>) => Promise<Record<string, un
   null;
 const mockCalls: string[] = [];
 const mockCreated: Record<string, unknown>[] = [];
+/** A name the cluster serves over HTTPS, through the edge; null for none. */
+let mockKtls: { host: string } | null = null;
 
+jest.mock('../../../src/core/lifecycle/tlsplan', () => {
+  const actual = jest.requireActual<typeof TlsplanNS>('../../../src/core/lifecycle/tlsplan');
+  const routes = jest.requireActual<typeof RoutesNS>('../../../src/core/edge/routes');
+  return {
+    ...actual,
+    // With a name, the cluster's ingress probes are stated and the edge route is the real
+    // file, passed through to a NodePort -- what a create with --domain writes on k3s.
+    resolveTls: (...args: Parameters<typeof actual.resolveTls>) =>
+      mockKtls !== null
+        ? Promise.resolve({ mode: 'acme', host: mockKtls.host } as never)
+        : actual.resolveTls(...args),
+    kubernetesTlsPlan: () => Promise.resolve(mockKtls as never),
+    routeKubernetesName: async (name: string, ktls: { host: string }) => {
+      await routes.register(name, ktls.host, { passthrough: '10.0.0.1:30734' });
+    },
+  };
+});
 jest.mock('../../../src/core/lifecycle/sizing', () => ({
   ...jest.requireActual<typeof SizingNS>('../../../src/core/lifecycle/sizing'),
   // The host's free memory is not what any of these is about.
@@ -137,6 +159,7 @@ beforeEach(() => {
   mockPlan = adopted(CONTEXT, 'kind');
   mockHelm = '';
   mockCreate = null;
+  mockKtls = null;
   mockCalls.length = 0;
   mockCreated.length = 0;
 });
@@ -207,6 +230,38 @@ describe('a Kubernetes create', () => {
     expect(meta.extra.namespace).toBe(await namespaceFor('interrupted'));
     // ...and it must be distinguishable from a create that finished.
     expect(meta.extra.incomplete).toBe(true);
+  });
+
+  it('takes back the edge route it registered when the create fails', async () => {
+    // The route goes in before the create, so an ACME challenge has somewhere to land. On a
+    // k3s playground a create whose ClusterIssuer never became ready rolled its namespace
+    // back and left the route, sending the name to a NodePort that no longer existed.
+    mockKtls = { host: 'kfail.example.test' };
+    mockCreate = () => Promise.reject(new Error('the ClusterIssuer did not become ready'));
+    const said: string[] = [];
+    await expect(
+      createKubernetes(
+        createReq({ version: '8.5.1', name: 'kfail', runtime: 'kubernetes', offline: true }),
+        (event) => said.push(event.message),
+      ),
+    ).rejects.toThrow('ClusterIssuer');
+    expect(routeHost('kfail')).toBe('');
+    expect(said).toContain('create failed — removing the edge route for kfail.example.test');
+    // The record stays, as it always has, so `list` and `down` still find the workspace.
+    expect(await exists('kfail')).toBe(true);
+  });
+
+  it('leaves a route that was there before the create', async () => {
+    // Re-creating a workspace that already served the name must not take its route away.
+    await register('kkeep', 'kkeep.example.test', { passthrough: '10.0.0.1:30000' });
+    mockKtls = { host: 'kkeep.example.test' };
+    mockCreate = () => Promise.reject(new Error('the chart did not install'));
+    await expect(
+      createKubernetes(
+        createReq({ version: '8.5.1', name: 'kkeep', runtime: 'kubernetes', offline: true }),
+      ),
+    ).rejects.toThrow('chart');
+    expect(routeHost('kkeep')).toBe('kkeep.example.test');
   });
 
   it('leaves NO record when it is refused for want of a cluster', async () => {

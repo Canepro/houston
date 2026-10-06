@@ -7,13 +7,14 @@
  * production with the whole suite green.
  */
 import * as config from '../../lib/config';
+import { grafanaUrl } from '../../lib/monitoring';
 import { workspaceNamespaces } from '../kube/capabilities';
+import { shortName } from '../kube/context';
 import { forwardAlive } from '../kube/forward';
 import { CONTEXT as KUBE_CONTEXT, RELEASE } from '../kube/names';
 import { namespaceFor } from '../kube/namespace';
 import { PENDING_STATES, releaseState } from '../kube/release';
-import { desiredReplicas } from '../kube/scale';
-import { terminalPodFailure, workloadExists, workspaceReady } from '../kube/status';
+import { terminalPodFailure, workloadReplicas, workspaceReady } from '../kube/status';
 import { dockerAvailable } from '../runner/host';
 import { projectStates, rcStatusByProject, servicesByProject } from '../runner/queries';
 import { type Metadata, externalUrl, listMeta, readMeta } from '../runner/record';
@@ -80,18 +81,33 @@ export async function kubernetesState(name: string, meta: Metadata): Promise<str
   // uses when the daemon is unreachable. Without it a healthy workspace read as `down`
   // whenever the cluster could not be asked. `down` is the word that invites `up --force`
   // and `down --volumes`, so it is the worst available guess.
-  const held = await workspaceNamespaces(context);
+  //
+  // ONE ROUND OF QUESTIONS, NOT FOUR IN A ROW. On EKS every kubectl call first fetches a
+  // token, so asking the namespace, the workload, its replicas and its pods one after
+  // another made each `list` -- which the GUI asks for every four seconds -- and each
+  // workspace panel cost four round trips. The three reads are independent; their answers
+  // are taken in the order the rule needs, so a missing namespace still decides first and
+  // a refused workload read still raises only once the namespace is known to be there.
+  const [held, workload, ready] = await Promise.all([
+    workspaceNamespaces(context),
+    workloadReplicas(name, { context }).then(
+      (replicas) => ({ replicas, failure: null as unknown }),
+      (failure: unknown) => ({ replicas: null, failure }),
+    ),
+    workspaceReady(name, { context }),
+  ]);
   if (held === null) return '?';
   if (!held.includes(await namespaceFor(name))) return 'down';
+  if (workload.failure !== null) throw workload.failure;
   // The namespace EXISTING is not the workspace running. A plain `down` keeps the
   // namespace and its PVC on purpose and uninstalls the release, so a torn-down workspace
   // reported "starting" -- and would have reported it forever.
-  if (!(await workloadExists(name, { context }))) return 'down';
+  if (workload.replicas === null) return 'down';
   // Scaled to zero is STOPPED, not starting. `stop` is implemented as scale-to-zero and
   // without this the column said "starting" for a workspace that was deliberately
   // stopped and was never going to move.
-  if ((await desiredReplicas(name, { context })) === 0) return 'stopped';
-  if (await workspaceReady(name, { context })) return 'running';
+  if (workload.replicas === 0) return 'stopped';
+  if (ready) return 'running';
   // NOT-READY IS NOT ALWAYS STARTING. For a wedged `pending-install` release or a pod in
   // ImagePullBackOff / CreateContainerConfigError nothing is coming. A refused read must
   // not manufacture a failure, so each probe is guarded and falls back to the honest
@@ -197,7 +213,7 @@ export function reproLinks(meta: Metadata): { label: string; url: string; kind: 
   if (isTruthy(extra.monitoring)) {
     links.push({
       label: 'Grafana',
-      url: `http://localhost:${String(config.MONITOR_PORTS[1])}`,
+      url: grafanaUrlOf(meta),
       kind: 'monitor',
     });
     links.push({
@@ -209,6 +225,28 @@ export function reproLinks(meta: Metadata): { label: string; url: string; kind: 
   return links;
 }
 
+/** Only houston-served TLS publishes Grafana; every cluster stack uses the sub-path. */
+export function grafanaUrlOf(meta: Metadata): string {
+  const publicUrl = isTruthy(bag(meta.extra).tls) ? meta.publicUrl : '';
+  return grafanaUrl(publicUrl, topology.ofMeta(meta) === topology.KUBERNETES || !!publicUrl);
+}
+
+/** Origins the GUI may embed, derived from monitored workspaces served by houston. */
+export async function grafanaFrameOrigins(): Promise<string[]> {
+  const origins = new Set<string>();
+  for (const meta of await listMeta()) {
+    if (!isTruthy(bag(meta.extra).monitoring) || !isTruthy(bag(meta.extra).tls) || !meta.publicUrl)
+      continue;
+    try {
+      const url = new URL(meta.publicUrl);
+      if (url.protocol === 'https:') origins.add(url.origin);
+    } catch {
+      // A hand-edited invalid URL grants no iframe origin.
+    }
+  }
+  return [...origins].sort();
+}
+
 /**
  * DERIVED here, not read out of the record. Every workspace created before the groups
  * existed -- and every workspace created before the next wording fix -- gets the current
@@ -218,6 +256,18 @@ export function reproLinks(meta: Metadata): { label: string; url: string; kind: 
  * notes no group accounts for (a preset that has since been deleted, a note some older
  * release appended by hand).
  */
+/**
+ * The cluster a Kubernetes workspace runs in: the context a command needs, and the short
+ * name a person recognises. Both '' for a Compose workspace, and ALWAYS present -- a key
+ * that appears only sometimes is how a payload drifts from what the tests render.
+ */
+export function clusterOf(meta: Metadata): { context: string; cluster: string } {
+  const extra = bag(meta.extra);
+  if (topology.ofMeta(meta) !== topology.KUBERNETES) return { context: '', cluster: '' };
+  const context = isTruthy(extra[config.EXTRA_CONTEXT]) ? String(extra[config.EXTRA_CONTEXT]) : '';
+  return { context, cluster: context === '' ? '' : shortName(context) };
+}
+
 export function summary(meta: Metadata): Record<string, unknown> {
   const groups = notes.noteGroupsOf(meta);
   const extra = bag(meta.extra);
@@ -240,6 +290,7 @@ export function summary(meta: Metadata): Record<string, unknown> {
     // path can only refuse.
     runtime: topology.ofMeta(meta),
     deployment: String(topology.axesOfMeta(meta).deployment ?? ''),
+    ...clusterOf(meta),
   };
   // Whether this workspace HAS sample data, and whether the readback agreed. Always
   // present, never conditional -- a key that appears only sometimes is how the panel's
@@ -264,7 +315,7 @@ export function summary(meta: Metadata): Record<string, unknown> {
   }
   if (isTruthy(extra.monitoring)) {
     d.monitoring = true;
-    d.grafana_url = `http://localhost:${String(config.MONITOR_PORTS[1])}`;
+    d.grafana_url = grafanaUrlOf(meta);
   }
   return d;
 }
@@ -337,6 +388,7 @@ export async function rowFor(
     root_url: meta.rootUrl,
     state,
     runtime,
+    ...clusterOf(meta),
     // The https URL when `up --https` was used; "" otherwise.
     public_url: meta.publicUrl,
     tls: isTruthy(extra.tls) ? String(extra.tls) : '',
@@ -348,7 +400,7 @@ export async function rowFor(
     uptime,
     health: degraded || health || (state === 'running' ? state : ''),
     degraded: degradedWhy,
-    grafana_url: monitored ? `http://localhost:${String(config.MONITOR_PORTS[1])}` : null,
+    grafana_url: monitored ? grafanaUrlOf(meta) : null,
     links: reproLinks(meta),
   };
 }

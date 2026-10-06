@@ -28,7 +28,7 @@ Every command also explains itself: `houston <command> --help`.
 | REST | `token` `api` `pat` |
 | web GUI and accounts | `serve` `users` `audit` `chown` |
 | HTTPS | `edge` `trust-ca` `tls-status` |
-| cloud clusters | `cluster` (see [EKS](eks.md)) |
+| cloud clusters | `cluster` (`cluster overview` for what exists and what it costs; see [EKS](eks.md)) |
 | other | `monitor` `presets` `versions` `doctor` `capabilities` `skill` |
 
 ---
@@ -52,7 +52,7 @@ creating it again:
 | `restart` | restarts Rocket.Chat |
 | `down` | removes the containers but **keeps** the data and the record |
 | `down --volumes` | deletes the data too, after asking |
-| `prune` | removes every workspace that is `down`, except pinned and running ones |
+| `prune` | **deletes** every workspace that is `down`, with its data and record, except pinned and running ones |
 
 The commands that delete data ask first, and `prune` lists what it will remove. Add
 `--yes` to skip the question in a script.
@@ -176,7 +176,8 @@ each discussion starts from. `seed` prints the ones it posted, so `small` report
 `messages: 46`, `standard` 283 and `large` 3000.
 
 Every profile has every kind of room: public and private channels, public and private
-teams, channels inside teams, discussions, direct messages, threads and reactions.
+teams, channels inside teams, discussions, direct messages and threads. `standard` and
+`large` also add reactions; `small` has none.
 
 - Seed users are `alice`, `bob` and so on, and each password is the username.
 - Email 2FA and the rate limiter are off while seeding, and are put back afterwards.
@@ -303,7 +304,8 @@ houston tls-status --name ticket-1234
 ```
 
 While the edge is stopped, every HTTPS name on the machine is unreachable, so `doctor`
-reports a stopped edge as a failure. A route the edge cannot reach answers **502**, and
+reports a stopped edge as a failure when a workspace or the GUI's name uses it (and as
+fine when nothing does). A route the edge cannot reach answers **502**, and
 `edge status` shows which.
 
 **Wildcard certificates (dns-01):** put your DNS provider's credentials in
@@ -316,7 +318,8 @@ chmod 600 ~/.houston/acme/dns.env
 ```
 
 A `--domain` workspace can be reached by anyone who can reach that name, so houston
-gives it a generated admin password instead of `admin123`. `houston info` shows it.
+gives it a generated admin password instead of `admin123`, as it does for a workspace
+bound beyond this machine (`--bind 0.0.0.0`). `houston info` shows it.
 
 ---
 
@@ -330,7 +333,7 @@ houston monitor --name ticket-1234          # or add it later, without restartin
 houston monitor --name ticket-1234 --off
 ```
 
-- **Grafana** is at `http://localhost:5050` (`admin` / `admin`, anonymous viewing on),
+- **Grafana** on a Docker loopback workspace is at `http://localhost:5050` (`admin` / `admin`, anonymous Viewer on),
   with the Rocket.Chat, MongoDB and Node Exporter dashboards.
 - **Prometheus** is at `http://localhost:9090`.
 - Container logs go to **Loki**, readable in the *Rocket.Chat Logs* dashboard.
@@ -338,6 +341,20 @@ houston monitor --name ticket-1234 --off
 On Docker, log collection covers only that workspace. On Kubernetes, one shared stack
 runs in the `houston-system` namespace, and `--off` leaves it running while another
 workspace still uses it.
+
+With houston-served HTTPS (`--domain` or `--https`), both runtimes serve Grafana at
+`https://<workspace-host>/grafana/`. `info` and the GUI report that URL, including
+the Logs link and the live load-test dashboard. The login remains `admin/admin`
+on this public name; anonymous users can view dashboards.
+
+Kubernetes loopback forwards serve `http://localhost:5050/grafana/`. Every monitored
+HTTPS workspace has its own Ingress into the shared stack. Under ACME this requests
+an extra certificate per workspace. Absolute Grafana links name the first public
+host configured for the stack; other workspace hosts serve the same relative paths.
+Upgrading an older stack to this path restarts Grafana; anyone using an existing
+port-forward must run `houston monitor --name <name>` again on their own box.
+
+A bare `--root-url` uses the local Grafana URL; a customer proxy must route `/grafana` to Grafana and configure its sub-path.
 
 ---
 

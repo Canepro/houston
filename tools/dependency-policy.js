@@ -40,6 +40,7 @@ const RANKS = [
     '^src/lib/errors\\.ts$',
     '^src/seams/exec\\.ts$',
     '^src/lib/float-text\\.ts$',
+    '^src/lib/map-limit\\.ts$',
     '^src/lib/mkdir-parents\\.ts$',
     '^src/lib/unicode-tables\\.ts$',
     '^src/lib/home\\.ts$',
@@ -122,7 +123,7 @@ const RANKS = [
   ['^src/core/kube/operator\\.ts$'],
   ['^src/core/kube/(chart|monitoring)\\.ts$'],
   ['^src/core/kube/(certmanager|forward)\\.ts$'],
-  ['^src/core/kube/ingress\\.ts$'],
+  ['^src/core/kube/(ingress|grafana-ingress)\\.ts$'],
   ['^src/core/kube/workspace\\.ts$'],
   ['^src/core/eks\\.ts$'],
   // The account trio sits ABOVE everything it could otherwise be reached from, and that

@@ -262,9 +262,22 @@ function renderTab() {
     // line under the title AND in the URL box below, so it was the one fact on this
     // grid stated three times, while the runtime was stated nowhere.
     const where = d.runtime === "kubernetes" ? "Kubernetes" : "Compose";
+    // AND WHICH CLUSTER, by the name a person knows, linking to its row on the Clusters
+    // page: the panel said "Kubernetes" and the ARN sat in a note card further down.
+    let runsOn = d.deployment ? `${where} · ${d.deployment}` : where;
+    if (d.runtime === "kubernetes" && d.cluster) {
+      const region = String(d.context || "").startsWith("arn:aws:eks:") ? String(d.context).split(":")[3] : "";
+      // The cluster, which is the fact that decides everything else, on its own line; the
+      // rest small beneath it. On one line it wrapped into three, a "·" left dangling.
+      runsOn = ctx.el("span", {},
+        ctx.el("button", { type: "button", class: "linkbtn", title: d.context || "",
+          onclick: () => ctx.openContext(d.context) }, d.cluster),
+        ctx.el("small", { class: "v-sub" },
+          [where, region, d.deployment].filter(Boolean).join(" · ")));
+    }
     const grid = ctx.el("div", { class: "kv-grid" },
       kv("RC Version", d.rc_version), kv("MongoDB", d.mongo_tag),
-      kv("Runs on", d.deployment ? `${where} · ${d.deployment}` : where),
+      kv("Runs on", runsOn),
       kv("Uptime", d.uptime || "—", d.uptime ? "green" : ""),
       kv("Scenario", d.preset || "default"),
       // healthClass() knows unhealthy/starting/healthy; the kv only understood the

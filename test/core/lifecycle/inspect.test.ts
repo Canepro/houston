@@ -11,6 +11,7 @@ import {
   degradedReason,
   reproLinks,
   reproState,
+  rowFor,
   summary,
   uptimeHealth,
 } from '../../../src/core/lifecycle/inspect';
@@ -101,6 +102,21 @@ describe('what a workspace is right now', () => {
       links: reproLinks(meta),
       summary: summary(meta),
     }).toEqual(recorded);
+  });
+
+  it('names the cluster a Kubernetes workspace runs in, and nothing for a Compose one', () => {
+    // The record held the context all along; the panel and `list` showed "k8s" and an ARN
+    // in a note card. The short name is what a person recognises, the context what a
+    // command needs, and both are ALWAYS present so the payload's shape does not drift.
+    const kube = metadata({
+      name: 't1',
+      extra: { runtime: 'kubernetes', context: 'arn:aws:eks:us-east-1:1:cluster/support' },
+    });
+    expect(summary(kube)).toMatchObject({
+      context: 'arn:aws:eks:us-east-1:1:cluster/support',
+      cluster: 'support',
+    });
+    expect(summary(metadata({ name: 'c1' }))).toMatchObject({ context: '', cluster: '' });
   });
 
   it('returns every key the browser fixture renders from', async () => {
@@ -238,6 +254,48 @@ describe('reading a container status', () => {
 });
 
 describe('the links a workspace publishes', () => {
+  it.each([
+    ['docker', 'local', 'https://h', 'https://h/grafana'],
+    ['docker', 'acme', 'https://h', 'https://h/grafana'],
+    ['kubernetes', 'local', 'https://h', 'https://h/grafana'],
+    ['kubernetes', '', '', 'http://localhost:5050/grafana'],
+  ])(
+    'Grafana public URL regression: reports %s TLS=%s in every payload',
+    async (runtime, tls, publicUrl, expected) => {
+      const meta = metadata({
+        name: 'w',
+        project: 'houston-w',
+        rootUrl: 'http://localhost:3310',
+        hostPort: 3310,
+        publicUrl,
+        extra: { runtime, tls, monitoring: true, namespace: 'houston-w' },
+      });
+      expect(summary(meta).grafana_url).toBe(expected);
+      expect(reproLinks(meta).find((link) => link.label === 'Grafana')?.url).toBe(expected);
+      expect(
+        (
+          await rowFor(meta, {
+            default: '',
+            dockerUp: false,
+            states: {},
+            statusMap: {},
+            svcMap: {},
+          })
+        ).grafana_url,
+      ).toBe(expected);
+      expect(reproLinks(meta).find((link) => link.label === 'Prometheus')?.url).toBe(
+        'http://localhost:9090',
+      );
+    },
+  );
+  it('keeps a Docker loopback workspace and a customer proxy on the original Grafana URL', () => {
+    for (const meta of [
+      metadata({ extra: { monitoring: true } }),
+      metadata({ publicUrl: 'https://h', rootUrl: 'https://h', extra: { monitoring: true } }),
+    ]) {
+      expect(summary(meta).grafana_url).toBe('http://localhost:5050');
+    }
+  });
   it("surfaces each scenario's own UI, the monitoring pair and every instance", () => {
     const byLabel = (meta: Metadata) =>
       Object.fromEntries(reproLinks(meta).map((link) => [link.label, link.url]));

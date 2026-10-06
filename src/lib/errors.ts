@@ -221,6 +221,9 @@ export const GATE_CODES: Readonly<Record<string, string>> = Object.freeze({
   GATE_ENGINE_RESIZE: 'resizing the container engine was not authorised',
   GATE_UNAPPROVED_CLUSTER: 'the target Kubernetes cluster is not an approved one',
   GATE_DELETE_UNOWNED: 'the resource was not created by houston',
+  GATE_KEEP_UNOWNED:
+    'the cluster was not created by houston, so its expiry is not houston’s to move',
+  GATE_SHARE_UNOWNED: 'the cluster was not created by houston, so houston grants no access to it',
   GATE_PUBLIC_EXPOSURE: 'the request would expose a repro beyond loopback',
   GATE_RETENTION: 'retaining this run was not authorised',
   // DISTINCT from GATE_UNAPPROVED_CLUSTER, which already means "the CA private key may
@@ -228,6 +231,8 @@ export const GATE_CODES: Readonly<Record<string, string>> = Object.freeze({
   // that a caller branches on `code` -- and these two want opposite responses: one is
   // about a secret leaving this box, the other about money leaving an account.
   GATE_CLOUD_SPEND: 'creating a cluster that costs money was not authorised',
+  GATE_WRONG_ACCOUNT: 'the selected AWS account differs from the server identity',
+  GATE_WRONG_CLUSTER: 'AWS returned a different cluster than the one selected',
 });
 
 /**
@@ -241,6 +246,10 @@ export const RAISED_GATE_CODES: readonly string[] = Object.freeze([
   'GATE_UNAPPROVED_CLUSTER',
   'GATE_CLOUD_SPEND',
   'GATE_DELETE_UNOWNED',
+  'GATE_KEEP_UNOWNED',
+  'GATE_SHARE_UNOWNED',
+  'GATE_WRONG_ACCOUNT',
+  'GATE_WRONG_CLUSTER',
 ]);
 
 /**

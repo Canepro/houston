@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import type * as MonitorNS from '../../src/core/monitor';
+import type * as RecordNS from '../../src/core/runner/record';
 import type * as YamlNS from 'yaml';
 import type { KubectlResult } from '../../src/seams/kubectl';
 
@@ -558,7 +559,7 @@ describe('attaching monitoring on Kubernetes', () => {
     ]);
     expect(calls['reachable']).toEqual([5050]);
     expect(result['monitoring']).toBe(true);
-    expect(result['grafana_url']).toBe('http://localhost:5050');
+    expect(result['grafana_url']).toBe('http://localhost:5050/grafana');
     expect(meta.extra.monitoring).toBe(true);
     expect(meta.extra.monitoring_ports).toEqual([5050]);
     expect(meta.extra.grafana_pid).toBe(4321);
@@ -568,7 +569,7 @@ describe('attaching monitoring on Kubernetes', () => {
       message: "monitoring attached to 'w'",
       level: 'info',
       phase: 'done',
-      data: { data: { grafana_url: 'http://localhost:5050' } },
+      data: { data: { grafana_url: 'http://localhost:5050/grafana' } },
     });
   });
 });
@@ -801,4 +802,206 @@ describe('a Kubernetes detach, as a GUI job sees it', () => {
     expect(events.some((event) => event.phase === 'monitor')).toBe(true);
     expect(events.at(-1)?.phase).toBe('done');
   });
+});
+
+describe('Grafana public URL regression: attach and detach', () => {
+  const modules = [
+    'lifecycle/naming',
+    'lifecycle/ports',
+    'lifecycle/admin',
+    'runner/record',
+    'runner/engine',
+    'runner/queries',
+    'edge/routes',
+    'kube/names',
+    'kube/namespace',
+    'kube/monitoring',
+    'kube/exec',
+    'kube/forward',
+    'rcapi',
+  ];
+  afterEach(() => {
+    for (const module of modules) jest.dontMock(`../../src/core/${module}`);
+    jest.resetModules();
+  });
+
+  function setup(runtime: string, tls = 'local', staging = false) {
+    jest.resetModules();
+    const record = jest.requireActual<typeof RecordNS>('../../src/core/runner/record');
+    const m = record.metadata({
+      name: 'w',
+      project: 'houston-w',
+      publicUrl: 'https://rc.example.test',
+      rootUrl: 'http://localhost:3310',
+      extra: {
+        runtime,
+        tls,
+        tls_staging: staging,
+        namespace: 'houston-w',
+        context: 'prod',
+        ingress_class: 'traefik',
+        notes: [
+          'keep me',
+          'Grafana:    https://old.example.test/grafana  (admin/admin; anonymous view enabled)',
+          "Container logs -> Loki: open the 'Rocket.Chat Logs' dashboard in Grafana (https://old.example.test/grafana/d/houston-logs) - no login needed.",
+        ],
+      },
+    });
+    const doc = {
+      services: { rocketchat: { environment: {}, ports: ['127.0.0.1:3310:3000'] } },
+      volumes: {},
+    };
+    const registered = jest.fn(async () => false);
+    const cleanup = jest.fn(async () => undefined);
+    const ports = jest.fn(async () => undefined);
+    const forward = jest.fn(async () => 1);
+    let manifest: Record<string, unknown> | undefined;
+    jest.doMock('../../src/core/lifecycle/naming', () => ({
+      resolveName: async (name: string) => name,
+    }));
+    jest.doMock('../../src/core/lifecycle/ports', () => ({ checkMonitorPorts: ports }));
+    jest.doMock('../../src/core/lifecycle/admin', () => ({
+      login: async () => ({ token: 't', userId: 'u' }),
+    }));
+    jest.doMock('../../src/core/runner/record', () => ({
+      ...record,
+      readMeta: async () => m,
+      readCompose: async () => doc,
+      write: async () => undefined,
+      updateMeta: async (_name: string, update: (meta: typeof m) => void) => update(m),
+    }));
+    jest.doMock('../../src/core/runner/engine', () => ({
+      ...jest.requireActual<object>('../../src/core/runner/engine'),
+      up: async () => 0,
+      rmServices: async () => 0,
+    }));
+    jest.doMock('../../src/core/runner/queries', () => ({
+      ...jest.requireActual<object>('../../src/core/runner/queries'),
+      removeVolumes: async () => [],
+    }));
+    jest.doMock('../../src/core/edge/routes', () => ({
+      ...jest.requireActual<object>('../../src/core/edge/routes'),
+      register: registered,
+    }));
+    jest.doMock('../../src/core/kube/names', () => jest.requireActual('../../src/core/kube/names'));
+    jest.doMock('../../src/core/kube/namespace', () => ({
+      ...jest.requireActual<object>('../../src/core/kube/namespace'),
+      namespaceFor: async () => 'houston-w',
+    }));
+    jest.doMock('../../src/core/kube/monitoring', () => ({
+      ...jest.requireActual<object>('../../src/core/kube/monitoring'),
+      ensureMonitoring: async () => undefined,
+      setMonitoringLabel: async () => undefined,
+      removeGrafanaIngress: cleanup,
+      removeMonitoring: async () => false,
+    }));
+    jest.doMock('../../src/core/kube/forward', () => ({
+      ...jest.requireActual<object>('../../src/core/kube/forward'),
+      grafanaForward: forward,
+      forwardReachable: async () => true,
+    }));
+    jest.doMock('../../src/core/kube/exec', () => ({
+      ...jest.requireActual<object>('../../src/core/kube/exec'),
+      kube: {
+        run: async (argv: string[], options: { input?: string } = {}) => {
+          if (argv.includes('apply'))
+            manifest = JSON.parse(options.input ?? '{}') as Record<string, unknown>;
+          return {
+            argv,
+            returncode: 0,
+            stderr: '',
+            stdout:
+              argv.includes('certificate') && manifest !== undefined
+                ? JSON.stringify({ status: { conditions: [{ type: 'Ready', status: 'True' }] } })
+                : '',
+          };
+        },
+      },
+    }));
+    jest.doMock('../../src/core/rcapi', () => ({
+      ...jest.requireActual<object>('../../src/core/rcapi'),
+      setSetting: async () => true,
+    }));
+    return {
+      m,
+      doc,
+      registered,
+      cleanup,
+      ports,
+      forward,
+      manifest: () => manifest,
+      monitor: require('../../src/core/monitor') as typeof MonitorNS,
+    };
+  }
+
+  it('publishes Docker Grafana, refreshes both route variants and strips old HTTPS notes', async () => {
+    const world = setup('docker');
+    const result = await world.monitor.attachLocked('w');
+    expect(result.grafana_url).toBe('https://rc.example.test/grafana');
+    expect(
+      (world.doc.services as Record<string, { environment?: unknown }>).grafana?.environment,
+    ).toMatchObject({ GF_SERVER_ROOT_URL: 'https://rc.example.test/grafana/' });
+    expect(world.registered).toHaveBeenCalledWith(
+      'w',
+      'rc.example.test',
+      expect.objectContaining({ grafana: true }),
+    );
+    expect(world.m.extra.notes).not.toEqual(
+      expect.arrayContaining([expect.stringContaining('https://old.example.test')]),
+    );
+    await world.monitor.detachLocked('w');
+    expect(world.registered).toHaveBeenLastCalledWith(
+      'w',
+      'rc.example.test',
+      expect.objectContaining({ grafana: false }),
+    );
+    expect(world.m.extra.notes).toEqual(['keep me']);
+  });
+
+  it.each([
+    ['local', false, 'houston-ca'],
+    ['acme', false, 'houston-acme'],
+    ['acme', true, 'houston-acme-staging'],
+  ] as const)(
+    'applies the Kubernetes Ingress for %s staging=%s and deletes it on detach',
+    async (mode, staging, issuer) => {
+      const world = setup('kubernetes', mode, staging);
+      const result = await world.monitor.attachKubernetes('w');
+      expect(result.grafana_url).toBe('https://rc.example.test/grafana');
+      expect(result.notes).toContain('Grafana: https://rc.example.test/grafana (admin/admin)');
+      expect(result.notes).toContain('the stack is SHARED by every workspace on this cluster');
+      expect(world.manifest()).toMatchObject({
+        metadata: {
+          name: 'grafana-w',
+          namespace: 'houston-system',
+          labels: { 'app.kubernetes.io/managed-by': 'houston', 'houston.io/workspace': 'w' },
+          annotations: { 'cert-manager.io/cluster-issuer': issuer },
+        },
+        spec: {
+          ingressClassName: 'traefik',
+          tls: [{ hosts: ['rc.example.test'], secretName: 'grafana-w-tls' }],
+          rules: [
+            {
+              host: 'rc.example.test',
+              http: {
+                paths: [
+                  {
+                    path: '/grafana',
+                    pathType: 'Prefix',
+                    backend: {
+                      service: { name: 'monitoring-grafana-service', port: { number: 3000 } },
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      });
+      expect(world.forward).not.toHaveBeenCalled();
+      expect(world.ports).not.toHaveBeenCalled();
+      await world.monitor.detachKubernetes('w');
+      expect(world.cleanup).toHaveBeenCalledWith('w', expect.objectContaining({ context: 'prod' }));
+    },
+  );
 });

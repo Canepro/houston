@@ -3,7 +3,8 @@ import { ctx } from "./shared.js";
 // ---- theme ------------------------------------------------------------------
 // Stored per browser, not per account: it is a property of the screen you are
 // sitting at, and the same person on a projector and a laptop wants different
-// answers. First visit follows the OS rather than picking for them.
+// answers. Light until somebody presses the toggle: the owner's choice (2026-10-05),
+// over following the OS, which opened dark on every dark-mode laptop.
 const THEME_KEY = "houston-theme";
 function applyTheme(name) {
   document.documentElement.dataset.theme = name === "dark" ? "dark" : "light";
@@ -37,8 +38,7 @@ function applyTheme(name) {
 function initTheme() {
   let saved = null;
   try { saved = localStorage.getItem(THEME_KEY); } catch (_) { /* private mode */ }
-  applyTheme(saved || (window.matchMedia
-    && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"));
+  applyTheme(saved === "dark" ? "dark" : "light");
 }
 initTheme();
 // The initial VIEW is an assignment, not a setView() call, so nothing had
