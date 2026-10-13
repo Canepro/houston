@@ -5,27 +5,38 @@
  * port-forward alive while it waits, which is why `waitServingKubernetes` is separate rather
  * than a flag.
  */
+import { pendingReceipt } from '../../seed/receipt';
 import * as config from '../../lib/config';
 import { ConflictError, CreateFailedError, NotReadyError, ReproError } from '../../lib/errors';
 import { type Emit, info, nullEmit, warn } from '../../lib/events';
 import { toInt, toText } from '../../lib/format';
-import { sleep, unwindsOnInterrupt } from '../../seams/exec';
+import { publicPathsOf } from '../../lib/presets/public';
+import { baseVersion } from '../../lib/versions';
+import { Interrupted, sleep, unwindsOnInterrupt } from '../../seams/exec';
 import { diagnoseFailure } from '../diagnose';
 import * as edge from '../edge/acme';
 import { running as edgeRunning } from '../edge/engine';
 import { ensureRunning } from '../edge/runtime';
 import { register as registerRoute } from '../edge/routes';
-import { forwardAlive, ensurePortForward, forwardReachable } from '../kube/forward';
+import {
+  ensurePortForward,
+  forwardAlive,
+  signalForward,
+  forwardReachable,
+  holderCommand,
+  scenarioUiForwards,
+  stopForward,
+} from '../kube/forward';
 import { namespaceFor } from '../kube/namespace';
 import { workspaceReady, terminalPodFailure, servicesWithoutEndpoints } from '../kube/status';
 import { CONTEXT as KUBE_CONTEXT } from '../kube/names';
 import { completeSetupWizard, NotReady, apiInfo, waitReady } from '../rcapi';
 import * as engine from '../runner/engine';
-import { type Metadata, adminPass, updateMeta } from '../runner/record';
-import { rcRestartCount, rcState, servicesByProject } from '../runner/queries';
+import { type Metadata, adminPass, readMeta, updateMeta } from '../runner/record';
+import { oneShotSetups, rcRestartCount, rcState, servicesByProject } from '../runner/queries';
 import * as postready from '../postready';
 import * as topology from '../topology';
-import { MODE_LOCAL } from '../tls';
+import { MODE_LOCAL, originCertificate } from '../tls';
 
 import { login } from './admin';
 import * as inspect from './inspect';
@@ -152,7 +163,12 @@ export async function restoreRoute(meta: Metadata, emit: Emit = nullEmit): Promi
       typeof extra.instances === 'number' && Number.isInteger(extra.instances)
         ? extra.instances
         : 1;
-    await registerRoute(meta.name, host, { instances, local, grafana: isTruthy(extra.monitoring) });
+    await registerRoute(meta.name, host, {
+      instances,
+      local,
+      grafana: isTruthy(extra.monitoring),
+      publicPaths: publicPathsOf(extra),
+    });
     info(emit, `${host} is served by the edge again`, { phase: 'tls' });
   } catch (error) {
     warn(
@@ -172,13 +188,9 @@ export async function restoreRoute(meta: Metadata, emit: Emit = nullEmit): Promi
  * recycled pid belonging to ANOTHER workspace's forward is precisely the failure this
  * avoids.
  */
-export function stopPortForward(pid: number, { namespace = '' } = {}): void {
-  if (!forwardAlive(pid, { namespace })) return;
-  try {
-    process.kill(pid, 'SIGTERM');
-  } catch {
-    // already gone
-  }
+export async function stopPortForward(pid: number, { namespace = '' } = {}): Promise<void> {
+  if (!(await forwardAlive(pid, { namespace }))) return;
+  signalForward(pid);
 }
 
 export async function finalize(
@@ -191,7 +203,8 @@ export async function finalize(
       info(emit, 'setup wizard skipped — no registration needed', { phase: 'post_ready' });
     }
     return auth;
-  } catch {
+  } catch (error) {
+    if (error instanceof Interrupted) throw error; // Ctrl-C or a stopped job: unwind
     // finalize is best-effort
     return null;
   }
@@ -262,12 +275,15 @@ export async function waitServing(
   emit: Emit,
   timeout: number,
 ): Promise<Record<string, unknown>> {
+  const started = Date.now();
   if (topology.ofMeta(meta) === topology.KUBERNETES) {
     // `rcState` asks docker whether a CONTAINER is running, so `ready` on a Kubernetes
     // workspace answered "Rocket.Chat container is not running" about a workspace whose
     // pods were fine. It also re-establishes the port-forward, which is the whole reason
     // `ready` is the right place to ask.
-    return await waitServingKubernetes(meta, emit, timeout);
+    const served = await waitServingKubernetes(meta, emit, timeout);
+    await waitForOrigin(meta, emit, Math.max(timeout - (Date.now() - started) / 1000, 1));
+    return served;
   }
   const seen: { restarts: number; cause: string | null } = { restarts: 0, cause: null };
 
@@ -281,6 +297,32 @@ export async function waitServing(
   let served: Record<string, unknown>;
   try {
     served = await waitReady(meta.rootUrl, { timeout, isAlive, onTick: tick });
+    // EVERY INSTANCE, not the front door alone. The workspace's own Traefik starts every
+    // server healthy and checks them every 10 s, so the first instance to answer made this
+    // "ready" while the others were still booting: 9-10 of 20 requests answered 502 right
+    // after it, and the admin login failed. Each instance is published on hostPort+i.
+    const instances = Number(bag(meta.extra).instances ?? 1) || 1;
+    // NAMED when one is not: "did not become ready within 59s" with the front door
+    // answering left a reader to find the stopped replica by hand.
+    const late: string[] = [];
+    let first: NotReady | null = null;
+    for (let i = 1; instances > 1 && i <= instances; i += 1) {
+      const own = new URL(meta.rootUrl);
+      own.port = String(meta.hostPort + i);
+      const left = Math.max(timeout - (Date.now() - started) / 1000, 1);
+      try {
+        await waitReady(own.origin, { timeout: left, isAlive, onTick: tick });
+      } catch (error) {
+        if (!(error instanceof NotReady)) throw error;
+        first ??= error;
+        late.push(`rocketchat-${String(i)} at ${own.origin}`);
+      }
+    }
+    if (first !== null) {
+      throw new NotReady(
+        `${errorText(first)}: ${late.join(', ')} ${late.length === 1 ? 'is' : 'are'} not serving`,
+      );
+    }
   } catch (error) {
     if (!(error instanceof NotReady)) throw error;
     if (seen.cause === null) {
@@ -288,8 +330,92 @@ export async function waitServing(
     }
     throw readinessFailure(meta, seen, { prefix: errorText(error) });
   }
+  await waitForOneShotSetup(meta, emit, Math.max(timeout - (Date.now() - started) / 1000, 1));
   await refuseIfServingWithoutADatabase(meta);
+  await waitForOrigin(meta, emit, Math.max(timeout - (Date.now() - started) / 1000, 1));
   return served;
+}
+
+/** Internal HTTP health cannot prove the restored HTTPS route serves an application. */
+async function waitForOrigin(meta: Metadata, emit: Emit, timeout: number): Promise<void> {
+  if (meta.publicUrl === '' || !isTruthy(bag(meta.extra).tls) || bag(meta.extra).edge !== true)
+    return;
+  const publicUrl = new URL(meta.publicUrl);
+  if (publicUrl.protocol !== 'https:') return;
+  try {
+    await waitReady(meta.publicUrl, {
+      timeout,
+      page: true,
+      requestOptions: async (remainingMs) => {
+        const observed = await originCertificate(publicUrl.hostname, {
+          port: Number(publicUrl.port || 443),
+          timeout: remainingMs / 1000,
+        });
+        if (observed.pem === '') return null;
+        return {
+          followRedirects: false,
+          loopbackOrigin: {
+            certificate: observed.pem,
+            allowCertificateNameMismatch: observed.fallback,
+          },
+        };
+      },
+      onTick: (elapsed) =>
+        info(emit, `waiting for ${meta.publicUrl} to serve Rocket.Chat (${Math.floor(elapsed)}s)`, {
+          phase: 'wait',
+        }),
+    });
+  } catch (error) {
+    if (!(error instanceof NotReady)) throw error;
+    throw new NotReadyError(
+      `'${meta.name}' answers internally, but its HTTPS origin ${meta.publicUrl} ` +
+        'is not serving Rocket.Chat — `houston edge status` and the edge logs say why',
+    );
+  }
+}
+
+/**
+ * The workspace's one-shot setup -- the MinIO bucket, the replica set -- finished, not just
+ * Rocket.Chat serving. Rocket.Chat does not wait for `minio-init`, so on rootless Podman,
+ * whose DNS flaps, `up --wait` returned while the bucket did not exist yet and the first
+ * upload failed. A setup that failed is said, with where its reason is.
+ */
+export async function waitForOneShotSetup(
+  meta: Metadata,
+  emit: Emit,
+  timeout: number,
+  pause: (seconds: number) => Promise<void> = sleep,
+): Promise<void> {
+  const deadline = Date.now() + timeout * 1000;
+  let said = false;
+  for (;;) {
+    // Not mongo-init: Rocket.Chat serving proves the replica set it initiated, and a re-run
+    // after `restart` that missed a DNS lookup made a healthy workspace read as not ready.
+    const setups = (await oneShotSetups(meta.name)).filter((one) => one.service !== 'mongo-init');
+    const failed = setups.find((one) => one.status === 'exited' && one.exitCode !== 0);
+    if (failed !== undefined) {
+      throw new NotReadyError(
+        `${failed.service} exited ${String(failed.exitCode)} before it finished setting up ` +
+          `'${meta.name}' — \`docker compose -p ${meta.project} logs ${failed.service}\` says ` +
+          `why, and \`houston restart --name ${meta.name}\` runs it again`,
+      );
+    }
+    const pending = setups.filter((one) => one.status !== 'exited').map((one) => one.service);
+    if (pending.length === 0) return;
+    if (Date.now() >= deadline) {
+      throw new NotReadyError(
+        `${pending.join(', ')} has not finished setting up '${meta.name}' — ` +
+          `\`docker compose -p ${meta.project} logs ${pending[0] ?? ''}\` says where it is`,
+      );
+    }
+    if (!said) {
+      info(emit, `Rocket.Chat answers; waiting for ${pending.join(', ')} to finish`, {
+        phase: 'wait',
+      });
+      said = true;
+    }
+    await pause(2);
+  }
 }
 
 /**
@@ -321,6 +447,44 @@ export async function repairThePortForward(
     meta.extra.port_forward_pid = pid;
   }
   return pid;
+}
+
+/**
+ * A preset's UI forwards, re-established when any of them is gone.
+ *
+ * They die with their pods, which `stop` scales to zero, and only the Rocket.Chat forward
+ * was ever repaired. So after a stop/start the SAML IdP on :8081 answered nothing:
+ * `post_ready` could not re-read its descriptor, Rocket.Chat kept the certificate of a
+ * Keycloak that had since re-imported its realm with new keys, and every SAML sign-in was
+ * `Invalid Signature` -- "Unauthorized". Restarted together, under a fresh record entry.
+ */
+export async function repairTheScenarioForwards(
+  meta: Metadata,
+  emit: Emit,
+  extra: Record<string, unknown>,
+  namespace: string,
+  context: string,
+): Promise<void> {
+  const recorded = Object.entries(bag(extra.scenario_forwards));
+  let gone = false;
+  for (const [port, pid] of recorded) {
+    if (!(await forwardAlive(Number(pid), { namespace, hostPort: Number(port) }))) gone = true;
+  }
+  if (!gone) return;
+  for (const [port, pid] of recorded) {
+    await stopForward(Number(pid), { namespace, hostPort: Number(port) });
+  }
+  const ui = await scenarioUiForwards(meta.name, {
+    namespace,
+    context,
+    bindHost: toText(extra.bind_host),
+    emit,
+  });
+  const fresh = Object.fromEntries(Object.entries(ui).map(([port, pid]) => [String(port), pid]));
+  await updateMeta(meta.name, (current) => {
+    current.extra.scenario_forwards = fresh;
+  });
+  meta.extra.scenario_forwards = fresh;
 }
 
 /**
@@ -382,8 +546,8 @@ export function refuseAForeignHolder(meta: Metadata, foreign: number): number {
       `port ${String(meta.hostPort)} is answering, but not with ` +
         `Rocket.Chat, and '${meta.name}' is otherwise ready — so ` +
         `nothing served on ${meta.rootUrl} can be trusted to be this ` +
-        'workspace. Something else holds that port. `ss -ltnp | grep ' +
-        `${String(meta.hostPort)}\` says what; note it may hold only IPv4 ` +
+        `workspace. Something else holds that port. \`${holderCommand(meta.hostPort)}\` ` +
+        'says what; note it may hold only IPv4 ' +
         'while the port-forward has IPv6, which looks healthy from ' +
         'houston and wrong from a browser. Free the port, or ' +
         `\`houston down --name ${meta.name}\` then \`houston up\` for ` +
@@ -454,6 +618,7 @@ export async function waitServingKubernetes(
           foreign = 0;
           if (pid && pid === stablePid) {
             await warnAboutServicesWithNoEndpoints(meta, emit, namespace, context);
+            await repairTheScenarioForwards(meta, emit, current, namespace, context);
             info(emit, `'${meta.name}' is serving at ${meta.rootUrl}`, {
               phase: 'ready',
               pct: 100,
@@ -517,11 +682,18 @@ export async function waitAndFinalize(
   // From the NOTE, not from meta: the request died with the process, and
   // meta.extra["seed"] is written only after a seed has already succeeded.
   let pending = pendingSeed(meta.name);
-  if (isTruthy(pending.seed_here)) {
-    // The process that wrote this note is still running and will seed itself.
-    pending = {};
-  }
-  if (Object.keys(pending).length > 0 && !isTruthy(bag(meta.extra).seed)) {
+  const activeReceipt = pendingReceipt(meta.name);
+  if (
+    activeReceipt !== null ||
+    (Object.keys(pending).length > 0 && !isTruthy(bag(meta.extra).seed))
+  ) {
+    if (activeReceipt !== null)
+      pending = {
+        ...pending,
+        seed_profile: activeReceipt.plan.profile,
+        seed_scenarios: activeReceipt.plan.scenarios,
+        seed_history_days: activeReceipt.plan.historyDays,
+      };
     info(
       emit,
       'finishing the seed the interrupted create asked for ' +
@@ -534,6 +706,25 @@ export async function waitAndFinalize(
         isTruthy(pending.seed_profile) ? String(pending.seed_profile) : 'small',
         Boolean(pending.seed_stats),
         emit,
+        {
+          scenarios: Array.isArray(pending.seed_scenarios)
+            ? (pending.seed_scenarios as string[])
+            : [],
+          historyDays:
+            typeof pending.seed_history_days === 'number' ? pending.seed_history_days : null,
+          ...(activeReceipt === null
+            ? {}
+            : {
+                users: activeReceipt.plan.users,
+                channels: activeReceipt.plan.channels,
+                messages: activeReceipt.plan.messages,
+              }),
+        },
+        activeReceipt?.run,
+        async () =>
+          activeReceipt !== null ||
+          (Object.keys(pendingSeed(meta.name)).length > 0 &&
+            !isTruthy(bag((await readMeta(meta.name)).extra).seed)),
       );
     } catch (error) {
       if (!(error instanceof ReproError)) throw error;
@@ -552,7 +743,8 @@ export async function waitAndFinalize(
   }
   clearKind(CREATE_UNFINISHED, meta.name);
   const running = String(served.version ?? '?');
-  if (running !== '?' && !meta.rcVersion.startsWith(running)) {
+  // `baseVersion`: a CI build serves `8.10.0-develop` and is recorded as `8.10.0.dev0`.
+  if (running !== '?' && !meta.rcVersion.startsWith(baseVersion(running))) {
     warn(emit, `running version ${running} != requested ${meta.rcVersion}`, { phase: 'wait' });
   }
   sayReady(emit, final);

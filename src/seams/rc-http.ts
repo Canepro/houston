@@ -41,6 +41,8 @@
  */
 import type * as HttpNS from 'node:http';
 import type * as ZlibNS from 'node:zlib';
+import * as tls from 'node:tls';
+import { X509Certificate } from 'node:crypto';
 
 import { dumps } from '../lib/json-text';
 import { STRIP_CHARS, floatString } from '../lib/float-text';
@@ -88,6 +90,7 @@ export interface HttpResponse {
   /** `status < 400`, the established meaning of ok. */
   readonly ok: boolean;
   readonly text: string;
+  readonly bytes?: Buffer;
   /** Lower-cased header names, a repeated one's values joined with `, `. */
   readonly headers: Readonly<Record<string, string>>;
   readonly url: string;
@@ -105,10 +108,31 @@ export interface RequestOptions {
    * and no Content-Type -- and not the four bytes `null` (see `jsonBody`).
    */
   readonly json?: unknown;
+  readonly body?: string | Buffer;
+  readonly binary?: boolean;
+  readonly sameOriginRedirects?: boolean;
+  /** Return the responding endpoint's redirect, without asking another endpoint. */
+  readonly followRedirects?: boolean;
+  /**
+   * Route liveness on an owned loopback HTTPS origin, bypassing DNS/CDN/proxies. The
+   * observed certificate is this request's sole trust anchor and must match exactly;
+   * it does not establish public CA trust. Normal requests never use this option.
+   */
+  readonly loopbackOrigin?: {
+    readonly certificate: string;
+    /** A known ingress default certificate while asynchronous issuance is pending. */
+    readonly allowCertificateNameMismatch?: boolean;
+  };
   /** Query string, appended to the URL. */
   readonly params?: Readonly<Record<string, string | number | boolean>>;
   /** The whole exchange's deadline, in milliseconds. */
   readonly timeoutMs?: number;
+  /**
+   * The most bytes a body may hold, as it arrives and once decoded; past it the exchange is
+   * abandoned as a `RequestFailed` of kind `other`. Unset is no cap, as it always was: every
+   * caller before this one talks to a server it started, and an identity provider is not one.
+   */
+  readonly maxBytes?: number;
 }
 
 /**
@@ -202,7 +226,7 @@ const DEFAULT_HEADERS: HeaderList = Object.freeze([
 function preparedHeaders(
   caller: Readonly<Record<string, string>>,
   method: string,
-  body: string | undefined,
+  body: string | Buffer | undefined,
 ): HeaderList {
   const merged = new Map<string, readonly [string, string]>();
   const put = (name: string, value: string) => merged.set(name.toLowerCase(), [name, value]);
@@ -247,7 +271,12 @@ function hostHeader(url: URL): string {
  * flat array, which node's client writes verbatim -- spelling and order kept, nothing of
  * its own added while `Connection` and the framing are present.
  */
-function onTheWire(url: URL, method: string, headers: HeaderList, body: string | undefined) {
+function onTheWire(
+  url: URL,
+  method: string,
+  headers: HeaderList,
+  body: string | Buffer | undefined,
+) {
   const named = new Set(headers.map(([name]) => name.toLowerCase()));
   const lines: string[] = [];
   if (!named.has('host')) lines.push('Host', hostHeader(url));
@@ -257,6 +286,36 @@ function onTheWire(url: URL, method: string, headers: HeaderList, body: string |
   }
   for (const [name, value] of headers) lines.push(name, value);
   return lines;
+}
+
+/**
+ * Whether node may send this through the environment's proxy: plain HTTP, with the proxy
+ * settings node read at startup (NODE_USE_ENV_PROXY). It decides NO_PROXY itself.
+ */
+function proxiedHttp(url: URL, shared: { options?: { proxyEnv?: unknown } }): boolean {
+  return url.protocol === 'http:' && shared.options?.proxyEnv !== undefined;
+}
+
+/**
+ * The same header lines as one object, in the same order and spelling -- or the lines, when
+ * a name repeats and an object would drop one.
+ *
+ * Node before 24.19 builds a proxied request's absolute URI from `getHeader('host')`, which
+ * a raw list never reaches, and falls back to `localhost`: behind a proxy on Node
+ * 24.10-24.18, which `engines` admits, every plain-HTTP call houston made asked the proxy
+ * for localhost. From an object node reads `Host`, and adds nothing of its own while
+ * `Host`, `Connection` and the framing are there -- so the bytes are the list's.
+ */
+function asHeaderObject(lines: readonly string[]): Record<string, string> | readonly string[] {
+  const out = Object.create(null) as Record<string, string>;
+  const seen = new Set<string>();
+  for (let at = 0; at < lines.length; at += 2) {
+    const name = lines[at] as string;
+    if (seen.has(name.toLowerCase())) return lines;
+    seen.add(name.toLowerCase());
+    out[name] = lines[at + 1] as string;
+  }
+  return out;
 }
 
 /** The statuses that redirect, and how many redirects are followed. */
@@ -273,6 +332,7 @@ interface Answer {
    * an `Undecodable` for one its Content-Encoding does not describe.
    */
   text(): Promise<string>;
+  bytes(): Promise<Buffer>;
   /** Let a redirect's body go. */
   discard(): Promise<void>;
 }
@@ -283,8 +343,10 @@ type Send = (
   path: string,
   method: string,
   headers: HeaderList,
-  body: string | undefined,
+  body: string | Buffer | undefined,
   signal: AbortSignal,
+  loopbackOrigin?: RequestOptions['loopbackOrigin'],
+  maxBytes?: number,
 ) => Promise<Answer>;
 
 /**
@@ -301,6 +363,13 @@ class Broken extends Error {
     readonly proxy: URL | null = null,
   ) {
     super(String((cause as Error).message || cause), { cause });
+  }
+}
+
+/** A body past the caller's `maxBytes`. */
+class TooLarge extends Error {
+  constructor(readonly limit: number) {
+    super(`more than ${String(limit)} bytes`);
   }
 }
 
@@ -380,9 +449,16 @@ class Undecodable extends Error {
  * missing its trailer is the text it holds, where node's one-shot decoders refuse it with
  * "unexpected end of file". A body that is not the encoding at all is an `Undecodable`.
  */
-function decoded(bytes: Buffer, headers: Readonly<Record<string, string>>): string {
+function decodedBytes(
+  bytes: Buffer,
+  headers: Readonly<Record<string, string>>,
+  maxBytes?: number,
+): Buffer {
   const zlib = require('node:zlib') as typeof ZlibNS;
-  const lenient = { finishFlush: zlib.constants.Z_SYNC_FLUSH };
+  const lenient = {
+    finishFlush: zlib.constants.Z_SYNC_FLUSH,
+    ...(maxBytes === undefined ? {} : { maxOutputLength: maxBytes }),
+  };
   const encoding = (headers['content-encoding'] ?? '').trim().toLowerCase();
   let plain = bytes;
   try {
@@ -396,9 +472,19 @@ function decoded(bytes: Buffer, headers: Readonly<Record<string, string>>): stri
       }
     }
   } catch (error) {
+    if (maxBytes !== undefined && (error as { code?: unknown }).code === 'ERR_BUFFER_TOO_LARGE')
+      throw new TooLarge(maxBytes);
     throw new Undecodable(encoding, error);
   }
-  return new TextDecoder('utf-8').decode(plain);
+  return plain;
+}
+
+function decoded(
+  bytes: Buffer,
+  headers: Readonly<Record<string, string>>,
+  maxBytes?: number,
+): string {
+  return new TextDecoder('utf-8').decode(decodedBytes(bytes, headers, maxBytes));
 }
 
 /**
@@ -437,25 +523,59 @@ function collect(incoming: HttpNS.IncomingMessage): Record<string, string> {
  * Guarded in the suite by `testsetup-network.ts`, which refuses a non-loopback
  * `http.request` / `https.request` as it refuses a non-loopback `fetch`.
  */
-const viaNode: Send = async (url, path, method, headers, body, signal) => {
+const viaNode: Send = async (
+  url,
+  path,
+  method,
+  headers,
+  body,
+  signal,
+  loopbackOrigin,
+  maxBytes,
+) => {
   const client = (
     url.protocol === 'https:' ? require('node:https') : require('node:http')
   ) as typeof HttpNS;
   // `options` is there on both modules' agents; only https' type declares it.
   const shared = client.globalAgent as HttpNS.Agent & { options?: HttpNS.AgentOptions };
-  const agent = new client.Agent({ keepAlive: false, proxyEnv: shared.options?.proxyEnv });
+  const originTls =
+    loopbackOrigin === undefined
+      ? {}
+      : {
+          ca: loopbackOrigin.certificate,
+          allowPartialTrustChain: true,
+          rejectUnauthorized: true,
+          servername: url.hostname,
+          checkServerIdentity: (host: string, certificate: tls.PeerCertificate) => {
+            const pinned = new X509Certificate(loopbackOrigin.certificate);
+            if (certificate.fingerprint256 !== pinned.fingerprint256)
+              return new Error('the origin certificate changed during the readiness probe');
+            return loopbackOrigin.allowCertificateNameMismatch === true
+              ? undefined
+              : tls.checkServerIdentity(host, certificate);
+          },
+        };
+  const agent = new client.Agent({
+    keepAlive: false,
+    proxyEnv: loopbackOrigin === undefined ? shared.options?.proxyEnv : undefined,
+    ...originTls,
+  });
+  const lines = onTheWire(url, method, headers, body);
   return await new Promise<Answer>((resolve, reject) => {
     const outgoing = client.request(
       {
         protocol: url.protocol,
         // `[::1]` is how a URL spells the host and `::1` is how a socket wants it.
-        hostname: url.hostname.replace(/^\[(.*)\]$/u, '$1'),
+        hostname:
+          loopbackOrigin === undefined ? url.hostname.replace(/^\[(.*)\]$/u, '$1') : '127.0.0.1',
         port: url.port,
         path,
         method,
-        headers: onTheWire(url, method, headers, body),
+        headers:
+          loopbackOrigin === undefined && proxiedHttp(url, shared) ? asHeaderObject(lines) : lines,
         agent,
         signal,
+        ...originTls,
       },
       (incoming) => {
         const collected = collect(incoming);
@@ -475,6 +595,7 @@ const viaNode: Send = async (url, path, method, headers, body, signal) => {
           incoming.on('data', (chunk: Buffer) => {
             chunks.push(chunk);
             read += chunk.length;
+            if (maxBytes !== undefined && read > maxBytes) incoming.destroy(new TooLarge(maxBytes));
           });
           incoming.on('error', (error) => {
             broke(new Broken('body', read, length, socketError ?? error));
@@ -491,7 +612,8 @@ const viaNode: Send = async (url, path, method, headers, body, signal) => {
           status: incoming.statusCode ?? 0,
           reason: incoming.statusMessage ?? '',
           headers: collected,
-          text: async () => decoded(await arrived, collected),
+          text: async () => decoded(await arrived, collected, maxBytes),
+          bytes: async () => decodedBytes(await arrived, collected, maxBytes),
           discard: async () => {
             await arrived.catch(() => undefined);
           },
@@ -499,7 +621,7 @@ const viaNode: Send = async (url, path, method, headers, body, signal) => {
       },
     );
     outgoing.on('error', (error) => {
-      const proxy = proxyOf(url, shared.options?.proxyEnv);
+      const proxy = loopbackOrigin === undefined ? proxyOf(url, shared.options?.proxyEnv) : null;
       const via = failedAtProxy(error, url, proxy, outgoing.path !== path);
       reject(new Broken('send', 0, null, error, via));
     });
@@ -766,6 +888,14 @@ function failed(
   timeoutMs: number,
   aborted: boolean,
 ): RequestFailed {
+  const tooLarge =
+    error instanceof TooLarge ? error : error instanceof Broken ? error.cause : undefined;
+  if (tooLarge instanceof TooLarge) {
+    return new RequestFailed(`${target} answered with ${tooLarge.message}`, target, {
+      cause: tooLarge,
+      kind: 'other',
+    });
+  }
   if (error instanceof Undecodable) {
     const zlibError = error.cause as { errno?: unknown; code?: unknown; message?: unknown };
     return new RequestFailed(
@@ -832,9 +962,14 @@ async function resolveRedirects(
   target: string,
   method: string,
   headers: HeaderList,
-  body: string | undefined,
+  body: string | Buffer | undefined,
   timeoutMs: number,
   interrupted?: AbortSignal,
+  binary = false,
+  sameOriginRedirects = false,
+  followRedirects = true,
+  loopbackOrigin?: RequestOptions['loopbackOrigin'],
+  maxBytes?: number,
 ): Promise<HttpResponse> {
   const prepared = prepareUrl(target);
   let url: URL;
@@ -870,12 +1005,21 @@ async function resolveRedirects(
       let answer: Answer;
       try {
         if (verb === 'CONNECT') throw new TypeError("'CONNECT' HTTP method is unsupported.");
-        answer = await viaNode(url, path, verb, sent, payload, controller.signal);
+        answer = await viaNode(
+          url,
+          path,
+          verb,
+          sent,
+          payload,
+          controller.signal,
+          loopbackOrigin,
+          maxBytes,
+        );
       } catch (error) {
         throw failed(error, url, path, landed, target, timeoutMs, controller.signal.aborted);
       }
       const location = answer.headers.location;
-      if (REDIRECTS.has(answer.status) && location !== undefined) {
+      if (followRedirects && REDIRECTS.has(answer.status) && location !== undefined) {
         await answer.discard();
         // Thirty redirects followed: the 31st is the one refused.
         if (redirects >= MAX_REDIRECTS)
@@ -886,6 +1030,8 @@ async function resolveRedirects(
         // location has none (RFC 7231 7.1.2).
         try {
           const next = new URL(requoteUri(location), url);
+          if (sameOriginRedirects && next.origin !== new URL(target).origin)
+            throw new Error('cross-origin download redirect refused');
           if (next.hash === '') next.hash = url.hash;
           url = next;
         } catch (error) {
@@ -908,8 +1054,12 @@ async function resolveRedirects(
         continue;
       }
       let text: string;
+      let bytes: Buffer | undefined;
       try {
-        text = await answer.text();
+        if (binary) {
+          bytes = await answer.bytes();
+          text = new TextDecoder('utf-8').decode(bytes);
+        } else text = await answer.text();
       } catch (error) {
         throw failed(error, url, path, landed, target, timeoutMs, controller.signal.aborted);
       }
@@ -918,6 +1068,7 @@ async function resolveRedirects(
         reason: answer.reason,
         ok: answer.status < 400,
         text,
+        ...(bytes === undefined ? {} : { bytes }),
         headers: answer.headers,
         url: landed,
         json: () => JSON.parse(text) as unknown,
@@ -932,7 +1083,12 @@ async function resolveRedirects(
 async function request(url: string, options: RequestOptions = {}): Promise<HttpResponse> {
   const target = withParams(url, options.params);
   const method = (options.method ?? 'GET').toUpperCase();
-  const body = jsonBody(options.json, target);
+  if (options.body !== undefined && options.json !== undefined) {
+    throw new RequestFailed('a request cannot carry both JSON and a raw body', target, {
+      kind: 'other',
+    });
+  }
+  const body = options.body ?? jsonBody(options.json, target);
   // The JSON Content-Type only when the caller did not say: an explicit Content-Type wins
   // over the one a JSON body would have set. After the Content-Length, in the established
   // order (see `preparedHeaders`).
@@ -950,6 +1106,11 @@ async function request(url: string, options: RequestOptions = {}): Promise<HttpR
         body,
         options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         interrupted.signal,
+        options.binary === true,
+        options.sameOriginRedirects === true,
+        options.followRedirects !== false,
+        options.loopbackOrigin,
+        options.maxBytes,
       ),
       stop: () => interrupted.abort(),
     };

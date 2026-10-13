@@ -61,6 +61,7 @@ jest.mock('../../../src/core/kube/status', () => ({
   ...jest.requireActual('../../../src/core/kube/status'),
   podMetrics: jest.fn(),
   podRows: jest.fn(),
+  logProcess: jest.fn(),
 }));
 // THE RELEASE LOOKUP. The create dialog's version hint asks /api/versions/<v> 400 ms after
 // a version is typed, and nothing stubbed it: a case passed only while it finished inside
@@ -83,6 +84,7 @@ jest.mock('../../../src/core/eks', () => ({
     error: '',
   })),
   region: jest.fn(async () => 'us-east-1'),
+  profiles: jest.fn(async () => []),
 }));
 jest.mock('../../../src/core/cluster', () => ({
   ...jest.requireActual('../../../src/core/cluster'),
@@ -124,6 +126,16 @@ jest.mock('../../../src/core/lifecycle/seeding', () => ({
 jest.mock('../../../src/core/backup', () => ({
   ...jest.requireActual('../../../src/core/backup'),
   listBackups: jest.fn(),
+  restore: jest.fn(),
+  readManifest: jest.fn(),
+}));
+jest.mock('../../../src/core/upgrade', () => ({
+  ...jest.requireActual('../../../src/core/upgrade'),
+  rollback: jest.fn(),
+}));
+jest.mock('../../../src/core/lifecycle/destroy', () => ({
+  ...jest.requireActual('../../../src/core/lifecycle/destroy'),
+  teardown: jest.fn(),
 }));
 jest.mock('../../../src/core/doctor', () => ({
   ...jest.requireActual('../../../src/core/doctor'),
@@ -143,13 +155,15 @@ import * as backup from '../../../src/core/backup';
 import * as doctor from '../../../src/core/doctor';
 import * as edgeRoutes from '../../../src/core/edge/routes';
 import * as createDocker from '../../../src/core/lifecycle/create-docker';
+import * as rcapi from '../../../src/core/rcapi';
 import * as envvars from '../../../src/core/envvars';
 import * as seeding from '../../../src/core/lifecycle/seeding';
 import * as presets from '../../../src/lib/presets';
 import * as config from '../../../src/lib/config';
 import { CREATE_POLICY_KEY, PRIVILEGED_CREATE_FIELDS } from '../../../src/core/lifecycle/types';
-import type { JobManager } from '../../../src/web/jobs';
-import { NotReadyError } from '../../../src/lib/errors';
+import { JobManager } from '../../../src/web/jobs';
+import type * as ExecNS from '../../../src/seams/exec';
+import { NotReadyError, PreflightError } from '../../../src/lib/errors';
 import * as firstrun from '../../../src/core/firstrun';
 import * as edgeAcme from '../../../src/core/edge/acme';
 import * as edgeRuntime from '../../../src/core/edge/runtime';
@@ -164,6 +178,8 @@ import * as runnerHost from '../../../src/core/runner/host';
 import * as runnerEngine from '../../../src/core/runner/engine';
 import * as runnerQueries from '../../../src/core/runner/queries';
 import * as runnerRecord from '../../../src/core/runner/record';
+import * as destroy from '../../../src/core/lifecycle/destroy';
+import * as upgrade from '../../../src/core/upgrade';
 import * as topology from '../../../src/core/topology';
 import * as kubeStatus from '../../../src/core/kube/status';
 import * as users from '../../../src/core/users';
@@ -172,6 +188,7 @@ import type { AppOptions } from '../../../src/web/app';
 
 const realPayload = jest.requireActual<typeof payload>('../../../src/core/lifecycle/payload');
 const realInspect = jest.requireActual<typeof inspect>('../../../src/core/lifecycle/inspect');
+const realRecord = jest.requireActual<typeof runnerRecord>('../../../src/core/runner/record');
 
 const mockListRepros = jest.mocked(inspect.listRepros);
 const mockDescribe = jest.mocked(inspect.describe);
@@ -189,6 +206,7 @@ const mockReadMeta = jest.mocked(runnerRecord.readMeta);
 const mockRuntimeOf = jest.mocked(topology.ofRepro);
 const mockPodMetrics = jest.mocked(kubeStatus.podMetrics);
 const mockPodRows = jest.mocked(kubeStatus.podRows);
+const mockLogProcess = jest.mocked(kubeStatus.logProcess);
 const mockPreflight = jest.mocked(kubeProbe.preflight);
 const mockToolsReady = jest.mocked(kubeTools.toolsReady);
 const mockCanProvision = jest.mocked(kubeTools.canProvision);
@@ -200,6 +218,7 @@ const mockSweepLeftovers = jest.mocked(eks.sweepLeftovers);
 const mockSweepClusters = jest.mocked(eks.sweepClusters);
 const mockConnectExisting = jest.mocked(eks.connectExisting);
 const mockWhoami = jest.mocked(eks.whoami);
+const mockProfiles = jest.mocked(eks.profiles);
 const mockResolveDns = jest.mocked(cluster.resolveName);
 const mockResolveAddresses = jest.mocked(cluster.resolveAddresses);
 /** What the build flow's first two steps read; a case may shape it, even mid-case. */
@@ -211,9 +230,16 @@ const mockDeleteHost = jest.mocked(edgeRuntime.deleteHost);
 const mockServedDomain = jest.mocked(edgeSpec.servedDomain);
 const mockAcmeHosts = jest.mocked(edgeAcme.acmeHosts);
 const mockCreateRepro = jest.mocked(createDocker.createRepro);
+const mockReleaseInfo = jest.mocked(rcapi.releaseInfo);
 const mockEnvCurrent = jest.mocked(envvars.current);
 const mockRunSeedInline = jest.mocked(seeding.runSeedInline);
 const mockListBackups = jest.mocked(backup.listBackups);
+const mockRestore = jest.mocked(backup.restore);
+const mockReadManifest = jest.mocked(backup.readManifest);
+const mockRollback = jest.mocked(upgrade.rollback);
+const mockTeardown = jest.mocked(destroy.teardown);
+/** A bundle's manifest by file name, for the cases that need one other than the default. */
+let manifests: Record<string, Record<string, unknown>> = {};
 const mockRunChecks = jest.mocked(doctor.runChecks);
 const mockRouteHost = jest.mocked(edgeRoutes.routeHost);
 const mockIsPassthrough = jest.mocked(edgeRoutes.isPassthrough);
@@ -221,6 +247,9 @@ const mockRouteReachable = jest.mocked(edgeRoutes.routeReachable);
 
 const PUBLIC_NAME = 'houston.support.example.com';
 let portedJobs: JobManager | undefined;
+/** The job the Stop case stops, really running in the server's own registry. */
+let stuckJob: { status: string; error: string | null } | undefined;
+let buildingJob: { status: string; stopper: AbortController } | undefined;
 /** Lets the workspace's own read answer, in the case that holds it back. */
 let releaseDetail: (() => void) | null = null;
 /** How many workspace-list reads the server answered. */
@@ -242,6 +271,7 @@ const CASES: readonly BrowserCase[] = [
   ['flows', 'a readonly user is not offered what it cannot do'],
   ['flows', 'an admin can open people and a member cannot'],
   ['flows', 'the activity page opens both of its tabs'],
+  ['flows', 'a running job can be stopped from its output'],
   ['surfaces chrome', 'the theme is light by default and the choice survives a reload'],
   ['surfaces chrome', 'people rows have their own shape not activitys'],
   ['surfaces chrome', 'a background poll does not navigate the page for you'],
@@ -274,6 +304,14 @@ const CASES: readonly BrowserCase[] = [
   ['surfaces dialogs', 'a member is not offered the delete at all'],
   ['surfaces dialogs', 'the create dialog follows the box policy not the role'],
   ['surfaces dialogs', 'https is in section two and is still not a second twisty'],
+  ['surfaces dialogs', 'presets are ticked from a list and sent with each ones settings'],
+  ['surfaces dialogs', 'the e2ee options send the policy and switches as its settings'],
+  ['surfaces dialogs', 'saml and oidc rule each other out and ldap follows the one ticked'],
+  ['surfaces dialogs', 'ldap asks for a one time code only with its own single sign on'],
+  ['surfaces dialogs', 'a pasted license is masked and sent'],
+  ['surfaces dialogs', 'the 9 notice asks for a license only when one is needed'],
+  ['surfaces dialogs', 'a ci build names its base release'],
+  ['surfaces dialogs', 'the workspace panel shows its presets its build and its license'],
   ['surfaces dialogs', 'you can change your own password from the browser'],
   ['surfaces offstage', 'a running workspace on home offers both places it could mean'],
   ['remote', 'the panel says that localhost means the readers own machine'],
@@ -293,6 +331,11 @@ const CASES: readonly BrowserCase[] = [
   ['kubernetes chrome', 'the doctor chip goes red only when nothing can run a workspace'],
   ['kubernetes chrome', 'in progress shows only jobs that are'],
   ['kubernetes dialogs', 'the seed job shows what it made and whether it was confirmed'],
+  ['kubernetes dialogs', 'seed choices show server counts and reset when reopened'],
+  ['kubernetes dialogs', 'seed submits profile scenarios and history together'],
+  ['kubernetes dialogs', 'seed scale mode disables scenarios and historical dates'],
+  ['kubernetes dialogs', 'seed incomplete readback never appears confirmed'],
+  ['kubernetes dialogs', 'create sends scenario and history only with sample data enabled'],
   ['kubernetes dialogs', 'the create dialog says what it builds and what the box has left'],
   ['kubernetes dialogs', 'a kubernetes card names the cluster it will use'],
   ['kubernetes dialogs', 'the arrangement says what it builds'],
@@ -365,7 +408,11 @@ const CASES: readonly BrowserCase[] = [
   ['clusters', 'with only a cluster on this machine the page offers to set up eks'],
   ['clusters', 'the clusters page shows no number it has not read'],
   ['clusters', 'a failed overview read says so and offers to try again'],
+  ['clusters', 'this machine says it could not read its clusters, not that it has none'],
+  ['clusters', 'this machine shows its cluster while the list is read again'],
   ['clusters', 'an expired aws sign-in says sign in, not install'],
+  ['clusters', 'the setup re-check says it is checking and when it last checked'],
+  ['clusters', 'the setup flow names the aws profiles a server started without one could use'],
   ['clusters', 'first run home offers to create the first workspace'],
   ['clusters', 'create shows its progress and ends with where to go'],
   ['clusters', 'the create dialog never names a cluster the server will not use'],
@@ -378,14 +425,41 @@ const CASES: readonly BrowserCase[] = [
   ['clusters', 'create on a cluster with a dns zone asks for an email, not a domain'],
   ['clusters', 'opening a workspace shows its header before its own read answers'],
   ['clusters', 'the workspace list is read one at a time'],
+  ['surfaces dialogs', 'a refusal raised inside a dialog is read on top of it'],
+  ['surfaces dialogs', 'a second new workspace starts from an empty form'],
+  ['surfaces dialogs', 'a member is told a ci build is kept to admins before pressing create'],
+  ['surfaces dialogs', 'the create dialog can stop its own job'],
+  ['surfaces dialogs', 'a stopped job is said to be stopped not failed'],
+  ['surfaces dialogs', 'a long scenario note wraps in the create result'],
+  ['surfaces rail', 'a finished restore re-reads the workspace without a page error'],
+  ['surfaces rail', 'the overview follows a workspace that is still starting'],
+  ['surfaces rail', 'the down and unknown words are readable in both themes'],
+  ['surfaces rail', 'at phone width the rail filters and the last tab stay reachable'],
+  ['kubernetes chrome', 'the footer says k8s is unknown until the probe answers'],
+  ['kubernetes rail', 'a log stream a restart ends follows the new pod by itself'],
+  ['clusters', 'an unreadable kubeconfig is said with its reason'],
+  ['clusters', 'a member opening create at once is told the cluster is being read'],
+  ['clusters', 'the create dialog redraws a local cluster card when its status arrives'],
+  ['surfaces rail', 'a workspace is handed over from its pane and its owner row follows'],
+  ['surfaces rail', 'a refused hand over is said inside its dialog'],
+  ['surfaces rail', 'the delete confirm says who can hand a workspace over and names no command'],
+  [
+    'surfaces rail',
+    'every backup on the machine is listed and a deleted workspaces restores as new',
+  ],
+  [
+    'surfaces rail',
+    'restore as new says before it starts that the side ports are taken and what works',
+  ],
+  ['surfaces rail', 'an upgraded workspace rolls back behind a red confirm and the panel follows'],
 ];
 
-const CASES_DIGEST = '02ca5537f96bd18263553d5f73a6588bece6777a87a00201ca4f0ee425e3feb8';
+const CASES_DIGEST = '852fc4b3cbec0287492a454d22def80a25bb07eda3434d7dd81aeb1b455080f1';
 const caseIds = CASES.map(([file, name]) => `${file}: ${name}`);
 const casesDigest = crypto.createHash('sha256').update(JSON.stringify(CASES)).digest('hex');
-if (CASES.length !== 145 || new Set(caseIds).size !== 145 || casesDigest !== CASES_DIGEST) {
+if (CASES.length !== 184 || new Set(caseIds).size !== 184 || casesDigest !== CASES_DIGEST) {
   throw new Error(
-    `browser behavior inventory changed: expected 145 unique cases at ${CASES_DIGEST}, ` +
+    `browser behavior inventory changed: expected 184 unique cases at ${CASES_DIGEST}, ` +
       `got ${String(CASES.length)} cases, ${String(new Set(caseIds).size)} unique, ${casesDigest}`,
   );
 }
@@ -404,6 +478,11 @@ function detail(overrides: Record<string, unknown> = {}): Record<string, unknown
     host_port: 3001,
     uptime: '2h',
     preset: 'base',
+    // A composed workspace's list; the real payload adds it only for one.
+    presets: [],
+    // The CI build it runs (its ghcr tag) and whether it was given a license.
+    ci_build: '',
+    licensed: false,
     health: 'healthy',
     url: 'http://localhost:3001',
     root_url: 'http://localhost:3001',
@@ -427,6 +506,8 @@ function detail(overrides: Record<string, unknown> = {}): Record<string, unknown
     owner: 'alice',
     made_by: 'alice',
     owner_history: [],
+    // The version a rollback returns to; the pane offers one only when it is set.
+    rollback_to: '',
     workspace: '/tmp/ws',
     default: false,
     grafana_url: '',
@@ -500,6 +581,10 @@ function configureStubs(browserCase: BrowserCase): void {
     arn: 'arn:aws:iam::111122223333:user/alice',
     error: '',
   });
+  mockProfiles.mockResolvedValue([]);
+  // Offline, as at the top of the file: the CI-build case answers a package.json, and
+  // clearAllMocks would keep that answer for every case after it.
+  mockReleaseInfo.mockResolvedValue(null);
   mockResolveDns.mockResolvedValue([]);
   mockResolveAddresses.mockResolvedValue([]);
   fakeOverview();
@@ -523,6 +608,12 @@ function configureStubs(browserCase: BrowserCase): void {
   mockServedDomain.mockReturnValue('');
   mockAcmeHosts.mockReturnValue([]);
   mockListBackups.mockResolvedValue([]);
+  manifests = {};
+  mockReadManifest.mockImplementation(
+    async (bundle) =>
+      manifests[path.basename(bundle)] ?? { rc_version: '7.4.1', preset: 'base', repro: 't1234' },
+  );
+  mockTeardown.mockResolvedValue({ name: 't1234' } as never);
   mockRunChecks.mockResolvedValue({ checks: [], counts: {}, verdict: 'ok', repros: {} });
   mockRouteHost.mockImplementation((value) => `${value}.example.test`);
   mockIsPassthrough.mockReturnValue(false);
@@ -714,6 +805,8 @@ function fakeOverview(): void {
           ? full
           : {
               ...full,
+              // `glance(row.context, row.where)`: where the list placed it, by its server.
+              where: row.where,
               ready: null,
               nodes: null,
               age_hours: null,
@@ -1020,6 +1113,77 @@ async function prepareClusterCase(name: string): Promise<void> {
   if (name === 'a failed overview read says so and offers to try again') {
     mockOverview.mockRejectedValue(new Error('kubeconfig could not be read'));
   }
+  if (name === 'this machine says it could not read its clusters, not that it has none') {
+    mockKnownContexts.mockRejectedValue(new Error('kubeconfig could not be read'));
+  }
+  if (name === 'an unreadable kubeconfig is said with its reason') {
+    // H11b: `chmod 000` on the kubeconfig of a running k3s. The list answers, empty, with why.
+    mockKnownContexts.mockResolvedValue({
+      contexts: [],
+      unreadable:
+        'error: error loading config file "/home/laborant/kube-run/config": open /home/laborant/kube-run/config: permission denied',
+      default: '',
+    });
+    mockToolsReady.mockReturnValue(true);
+  }
+  if (
+    name === 'a member opening create at once is told the cluster is being read' ||
+    name === 'the create dialog redraws a local cluster card when its status arrives'
+  ) {
+    // A k3s that kubectl points at and no saved default: the box of H11c and H12.
+    useClusterContexts([localContext('default', 'local')], '');
+    mockClusterStatus.mockImplementation(async (context) => localStatus(context));
+    mockToolsReady.mockReturnValue(true);
+    const slow = async (): Promise<void> => {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    };
+    if (name === 'a member opening create at once is told the cluster is being read') {
+      portedUser = 'mem';
+      portedPassword = 'members-good-password';
+      await users.add(portedUser, portedPassword, 'member');
+      config.updateConfig((value) => {
+        value[CREATE_POLICY_KEY] = 'admin';
+      });
+      // The probe that says where an empty context lands, slow as kubectl is.
+      mockPreflight.mockImplementation(async () => {
+        await slow();
+        return {
+          context: 'default',
+          distribution: 'k3s',
+          clusterReachable: true,
+          nodeCount: 1,
+          namespaces: [],
+        } as never;
+      });
+    } else {
+      // The overview that says the k3s is running, slow as it is on a real box.
+      const real = mockOverview.getMockImplementation();
+      mockOverview.mockImplementation(async (...args) => {
+        await slow();
+        return await (real as NonNullable<typeof real>)(...args);
+      });
+    }
+  }
+  if (name === 'this machine shows its cluster while the list is read again') {
+    // The page load reads the list at once; the Clusters page's own read is slow.
+    const local = {
+      contexts: [
+        clusterContext('default', {
+          where: 'local',
+          provider: 'k3s',
+          billable: false,
+          is_default: false,
+        }),
+      ],
+      unreadable: '',
+      default: '',
+    };
+    const start = Date.now();
+    mockKnownContexts.mockImplementation(async () => {
+      if (Date.now() - start > 3000) await new Promise((resolve) => setTimeout(resolve, 2500));
+      return local;
+    });
+  }
   if (name === 'the setup flow says what the server is missing') {
     preflightOverride = {
       tools_ok: false,
@@ -1029,6 +1193,14 @@ async function prepareClusterCase(name: string): Promise<void> {
       approved: false,
     };
     mockWhoami.mockResolvedValue({ account: '', arn: '', error: 'Unable to locate credentials.' });
+  }
+  if (
+    name === 'the setup re-check says it is checking and when it last checked' ||
+    name === 'the setup flow names the aws profiles a server started without one could use'
+  ) {
+    preflightOverride = { identity: '', account: '', approved: false };
+    mockWhoami.mockResolvedValue({ account: '', arn: '', error: 'Unable to locate credentials.' });
+    mockProfiles.mockResolvedValue(['support-eks-houston']);
   }
   if (name === 'an expired aws sign-in says sign in, not install') {
     const expired = 'Error when retrieving token from sso: Token has expired and refresh failed';
@@ -1170,6 +1342,14 @@ async function prepareClusterCase(name: string): Promise<void> {
 
   if (name === 'create shows its progress and ends with where to go') {
     mockCreateRepro.mockImplementation(async (req, emit) => {
+      // The name the create settled on comes first; the title takes it (it guessed one).
+      emit?.(
+        event('workspace name: first-one', {
+          phase: 'create',
+          code: 'workspace-name',
+          data: { workspace: 'first-one' },
+        }),
+      );
       // As a real create streams them: many lines per phase, docker's pull lines among them.
       for (const [phase, message] of [
         ['pull', 'Image rocket.chat:8.5.1 Pulling'],
@@ -1305,6 +1485,66 @@ async function openPlaceView(page: Page, key: string, title: string): Promise<vo
 }
 
 async function exerciseClusterCase(name: string, page: Page): Promise<void> {
+  if (name === 'an unreadable kubeconfig is said with its reason') {
+    // The server sent the reason; the page said there was no cluster and no kind.
+    await page.locator('#btn-clusters').click();
+    await page.waitForFunction(
+      () => (document.querySelector('#cl-local')?.textContent ?? '').includes('permission denied'),
+      undefined,
+      { timeout: 5000 },
+    );
+    const local = await page.locator('#cl-local').innerText();
+    expect(local).toContain("This machine's kubeconfig could not be read: error: error loading");
+    expect(local).not.toContain('No cluster on this machine');
+    // And the footer agrees: it said "k8s: not set up" beside this page.
+    await page.waitForFunction(
+      () =>
+        (document.querySelector('#sb-engines')?.textContent ?? '').endsWith(
+          'k8s: kubeconfig unreadable',
+        ),
+      undefined,
+      { timeout: 5000 },
+    );
+    return;
+  }
+  if (name === 'a member opening create at once is told the cluster is being read') {
+    // Opened before the probe answers: where an empty context lands is not known yet. It
+    // said "Unavailable" and that an admin keeps the choice, and never changed while open.
+    await openClusterCreate(page);
+    const card = page.locator('#dest-cards label[data-dest="k8s-default"]');
+    const early = await card.innerText();
+    expect(early).toContain('Reading…');
+    expect(early).not.toContain('Unavailable');
+    expect(await card.locator('input').isDisabled()).toBe(true);
+    await page.waitForFunction(
+      () =>
+        (
+          document.querySelector('#dest-cards label[data-dest="k8s-default"]')?.textContent ?? ''
+        ).includes("This server's default · "),
+      undefined,
+      { timeout: 8000 },
+    );
+    expect(await card.innerText()).toContain('Ready');
+    expect(await card.locator('input').isDisabled()).toBe(false);
+    return;
+  }
+  if (name === 'the create dialog redraws a local cluster card when its status arrives') {
+    // H11c: the k3s card said "Reading…" for as long as the dialog stayed open; only
+    // closing and opening it again showed "Running".
+    await openClusterCreate(page);
+    const card = page.locator('#dest-cards label[data-dest="k8s:default"]');
+    expect(await card.innerText()).toContain('Reading…');
+    await page.waitForFunction(
+      () =>
+        (
+          document.querySelector('#dest-cards label[data-dest="k8s:default"]')?.textContent ?? ''
+        ).includes('Running'),
+      undefined,
+      { timeout: 8000 },
+    );
+    expect(await card.innerText()).not.toContain('Reading…');
+    return;
+  }
   if (name === 'the fake cluster status matches the real payload') {
     const required: readonly (keyof cluster.Ledger)[] = [
       'context',
@@ -1429,6 +1669,34 @@ async function exerciseClusterCase(name: string, page: Page): Promise<void> {
     return;
   }
 
+  if (name === 'this machine says it could not read its clusters, not that it has none') {
+    // A running k3s was shown as "Unavailable -- No cluster on this machine" while its list
+    // had not been read: "I could not ask" said as "it is not there".
+    await page.locator('#btn-clusters').click();
+    await page.waitForFunction(() =>
+      (document.querySelector('#cl-local')?.textContent ?? '').includes('Not answering'),
+    );
+    const local = await page.locator('#cl-local').innerText();
+    expect(local).toContain('could not be read');
+    expect(local).not.toContain('No cluster on this machine');
+    return;
+  }
+
+  if (name === 'this machine shows its cluster while the list is read again') {
+    // The rows followed the page load's read only when a build started or ended, so the
+    // page drew "Unavailable -- No cluster on this machine" for a running k3s until its own
+    // (slow) read came back.
+    // The page load's own reads (the list behind the cluster chip) are answered at once.
+    await page.waitForTimeout(3200);
+    await page.locator('#btn-clusters').click();
+    await page.waitForTimeout(400);
+    const early = await page.locator('#cl-local').innerText();
+    expect(early).not.toContain('No cluster on this machine');
+    expect(early).toContain('default');
+    await page.waitForTimeout(2600);
+    return;
+  }
+
   if (name === 'an expired aws sign-in says sign in, not install') {
     // An expired SSO token on a box with every tool installed was told to install the tools.
     await page.locator('#btn-clusters').click();
@@ -1448,6 +1716,72 @@ async function exerciseClusterCase(name: string, page: Page): Promise<void> {
     const said = await flow.innerText();
     expect(said).toContain('SSO sign-in has expired');
     expect(said.toLowerCase()).not.toContain('install');
+    return;
+  }
+
+  if (name === 'the setup re-check says it is checking and when it last checked') {
+    // Re-check answered the same "not signed in" and redrew the same screen: it looked like
+    // a button that did nothing. It says it is asking, then when it asked.
+    await page.locator('#btn-clusters').click();
+    await page
+      .locator('#cl-aws')
+      .getByRole('button', { name: /Set up Amazon EKS|Add a cluster/u })
+      .first()
+      .click();
+    const flow = page.locator('#eks-setup[open]');
+    await flow.waitFor({ state: 'visible' });
+    await page.waitForFunction(() =>
+      (document.querySelector('#eks-foot')?.textContent ?? '').includes('Checked at'),
+    );
+    let answer: (value: Awaited<ReturnType<typeof eks.whoami>>) => void = () => undefined;
+    mockWhoami.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    );
+    await flow.getByRole('button', { name: 'Re-check' }).click();
+    const busy = flow.getByRole('button', { name: 'Checking…' });
+    await busy.waitFor({ state: 'visible' });
+    expect(await busy.isDisabled()).toBe(true);
+    answer({ account: '', arn: '', error: 'Unable to locate credentials.' });
+    await flow.getByRole('button', { name: 'Re-check' }).waitFor({ state: 'visible' });
+    expect(await flow.getByRole('button', { name: 'Re-check' }).isDisabled()).toBe(false);
+    expect(await page.locator('#eks-foot').innerText()).toMatch(
+      /Re-check after signing in on the server\. Checked at \S/u,
+    );
+    return;
+  }
+
+  if (name === 'the setup flow names the aws profiles a server started without one could use') {
+    // `aws sts get-caller-identity --profile p` worked in a shell while the server, started
+    // without AWS_PROFILE, was not signed in -- and Re-check cannot fix that. It names the
+    // profiles the server's AWS config has and says to restart with one.
+    const prior = process.env.AWS_PROFILE;
+    delete process.env.AWS_PROFILE;
+    try {
+      await page.locator('#btn-clusters').click();
+      await page
+        .locator('#cl-aws')
+        .getByRole('button', { name: /Set up Amazon EKS|Add a cluster/u })
+        .first()
+        .click();
+      const hint = page.locator('#eks-setup[open] #eks-profiles');
+      await hint.waitFor({ state: 'visible' });
+      const said = await hint.innerText();
+      expect(said).toContain('This server was started without AWS_PROFILE');
+      expect(said).toContain('support-eks-houston');
+      expect(said).toContain('AWS_PROFILE=support-eks-houston houston serve');
+      expect(said).toContain('houston serve --print-service');
+      // A server started WITH a profile is not told to set one: the hint is not drawn.
+      process.env.AWS_PROFILE = 'support-eks-houston';
+      await page.locator('#eks-setup[open]').getByRole('button', { name: 'Re-check' }).click();
+      await page.waitForFunction(() => document.querySelector('#eks-profiles') === null);
+      expect(mockProfiles).toHaveBeenCalledTimes(1);
+    } finally {
+      if (prior === undefined) delete process.env.AWS_PROFILE;
+      else process.env.AWS_PROFILE = prior;
+    }
     return;
   }
 
@@ -1756,6 +2090,12 @@ async function exerciseClusterCase(name: string, page: Page): Promise<void> {
     await page.locator('#create-form input[name=version]').fill('8.5.1');
     await page.locator('#create-submit').click();
     await page.locator('#create-step-3:not([hidden])').waitFor({ state: 'visible' });
+    // While it runs, the title names the workspace the server settled on.
+    await page.waitForFunction(() =>
+      (document.querySelector('#create-progress-title')?.textContent ?? '').startsWith(
+        'Creating first-one on',
+      ),
+    );
     await page.waitForFunction(() =>
       (document.querySelector('#create-progress-title')?.textContent ?? '').includes('is ready'),
     );
@@ -2241,6 +2581,14 @@ async function exerciseClusterCase(name: string, page: Page): Promise<void> {
       .getByRole('button', { name: /Delete cluster/u })
       .click();
     await page.locator('#cluster-delete-dialog[open]').waitFor({ state: 'visible' });
+    // What force skips is said where it is offered: only the look inside, never the checks
+    // that this is houston's own cluster in this account.
+    const force = (await page.locator('#cluster-delete-force-hint').innerText()).replace(
+      /\s+/gu,
+      ' ',
+    );
+    expect(force).toContain('Force skips only that look inside');
+    expect(force).toContain('houston deletes only a cluster it built');
     await page.locator('#cluster-delete-form input[name=confirm]').fill('support');
     await page.locator('#cluster-delete-form input[name=force]').check();
     await page.locator('#cluster-delete-go').click();
@@ -2540,6 +2888,11 @@ async function exerciseFlow(name: string, page: Page, firstRunKey: string): Prom
     await page.locator('#me-menu:not([hidden])').waitFor({ state: 'visible' });
     await page.locator('#me-out').click();
     await page.waitForURL((url) => url.pathname === '/signin');
+    // BACK asks the server again: the page is never stored. It showed the cached page,
+    // whose modules were answered with a redirect to sign-in, so nothing ran in it.
+    const back = await page.goBack();
+    expect(new URL(back?.url() ?? '').pathname).toBe('/signin');
+    await page.locator('#u').waitFor({ state: 'visible' });
     await page.goto('/');
     await page.waitForURL((url) => url.pathname === '/signin');
     return;
@@ -2568,6 +2921,38 @@ async function exerciseFlow(name: string, page: Page, firstRunKey: string): Prom
     expect(await page.locator('#me-people').isHidden()).toBe(true);
     return;
   }
+  if (name === 'a running job can be stopped from its output') {
+    // A create waiting on a port-forward it could not see held its workspace until the
+    // server was killed. From Activity, its output now offers Stop, and says how it ended.
+    await page.locator('#btn-jobs').click();
+    const building = page.locator('#jobs-list .jobrow', { hasText: 'building-eks' });
+    await building.waitFor({ state: 'visible' });
+    await building.click();
+    await page.locator('#job-dialog[open]').waitFor({ state: 'visible' });
+    await page.waitForTimeout(500); // the dialog asks the server whether Stop is safe
+    expect(await page.locator('#job-stop').isHidden()).toBe(true);
+    await page.locator('#job-close').click();
+    const row = page.locator('#jobs-list .jobrow', { hasText: 'stuck-ws' });
+    await row.waitFor({ state: 'visible' });
+    await row.click();
+    const stop = page.locator('#job-dialog[open] #job-stop');
+    await stop.waitFor({ state: 'visible' });
+    page.once('dialog', (dialog) => {
+      void dialog.accept();
+    });
+    await stop.click();
+    await page.waitForFunction(
+      () => document.querySelector('#job-title')?.textContent === 'Stopped',
+    );
+    expect(await page.locator('#job-log').textContent()).toContain(
+      'stopped by alice before it finished',
+    );
+    expect(await page.locator('#job-stop').isHidden()).toBe(true);
+    expect(stuckJob?.status).toBe('error');
+    buildingJob?.stopper.abort();
+    return;
+  }
+
   if (name === 'the activity page opens both of its tabs') {
     await page.locator('#btn-jobs').click();
     await page.locator('#act-tabs').waitFor({ state: 'visible' });
@@ -2590,6 +2975,26 @@ async function prepareFlow(name: string): Promise<{ options: AppOptions; firstRu
   }
   if (name === 'an admin can open people and a member cannot') {
     await users.add('bob', 'bobs-good-password', 'member');
+  }
+  if (name === 'a running job can be stopped from its output') {
+    const { sleep } = require('../../../src/seams/exec') as typeof ExecNS;
+    const manager = new JobManager();
+    stuckJob = manager.submit(
+      'up',
+      async () => {
+        for (;;) await sleep(100);
+      },
+      { label: 'stuck-ws', actor: 'alice' },
+    );
+    // A kind a Stop would leave half done: its output offers no Stop at all.
+    buildingJob = manager.submit(
+      'cluster-create',
+      async () => {
+        for (;;) await sleep(100);
+      },
+      { label: 'building-eks', actor: 'alice' },
+    );
+    return { options: { accounts: true, jobs: manager }, firstRunKey: '' };
   }
   return { options: { accounts: true }, firstRunKey: '' };
 }
@@ -2643,6 +3048,32 @@ function kubeDetail(overrides: Record<string, unknown> = {}): Record<string, unk
 }
 
 function prepareKubernetesCase(name: string): void {
+  if (name === 'the footer says k8s is unknown until the probe answers') {
+    // A probe that takes its time, as kubectl against a real cluster does.
+    const real = mockPreflight.getMockImplementation();
+    mockPreflight.mockImplementation(async (...args) => {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      return await (real as NonNullable<typeof real>)(...args);
+    });
+  }
+  if (name === 'a log stream a restart ends follows the new pod by itself') {
+    // The first stream ends when a restart replaces the pod; the next follows the new one.
+    let streams = 0;
+    mockLogProcess.mockImplementation(async (_name, options) => {
+      streams += 1;
+      const pod = streams === 1 ? 'rocketchat-579c867b87-mclgv' : 'rocketchat-6d8f9c7b5-x2k4q';
+      options.onLine?.(
+        `[pod/${pod}/rocketchat] {"level":30,"msg":"pod ${String(streams)} says hello"}`,
+      );
+      const signal = options.abortSignal;
+      if (streams > 1 && signal !== undefined && !signal.aborted) {
+        await new Promise<void>((resolve) =>
+          signal.addEventListener('abort', () => resolve(), { once: true }),
+        );
+      }
+      return { code: 0 } as never;
+    });
+  }
   if (
     name === 'the arrangement says what it builds' ||
     name === 'the create dialog says what it builds and what the box has left'
@@ -2720,7 +3151,11 @@ function prepareKubernetesCase(name: string): void {
       get: () => undefined,
     } as unknown as JobManager;
   }
-  if (name === 'the seed job shows what it made and whether it was confirmed') {
+  if (
+    name === 'the seed job shows what it made and whether it was confirmed' ||
+    name.startsWith('seed ') ||
+    name === 'create sends scenario and history only with sample data enabled'
+  ) {
     mockReadMeta.mockResolvedValue({
       name: 't1234',
       project: 'p',
@@ -2738,14 +3173,74 @@ function prepareKubernetesCase(name: string): void {
       adminPassword: '',
       extra: {},
     });
+    const rich = name === 'seed submits profile scenarios and history together';
     mockRunSeedInline.mockResolvedValue({
       users: 20,
-      messages: 283,
-      threads: 48,
-      rooms_total: 22,
+      messages: rich ? 435 : 415,
+      threads: 162,
+      rooms_total: rich ? 29 : 25,
       dms: 5,
       rooms: { channel: 5, team: 1, discussion: 3, dm: 5 },
-      verification: { ok: true, faults: [], extra: [], unreadable: [], checked: 22 },
+      ...(rich
+        ? {
+            files: 12,
+            scenarios: ['permissions', 'room-states'],
+            history: {
+              days: 90,
+              oldest: '2026-07-11T00:00:00.000Z',
+              latest: '2026-10-09T00:00:00.000Z',
+              constrained: [],
+            },
+            planned: {
+              users: 20,
+              rooms_total: 29,
+              messages: 435,
+              threads: 162,
+              files: 12,
+              thread_parents: 54,
+              reaction_actions: 278,
+              pins: 21,
+              stars: 25,
+              mentions: 25,
+              edits: 6,
+            },
+            created: [
+              {
+                name: 'support',
+                kind: 'channel',
+                starred_by: ['alice'],
+                files: ['png', 'txt', 'pdf', 'csv'],
+              },
+              {
+                name: 'customer escalation 4821',
+                kind: 'discussion',
+                parent: 'support',
+                starred_by: ['bob'],
+                files: [],
+              },
+            ],
+          }
+        : {}),
+      verification: {
+        ok: name === 'seed incomplete readback never appears confirmed' ? null : true,
+        faults: [],
+        extra: [],
+        unreadable: [],
+        checked: 25,
+        ...(rich
+          ? {
+              features: {
+                files: 12,
+                thread_parents: 54,
+                reactions: 278,
+                pins: 21,
+                stars: 25,
+                mentions: 25,
+                edits: 6,
+              },
+            }
+          : {}),
+      },
     } as never);
   }
   if (name === 'a kubernetes card names the cluster it will use') {
@@ -2925,10 +3420,37 @@ function prepareKubernetesCase(name: string): void {
     ]);
   if (name === 'the live chart stops asking when the answer is a refusal')
     mockPodMetrics.mockRejectedValue(
-      new NotReadyError(
+      new PreflightError(
         'this cluster has no metrics-server, so there is nothing to read CPU and memory from. Install it with:\n  kubectl apply -f https://example/x.yaml',
       ),
     );
+  if (
+    [
+      'presets are ticked from a list and sent with each ones settings',
+      'the e2ee options send the policy and switches as its settings',
+      'ldap asks for a one time code only with its own single sign on',
+      'a pasted license is masked and sent',
+    ].includes(name)
+  )
+    mockCreateRepro.mockResolvedValue({} as never);
+  if (name === 'a ci build names its base release') {
+    // The build's package.json, which the server reads before a CI create.
+    mockReleaseInfo.mockImplementation(async (url: string) =>
+      url.endsWith('/apps/meteor/package.json')
+        ? ({ status: 200, ok: true, json: () => ({ version: '9.0.0-develop' }) } as never)
+        : null,
+    );
+  }
+  if (name === 'the workspace panel shows its presets its build and its license')
+    useRows([
+      detail({
+        preset: 'email+ldap',
+        presets: ['email', 'ldap'],
+        ci_build: 'pr-41234',
+        licensed: true,
+        notes: [...presets.load('ldap').notes],
+      }),
+    ]);
   if (name === 'a credential note is not labelled a sudo setup step')
     useRows([detail({ state: 'stopped', preset: 'ldap', notes: [...presets.load('ldap').notes] })]);
   if (name === 'the one preset with a real setup step keeps it')
@@ -3204,6 +3726,161 @@ async function prepareSurface(name: string): Promise<void> {
   }
   if (name === 'reduced motion keeps every state and removes the travel') {
     portedReducedMotion = true;
+  }
+  if (
+    name === 'a refusal raised inside a dialog is read on top of it' ||
+    name === 'a member is told a ci build is kept to admins before pressing create'
+  ) {
+    // E13 of the acceptance run: a member, on a box that keeps CI builds to admins.
+    portedUser = 'mem';
+    portedPassword = 'members-good-password';
+    await users.add(portedUser, portedPassword, 'member');
+    config.updateConfig((value) => {
+      value[CREATE_POLICY_KEY] = 'admin';
+    });
+  }
+  if (
+    name === 'the create dialog can stop its own job' ||
+    name === 'a stopped job is said to be stopped not failed'
+  ) {
+    // A create stuck waiting, as one on a port-forward it cannot see is.
+    const { sleep } = require('../../../src/seams/exec') as typeof ExecNS;
+    mockCreateRepro.mockImplementation(async (_req, emit) => {
+      emit?.(
+        event('workspace name: stuck-one', {
+          phase: 'create',
+          code: 'workspace-name',
+          data: { workspace: 'stuck-one' },
+        }),
+      );
+      emit?.(event('Image rocket.chat:8.5.1 Pulling', { phase: 'pull' }));
+      for (;;) await sleep(100);
+    });
+  }
+  if (name === 'a long scenario note wraps in the create result') {
+    // The email preset's own notes: the Mailpit row carries a description too long for
+    // a column, and its rider line.
+    mockCreateRepro.mockImplementation(async (req) => ({
+      name: 'mail-one',
+      rc_version: req.version,
+      mongo_tag: '8.0',
+      preset: 'email',
+      root_url: 'http://localhost:3302',
+      login: { user: 'admin', password: 'admin123' },
+      notes: [
+        'Mailpit (EVERY email RC sends, for ALL users, lands here): http://localhost:8025',
+        '  — one shared inbox; tell users apart by the To: column.',
+        "Quick SMTP check: Admin → Email → 'Send test email', then open Mailpit.",
+      ],
+    }));
+  }
+  if (name === 'a finished restore re-reads the workspace without a page error') {
+    mockRestore.mockResolvedValue({ name: 't1234' } as never);
+    mockListBackups.mockResolvedValue([
+      {
+        path: 't1234-2026-10-09.tar.zst',
+        bytes: 1_234_567,
+        rc_version: '7.4.1',
+        mongo_tag: '7.0',
+        preset: 'base',
+        label: '',
+        created_at: '2026-10-09T10:00:00+00:00',
+      },
+    ]);
+  }
+  if (name === 'a workspace is handed over from its pane and its owner row follows') {
+    await users.add('bob', 'bobs-good-password', 'member');
+    // A real record, so the real hand-over writes it; the panel reads its owner from there.
+    await realRecord.write(
+      't1234',
+      'services: {}\n',
+      realRecord.metadata({ name: 't1234', extra: { created_by: 'alice' } }),
+    );
+    mockDetail.mockImplementation(async () => {
+      const owner = String((await realRecord.readMeta('t1234')).extra.owner ?? 'alice');
+      return detail({ owner, created_by: owner }) as never;
+    });
+  }
+  if (
+    name === 'a refused hand over is said inside its dialog' ||
+    name === 'the delete confirm says who can hand a workspace over and names no command'
+  ) {
+    // A member, on the default policy: the owner, an admin or nobody else may hand over.
+    portedUser = 'mem';
+    portedPassword = 'members-good-password';
+    await users.add(portedUser, portedPassword, 'member');
+    const owner = name.startsWith('a refused') ? 'mem' : 'bob';
+    setSurfaceDetail(detail({ owner, created_by: owner, made_by: owner }));
+    mockReadMeta.mockResolvedValue({
+      name: 't1234',
+      runtime: topology.DOCKER,
+      extra: { owner },
+    } as never);
+  }
+  if (name === 'every backup on the machine is listed and a deleted workspaces restores as new') {
+    mockRestore.mockImplementation(async () => {
+      useRows([detail(), detail({ name: 'gone-ws', rc_version: '7.3.0' })]);
+      return { name: 'gone-ws' } as never;
+    });
+    mockListBackups.mockResolvedValue([
+      {
+        path: 't1234-2026-10-08.rcbak',
+        bytes: 2_048_000,
+        rc_version: '7.4.1',
+        preset: 'base',
+        repro: 't1234',
+        label: '',
+        created_at: '2026-10-08T10:00:00+00:00',
+      },
+      {
+        path: 'gone-ws-2026-10-01.rcbak',
+        bytes: 1_234_567,
+        rc_version: '7.3.0',
+        preset: 'email',
+        repro: 'gone-ws',
+        label: 'before the upgrade',
+        created_at: '2026-10-01T10:00:00+00:00',
+      },
+    ]);
+  }
+  if (
+    name === 'restore as new says before it starts that the side ports are taken and what works'
+  ) {
+    // The source still exists and still holds the port its scenario publishes.
+    await realRecord.write(
+      'mail-src',
+      'services: {}\n',
+      realRecord.metadata({ name: 'mail-src', preset: 'email', extra: { sidecar_ports: [8025] } }),
+    );
+    useRows([detail({ name: 'mail-src', preset: 'email' })]);
+    manifests = {
+      'mail-src-2026-10-09.rcbak': { rc_version: '7.4.1', preset: 'email', repro: 'mail-src' },
+    };
+    mockListBackups.mockResolvedValue([
+      {
+        path: 'mail-src-2026-10-09.rcbak',
+        bytes: 4_096_000,
+        rc_version: '7.4.1',
+        preset: 'email',
+        repro: 'mail-src',
+        label: '',
+        created_at: '2026-10-09T10:00:00+00:00',
+      },
+    ]);
+  }
+  if (name === 'an upgraded workspace rolls back behind a red confirm and the panel follows') {
+    setSurfaceDetail(detail({ rc_version: '7.4.1', rollback_to: '7.3.0' }));
+    mockRollback.mockImplementation(async () => {
+      setSurfaceDetail(detail({ rc_version: '7.3.0', rollback_to: '' }));
+      return { name: 't1234', rolled_back_to: '7.3.0', bundle: 'b', restore: {} } as never;
+    });
+  }
+  if (name === 'the overview follows a workspace that is still starting') {
+    // What a restart's job leaves on screen: it ended while Rocket.Chat was booting.
+    setSurfaceDetail(detail({ health: 'starting', uptime: '9 seconds' }));
+  }
+  if (name === 'the down and unknown words are readable in both themes') {
+    useRows([detail({ name: 'down-one', state: 'down' }), detail({ name: 'odd-one', state: '?' })]);
   }
 }
 
@@ -3639,6 +4316,31 @@ async function paneState(
 }
 
 async function exerciseKubernetesChrome(name: string, page: Page): Promise<void> {
+  if (name === 'the footer says k8s is unknown until the probe answers') {
+    // Docker has answered and Kubernetes has not: that is "?", not "not set up". It said
+    // "not set up" for as long as the probe took, on a box with a working cluster.
+    await page.waitForFunction(() =>
+      (document.querySelector('#sb-engines')?.textContent ?? '').startsWith('docker: up'),
+    );
+    expect(await page.locator('#sb-engines').textContent()).toBe('docker: up · k8s: ?');
+    // Create's Kubernetes card, opened in the same window, is reading too -- not "Needs
+    // kubectl and helm on the server".
+    await openClusterCreate(page);
+    const card = page.locator('#dest-cards label[data-dest="k8s-none"]');
+    expect(await card.innerText()).toContain('Reading…');
+    expect(await card.innerText()).not.toContain('Needs kubectl');
+    await page.waitForFunction(
+      () => !(document.querySelector('#sb-engines')?.textContent ?? '').endsWith('k8s: ?'),
+      undefined,
+      { timeout: 8000 },
+    );
+    expect(await page.locator('#sb-engines').textContent()).toBe(
+      'docker: up · k8s: kind kind-support',
+    );
+    // ...and says what the probe found once it has, with the dialog still open.
+    expect(await card.innerText()).not.toContain('Reading…');
+    return;
+  }
   if (name === 'the top links become one menu on a narrow screen') {
     await page.setViewportSize({ width: 430, height: 780 });
     await page.waitForTimeout(200);
@@ -3714,6 +4416,102 @@ async function exerciseKubernetesChrome(name: string, page: Page): Promise<void>
 }
 
 async function exerciseKubernetesDialogs(name: string, page: Page): Promise<void> {
+  if (name.startsWith('seed ')) {
+    await openWorkspace(page);
+    await page.getByRole('button', { name: 'Add sample data' }).click();
+    await page.locator('#seed-dialog[open]').waitFor({ state: 'visible' });
+    const form = page.locator('#seed-form');
+    if (name === 'seed choices show server counts and reset when reopened') {
+      expect(await form.locator('[name=profile] option').allTextContents()).toEqual([
+        'small — 5 users, 12 rooms',
+        'standard — 20 users, 25 rooms',
+        'large — 100 users, 60 rooms',
+      ]);
+      await form.locator('[name=scenarios][value=room-states]').check();
+      await form.locator('[name=history]').check();
+      await form.locator('[name=history_days]').fill('90');
+      await page.locator('#seed-cancel').click();
+      await page.getByRole('button', { name: 'Add sample data' }).click();
+      await page.locator('#seed-dialog[open]').waitFor({ state: 'visible' });
+      expect(await form.locator('[name=scenarios]:checked').count()).toBe(0);
+      expect(await form.locator('[name=history]').isChecked()).toBe(false);
+      expect(await form.locator('[name=history_days]').inputValue()).toBe('180');
+      expect(await form.locator('[name=history_days]').isDisabled()).toBe(true);
+      return;
+    }
+    if (name === 'seed scale mode disables scenarios and historical dates') {
+      await form.locator('[name=mode]').selectOption('scale');
+      expect(await form.locator('#seed-options').isVisible()).toBe(false);
+      for (const input of await form.locator('#seed-options input').all())
+        expect(await input.isDisabled()).toBe(true);
+      await form.locator('[name=mode]').selectOption('profile');
+      expect(await form.locator('#seed-options').isVisible()).toBe(true);
+      expect(await form.locator('[name=history_days]').isDisabled()).toBe(true);
+      return;
+    }
+    if (name === 'seed submits profile scenarios and history together') {
+      await form.locator('[name=profile]').selectOption('standard');
+      await form.locator('[name=scenarios][value=room-states]').check();
+      await form.locator('[name=scenarios][value=permissions]').check();
+      await form.locator('[name=history]').check();
+      await form.locator('[name=history_days]').fill('90');
+    }
+    await page.locator('#seed-submit').click();
+    await page.waitForFunction(
+      () => document.querySelector('#job-log .result') !== null,
+      undefined,
+      { timeout: 20000 },
+    );
+    if (name === 'seed incomplete readback never appears confirmed') {
+      expect(await page.locator('#job-log').innerText()).toContain(
+        'Incomplete: some checks could not run',
+      );
+      expect(await page.locator('#job-log .result .green').count()).toBe(0);
+    } else {
+      expect(mockRunSeedInline).toHaveBeenCalledTimes(1);
+      expect(mockRunSeedInline.mock.calls[0]?.[1]).toBe('standard');
+      expect(mockRunSeedInline.mock.calls[0]?.[4]).toEqual({
+        scenarios: ['permissions', 'room-states'],
+        historyDays: 90,
+      });
+      const result = page.locator('#job-log .result');
+      expect(await result.innerText()).toContain('Planned: 20 users · 29 rooms · 435 messages');
+      expect(await result.innerText()).toContain(
+        '12/12 files · 54/54 thread roots · 278/278 reactions · 21/21 pins · 25/25 stars',
+      );
+      expect(await result.innerText()).toContain('Synthetic history: 90 days');
+      await result.locator('details summary').click();
+      expect(await result.innerText()).toContain('support: personal stars: sign in as alice');
+      expect(await result.innerText()).toContain('discussion in support');
+    }
+    return;
+  }
+  if (name === 'create sends scenario and history only with sample data enabled') {
+    for (const enabled of [true, false]) {
+      await page.locator('#btn-new').click();
+      await page.locator('#create-dialog[open]').waitFor({ state: 'visible' });
+      await createDetails(page);
+      const form = page.locator('#create-form');
+      await form.locator('[name=version]').fill('8.5.1');
+      await form.locator('[name=seed]').check();
+      await form.locator('[name=seed_profile]').selectOption('standard');
+      await form.locator('[name=seed_scenarios][value=permissions]').check();
+      await form.locator('[name=seed_history]').check();
+      await form.locator('[name=seed_history_days]').fill('90');
+      if (!enabled) await form.locator('[name=seed]').uncheck();
+      const before = mockCreateRepro.mock.calls.length;
+      await page.locator('#create-submit').click();
+      for (let n = 0; n < 40 && mockCreateRepro.mock.calls.length === before; n += 1)
+        await page.waitForTimeout(100);
+      const request = mockCreateRepro.mock.calls[before]?.[0];
+      expect(request?.seed).toBe(enabled);
+      expect(request?.seedScenarios).toEqual(enabled ? ['permissions'] : []);
+      expect(request?.seedHistoryDays).toBe(enabled ? 90 : null);
+      await page.locator('#create-cancel').click();
+    }
+    return;
+  }
+
   if (name === 'the seed job shows what it made and whether it was confirmed') {
     await openWorkspace(page);
     await page.getByRole('button', { name: 'Add sample data' }).click();
@@ -3726,8 +4524,8 @@ async function exerciseKubernetesDialogs(name: string, page: Page): Promise<void
       { timeout: 20_000 },
     );
     const body = (await page.locator('#job-log').textContent()) ?? '';
-    expect(body).toContain('283 messages');
-    expect(body).toContain('48 in threads');
+    expect(body).toContain('415 messages');
+    expect(body).toContain('162 in threads');
     expect(body).toContain('channel 5');
     expect(body).toContain('discussion 3');
     return;
@@ -4047,6 +4845,24 @@ async function exerciseKubernetesPanel(name: string, page: Page): Promise<void> 
 }
 
 async function exerciseKubernetesRail(name: string, page: Page): Promise<void> {
+  if (name === 'a log stream a restart ends follows the new pod by itself') {
+    // Somebody else restarts the workspace: `kubectl logs -f` ends with the old pod. The
+    // reader's panel did not redraw, so it sat on "stream ended" until Retry was pressed.
+    await openWorkspace(page);
+    await page.getByRole('button', { name: 'Logs', exact: true }).click();
+    await page.locator('#logview', { hasText: 'pod 1 says hello' }).waitFor({ state: 'visible' });
+    await page
+      .locator('#logview', { hasText: 'pod 2 says hello' })
+      .waitFor({ state: 'visible', timeout: 8000 });
+    expect(mockLogProcess).toHaveBeenCalledTimes(2);
+    expect(await page.locator('#log-stat').textContent()).toBe('streaming');
+    // What the first pod said is still on screen above what the new one says.
+    expect(await page.locator('#logview .logrow .lm').allTextContents()).toEqual([
+      'pod 1 says hello',
+      'pod 2 says hello',
+    ]);
+    return;
+  }
   if (name.startsWith('the env tab')) {
     await openWorkspace(page);
     await page.getByRole('button', { name: 'Env vars' }).click();
@@ -4096,6 +4912,19 @@ async function exerciseKubernetesRail(name: string, page: Page): Promise<void> {
       return ((await load(source)).ctx as { dstate: { statsTimer: unknown } }).dstate.statsTimer;
     }, '/js/shared.js');
     expect(timer).toBeNull();
+    // ASKED ONCE PER SELECTION. Each re-render of the overview started the chart again, and
+    // a Kubernetes panel re-renders as its pods change: a 409 on every one of them.
+    const asked = mockPodMetrics.mock.calls.length;
+    for (const tab of ['Containers', 'Overview', 'Containers', 'Overview']) {
+      await page
+        .locator('#detail .tab')
+        .filter({ hasText: new RegExp(`^${tab}$`, 'u') })
+        .click();
+    }
+    await page.waitForFunction(() =>
+      document.querySelector('#chart')?.textContent.includes('metrics-server'),
+    );
+    expect(mockPodMetrics.mock.calls.length).toBe(asked);
     return;
   }
   if (name === 'a credential note is not labelled a sudo setup step') {
@@ -4103,6 +4932,15 @@ async function exerciseKubernetesRail(name: string, page: Page): Promise<void> {
     const body = (await page.locator('#d-body').textContent()) ?? '';
     expect(body).toContain('cn=admin,dc=example,dc=com');
     expect(body).not.toContain('Needs sudo');
+    // The header's "About this scenario" link keeps `.linkbtn`'s small size: the wizard's
+    // later `.linkbtn { font: inherit }` rendered it full size and bold.
+    const link = await page.locator('#d-body .panelcard-h .linkbtn').evaluate((el) => {
+      const root = parseFloat(getComputedStyle(document.documentElement).fontSize);
+      const style = getComputedStyle(el);
+      return { rem: parseFloat(style.fontSize) / root, weight: style.fontWeight };
+    });
+    expect(link.rem).toBeCloseTo(0.74, 2);
+    expect(link.weight).toBe('400');
     return;
   }
   if (name === 'the one preset with a real setup step keeps it') {
@@ -4487,6 +5325,27 @@ async function openCreate(page: Page): Promise<void> {
   await page.locator('#create-dialog[open]').waitFor({ state: 'visible', timeout: 5000 });
 }
 
+/** Type the version, submit, and let the create's job stream finish before the case ends. */
+async function submitTheCreate(page: Page, version: string): Promise<void> {
+  await page.locator('#create-form input[name=version]').fill(version);
+  await page.locator('#create-submit').click();
+  for (let n = 0; n < 40 && mockCreateRepro.mock.calls.length === 0; n += 1)
+    await page.waitForTimeout(100);
+  await page.waitForFunction(() =>
+    /is ready|could not be created/u.test(
+      document.querySelector('#create-progress-title')?.textContent ?? '',
+    ),
+  );
+}
+
+/** Close the dialog from step 2, which offers Back rather than Cancel: its ✕. */
+async function closeTheCreate(page: Page): Promise<void> {
+  await page.locator('#create-x').click({ timeout: 5000 });
+  await page.waitForFunction(
+    () => !(document.querySelector('#create-dialog') as HTMLDialogElement).open,
+  );
+}
+
 async function exerciseSurface(name: string, page: Page): Promise<void> {
   if (name === 'the dashboard renders a workspace card') {
     await page.locator('#repros', { hasText: 't1234' }).waitFor({ state: 'visible' });
@@ -4520,7 +5379,7 @@ async function exerciseSurface(name: string, page: Page): Promise<void> {
   }
   if (name === 'the backups tab lists what is there') {
     await openWorkspace(page);
-    await page.getByRole('button', { name: 'Backups', exact: true }).click();
+    await page.locator('#detail .tab', { hasText: 'Backups' }).click();
     await page.locator('#d-body', { hasText: 't1234-2026-08-09' }).waitFor({ state: 'visible' });
     expect(await page.locator('#d-body').textContent()).toContain('7.4.1');
     expect(mockListBackups).toHaveBeenCalledWith('t1234');
@@ -4752,13 +5611,185 @@ async function exerciseSurface(name: string, page: Page): Promise<void> {
     expect(await page.locator('#detail .note-p', { hasText: 'auto-provisioned' }).count()).toBe(1);
     return;
   }
+  if (name === 'presets are ticked from a list and sent with each ones settings') {
+    await openCreate(page);
+    await createDetails(page);
+    await page.locator('#plist input[value=ldap]').check();
+    await page.locator('#plist input[value=email]').check();
+    const combined = await page.locator('#pcombo').innerText();
+    expect(combined).toContain('email + ldap');
+    expect(combined).toContain('read it in Mailpit');
+    // Each ticked preset has its own settings; the untouched ones send nothing.
+    expect(await page.locator('.ppanel-h').allInnerTexts()).toEqual(['email', 'ldap']);
+    await page.locator('.ppanel input[data-p=ldap][data-k=users]').fill('7');
+    await page.locator('.ppanel input[data-p=email][data-k=verification]').check();
+    await submitTheCreate(page, '8.5.1');
+    const request = mockCreateRepro.mock.calls[0]?.[0];
+    expect(request?.preset).toBe('email+ldap');
+    expect(request?.params).toEqual({ 'ldap.users': '7', 'email.verification': 'true' });
+    return;
+  }
+  if (name === 'the e2ee options send the policy and switches as its settings') {
+    await openCreate(page);
+    await createDetails(page);
+    await page.locator('#plist input[value=e2ee]').check();
+    const policy = page.locator('.ppanel button[data-p=e2ee][data-k=policy]');
+    expect(await policy.allInnerTexts()).toEqual(['Optional', 'On by default', 'Enforced']);
+    await page.locator('.ppanel button[data-p=e2ee][data-k=policy][data-v=enforced]').click();
+    expect(
+      await page.locator('.ppanel', { hasText: 'Needs Rocket.Chat 8.8.0 or later' }).count(),
+    ).toBe(1);
+    // Sample data stays on offer: nothing about this preset stops the seeder.
+    expect(await page.locator('#create-form [name=seed]').isDisabled()).toBe(false);
+    await page.locator('.ppanel input[data-p=e2ee][data-k=files]').uncheck();
+    await submitTheCreate(page, '8.8.0');
+    const request = mockCreateRepro.mock.calls[0]?.[0];
+    expect(request?.preset).toBe('e2ee');
+    expect(request?.params).toEqual({ policy: 'enforced', files: 'off' });
+    return;
+  }
+  if (name === 'saml and oidc rule each other out and ldap follows the one ticked') {
+    await openCreate(page);
+    await createDetails(page);
+    await page.locator('#plist input[value=saml]').check();
+    expect(await page.locator('#plist input[value=oidc]').isDisabled()).toBe(true);
+    expect(
+      await page.locator('#plist label.prow:has(input[value=oidc]) .prow-why').innerText(),
+    ).toBe('One sign-in provider per workspace');
+    await page.locator('#plist input[value=ldap]').check();
+    // ldap's own single sign-on is the ticked saml: one Keycloak, locked, and said why.
+    const sso = await page
+      .locator('.ppanel button[data-p=ldap][data-k=idp]')
+      .evaluateAll((buttons) =>
+        buttons.map((b) => [
+          b.textContent,
+          (b as HTMLButtonElement).disabled,
+          b.getAttribute('aria-pressed'),
+        ]),
+      );
+    expect(sso).toEqual([
+      ['None', true, 'false'],
+      ['SAML', true, 'true'],
+      ['OIDC', true, 'false'],
+    ]);
+    expect(await page.locator('.ppanel', { hasText: 'Uses the same Keycloak' }).count()).toBe(1);
+    await page.locator('#plist input[value=saml]').uncheck();
+    expect(await page.locator('#plist input[value=oidc]').isDisabled()).toBe(false);
+    await closeTheCreate(page);
+    return;
+  }
+  if (name === 'ldap asks for a one time code only with its own single sign on') {
+    await openCreate(page);
+    await createDetails(page);
+    await page.locator('#plist input[value=ldap]').check();
+    const mfa = page.locator('.ppanel input[data-p=ldap][data-k=mfa]');
+    expect(await mfa.count()).toBe(0);
+    await page.locator('.ppanel button[data-p=ldap][data-k=idp][data-v=saml]').click();
+    expect(await mfa.count()).toBe(1);
+    expect(await page.locator('.ppanel input[data-p=ldap][data-k=idp_host]').count()).toBe(1);
+    await mfa.check();
+    await submitTheCreate(page, '8.5.1');
+    const request = mockCreateRepro.mock.calls[0]?.[0];
+    expect([request?.preset, request?.params]).toEqual(['ldap', { idp: 'saml', mfa: 'on' }]);
+    return;
+  }
+  if (name === 'a pasted license is masked and sent') {
+    await openCreate(page);
+    await createDetails(page);
+    const license = `${'Lk'.repeat(60)}zq9x`;
+    await page.locator('#lic-add').click();
+    await page.locator('#lic-text').fill(license);
+    await page.locator('#lic-text').blur();
+    // Masked: its length and last four characters; the box closed, the text gone from the page.
+    expect(await page.locator('#lic-sum-t').innerText()).toBe(
+      'License added · 124 characters · …zq9x',
+    );
+    expect(await page.locator('#lic-b').isHidden()).toBe(true);
+    expect(await page.locator('#lic-pill').isVisible()).toBe(true);
+    expect(await page.evaluate((text) => document.body.innerHTML.includes(text), license)).toBe(
+      false,
+    );
+    await submitTheCreate(page, '8.5.1');
+    expect(mockCreateRepro.mock.calls[0]?.[0]?.license).toBe(license);
+    return;
+  }
+  if (name === 'the 9 notice asks for a license only when one is needed') {
+    await openCreate(page);
+    await createDetails(page);
+    await page.locator('#create-form input[name=version]').fill('9.0.0-rc.1');
+    await page.locator('#version-hint', { hasText: 'MongoDB' }).waitFor({ state: 'visible' });
+    expect(await page.locator('#version-hint').innerText()).toContain(
+      'Release candidate 9.0.0-rc.1',
+    );
+    const notice = page.locator('#v9');
+    expect(await notice.isHidden()).toBe(true);
+    await page.locator('#plist input[value=ldap]').check();
+    expect(await notice.innerText()).toContain('for LDAP sign-in');
+    // A registration token answers it...
+    await page
+      .locator('#create-dialog details.adv')
+      .evaluate((d) => ((d as HTMLDetailsElement).open = true));
+    await page.locator('#create-form input[name=reg_token]').fill('a-token');
+    expect(await notice.isHidden()).toBe(true);
+    await page.locator('#create-form input[name=reg_token]').fill('');
+    expect(await notice.isVisible()).toBe(true);
+    // ...and so does a license, added from the notice's own link.
+    await notice.locator('button', { hasText: 'Add a license' }).click();
+    await page.locator('#lic-text').fill('a-license-text');
+    await page.locator('#lic-text').blur();
+    expect(await notice.isHidden()).toBe(true);
+    // Not a 9.x release: nothing to say.
+    await page.locator('#lic-remove').click();
+    await page.locator('#create-form input[name=version]').fill('8.5.1');
+    expect(await notice.isHidden()).toBe(true);
+    await closeTheCreate(page);
+    return;
+  }
+  if (name === 'a ci build names its base release') {
+    await openCreate(page);
+    await createDetails(page);
+    await page.locator('#create-form input[name=version]').fill('pr-41234');
+    expect(await page.locator('#version-pill').isVisible()).toBe(true);
+    await page
+      .locator('#version-hint', { hasText: 'Based on 9.0.0' })
+      .waitFor({ state: 'visible' });
+    const hint = await page.locator('#version-hint').innerText();
+    expect(hint).toContain('pull request #41234');
+    expect(hint).toContain('ghcr.io/rocketchat/rocket.chat:pr-41234');
+    expect(hint).toContain("from the pull request's package.json");
+    // Its base is 9.0, so a directory sign-in gets the notice too.
+    await page.locator('#plist input[value=ldap]').check();
+    expect(await page.locator('#v9').isVisible()).toBe(true);
+    await closeTheCreate(page);
+    return;
+  }
+  if (name === 'the workspace panel shows its presets its build and its license') {
+    await openWorkspace(page);
+    expect(await page.locator('.d-sub .pchip').allInnerTexts()).toEqual(['email', 'ldap']);
+    expect(await page.locator('.d-sub .pill.plain').allInnerTexts()).toEqual([
+      'CI build',
+      'Licensed',
+    ]);
+    // The notes card names the set the same way: not the stored `email+ldap`.
+    expect(
+      await page
+        .locator('#d-body .panelcard-h .section-label', { hasText: 'Scenario' })
+        .textContent(),
+    ).toBe('Scenario · email + ldap');
+    return;
+  }
   if (name === 'the create dialog opens and lists presets') {
     await openCreate(page);
-    await page.waitForFunction(() => document.querySelectorAll('#preset-select option').length > 0);
+    await page.waitForFunction(
+      () => document.querySelectorAll('#plist input[name=preset]').length > 0,
+    );
     const values = await page
-      .locator('#preset-select option')
-      .evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value));
-    expect(values).toEqual(expect.arrayContaining(['default', 'ldap']));
+      .locator('#plist input[name=preset]')
+      .evaluateAll((boxes) => boxes.map((box) => (box as HTMLInputElement).value));
+    expect(values).toEqual(expect.arrayContaining(['ldap', 'email']));
+    // Nothing ticked is `default`; several instances is the Shape, not a preset.
+    expect(values).not.toContain('default');
+    expect(values).not.toContain('multi-instance');
     await page.locator('#create-cancel').click();
     await page.waitForFunction(
       () => !(document.querySelector('#create-dialog') as HTMLDialogElement).open,
@@ -4845,10 +5876,12 @@ async function exerciseSurface(name: string, page: Page): Promise<void> {
     };
     await openWithAdvanced();
     for (const field of PRIVILEGED_CREATE_FIELDS) {
-      if (field !== 'context') {
-        expect(await page.locator(`#create-form [name=${field}]`).isVisible()).toBe(true);
+      if (field !== 'context' && field !== 'license') {
+        const input = page.locator(`#create-form [name=${field}]`);
+        expect([await input.isVisible(), await input.isDisabled()]).toEqual([true, false]);
       }
     }
+    expect(await page.locator('#lic-add').isDisabled()).toBe(false);
     await createWhere(page);
     // The policy lets this member choose a cluster: no "server's default" stand-in.
     expect(await page.locator('#dest-cards label[data-dest="k8s-default"]').count()).toBe(0);
@@ -4862,9 +5895,15 @@ async function exerciseSurface(name: string, page: Page): Promise<void> {
       value[CREATE_POLICY_KEY] = 'admin';
     });
     await openWithAdvanced();
+    // Shown, not hidden -- members create workspaces too -- and disabled, with the reason.
     for (const field of PRIVILEGED_CREATE_FIELDS) {
-      expect(await page.locator(`#create-form [name=${field}]`).isHidden()).toBe(true);
+      if (field === 'context' || field === 'license') continue;
+      const input = page.locator(`#create-form [name=${field}]`);
+      expect([await input.isVisible(), await input.isDisabled()]).toEqual([true, true]);
     }
+    expect(await page.locator('#adv-policy').isVisible()).toBe(true);
+    expect(await page.locator('#lic-add').isDisabled()).toBe(true);
+    expect(await page.locator('#lic-policy').isVisible()).toBe(true);
     await createWhere(page);
     // A cluster may not be chosen, so Kubernetes is one card: the server's default, which
     // here is the k3s kubectl points at -- named, and usable.
@@ -4970,6 +6009,353 @@ async function exerciseSurface(name: string, page: Page): Promise<void> {
     expect(await page.locator('.d-head').textContent()).toContain('t1234');
     return;
   }
+  if (name === 'a refusal raised inside a dialog is read on top of it') {
+    // The create is refused (400: a CI build is admin-only here). The reason was toasted
+    // under the modal's backdrop, behind the dialog itself, and Create seemed to do nothing.
+    await openCreate(page);
+    await createDetails(page);
+    await page.locator('#create-form input[name=version]').fill('develop');
+    await page.locator('#create-submit').click();
+    const toast = page.locator('#toasts .toast', { hasText: 'limited to admins' });
+    await toast.waitFor({ state: 'visible' });
+    const seen = await toast.evaluate((node) => {
+      // The stack ignores the pointer so it never blocks a click; to ask what is drawn on
+      // top at the toast's own centre, it has to answer for this one probe.
+      (node.parentElement as HTMLElement).style.pointerEvents = 'auto';
+      const box = node.getBoundingClientRect();
+      const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return hit !== null && (hit === node || node.contains(hit));
+    });
+    expect(seen).toBe(true);
+    // Still on the details, where the version can be changed.
+    expect(await page.locator('#create-step-2').isVisible()).toBe(true);
+    return;
+  }
+  if (name === 'a second new workspace starts from an empty form') {
+    // Only the presets were reset, so a second open came up with the last create's name,
+    // port and image -- and "Reuse it" then started the earlier workspace instead.
+    await openCreate(page);
+    await createDetails(page);
+    const form = page.locator('#create-form');
+    await form.locator('input[name=version]').fill('9.0.0');
+    await form.locator('input[name=name]').fill('l6-rc9-ldap-only-01');
+    await form.locator('input[name=seed]').check();
+    await page.locator('#create-dialog details.adv').evaluate((node) => {
+      (node as HTMLDetailsElement).open = true;
+    });
+    await form.locator('input[name=port]').fill('3301');
+    await form.locator('input[name=rc_image]').fill('registry.example/rocket.chat:8.5.1');
+    await form.locator('select[name=existing]').selectOption('force');
+    await closeTheCreate(page);
+    await openCreate(page);
+    await createDetails(page);
+    expect(
+      await form.evaluate((node) => {
+        const f = node as HTMLFormElement;
+        const value = (key: string): string =>
+          (f.elements.namedItem(key) as HTMLInputElement).value;
+        return {
+          version: value('version'),
+          name: value('name'),
+          port: value('port'),
+          image: value('rc_image'),
+          existing: value('existing'),
+          seed: (f.elements.namedItem('seed') as HTMLInputElement).checked,
+        };
+      }),
+    ).toEqual({ version: '', name: '', port: '', image: '', existing: 'reuse', seed: false });
+    await closeTheCreate(page);
+    return;
+  }
+  if (name === 'a member is told a ci build is kept to admins before pressing create') {
+    await openCreate(page);
+    await createDetails(page);
+    await page.locator('#create-form input[name=version]').fill('develop');
+    expect(await page.locator('#version-pill').isVisible()).toBe(true);
+    // Said where the version is typed, as the image and token fields on this step say it.
+    expect(await page.locator('#version-hint').innerText()).toContain(
+      'Limited to admins on this server (gui.create_policy admin)',
+    );
+    // A release is not a CI build: nothing to say there.
+    await page.locator('#create-form input[name=version]').fill('8.5.1');
+    expect(await page.locator('#version-hint').innerText()).not.toContain('Limited to admins');
+    await closeTheCreate(page);
+    return;
+  }
+  if (name === 'the create dialog can stop its own job') {
+    // Stop existed only from Activity; the create's own progress, where a stuck create is
+    // watched, offered nothing but Close.
+    await openCreate(page);
+    await createDetails(page);
+    await page.locator('#create-form input[name=version]').fill('8.5.1');
+    await page.locator('#create-submit').click();
+    const stop = page.locator('#create-dialog[open] #create-stop');
+    await stop.waitFor({ state: 'visible', timeout: 5000 });
+    page.once('dialog', (dialog) => {
+      void dialog.accept();
+    });
+    await stop.click();
+    await page.waitForFunction(() =>
+      (document.querySelector('#create-progress-title')?.textContent ?? '').endsWith('was stopped'),
+    );
+    expect(await stop.isHidden()).toBe(true);
+    expect(await page.locator('#create-progress').innerText()).toContain('stopped by alice');
+    // Its footer no longer says it "keeps starting and shows in the list".
+    expect(await page.locator('#create-foot-hint').innerText()).not.toContain('keeps starting');
+    return;
+  }
+  if (name === 'a stopped job is said to be stopped not failed') {
+    // The create carries on when its dialog is closed, and its ending is toasted. Somebody
+    // stopping it is not a failure; the toast said "failed: stopped by alice", in red.
+    await openCreate(page);
+    await createDetails(page);
+    await page.locator('#create-form input[name=version]').fill('8.5.1');
+    await page.locator('#create-submit').click();
+    await page.locator('#create-progress li').first().waitFor({ state: 'visible' });
+    await page.waitForFunction(() =>
+      (document.querySelector('#create-progress-title')?.textContent ?? '').includes('stuck-one'),
+    );
+    await closeTheCreate(page);
+    const stopped = await page.evaluate(async () => {
+      const { jobs } = (await (await fetch('/api/jobs')).json()) as {
+        jobs: { id: string; kind: string; status: string }[];
+      };
+      const job = jobs.find((j) => j.kind === 'create' && j.status === 'running');
+      if (job === undefined) return 0;
+      return (await fetch(`/api/jobs/${job.id}/stop`, { method: 'POST' })).status;
+    });
+    expect(stopped).toBe(200);
+    const toast = page.locator('#toasts .toast', { hasText: 'stopped by alice' });
+    await toast.waitFor({ state: 'visible' });
+    // Named as Activity names it: the workspace, not "Creating 8.5.1 (default)".
+    expect(await toast.textContent()).toContain('Creating stuck-one: ');
+    expect(await toast.textContent()).not.toContain('failed');
+    expect(await toast.getAttribute('class')).not.toContain('error');
+    return;
+  }
+  if (name === 'a long scenario note wraps in the create result') {
+    await openCreate(page);
+    await createDetails(page);
+    await submitTheCreate(page, '8.5.1');
+    const row = page.locator('#create-result .linkrow', { hasText: 'Mailpit' });
+    await row.waitFor({ state: 'visible' });
+    // The whole description is inside the row: wrapped, not cut at its right edge.
+    const fit = await row.evaluate((node) => {
+      const box = node.getBoundingClientRect();
+      const parts = [...node.children].map((child) => child.getBoundingClientRect());
+      return {
+        inside: parts.every((part) => part.right <= box.right + 1 && part.left >= box.left - 1),
+        clipped: node.scrollWidth > node.clientWidth + 1,
+        text: node.textContent,
+      };
+    });
+    expect(fit.text).toContain('tell users apart by the To: column');
+    expect(fit).toMatchObject({ inside: true, clipped: false });
+    return;
+  }
+  if (name === 'a finished restore re-reads the workspace without a page error') {
+    // The restore's own callback called a `refresh()` nothing defines: a page error, and
+    // the re-read of the list and the panel that follows it never ran.
+    await openWorkspace(page);
+    await page.locator('#detail .tab', { hasText: 'Backups' }).click();
+    const asNew = page.locator('#d-body button', { hasText: 'as new' });
+    await asNew.waitFor({ state: 'visible' });
+    const reads = mockListRepros.mock.calls.length;
+    await asNew.click();
+    await page.locator('#restore-go').click();
+    await page.waitForFunction(() => document.querySelector('#job-title')?.textContent === 'Done');
+    await page
+      .locator('#toasts .toast', { hasText: 'restored t1234' })
+      .waitFor({ state: 'visible' });
+    expect(mockRestore).toHaveBeenCalled();
+    // Re-read at once, not on the next four-second poll.
+    for (let n = 0; n < 20 && mockListRepros.mock.calls.length === reads; n += 1)
+      await page.waitForTimeout(50);
+    expect(mockListRepros.mock.calls.length).toBeGreaterThan(reads);
+    return;
+  }
+  if (name === 'a workspace is handed over from its pane and its owner row follows') {
+    // POST /api/repros/{name}/owner existed, and nothing in the GUI called it.
+    await openWorkspace(page);
+    expect(await page.locator('.d-sub').textContent()).toContain('alice (you)');
+    await page.locator('#actpane button', { hasText: 'Hand over…' }).click();
+    await page.locator('#owner-dialog[open]').waitFor({ state: 'visible' });
+    // An admin may read the people list, so it is a choice rather than a name to recall.
+    expect(await page.locator('#owner-pick option').allTextContents()).toEqual(['bob']);
+    expect(await page.locator('#owner-to').isVisible()).toBe(false);
+    await page.locator('#owner-pick').selectOption('bob');
+    await page.locator('#owner-go').click();
+    await page.locator('#owner-dialog').waitFor({ state: 'hidden' });
+    await page.locator('.d-sub', { hasText: 'bob' }).waitFor({ state: 'visible' });
+    expect((await realRecord.readMeta('t1234')).extra.owner).toBe('bob');
+    return;
+  }
+  if (name === 'a refused hand over is said inside its dialog') {
+    await openWorkspace(page);
+    await page.locator('#actpane button', { hasText: 'Hand over…' }).click();
+    await page.locator('#owner-dialog[open]').waitFor({ state: 'visible' });
+    // A member may not read the people list, so the name is typed.
+    expect(await page.locator('#owner-pick-row').isVisible()).toBe(false);
+    await page.locator('#owner-to').fill('nobody');
+    await page.locator('#owner-go').click();
+    const err = page.locator('#owner-err');
+    await err.waitFor({ state: 'visible' });
+    expect(await err.textContent()).toContain('no account named');
+    expect(await page.locator('#owner-dialog').getAttribute('open')).not.toBeNull();
+    return;
+  }
+  if (name === 'the delete confirm says who can hand a workspace over and names no command') {
+    await openWorkspace(page);
+    // The gate refuses this member, so nothing offers what it would refuse.
+    expect(await page.locator('#actpane button', { hasText: 'Hand over…' }).count()).toBe(0);
+    const said: string[] = [];
+    page.on('dialog', (dialog) => {
+      said.push(dialog.message());
+      void (said.length === 1 ? dialog.accept() : dialog.dismiss());
+    });
+    await page.locator('#actpane .apdanger button').click();
+    await page.waitForFunction(() => document.querySelector('#job-title')?.textContent === 'Done');
+    expect(said).toHaveLength(2);
+    // It sent a GUI user to `houston chown`, which a member may not run for themselves.
+    expect(said[1]).toContain('belongs to bob');
+    expect(said[1]).toContain('bob or an admin can hand it over to you with "Hand over…"');
+    expect(said[1]).not.toContain('houston');
+    expect(mockTeardown).toHaveBeenCalledWith('t1234', expect.objectContaining({ volumes: false }));
+    return;
+  }
+  if (name === 'every backup on the machine is listed and a deleted workspaces restores as new') {
+    // The Backups tab lives on a workspace's panel, so a deleted one's bundles were
+    // listed nowhere, and restoring one as new could not be reached.
+    await page.locator('#btn-backups').click();
+    await page.locator('#detail .dtable').waitFor({ state: 'visible' });
+    expect(mockListBackups).toHaveBeenCalledWith('');
+    expect(await page.locator('#btn-backups').getAttribute('aria-current')).not.toBeNull();
+    const gone = page.locator('#detail tr', { hasText: 'gone-ws-2026-10-01' });
+    expect(await gone.textContent()).toContain('deleted');
+    const kept = page.locator('#detail tr', { hasText: 't1234-2026-10-08' });
+    expect(await kept.textContent()).not.toContain('deleted');
+    await gone.getByRole('button', { name: 'restore as new' }).click();
+    await page.locator('#restore-dialog[open]').waitFor({ state: 'visible' });
+    expect(await page.locator('#restore-held').isVisible()).toBe(false);
+    await page.locator('#restore-go').click();
+    await page.waitForFunction(() => document.querySelector('#job-title')?.textContent === 'Done');
+    expect(mockRestore).toHaveBeenCalledWith(
+      expect.stringContaining('gone-ws-2026-10-01.rcbak'),
+      expect.objectContaining({ new: true, name: '' }),
+    );
+    // Back as a workspace, its bundle is no longer marked as a deleted one's.
+    await page.waitForFunction(
+      () =>
+        [...document.querySelectorAll('#detail tr')]
+          .find((row) => row.textContent.includes('gone-ws-2026-10-01'))
+          ?.textContent.includes('deleted') === false,
+    );
+    return;
+  }
+  if (
+    name === 'restore as new says before it starts that the side ports are taken and what works'
+  ) {
+    await openWorkspace(page, 'mail-src');
+    await page.locator('#detail .tab', { hasText: 'Backups' }).click();
+    await page.locator('#d-body button', { hasText: 'as new' }).click();
+    await page.locator('#restore-dialog[open]').waitFor({ state: 'visible' });
+    const held = (await page.locator('#restore-held').textContent()) ?? '';
+    expect(await page.locator('#restore-held').isVisible()).toBe(true);
+    expect(held).toContain('mail-src already publishes port 8025');
+    expect(held).toContain('restore into mail-src, which replaces its data');
+    expect(held).toContain('restore this backup as new from Backups');
+    expect(held).not.toContain('houston');
+    expect(await page.locator('#restore-go').isDisabled()).toBe(true);
+    expect(await page.locator('#restore-into').textContent()).toBe('Restore into mail-src instead');
+    await page.locator('#restore-cancel').click();
+    expect(mockRestore).not.toHaveBeenCalled();
+    return;
+  }
+  if (name === 'an upgraded workspace rolls back behind a red confirm and the panel follows') {
+    // POST /api/repros/{name}/upgrade/rollback existed, and nothing in the GUI called it.
+    await openWorkspace(page);
+    await page.locator('#actpane button', { hasText: 'Roll back to 7.3.0' }).click();
+    await page.locator('#rollback-dialog[open]').waitFor({ state: 'visible' });
+    // RED: it replaces the database, and it says what is lost.
+    const ink = await page.locator('#rollback-go').evaluate((element) => {
+      const sample = document.createElement('div');
+      sample.style.color = getComputedStyle(document.documentElement).getPropertyValue('--red');
+      document.body.append(sample);
+      const red = getComputedStyle(sample).color;
+      sample.remove();
+      return { color: getComputedStyle(element).color, red };
+    });
+    expect(ink.color).toBe(ink.red);
+    expect(await page.locator('#rollback-what').getAttribute('class')).toContain('bad');
+    expect(await page.locator('#rollback-what').textContent()).toContain('is lost');
+    await page.locator('#rollback-go').click();
+    await page.waitForFunction(() => document.querySelector('#job-title')?.textContent === 'Done');
+    expect(mockRollback).toHaveBeenCalledWith('t1234', expect.anything());
+    await page.locator('.d-sub', { hasText: '7.3.0' }).waitFor({ state: 'visible' });
+    expect(await page.locator('#actpane button', { hasText: 'Roll back' }).count()).toBe(0);
+    return;
+  }
+  if (name === 'the overview follows a workspace that is still starting') {
+    await openWorkspace(page);
+    const health = page.locator('#d-body .kv', { has: page.locator('.k', { hasText: 'Health' }) });
+    expect(await health.locator('.v').innerText()).toBe('starting');
+    // Rocket.Chat settles; the poll's list says so, and the panel follows it.
+    setSurfaceDetail(detail({ health: 'healthy', uptime: '2 minutes' }));
+    await browserImport(page, '/js/util.js', 'loadRepros');
+    await page.waitForFunction(
+      () =>
+        [...document.querySelectorAll('#d-body .kv')]
+          .find((kv) => kv.querySelector('.k')?.textContent === 'Health')
+          ?.querySelector('.v')?.textContent === 'healthy',
+      undefined,
+      { timeout: 3000 },
+    );
+    expect(await page.locator('#d-body').innerText()).toContain('2 minutes');
+    return;
+  }
+  if (name === 'the down and unknown words are readable in both themes') {
+    const words = ['.wrow[data-state="down"] .wstate', '.wrow[data-state="unknown"] .wstate'];
+    await page.locator(words[1] as string).waitFor({ state: 'visible' });
+    const light = await contrastRatios(page, words);
+    await page.locator('#theme-toggle').click();
+    await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
+    // A row's ground eases to the new theme; measure once it has arrived.
+    await page.waitForFunction(() => document.getAnimations().length === 0);
+    const dark = await contrastRatios(page, words);
+    // WCAG AA for text this size. They were 2.79 (light) and 3.12 (dark).
+    expect(
+      [...Object.entries(light), ...Object.entries(dark)].filter(([, ratio]) => ratio < 4.5),
+    ).toEqual([]);
+    return;
+  }
+  if (name === 'at phone width the rail filters and the last tab stay reachable') {
+    // At 390px the status and sort filters sat wholly past the screen's edge, and the tab
+    // strip cut "Backups" to "BAC", both in scrollers that showed no sign of being one.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openWorkspace(page);
+    await page.waitForTimeout(200);
+    const strips = await page.evaluate(() => {
+      const controls = [...document.querySelectorAll('.rail-controls > *, .rail-two > *')]
+        .filter((node) => (node as HTMLElement).offsetParent !== null)
+        .filter((node) => node.getBoundingClientRect().right > innerWidth)
+        .map((node) => node.id || node.className);
+      // The tabs still scroll in their own strip (five need more than a phone has), and
+      // the strip paints a cue at the edge that has more: a shadow that stays with the
+      // box under a cover that travels with the tabs.
+      const strip = document.querySelector('#detail .tabs') as HTMLElement;
+      const style = getComputedStyle(strip);
+      return {
+        offscreen: controls,
+        tabsScroll: strip.scrollWidth > strip.clientWidth,
+        cue:
+          /gradient.*gradient/u.test(style.backgroundImage) &&
+          style.backgroundAttachment.replace(/\s/gu, '') === 'local,scroll',
+        sideways: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      };
+    });
+    expect(strips).toEqual({ offscreen: [], tabsScroll: true, cue: true, sideways: false });
+    return;
+  }
   throw new Error(`unported surfaces behavior: ${name}`);
 }
 
@@ -5015,7 +6401,7 @@ async function exercise(browserCase: BrowserCase, page: Page): Promise<void> {
     await page.locator('#btn-new').click();
     await page.locator('#create-dialog').waitFor({ state: 'visible' });
     expect(await page.locator('#create-dialog').getAttribute('open')).toBe('');
-    expect(await page.locator('#preset-select option').count()).toBeGreaterThan(0);
+    expect(await page.locator('#plist input[name=preset]').count()).toBeGreaterThan(0);
     return;
   }
   if (
@@ -5134,7 +6520,13 @@ describe('the frozen GUI against the in-process Fastify server', () => {
               ? { pathname: '/api/me/password', status: 400 }
               : name === 'a failed overview read says so and offers to try again'
                 ? { pathname: '/api/clusters/overview', status: 500 }
-                : null;
+                : name === 'this machine says it could not read its clusters, not that it has none'
+                  ? { pathname: '/api/clusters', status: 500 }
+                  : name === 'a refusal raised inside a dialog is read on top of it'
+                    ? { pathname: '/api/repros', status: 400 }
+                    : name === 'a refused hand over is said inside its dialog'
+                      ? { pathname: '/api/repros/t1234/owner', status: 404 }
+                      : null;
     activePage.on('pageerror', (error) => failures.push(`pageerror: ${error.message}`));
     activePage.on('console', (message) => {
       if (message.type() !== 'error') return;
@@ -5155,12 +6547,28 @@ describe('the frozen GUI against the in-process Fastify server', () => {
       // A finished job's stream is closed by the page, which Chromium reports as aborted.
       const expectedFinishedJobStream =
         (name === 'the seed job shows what it made and whether it was confirmed' ||
+          name.startsWith('seed ') ||
+          name === 'create sends scenario and history only with sample data enabled' ||
+          name === 'a running job can be stopped from its output' ||
           name === 'the build price follows the node count and the build carries its zone' ||
           name === 'a cluster delete says in its job what aws still holds' ||
+          name === 'the delete dialog will not arm until the name is typed' ||
           name === 'create shows its progress and ends with where to go' ||
           name === 'create on a cluster with a dns zone asks for an email, not a domain' ||
           name === 'creating a kubernetes workspace sends the axes' ||
-          name === 'the setup flow connects a cluster houston built and folds away the others') &&
+          name === 'presets are ticked from a list and sent with each ones settings' ||
+          name === 'the e2ee options send the policy and switches as its settings' ||
+          name === 'ldap asks for a one time code only with its own single sign on' ||
+          name === 'a pasted license is masked and sent' ||
+          name === 'the setup flow connects a cluster houston built and folds away the others' ||
+          name === 'the create dialog can stop its own job' ||
+          name === 'a stopped job is said to be stopped not failed' ||
+          name === 'a long scenario note wraps in the create result' ||
+          name === 'a finished restore re-reads the workspace without a page error' ||
+          name === 'the delete confirm says who can hand a workspace over and names no command' ||
+          name ===
+            'every backup on the machine is listed and a deleted workspaces restores as new' ||
+          name === 'an upgraded workspace rolls back behind a red confirm and the panel follows') &&
         request.method() === 'GET' &&
         new URL(request.url()).pathname.endsWith('/stream') &&
         new URL(request.url()).pathname.includes('/api/jobs/') &&
@@ -5188,6 +6596,17 @@ describe('the frozen GUI against the in-process Fastify server', () => {
         (name === 'a failed overview read says so and offers to try again' &&
           new URL(response.url()).pathname === '/api/clusters/overview' &&
           response.status() === 500) ||
+        (name === 'this machine says it could not read its clusters, not that it has none' &&
+          new URL(response.url()).pathname === '/api/clusters' &&
+          response.status() === 500) ||
+        (name === 'a refusal raised inside a dialog is read on top of it' &&
+          response.request().method() === 'POST' &&
+          new URL(response.url()).pathname === '/api/repros' &&
+          response.status() === 400) ||
+        (name === 'a refused hand over is said inside its dialog' &&
+          response.request().method() === 'POST' &&
+          new URL(response.url()).pathname === '/api/repros/t1234/owner' &&
+          response.status() === 404) ||
         (name === 'you can change your own password from the browser' &&
           response.request().method() === 'POST' &&
           new URL(response.url()).pathname === '/api/me/password' &&

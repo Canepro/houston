@@ -9,8 +9,9 @@ import {
 
 import type * as ModNS from '../../../src/lib/presets/registry';
 
-/** The dynamic preset names earlier releases register, sorted, as they reported them. */
+/** Every dynamic builder, sorted by catalogue name. */
 const RECORDED_BUILDERS = [
+  'e2ee',
   'email',
   'ldap',
   'livechat',
@@ -25,7 +26,7 @@ describe('the leaf registry', () => {
     jest.resetModules();
   });
 
-  it('holds exactly the builders earlier releases hold', () => {
+  it('holds every dynamic builder', () => {
     // Loading the LOADER is what registers them: the import points downward, from the
     // loader to the registry, never from the registry up to its owners.
     require('../../../src/lib/presets/index');
@@ -57,7 +58,7 @@ describe('the leaf registry', () => {
     }).toThrow("preset scenario 'x' is already registered");
   });
 
-  it('names the same seven dynamic presets earlier releases name', () => {
+  it('names the complete dynamic preset catalogue', () => {
     expect([...DYNAMIC_PRESETS].sort()).toEqual(RECORDED_BUILDERS);
   });
 
@@ -71,9 +72,9 @@ describe('the leaf registry', () => {
     expect(Object.keys(scenarios())).toContain('ldap');
   });
 
-  it('registers exactly one scenario, which is ldap', () => {
+  it('registers the LDAP and E2EE runtime scenarios', () => {
     require('../../../src/lib/presets/index');
-    expect(Object.keys(scenarios()).sort()).toEqual(['ldap']);
+    expect(Object.keys(scenarios()).sort()).toEqual(['e2ee', 'ldap']);
   });
 
   // `register` is exercised by every builder module at import; naming it here keeps the

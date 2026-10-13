@@ -145,6 +145,34 @@ describe('real handler dispatch through Commander', () => {
     expect(stdout).toContain('releases.rocket.chat has no 99.1.2');
   });
 
+  test('a CI build prints its image as it is pulled, never repo:tag:version', async () => {
+    // Seen live: `versions pr-42617` printed ghcr.io/rocketchat/rocket.chat:pr-42617:8.10.0.dev0.
+    jest.resetModules();
+    jest.doMock('../../src/core/rcapi', () => ({
+      ...jest.requireActual<object>('../../src/core/rcapi'),
+      releaseInfo: jest.fn(async () => ({
+        status: 200,
+        json: () => ({ version: '8.10.0-develop' }),
+      })),
+    }));
+    const app = require('../../src/cli/app') as typeof AppNS;
+    const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
+    let stdout = '';
+    const io: CliIo = {
+      writeOut: (value) => {
+        stdout += value;
+      },
+      writeErr: () => undefined,
+    };
+    const code = await app.runCli(['versions', 'pr-42617'], {
+      execute: handlers.createExecutor(io),
+      io,
+    });
+    jest.dontMock('../../src/core/rcapi');
+    expect(code).toBe(0);
+    expect(stdout).toContain('  image        : ghcr.io/rocketchat/rocket.chat:pr-42617\n');
+  });
+
   test('prune asks before an orphan namespace can reach the destructive service', async () => {
     jest.resetModules();
     const prune = jest.fn();
@@ -179,6 +207,44 @@ describe('real handler dispatch through Commander', () => {
     // a namespace whose owner cannot be read is said to need --force.
     expect(stdout).toContain('  - houston-orphan   (owner could not be read — needs --force)');
     expect(prune).not.toHaveBeenCalled();
+  });
+});
+
+describe('a start that fails', () => {
+  test("says the service's own reason, not one sentence for every failure", async () => {
+    // Every failed `start` printed "if it was `down`ed, use `houston up`" -- so a merely
+    // stopped workspace whose port somebody else held was sent to recreate itself, while
+    // the core had said which it was and why.
+    jest.resetModules();
+    await writeRecord('st', metadata({ name: 'st', project: 'houston-st' }));
+    const reason =
+      "`docker compose start` failed for 'st' — rocketchat: failed to bind host port " +
+      '127.0.0.1:3611/tcp: address already in use';
+    jest.doMock('../../src/core/lifecycle/state', () => ({
+      ...jest.requireActual('../../src/core/lifecycle/state'),
+      setState: async () => {
+        const errors = require('../../src/lib/errors') as {
+          DockerError: new (message: string) => Error;
+        };
+        throw new errors.DockerError(reason);
+      },
+    }));
+    const app = require('../../src/cli/app') as typeof AppNS;
+    const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
+    let stderr = '';
+    const io: CliIo = {
+      writeOut: () => undefined,
+      writeErr: (value) => {
+        stderr += value;
+      },
+    };
+    const code = await app.runCli(['start', '--name', 'st'], {
+      execute: handlers.createExecutor(io),
+      io,
+    });
+    jest.dontMock('../../src/core/lifecycle/state');
+    expect(code).toBe(3);
+    expect(stderr).toBe(`error: ${reason}\n`);
   });
 });
 
@@ -316,13 +382,13 @@ describe('an invalid version is refused before anything is asked', () => {
     expect(reaches()).toEqual([]);
   });
 
-  // What earlier releases' `versions` does with a refused version, measured against a 1.x
-  // install: ONE `error:` line on stderr, nothing on stdout, exit 1, and a
-  // durable record with code REPRO_ERROR and `trace: false`. An earlier version let resolve's
-  // InvalidVersionError escape to runCli's unhandled branch: a JavaScript stack, the
-  // message rewritten as "... this is unhandled ... that file is the problem", and
-  // `trace: true`, which is the event log's signal for a defect. Both refusals `resolve`
-  // raises are pinned: the unparsable string and the parsable one no rule matches.
+  // A refused version is ONE `error:` line on stderr, nothing on stdout, exit 2, and a durable
+  // record with code VALIDATION_FAILED and `trace: false` -- what `up --version` answers for
+  // the same input. It was exit 1 and REPRO_ERROR, so one typo had two exit codes (L7-07).
+  // An earlier version let resolve's InvalidVersionError escape to runCli's unhandled
+  // branch: a JavaScript stack, "... this is unhandled ...", and `trace: true`, which is the
+  // event log's signal for a defect. Every refusal `resolve` raises is pinned: the
+  // unparsable string, the parsable one no rule matches, and a CI build asked offline.
   test.each([
     [
       ['versions', 'notaversion', '--offline'],
@@ -333,7 +399,15 @@ describe('an invalid version is refused before anything is asked', () => {
       ['versions', '8.0rc1', '--offline'],
       'no rule matches RC 8.0rc1 and the live lookup was unavailable',
     ],
-  ])('versions %j: one error line, exit 1, REPRO_ERROR and no trace', async (argv, message) => {
+    [
+      ['versions', 'develop', '--offline'],
+      "'develop' is a CI build, and its version is read from " +
+        'https://raw.githubusercontent.com/RocketChat/Rocket.Chat/develop/apps/meteor/package.json, ' +
+        // `up`'s flags, said as such: `versions` has no --rc-image.
+        'which needs the network. `up` can name the image itself instead: ' +
+        '--rc-image ghcr.io/rocketchat/rocket.chat:develop --version <its x.y.z>.',
+    ],
+  ])('versions %j: one error line, exit 2, usage, and no trace', async (argv, message) => {
     // FRESH modules: an earlier test resets the registry, after which the top-level app's
     // `instanceof ReproError` would not recognise a class the lazily-required handler throws.
     jest.resetModules();
@@ -349,7 +423,7 @@ describe('an invalid version is refused before anything is asked', () => {
     };
     const code = await fresh.runCli(argv, { execute: fresher(io), io });
     expect({ code, stdout, stderr }).toEqual({
-      code: 1,
+      code: 2,
       stdout: '',
       stderr: `error: ${message}\n`,
     });
@@ -361,7 +435,11 @@ describe('an invalid version is refused before anything is asked', () => {
         (line) => JSON.parse(line) as { kind: string; code: string; msg: string; trace: boolean },
       )
       .filter((record) => record.kind === 'error');
-    expect(records.at(-1)).toMatchObject({ code: 'REPRO_ERROR', msg: message, trace: false });
+    expect(records.at(-1)).toMatchObject({
+      code: 'VALIDATION_FAILED',
+      msg: message,
+      trace: false,
+    });
     expect(reaches()).toEqual([]);
   });
 
@@ -729,7 +807,8 @@ describe('config-import, before it reads the dump', () => {
       if (run.code === 0) {
         ours.push(run.calls[0]?.[1]);
       } else {
-        expect([run.code, run.err]).toEqual([1, `error: no such file: ${text}\n`]);
+        // Exit 4, a named thing that is not there, as `restore <missing bundle>` (L7-07).
+        expect([run.code, run.err]).toEqual([4, `error: no such file: ${text}\n`]);
         expect(run.calls).toEqual([]);
         ours.push(null);
       }
@@ -775,5 +854,348 @@ describe('config-import, before it reads the dump', () => {
     expect(ours[2]).toMatch(
       /^\n\+- config import -+\+\n[^]*\n {2}set these by hand[^]*\n {2}created custom OAuth[^]*Setting_10 \.\.\.\n/u,
     );
+  });
+});
+
+describe('up --license', () => {
+  it('reads a FILE, and refuses one it cannot read by naming the path, before any create', async () => {
+    const missing = path.join(workspace('nowhere'), 'licence.txt');
+    const got = await real(['up', '--version', '8.5.1', '--license', missing]);
+    expect(got.code).toBe(2);
+    expect(got.stderr).toContain(`--license '${missing}' could not be read`);
+    expect(fs.existsSync(workspace('rc8-5-1'))).toBe(false);
+  });
+});
+
+describe('--preset, more than once', () => {
+  /** Fresh modules: an earlier case resets the registry, and a stale `ReproError` reads as a crash. */
+  async function fresh(argv: string[]): Promise<{ code: number; stderr: string }> {
+    jest.resetModules();
+    const app = require('../../src/cli/app') as typeof AppNS;
+    const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
+    let stderr = '';
+    const io: CliIo = { writeOut: () => undefined, writeErr: (value) => (stderr += value) };
+    return { code: await app.runCli(argv, { execute: handlers.createExecutor(io), io }), stderr };
+  }
+
+  it('composes, and refuses saml + oidc naming both, before any create', async () => {
+    const got = await fresh([
+      'up',
+      '--version',
+      '8.5.1',
+      '--offline',
+      '--preset',
+      'saml',
+      '--preset',
+      'oidc',
+    ]);
+    expect(got.code).toBe(2);
+    expect(got.stderr).toContain("'oidc' and 'saml'");
+  });
+
+  it('asks which preset a shared --set key belongs to', async () => {
+    const got = await fresh([
+      'up',
+      '--version',
+      '8.5.1',
+      '--offline',
+      '--preset',
+      'ldap',
+      '--preset',
+      'saml',
+      '--set',
+      'users=3',
+    ]);
+    expect(got.code).toBe(2);
+    expect(got.stderr).toContain('--set ldap.users=... or --set saml.users=...');
+  });
+});
+
+describe('config acme.challenge', () => {
+  test('is listed in the help and refuses a value the edge would ignore', async () => {
+    // Missing from the help's key list, and `config set acme.challenge bogus` was stored and
+    // silently did nothing: the edge reads only http, tlsalpn and dns.
+    const help = await real(['config', '--help']);
+    expect(help.stdout).toContain('acme.challenge');
+    const bogus = await real(['config', 'set', 'acme.challenge', 'bogus']);
+    // A bad value is a usage error, exit 2 (L7-07); it was a plain exit 1.
+    expect(bogus.code).toBe(2);
+    expect(bogus.stderr).toContain('acme.challenge takes http, tlsalpn or dns');
+    expect(loadConfig().acme_challenge).toBeUndefined();
+    expect((await real(['config', 'set', 'acme.challenge', 'http'])).code).toBe(0);
+  });
+});
+
+describe('up --seed --stats --json', () => {
+  test("carries the seed's CPU and memory in the envelope", async () => {
+    // The sampler ran, its report was printed in prose and dropped under --json: a script
+    // got durations and readback, and none of the numbers --stats was asked for.
+    jest.resetModules();
+    await writeRecord('sd1', metadata({ name: 'sd1', project: 'houston-sd1', rcVersion: '8.5.1' }));
+    const report = {
+      rocketchat: {
+        idle_cpu: 1,
+        peak_cpu: 90,
+        idle_mem: 3e8,
+        peak_mem: 6e8,
+        limit_mem: 0,
+        peak_cpu_t: 2,
+      },
+    };
+    jest.doMock('../../src/core/lifecycle/create-docker', () => ({
+      ...jest.requireActual('../../src/core/lifecycle/create-docker'),
+      createRepro: async () => ({ name: 'sd1' }),
+    }));
+    jest.doMock('../../src/core/lifecycle/admin', () => ({
+      ...jest.requireActual('../../src/core/lifecycle/admin'),
+      login: async () => ({ token: 't', userId: 'u' }),
+    }));
+    jest.doMock('../../src/seed/apply', () => ({
+      ...jest.requireActual('../../src/seed/apply'),
+      seed: async () => ({ users: 1, channels: 1 }),
+    }));
+    jest.doMock('../../src/core/lifecycle/seeding', () => ({
+      ...jest.requireActual('../../src/core/lifecycle/seeding'),
+      checkSeed: async () => ({ ok: true, faults: [] }),
+    }));
+    jest.doMock('../../src/perf/resources', () => ({
+      ...jest.requireActual('../../src/perf/resources'),
+      ResourceMonitor: class {
+        start() {
+          return this;
+        }
+        async stop() {
+          return report;
+        }
+      },
+    }));
+    const app = require('../../src/cli/app') as typeof AppNS;
+    const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
+    let stdout = '';
+    const write = jest.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      stdout += String(chunk);
+      return true;
+    });
+    const io: CliIo = { writeOut: (v) => void (stdout += v), writeErr: () => undefined };
+    try {
+      const code = await app.runCli(
+        ['up', '--version', '8.5.1', '--name', 'sd1', '--seed', '--stats', '--json'],
+        { execute: handlers.createExecutor(io), io },
+      );
+      expect(code).toBe(0);
+    } finally {
+      write.mockRestore();
+      for (const id of [
+        '../../src/core/lifecycle/create-docker',
+        '../../src/core/lifecycle/admin',
+        '../../src/seed/apply',
+        '../../src/core/lifecycle/seeding',
+        '../../src/perf/resources',
+      ])
+        jest.dontMock(id);
+    }
+    const envelope = JSON.parse(stdout.trim().split('\n').at(-1) ?? '{}') as {
+      data: { seed: { resources?: unknown } };
+    };
+    expect(envelope.data.seed.resources).toEqual(report);
+  });
+});
+
+describe('upgrade --dry-run to a CI build', () => {
+  test('shows the image as it is pulled, never repo:tag:version', async () => {
+    // The plan table's image line went through imageRef with the build's own tag; only
+    // `versions` had a test, so this line could regress to `...:develop:8.10.0` unseen.
+    jest.resetModules();
+    jest.doMock('../../src/core/upgrade', () => ({
+      ...jest.requireActual('../../src/core/upgrade'),
+      plan: async () => ({
+        name: 'w',
+        from_version: '8.5.1',
+        to_version: '8.10.0',
+        rc_image: 'ghcr.io/rocketchat/rocket.chat:develop',
+        from_mongo: '8.0',
+        to_mongo: '8.0',
+        mongo_blocked: '',
+        direction: 'upgrade',
+        allowed: true,
+        blocked_reason: '',
+        warnings: [],
+        oplog: false,
+        source: 'ci build',
+      }),
+    }));
+    const app = require('../../src/cli/app') as typeof AppNS;
+    const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
+    let stdout = '';
+    const io: CliIo = { writeOut: (v) => void (stdout += v), writeErr: () => undefined };
+    try {
+      await app.runCli(['upgrade', '--name', 'w', '--to', 'develop', '--dry-run'], {
+        execute: handlers.createExecutor(io),
+        io,
+      });
+    } finally {
+      jest.dontMock('../../src/core/upgrade');
+    }
+    expect(stdout).toContain('ghcr.io/rocketchat/rocket.chat:develop');
+    expect(stdout).not.toContain('develop:8.10.0');
+  });
+});
+
+describe('a usage mistake is exit 2 whichever command it is typed to (L7-07)', () => {
+  // `up --set users=abc` was 2 and `up --set users` 1; `config-import bad.json` 2 and `api -d
+  // '{not json'` 1; `cluster frob` 2 and `config frob x` 1. One kind of mistake, one code.
+  afterEach(() => {
+    jest.dontMock('../../src/core/lifecycle/admin');
+    jest.resetModules();
+  });
+
+  /** argv through fresh modules, so a `doMock` reaches the lazily-required handler. */
+  async function fresh(argv: string[]): Promise<{ code: number; err: string }> {
+    const app = require('../../src/cli/app') as typeof AppNS;
+    const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
+    let err = '';
+    const io: CliIo = { writeOut: () => undefined, writeErr: (v) => void (err += v) };
+    return { code: await app.runCli(argv, { execute: handlers.createExecutor(io), io }), err };
+  }
+
+  /** A workspace on record whose admin login answers, so a command reaches its own checks. */
+  async function signedIn(): Promise<void> {
+    jest.resetModules();
+    await writeRecord('sample', metadata({ name: 'sample', project: 'houston-sample' }));
+    jest.doMock('../../src/core/lifecycle/admin', () => ({
+      ...jest.requireActual<object>('../../src/core/lifecycle/admin'),
+      login: jest.fn(async () => ({ token: 'token', userId: 'admin' })),
+    }));
+  }
+
+  test.each([
+    [['up', '--version', '8.5.1', '--set', 'users'], '--set expects KEY=VALUE'],
+    [['config', 'frob', 'acme.staging'], "unknown action 'frob'"],
+    // The action first: this answered "unknown key 'x'" about a mistake that was `frob`.
+    [['config', 'frob', 'x'], "unknown action 'frob'"],
+    [['config', 'set', 'gui.create_policy', 'nobody'], 'gui.create_policy takes'],
+  ])('%j', async (argv, message) => {
+    jest.resetModules();
+    const ran = await fresh(argv);
+    expect(ran).toEqual({ code: 2, err: expect.stringContaining(message) as string });
+  });
+
+  test("api -d '{not json' is 2, as config-import of a file that is not JSON", async () => {
+    await signedIn();
+    const ran = await fresh(['api', 'POST', '/x', '--name', 'sample', '-d', '{not json']);
+    expect(ran).toEqual({
+      code: 2,
+      err: expect.stringContaining('--data is not valid JSON') as string,
+    });
+  });
+
+  test('seed --profile huge is 2, as the GUI seed refuses it', async () => {
+    await signedIn();
+    const ran = await fresh(['seed', '--name', 'sample', '--profile', 'huge']);
+    expect(ran).toEqual({
+      code: 2,
+      err: expect.stringContaining("unknown seed profile 'huge'") as string,
+    });
+  });
+});
+
+describe('Okta sign-in from the terminal', () => {
+  const home = (): string => process.env.HOUSTON_HOME ?? '';
+
+  /** `real`, on this registry: an earlier test resets modules, and `core/sso` loads lazily,
+   * so its refusals must be the same `ReproError` class the CLI it runs under checks for. */
+  async function fresh(argv: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+    jest.resetModules();
+    const app = require('../../src/cli/app') as typeof AppNS;
+    const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
+    let stdout = '';
+    let stderr = '';
+    const write = jest.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      stdout += String(chunk);
+      return true;
+    });
+    const io: CliIo = {
+      writeOut: (value) => {
+        stdout += value;
+      },
+      writeErr: (value) => {
+        stderr += value;
+      },
+    };
+    try {
+      return {
+        code: await app.runCli(argv, { execute: handlers.createExecutor(io), io }),
+        stdout,
+        stderr,
+      };
+    } finally {
+      write.mockRestore();
+    }
+  }
+  afterEach(() => {
+    for (const file of ['users', 'sso-identities.json', 'config.yaml']) {
+      fs.rmSync(path.join(home(), file), { force: true });
+    }
+  });
+
+  test('config refuses a bad value, and the issuer until it is the last thing missing', async () => {
+    const bad = await fresh(['config', 'set', 'sso.provision', 'admin']);
+    expect(bad.code).toBe(2);
+    expect(bad.stderr).toContain('sso.provision takes off, member, readonly -- never admin');
+    const early = await fresh(['config', 'set', 'sso.issuer', 'https://login.example.com']);
+    expect(early.code).toBe(2);
+    expect(early.stderr).toContain(
+      'set sso.client_id, sso.public_url, sso.email_domains first: setting sso.issuer is what turns Okta sign-in on',
+    );
+    for (const [key, value] of [
+      ['sso.client_id', '0oa-client'],
+      ['sso.public_url', 'https://houston.example.com/'],
+      ['sso.email_domains', 'Example.com'],
+      ['sso.issuer', 'https://login.example.com'],
+    ]) {
+      expect((await fresh(['config', 'set', key as string, value as string])).code).toBe(0);
+    }
+    expect(loadConfig()).toMatchObject({
+      'sso.public_url': 'https://houston.example.com',
+      'sso.email_domains': 'example.com',
+      'sso.issuer': 'https://login.example.com',
+    });
+    expect((await fresh(['config', '--help'])).stdout).toContain('sso.provision');
+  });
+
+  test('users link-sso approves an exact name, list shows the link, unlink-sso ends it', async () => {
+    expect((await fresh(['users', 'add', 'ana-lopez', 'admin'])).code).toBe(0);
+    const link = await fresh(['users', 'link-sso', 'Ana.Lopez']);
+    expect(link.code).toBe(0);
+    expect(link.stdout).toContain(
+      "✓ the Okta user whose username is 'ana-lopez' may now sign in as it.",
+    );
+    fs.writeFileSync(
+      path.join(home(), 'sso-identities.json'),
+      JSON.stringify({
+        version: 1,
+        bindings: [
+          {
+            issuer: 'https://login.example.com',
+            sub: '00u-ana',
+            name: 'ana-lopez',
+            email: 'ana.lopez@example.com',
+            display: 'ana.lopez',
+            status: 'active',
+            at: '2026-10-13T00:00:00.000Z',
+          },
+        ],
+        approvals: [],
+      }),
+    );
+    expect((await fresh(['users', 'list'])).stdout).toMatch(
+      /ana-lopez +\d{4}-\d\d-\d\d {2}\[admin\] {2}okta ana\.lopez@example\.com/u,
+    );
+    const unlink = await fresh(['users', 'unlink-sso', 'ana-lopez']);
+    expect(unlink.code).toBe(0);
+    expect(unlink.stdout).toContain('to allow it again: houston users link-sso ana-lopez');
+    expect((await fresh(['users', 'list'])).stdout).not.toContain('okta');
+    expect((await fresh(['users', 'unlink-sso', 'ana-lopez'])).code).toBe(4);
+    expect((await fresh(['users', 'link-sso', 'nobody'])).code).toBe(4);
   });
 });

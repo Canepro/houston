@@ -8,7 +8,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-import { NotReadyError } from '../../../src/lib/errors';
+import { PreflightError } from '../../../src/lib/errors';
 import type { KubectlResult } from '../../../src/seams/kubectl';
 import type * as PolicyNS from '../../testsetup-policy';
 import { kubernetesState } from '../../../src/core/lifecycle/inspect';
@@ -162,7 +162,10 @@ describe('the numbers', () => {
 
     answer(() => ({ returncode: 1, stderr: 'error: Metrics API not available' }));
     const refused = await podMetrics('k', { context: 'c' }).catch((error: unknown) => error);
-    expect(refused).toBeInstanceOf(NotReadyError);
+    // Exit 3, "install it": polling changes nothing. It was a NotReadyError, exit 5, which
+    // tells a script to poll again (L7-07). The GUI's chart stops on either: both are a 409.
+    expect(refused).toBeInstanceOf(PreflightError);
+    expect(refused).toMatchObject({ exitCode: 3, httpStatus: 409 });
     expect((refused as Error).message).toContain('metrics-server');
     // Say how to install it.
     expect((refused as Error).message).toContain('kubectl apply');

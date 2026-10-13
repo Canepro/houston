@@ -104,6 +104,21 @@ describe('the import plan', () => {
     expect(ours(buildPlan(file, { only: new Set(['LDAP', 'Accounts']) }))).toEqual(recorded);
   });
 
+  it('takes --only as id prefixes, and says when they match nothing', () => {
+    // The help says "id prefixes", and the filter compared the id's first `_` segment: the
+    // spelling it invites, `--only Message_`, imported 0 settings and exited 0.
+    const file = write(
+      'message-settings.json',
+      JSON.stringify([{ _id: 'Message_MaxAllowedSize', value: 4321, packageValue: 5000 }]),
+    );
+    expect(buildPlan(file, { only: new Set(['Message_']) }).apply.map(([id]) => id)).toEqual([
+      'Message_MaxAllowedSize',
+    ]);
+    expect(() => buildPlan(file, { only: new Set(['Mesage_']) })).toThrow(
+      '--only Mesage_ matched no setting this dump changes from its default',
+    );
+  });
+
   it('imports only what the customer CHANGED', () => {
     const file = write('s.json', JSON.stringify(DUMP));
     const ids = buildPlan(file).apply.map(([sid]) => sid);
@@ -372,8 +387,8 @@ describe('applying the plan', () => {
     }));
     jest.doMock('../../src/core/journal', () => ({
       RATE_LIMITER_OFF: 'rate_limiter_off',
-      record: (kind: string, ws: string) => {
-        notes.push(`+${kind}:${ws}`);
+      record: (kind: string, ws: string, detail: { purpose?: string } = {}) => {
+        notes.push(`+${kind}:${ws}${detail.purpose === undefined ? '' : `:${detail.purpose}`}`);
         return 'note-1';
       },
       clear: (id: string) => notes.push(`-${id}`),
@@ -405,7 +420,8 @@ describe('applying the plan', () => {
     ]);
     // The dump SETS the limiter, so the dump's value wins and the note is closed.
     expect(state.calls.at(-1)).toEqual(['API_Enable_Rate_Limiter', true]);
-    expect(state.notes).toEqual(['+rate_limiter_off:T-1', '-note-1']);
+    // Said as a settings import's, not a performance run's, when recovery describes it.
+    expect(state.notes).toEqual(['+rate_limiter_off:T-1:a settings import', '-note-1']);
     expect(result).toEqual({ applied: 3, failed: 0, skipped: 2, failures: [] });
   });
 

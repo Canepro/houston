@@ -12,6 +12,7 @@ import {
   dockerCapacity,
   dockerKernelVersion,
   dockerServerVersion,
+  engine,
   hostMemory,
 } from '../../../src/core/runner/host';
 
@@ -322,5 +323,101 @@ describe('the auth files under HOME', () => {
       fs.rmSync(box, { recursive: true, force: true });
       fs.rmSync(empty, { recursive: true, force: true });
     }
+  });
+});
+
+describe('which engine answers docker', () => {
+  /** `docker info` and `docker version`, as JSON, keyed by the subcommand. */
+  function engineAnswers(info: unknown, version: unknown = { Server: { Components: [] } }): void {
+    dockerMock.mockImplementation(async (args: readonly string[]) =>
+      answer({ stdout: JSON.stringify(args[0] === 'info' ? info : version) }),
+    );
+  }
+
+  it('is Docker, which runs healthchecks', async () => {
+    engineAnswers(
+      {
+        ServerVersion: '27.5.1',
+        CgroupDriver: 'cgroupfs',
+        SecurityOptions: [],
+        KernelVersion: '6.8.0',
+        NCPU: 4,
+        MemTotal: 8,
+      },
+      { Server: { Components: [{ Name: 'Engine', Version: '27.5.1' }] } },
+    );
+    expect(await engine()).toMatchObject({
+      kind: 'docker',
+      healthchecks: true,
+      shim: false,
+      rootless: false,
+    });
+  });
+
+  it('is Podman behind its socket, rootless on cgroupfs: no healthchecks (measured, 6.1.3)', async () => {
+    engineAnswers(
+      {
+        ServerVersion: '6.1.3',
+        CgroupDriver: 'cgroupfs',
+        SecurityOptions: ['name=seccomp,profile=default', 'name=rootless'],
+        KernelVersion: '6.1.167',
+        NCPU: 4,
+        MemTotal: 10_511_347_712,
+      },
+      { Server: { Components: [{ Name: 'Podman Engine', Version: '6.1.3' }, { Name: 'Engine' }] } },
+    );
+    expect(await engine()).toMatchObject({
+      kind: 'podman',
+      version: '6.1.3',
+      rootless: true,
+      cgroupDriver: 'cgroupfs',
+      healthchecks: false,
+      shim: false,
+    });
+  });
+
+  it('is Podman as the podman-docker shim, in its own JSON; systemd runs healthchecks', async () => {
+    engineAnswers({
+      host: {
+        cgroupManager: 'systemd',
+        security: { rootless: false },
+        kernel: '6.9.1',
+        cpus: 2,
+        memTotal: 4096,
+      },
+      version: { Version: '5.2.0' },
+    });
+    expect(await engine()).toMatchObject({
+      kind: 'podman',
+      version: '5.2.0',
+      shim: true,
+      healthchecks: true,
+      kernel: '6.9.1',
+    });
+  });
+
+  it("falls back to the shim's JSON where Docker's template fields do not exist", async () => {
+    const shimInfo = {
+      host: {
+        cgroupManager: 'cgroupfs',
+        security: { rootless: true },
+        kernel: '6.1.167',
+        cpus: 4,
+        memTotal: 1234,
+      },
+    };
+    firstLineMock.mockResolvedValue(null);
+    dockerMock.mockImplementation(async (args: readonly string[]) =>
+      args.includes('{{json .}}')
+        ? answer({ stdout: JSON.stringify(shimInfo) })
+        : answer({ exitCode: 125, stderr: "can't evaluate field NCPU" }),
+    );
+    expect(await dockerKernelVersion()).toBe('6.1.167');
+    expect(await dockerCapacity()).toEqual([4, 1234]);
+  });
+
+  it('is null when nothing answers', async () => {
+    dockerMock.mockResolvedValue(answer({ exitCode: 1 }));
+    expect(await engine()).toBeNull();
   });
 });

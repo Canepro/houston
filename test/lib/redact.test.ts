@@ -2,7 +2,13 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { STRIP_CHARS } from '../../src/lib/float-text';
-import { REDACTED, SECRET_KEY_HINTS, URL_USERINFO, redactEnv } from '../../src/lib/redact';
+import {
+  REDACTED,
+  SECRET_KEY_HINTS,
+  URL_USERINFO,
+  redactArgv,
+  redactEnv,
+} from '../../src/lib/redact';
 
 /** What earlier releases' redactor returned for the larger corpora below, recorded. */
 const RECORDED = JSON.parse(
@@ -98,12 +104,15 @@ describe('redactEnv', () => {
     expect(CASES.map(([k, v]) => redactEnv(k, v))).toEqual(recorded);
   });
 
-  it('declares the same hints and the same mask as earlier releases', () => {
+  it('declares the hints and the mask of earlier releases, plus the licence', () => {
+    // `rocketchat_license` is the one deliberate addition: earlier releases printed an
+    // Enterprise licence wherever they printed env, and `up --license` exists to keep it out.
     const recorded = {
       hints: ['password', 'pass', 'secret', 'token', '_key', 'apikey', 'credential'],
       redacted: '********',
     };
-    expect(recorded.hints).toEqual([...SECRET_KEY_HINTS]);
+    expect([...recorded.hints, 'rocketchat_license']).toEqual([...SECRET_KEY_HINTS]);
+    expect(redactEnv('ROCKETCHAT_LICENSE', 'RCV3_abc')).toBe(REDACTED);
     expect(recorded.redacted).toBe(REDACTED);
   });
 
@@ -138,6 +147,68 @@ describe('redactEnv', () => {
       '',
     ];
     expect(corpus.map((c) => c.replace(URL_USERINFO, '<M>'))).toEqual(recorded);
+  });
+});
+
+describe('redactArgv', () => {
+  it('masks the registration token in either spelling', () => {
+    expect(redactArgv(['up', '--reg-token', 'abc', '--reg-token=def'])).toEqual([
+      'up',
+      '--reg-token',
+      REDACTED,
+      `--reg-token=${REDACTED}`,
+    ]);
+  });
+
+  it('masks a KEY=VALUE value by its key, and leaves an ordinary one readable', () => {
+    expect(
+      redactArgv([
+        '--setting',
+        'LDAP_Authentication_Password=hunter2',
+        '--setting=Site_Name=Acme',
+        '--env',
+        'ADMIN_PASS=x',
+        '-e',
+        'PORT=3000',
+        '-eAPI_KEY=k',
+        '--set',
+        'bind_password=y',
+        '--set=users=5',
+      ]),
+    ).toEqual([
+      '--setting',
+      `LDAP_Authentication_Password=${REDACTED}`,
+      '--setting=Site_Name=Acme',
+      '--env',
+      `ADMIN_PASS=${REDACTED}`,
+      '-e',
+      'PORT=3000',
+      `-eAPI_KEY=${REDACTED}`,
+      '--set',
+      `bind_password=${REDACTED}`,
+      '--set=users=5',
+    ]);
+  });
+
+  it('masks URL userinfo in any token, whatever flag carries it', () => {
+    expect(
+      redactArgv([
+        '--env',
+        'MONGO_URL=mongodb://rc:s3@h/db',
+        '--root-url=https://u:p@h',
+        'a://u:p@h',
+      ]),
+    ).toEqual([
+      '--env',
+      `MONGO_URL=mongodb://rc:${REDACTED}@h/db`,
+      `--root-url=https://u:${REDACTED}@h`,
+      `a://u:${REDACTED}@h`,
+    ]);
+  });
+
+  it('leaves a command line with no credential byte-identical', () => {
+    const argv = ['up', '--version', '8.5.1', '--name', 'TICKET-1', '--preset', 'ldap', '--wait'];
+    expect(redactArgv(argv)).toEqual(argv);
   });
 });
 

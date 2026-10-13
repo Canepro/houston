@@ -14,13 +14,13 @@ function whenReady(name, invoke) {
 
 document.addEventListener("click", (event) => {
   const target = event.target.closest(
-    "#btn-jobs, #btn-clusters, #btn-scenarios, #btn-home, #btn-new",
+    "#btn-jobs, #btn-clusters, #btn-scenarios, #btn-backups, #btn-home, #btn-new",
   );
   if (!target) return;
   event.preventDefault();
   const names = {
     "btn-jobs": "openJobs", "btn-clusters": "openClusters",
-    "btn-scenarios": "openScenarios", "btn-home": "goHome",
+    "btn-scenarios": "openScenarios", "btn-backups": "openBackups", "btn-home": "goHome",
     "btn-new": "openCreate",
   };
   whenReady(names[target.id], (fn) => target.id === "btn-jobs" ? fn("running") : fn());

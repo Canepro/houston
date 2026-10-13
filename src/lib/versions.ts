@@ -35,9 +35,59 @@ import {
   lowest as lowestOf,
   parseVersion,
   SpecifierSet,
+  type Version,
 } from './version-spec';
 
 export const RELEASES_URL = 'https://releases.rocket.chat/{version}/info';
+
+/** Where Rocket.Chat's CI publishes every `develop` and pull-request build, anonymously. */
+export const BUILD_IMAGE = 'ghcr.io/rocketchat/rocket.chat';
+
+/**
+ * A CI build's tag: `develop` or `pr-<N>`, then optionally `-fips` or `-cov`, then optionally
+ * `-gha-run-<id>` for one run's build rather than the latest. Measured against the 100k+
+ * tags ghcr holds (2026-10-08); the per-architecture `-amd64`/`-arm64` tags are left out,
+ * because the plain tag is the multi-architecture index.
+ */
+export const BUILD_TAG_RE =
+  /^(develop|pr-([1-9][0-9]{0,6}))(-(?:fips|cov))?(-gha-run-[0-9]{1,15})?$/;
+
+/** `Resolved.source` for a CI build. */
+export const BUILD_SOURCE = 'ci build';
+
+/** Whether `version` names a CI build rather than a release. */
+export function isBuildTag(version: string): boolean {
+  return BUILD_TAG_RE.test(version);
+}
+
+/**
+ * The `package.json` holding a build's version, at the ref it was built from. The image
+ * carries no version label of its own (measured: only the build-run URL), so this is the
+ * one place the version can be read without pulling 1.6 GB.
+ */
+export function buildPackageUrl(tag: string): string {
+  const pr = BUILD_TAG_RE.exec(tag)?.[2];
+  const ref = pr === undefined ? 'develop' : `refs/pull/${pr}/head`;
+  return `https://raw.githubusercontent.com/RocketChat/Rocket.Chat/${ref}/apps/meteor/package.json`;
+}
+
+/**
+ * A build's `package.json` version as a version every reader of a record can parse and order:
+ * `8.10.0-develop` -> `8.10.0.dev0`, which sorts below 8.10.0, so moving to the release is
+ * an upgrade. Anything else is kept as written.
+ */
+export function baseVersion(packageVersion: string): string {
+  return packageVersion.replace(/-develop$/u, '.dev0');
+}
+
+/** The URL `resolve` will ask about `version`, or null when nothing should be asked. */
+export function lookupUrl(version: string): string | null {
+  if (isBuildTag(version)) return buildPackageUrl(version);
+  if (!isValidVersion(version)) return null;
+  // A `.devN` is a build's version, recorded or restored: no release endpoint knows it.
+  if (parseVersion(version).dev !== null) return null;
+  return RELEASES_URL.replace('{version}', version);
+}
 
 /**
  * The OCI image-tag grammar, and the reason it is enforced rather than assumed.
@@ -88,12 +138,21 @@ export interface Resolved {
   /** "releases.rocket.chat" | "map (fallback)" | "map (no such release)". */
   source: string;
   note: string;
+  /**
+   * Every MongoDB this Rocket.Chat runs on, as tags ("7.0", "8.0"), when it is known --
+   * `mongoTag` is only the one a NEW workspace gets. An upgrade keeps a MongoDB the target
+   * still runs on: 7.12 -> 7.13 was refused "(7 -> 8)" because the map pairs a fresh 7.13
+   * with 8.0, though 7.13 runs on 7.0.
+   */
+  supports?: readonly string[];
 }
 
 interface Rule {
   rc: string;
   mongo: string;
   note?: string;
+  /** The MongoDB tags this range also runs on; absent means the paired one alone. */
+  supports?: string[];
 }
 
 interface VersionMap {
@@ -273,6 +332,7 @@ export function resolveOnline(
     oplog: oplogFor(rcMajor),
     source: 'releases.rocket.chat',
     note: mongoNote(best, compatible, tag),
+    supports: compatible.map((entry) => seriesTag(entry)).filter((entry) => entry !== null),
   };
 }
 
@@ -308,8 +368,78 @@ export function isValidVersion(version: string): boolean {
   }
 }
 
+/** The shipped rule for a release, or undefined. */
+function ruleFor(data: VersionMap, version: Version): Rule | undefined {
+  return data.rules.find((rule) => new SpecifierSet(rule.rc).contains(version));
+}
+
+/**
+ * A CI build: its version from the branch's `package.json`, its MongoDB from the shipped rule
+ * for that version's RELEASE (a `.dev0` sorts below every rule's floor), its image the build.
+ */
+function resolveBuild(tag: string, options: ResolveOptions): Resolved {
+  const url = buildPackageUrl(tag);
+  // `up`'s own flags, said as such: `versions` and `upgrade` reach this too, and neither has
+  // `--rc-image`, so "Or name the image yourself: --rc-image ..." named a flag they refuse.
+  const hatch = `\`up\` can name the image itself instead: --rc-image ${BUILD_IMAGE}:${tag} --version <its x.y.z>.`;
+  if (options.offline === true || options.fetcher === undefined) {
+    throw new InvalidVersionError(
+      `${quotedText(tag)} is a CI build, and its version is read from ${url}, which needs ` +
+        `the network. ${hatch}`,
+    );
+  }
+  let resp: ReleaseInfoResponse | null;
+  try {
+    resp = options.fetcher(url);
+  } catch {
+    resp = null;
+  }
+  let packageVersion = '';
+  if (resp !== null && resp.status === 200) {
+    try {
+      const body = resp.json();
+      if (body !== null && typeof body === 'object') {
+        packageVersion = String((body as Record<string, unknown>).version ?? '');
+      }
+    } catch {
+      packageVersion = '';
+    }
+  }
+  const rcVersion = baseVersion(packageVersion);
+  let parsed: Version | null;
+  try {
+    parsed = parseVersion(rcVersion);
+  } catch {
+    parsed = null;
+  }
+  if (parsed === null) {
+    const said = resp === null ? 'did not answer' : `answered ${String(resp.status)}`;
+    throw new InvalidVersionError(
+      `no CI build ${quotedText(tag)}: ${url} ${resp?.status === 200 ? 'held no readable version' : said}. ${hatch}`,
+    );
+  }
+  const rule = ruleFor(loadMap(), parseVersion(parsed.release.join('.')));
+  if (rule === undefined) {
+    throw new InvalidVersionError(
+      `no rule matches RC ${rcVersion}, the version of CI build ${tag}`,
+    );
+  }
+  return {
+    rcVersion,
+    rcImage: `${BUILD_IMAGE}:${tag}`,
+    mongoTag: rule.mongo,
+    mongoFlavor: flavor(rule.mongo),
+    mongoShell: shell(rule.mongo),
+    oplog: oplogFor(parsed.release[0] ?? 0),
+    source: BUILD_SOURCE,
+    note: `CI build ${tag}: ${url} says ${packageVersion}`,
+    supports: rule.supports ?? [rule.mongo],
+  };
+}
+
 /** Resolve `version` to a full MongoDB pairing. */
 export function resolve(version: string, options: ResolveOptions = {}): Resolved {
+  if (isBuildTag(version)) return resolveBuild(version, options);
   let rcMajor: number;
   try {
     rcMajor = parseVersion(version).release[0] ?? 0;
@@ -333,7 +463,11 @@ export function resolve(version: string, options: ResolveOptions = {}): Resolved
     }
   }
 
-  const candidate = parseVersion(version);
+  // A build's `.devN` (a restored or re-upped CI build) pairs as its release does; every
+  // rule's floor excludes a dev release, so it would otherwise match nothing.
+  const parsed = parseVersion(version);
+  const candidate =
+    parsed.dev !== null && parsed.pre === null ? parseVersion(parsed.release.join('.')) : parsed;
   for (const rule of data.rules) {
     if (new SpecifierSet(rule.rc).contains(candidate)) {
       let note = rule.note ?? '';
@@ -358,6 +492,7 @@ export function resolve(version: string, options: ResolveOptions = {}): Resolved
         oplog: oplogFor(rcMajor),
         source: why.includes(NOT_A_RELEASE) ? 'map (no such release)' : 'map (fallback)',
         note,
+        supports: rule.supports ?? [rule.mongo],
       };
     }
   }

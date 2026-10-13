@@ -1,5 +1,5 @@
 /**
- * Shared Keycloak scaffolding for the IdP presets (`saml`, `oidc`).
+ * Shared Keycloak scaffolding for the IdP presets (`saml`, `oidc`, and ldap's `idp`).
  *
  * Both presets run the same Keycloak image with a generated realm import; only the realm's
  * client (SAML vs OIDC) and the published port differ. Bump the Keycloak version here, once.
@@ -13,6 +13,146 @@ export const REALM = 'houston';
 const DOMAIN = 'example.com';
 
 type Bag = Record<string, unknown>;
+
+/** Must equal Rocket.Chat's SAML issuer. */
+export const SAML_CLIENT = 'houston-saml-sp';
+export const OIDC_CLIENT_ID = 'rc-oidc';
+export const OIDC_CLIENT_SECRET = 'rc-oidc-secret';
+/** RC Custom OAuth name -> settings key + /_oauth/keycloak callback. */
+export const OIDC_PROVIDER = 'keycloak';
+
+function samlMapper(name: string, userProperty: string): Bag {
+  return {
+    name,
+    protocol: 'saml',
+    protocolMapper: 'saml-user-property-mapper',
+    consentRequired: false,
+    config: {
+      'user.attribute': userProperty,
+      'attribute.nameformat': 'Basic',
+      'attribute.name': name,
+    },
+  };
+}
+
+/** Rocket.Chat's SAML service provider, as a realm client. */
+export function samlClient(): Bag {
+  return {
+    clientId: SAML_CLIENT,
+    protocol: 'saml',
+    enabled: true,
+    // Trailing wildcard: matches whatever host port houston assigns to RC.
+    redirectUris: ['http://localhost*'],
+    frontchannelLogout: true,
+    attributes: {
+      'saml.assertion.signature': 'true', // sign the assertion
+      'saml.server.signature': 'true', // sign the response
+      'saml.client.signature': 'false', // RC doesn't sign its requests
+      'saml.force.post.binding': 'true',
+      'saml.authnstatement': 'true',
+      saml_name_id_format: 'email',
+      'saml.signature.algorithm': 'RSA_SHA256',
+    },
+    protocolMappers: [
+      samlMapper('email', 'email'),
+      samlMapper('username', 'username'),
+      samlMapper('firstName', 'firstName'),
+      samlMapper('lastName', 'lastName'),
+    ],
+  };
+}
+
+/** Rocket.Chat's SAML provider settings for the generated Keycloak realm. */
+export function samlSettings(samlEp: string): Record<string, string> {
+  return {
+    OVERWRITE_SETTING_SAML_Custom_Default: 'true',
+    OVERWRITE_SETTING_SAML_Custom_Default_provider: 'keycloak',
+    OVERWRITE_SETTING_SAML_Custom_Default_entry_point: samlEp,
+    // Keycloak serves SSO and SLO from the same endpoint. We logout locally by default,
+    // but set this correctly so the config is coherent and real SLO works if
+    // logout_behaviour is switched to "SAML".
+    OVERWRITE_SETTING_SAML_Custom_Default_idp_slo_redirect_url: samlEp,
+    OVERWRITE_SETTING_SAML_Custom_Default_logout_behaviour: 'Local',
+    OVERWRITE_SETTING_SAML_Custom_Default_issuer: SAML_CLIENT,
+    OVERWRITE_SETTING_SAML_Custom_Default_button_label_text: 'Keycloak SSO',
+    OVERWRITE_SETTING_SAML_Custom_Default_default_user_role: 'user',
+    OVERWRITE_SETTING_SAML_Custom_Default_name_overwrite: 'false',
+    OVERWRITE_SETTING_SAML_Custom_Default_mail_overwrite: 'false',
+    OVERWRITE_SETTING_SAML_Custom_Default_user_data_fieldmap:
+      '{"username":"username","email":"email","name":"firstName"}',
+    OVERWRITE_SETTING_Accounts_TwoFactorAuthentication_By_Email_Enabled: 'false',
+  };
+}
+
+/** Capitalised: first character upper, the rest lower. */
+export function capitalize(value: string): string {
+  return value.slice(0, 1).toUpperCase() + value.slice(1).toLowerCase();
+}
+
+/** Rocket.Chat's OIDC client, confidential, on Keycloak published at `port`. */
+export function oidcClient(idpHost: string, port: number): Bag {
+  return {
+    clientId: OIDC_CLIENT_ID,
+    protocol: 'openid-connect',
+    enabled: true,
+    publicClient: false, // confidential -> uses the client secret
+    secret: OIDC_CLIENT_SECRET, // pinned so RC's config matches on import
+    standardFlowEnabled: true, // authorization-code flow
+    directAccessGrantsEnabled: true,
+    // WHERE KEYCLOAK IS ALLOWED TO SEND THE BROWSER BACK -- which is Rocket.Chat's own
+    // callback, `<Site_Url>/_oauth/keycloak`, and therefore has nothing to do with the
+    // IdP's hostname. `http://localhost*` covers the ordinary case; the https entry
+    // covers a workspace created with `--domain`, whose Site_Url is
+    // `https://<name>.<domain>` and which Keycloak refused outright with "Invalid
+    // parameter: redirect_uri" because no pattern here matched it.
+    redirectUris: [
+      'http://localhost*',
+      `http://${idpHost}:${String(port)}/*`,
+      'http://*',
+      'https://*',
+    ],
+    webOrigins: ['*'],
+    // Keycloak's built-in openid/profile/email scopes already emit preferred_username /
+    // email / name / sub -- no custom mappers needed.
+  };
+}
+
+/** The Accounts_OAuth_Custom block that points Rocket.Chat at this Keycloak realm. */
+export function oauthSettings(
+  realmBase: string,
+  setting: string,
+): [Record<string, string>, Record<string, unknown>] {
+  // A custom OAuth provider's settings do not exist until it is created via the API, so
+  // these cannot be OVERWRITE_SETTING env -- houston creates the provider and sets these
+  // on `ready` (post_ready). Values are full setting ids.
+  const settings: Record<string, unknown> = {
+    [setting]: true,
+    [`${setting}-url`]: realmBase,
+    [`${setting}-authorize_path`]: '/protocol/openid-connect/auth',
+    [`${setting}-token_path`]: '/protocol/openid-connect/token',
+    [`${setting}-identity_path`]: '/protocol/openid-connect/userinfo',
+    [`${setting}-token_sent_via`]: 'header',
+    [`${setting}-scope`]: 'openid profile email',
+    [`${setting}-id`]: OIDC_CLIENT_ID,
+    [`${setting}-secret`]: OIDC_CLIENT_SECRET,
+    [`${setting}-login_style`]: 'popup',
+    [`${setting}-username_field`]: 'preferred_username',
+    [`${setting}-email_field`]: 'email',
+    [`${setting}-name_field`]: 'name',
+    [`${setting}-merge_users`]: true,
+    [`${setting}-show_button`]: true,
+    [`${setting}-button_label_text`]: 'Keycloak (OIDC)',
+    [`${setting}-button_color`]: '#1d74f5',
+    [`${setting}-button_label_color`]: '#FFFFFF',
+  };
+
+  const env: Record<string, string> = {
+    // This one IS a real existing setting, so OVERWRITE works at boot. No SMTP in the
+    // repro -> don't block first login on email-2FA.
+    OVERWRITE_SETTING_Accounts_TwoFactorAuthentication_By_Email_Enabled: 'false',
+  };
+  return [env, settings];
+}
 
 /** The Keycloak Deployment: one replica, dev mode, with its realm import mounted. */
 function keycloakDeployment(
@@ -191,22 +331,30 @@ export function service(realmMount: string, hostPort: number, httpPort?: number)
   };
 }
 
-/** Test users user1..userN, password = username, verified emails. */
-export function users(count: number): Bag[] {
+/**
+ * Test users user1..userN, password = username, verified emails. `prefix` names them apart
+ * from another store's users (`sso-user1`, `sso-user1@example.com`) when a directory is
+ * composed in: SAML merges into an existing account by EMAIL, so the address must differ too.
+ */
+export function users(count: number, prefix = ''): Bag[] {
   const out: Bag[] = [];
   for (let i = 1; i <= count; i += 1) {
+    const name = `${prefix}user${String(i)}`;
     out.push({
-      username: `user${String(i)}`,
+      username: name,
       enabled: true,
       emailVerified: true,
-      email: `user${String(i)}@${DOMAIN}`,
+      email: `${name}@${DOMAIN}`,
       firstName: 'User',
       lastName: String(i),
-      credentials: [{ type: 'password', value: `user${String(i)}`, temporary: false }],
+      credentials: [{ type: 'password', value: name, temporary: false }],
     });
   }
   return out;
 }
+
+/** The internal param the composer passes saml and oidc; documented in no `paramsHelp`. */
+export const USER_PREFIX_PARAM = 'sso_user_prefix';
 
 /**
  * A minimal realm export: just our client(s) + test users.
@@ -216,14 +364,16 @@ export function users(count: number): Bag[] {
  * `JSON.stringify(value, null, 2)` matches byte for byte on ASCII -- and everything in here
  * is ASCII by construction.
  */
-export function realmJson(clients: Bag[], userCount: number): string {
+export function realmJson(clients: Bag[], userCount: number, prefix = '', extra: Bag = {}): string {
   return JSON.stringify(
     {
       realm: REALM,
       enabled: true,
       sslRequired: 'none', // allow HTTP (reached via docker port-forward)
       clients,
-      users: users(userCount),
+      users: users(userCount, prefix),
+      // A directory's federation and required actions (ldap's `idp`); nothing otherwise.
+      ...extra,
     },
     null,
     2,

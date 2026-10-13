@@ -4,10 +4,13 @@
  * Tier 0, and the busiest leaf in the package. Callers reach it as `naming.resolveName(...)`
  * rather than by importing the function, so a patch on this module is seen by all of them.
  */
+import { createHash } from 'node:crypto';
+
+import { namesOf } from '../../lib/presets/composite';
 import * as config from '../../lib/config';
 import { NotFoundError, ValidationError } from '../../lib/errors';
 import { quotedText } from '../../lib/format';
-import { type Emit, warn } from '../../lib/events';
+import { type Emit, event, warn } from '../../lib/events';
 import * as paths from '../runner/paths';
 
 import type { CreateReq } from './types';
@@ -29,6 +32,14 @@ const VALID_NAME_RE = /^[a-z0-9][a-z0-9-]*\n?$/u;
  * 500 from the web API and a raw stack trace from the CLI. 64 leaves ample room.
  */
 export const NAME_MAX = 64;
+
+/**
+ * The longest name `deriveName` makes for a composed set. Over HTTPS the edge resolves
+ * `houston-<name>-phpldapadmin-1`, the longest container it routes to, and a DNS label
+ * holds 63 characters; 40 also fits `<name>.houston.localhost` in a certificate's
+ * 64-character common name and `houston-<name>` in a Kubernetes namespace.
+ */
+export const DERIVED_MAX = 40;
 
 export function requireValidName(name: string): void {
   if (!VALID_NAME_RE.test(name)) {
@@ -58,6 +69,35 @@ export function sanitize(name: string): string {
  * injection, but two different tickets could silently land on ONE workspace and share
  * its data, which is the failure worth naming.
  */
+/**
+ * Say the name the create settled on, when it is not what was typed: derived from the
+ * version and presets, or prefixed with the person's account. The GUI titles its progress
+ * with it (`code`), which until now guessed `rc-<version>` and named nothing on the box.
+ */
+export function announceName(req: CreateReq, name: string, emit: Emit): void {
+  if (name === req.name) return;
+  emit(
+    event(`workspace name: ${name}`, {
+      phase: 'create',
+      code: 'workspace-name',
+      data: { workspace: name },
+    }),
+  );
+}
+
+/**
+ * How long a name the person may TYPE when the workspace name may be at most `max`: with
+ * accounts houston puts `<actor>-` in front of what they type, and that counts too.
+ */
+export function typedRoom(req: CreateReq, name: string, max: number): string {
+  const prefixed = req.actor !== '' && name.startsWith(`${req.actor}-`);
+  const room = max - (prefixed ? req.actor.length + 1 : 0);
+  return (
+    `at most ${String(room)} characters` +
+    (prefixed ? `, as houston puts '${req.actor}-' in front of it` : '')
+  );
+}
+
 export function warnNameCoerced(req: CreateReq, emit: Emit): void {
   if (!req.name) return;
   const became = sanitize(req.name);
@@ -82,9 +122,27 @@ export function warnNameCoerced(req: CreateReq, emit: Emit): void {
  */
 export function deriveName(version: string, preset: string, actor = ''): string {
   let base = `rc${version}`;
-  if (preset && preset !== 'default') base += `-${preset}`;
+  const names = preset && preset !== 'default' ? namesOf(preset) : [];
+  // A composed set joins with `--`, so `email+ldap` cannot derive the same name as a user
+  // preset called `email-ldap` (workspace names hold only [a-z0-9-]).
+  if (names.length > 0) base += `-${names.join('--')}`;
   if (actor) base = `${actor}-${base}`;
-  return sanitize(base);
+  const name = sanitize(base);
+  if (names.length < 2 || name.length <= DERIVED_MAX) return name;
+  // A composed set can name more than fits: five presets from the GUI made a 51-character
+  // name whose HTTPS certificate openssl refused, and whose longer containers the edge
+  // could not resolve. Keep whole preset names while they fit,
+  // then a hash of the full name, so the same set derives the same name every time (a
+  // re-up finds it) and two sets never derive the same one.
+  const tag = createHash('sha256').update(name).digest('hex').slice(0, 6);
+  const room = DERIVED_MAX - tag.length - 1;
+  const [first = '', ...rest] = name.split('--');
+  let kept = first;
+  for (const part of rest) {
+    if (`${kept}--${part}`.length > room) break;
+    kept += `--${part}`;
+  }
+  return `${kept.slice(0, room).replace(/-+$/u, '')}-${tag}`;
 }
 
 /**
@@ -164,8 +222,10 @@ export async function resolveName(name: string | null | undefined, actor = ''): 
 /**
  * The workspace name for this request. Used twice -- by the lock wrapper and by the body
  * -- so they cannot drift apart and lock a different repro than the one being written.
+ * A typed name keeps no prefix when it is an existing workspace the actor may act on
+ * (`exactName`), as every other command resolves it.
  */
 export function deriveFor(req: CreateReq): string {
-  if (req.name) return sanitize(ownerPrefix(sanitize(req.name), req.actor));
-  return deriveName(req.version, req.preset, req.actor);
+  if (!req.name) return deriveName(req.version, req.preset, req.actor);
+  return sanitize(req.exactName ? req.name : ownerPrefix(sanitize(req.name), req.actor));
 }

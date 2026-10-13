@@ -20,7 +20,7 @@
  *   registration   show the pre-chat registration form first (default false).
  *   department     create an Omnichannel department (default true).
  */
-import { intParam, k8sManifests, presetPort, presetPorts, truthyParam } from './common';
+import { EMAIL_2FA, intParam, k8sManifests, presetPort, presetPorts, truthyParam } from './common';
 import { type Params, register } from './registry';
 import { emptyPreset, type Preset } from './types';
 
@@ -199,6 +199,7 @@ export function build(params: Params): Preset {
       `separate demo website (${widgetUrl}). Reproduce widget-load / CORS ` +
       '/ routing / agent-availability tickets. Admin is the agent.',
     env: livechatSettings(registration),
+    softEnv: [EMAIL_2FA],
     services: widgetService(),
     dependsOn: ['widget-site'],
     requiresLicense: false,

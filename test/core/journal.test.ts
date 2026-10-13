@@ -272,7 +272,9 @@ describe('describe()', () => {
               ? { bundle: 'b.tar.gz' }
               : k === CREATE_UNFINISHED
                 ? { seed: 'small' }
-                : {},
+                : k === 'e2ee_default_off'
+                  ? { setting: 'E2E_Enabled_Default_PrivateRooms' }
+                  : {},
     }));
     expect(RECORDED_DESCRIPTIONS).toHaveLength(KINDS.length);
     expect(cases.map((c) => describeEntry(c as Entry))).toEqual(RECORDED_DESCRIPTIONS);
@@ -330,6 +332,14 @@ describe('recover()', () => {
 });
 
 describe('pendingSeed', () => {
+  it('does not turn an abandoned unseeded CLI create into a seed request', () => {
+    const id = record(CREATE_UNFINISHED, 'TICKET-1', { seed: false, seed_here: true });
+    const file = path.join(journalDir(), `${id}.json`);
+    const data = JSON.parse(fs.readFileSync(file, 'utf8')) as Entry;
+    fs.writeFileSync(file, JSON.stringify({ ...data, pid: 2 ** 22, started: 'gone' }));
+    expect(pendingSeed('TICKET-1')).toEqual({});
+  });
+
   it('reads the seed off the NOTE, because that is the only place it survives', () => {
     // `meta.extra.seed` is written only after a seed has already succeeded, so metadata
     // can say "seeded" or say nothing, and "nothing" covers both "none was asked for" and
@@ -410,6 +420,7 @@ describe('compatibility with the notes earlier releases wrote', () => {
       'email_2fa_off',
       'database_dropped',
       'cluster_unfinished',
+      'e2ee_default_off',
     ]);
     expect([...ADVISORY]).toEqual(['create_unfinished', 'database_dropped', 'cluster_unfinished']);
   });

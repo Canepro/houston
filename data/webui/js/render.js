@@ -26,8 +26,9 @@ function triageOf(d) {
   // The STATE comes first and comes alone. The health of a workspace that is not
   // running is not a second problem, it is the same problem said twice.
   if (d.state === "?") {
-    push("Docker is not answering",
-         "Nothing here can report its state, start or stop until it is back.",
+    push(ctx.SERVER_ONLINE ? "Docker is not answering" : "Server unavailable",
+         ctx.SERVER_ONLINE ? "Nothing here can report its state, start or stop until it is back."
+           : "The server is unavailable. Last known workspace data is shown until it returns.",
          [["Check this box", ctx.openDoctor, true]]);
     return out;
   }
@@ -150,7 +151,8 @@ function triageBlock(d) {
 }
 
 function renderDetail() {
-  const d = ctx.dstate.detail; if (!d) return;
+  const saved = ctx.dstate.detail; if (!saved) return;
+  const d = ctx.displayRepro(saved);
   if (ctx.dstate.statsTimer) { clearInterval(ctx.dstate.statsTimer); ctx.dstate.statsTimer = null; }
   const panel = ctx.$("#detail"); panel.innerHTML = "";
   const busyLabel = ctx.pendingOn(d.name);
@@ -166,8 +168,18 @@ function renderDetail() {
       : ctx.el("span", { class: "pill " + ctx.stateClass(d.state) }, d.state),
     ctx.el("button", { class: "close", onclick: ctx.closeDetail }, "×"));
   const sub = ctx.el("div", { class: "d-sub" },
-    ctx.el("b", {}, d.rc_version || "?"), ctx.el("i", {}, "/"), `mongo ${d.mongo_tag || "?"}`);
-  if (d.preset) sub.append(ctx.el("i", {}, "·"), d.preset);
+    ctx.el("b", {}, d.rc_version || "?"));
+  // Facts about the thing, not states: no dot, no colour.
+  if (d.ci_build) sub.append(ctx.el("span", { class: "pill plain", title: `ghcr.io/rocketchat/rocket.chat:${d.ci_build}` }, "CI build"));
+  sub.append(ctx.el("i", {}, "/"), `mongo ${d.mongo_tag || "?"}`);
+  if (d.preset) {
+    // Several presets as chips, one as before.
+    const names = Array.isArray(d.presets) && d.presets.length > 1 ? d.presets : null;
+    sub.append(ctx.el("i", {}, "·"), names
+      ? ctx.el("span", { class: "pchips" }, ...names.flatMap((n, i) => (i ? ["+", ctx.el("span", { class: "pchip" }, n)] : [ctx.el("span", { class: "pchip" }, n)])))
+      : d.preset);
+  }
+  if (d.licensed) sub.append(ctx.el("span", { class: "pill plain" }, "Licensed"));
   sub.append(ctx.el("i", {}, "·"), ":" + d.host_port);
   if (d.created_by) {
     sub.append(ctx.el("i", {}, "·"), d.created_by + (d.created_by === ctx.ME ? " (you)" : ""));
@@ -189,13 +201,18 @@ function renderDetail() {
     tabs.append(ctx.el("button", { class: "tab" + (ctx.dstate.tab === key ? " active" : ""), onclick: () => ctx.switchTab(key) },
       t.charAt(0).toUpperCase() + t.slice(1)));
   }
-  if (!ctx.canWrite() && (ctx.dstate.tab === "logs" || ctx.dstate.tab === "env")) ctx.dstate.tab = "overview";
+  if (!ctx.canWrite() && (ctx.dstate.tab === "logs" || ctx.dstate.tab === "env")) {
+    ctx.dstate.tab = "overview";
+    ctx.saveLocation({ replace: true });
+  }
   const actions = ctx.el("div", { class: "d-actions" });
   if (d.state !== "?") {
     actions.append(ctx.el("a", { href: d.root_url, target: "_blank", style: "text-decoration:none" },
       ctx.el("button", { class: "btn primary" }, "↗ Open RC")));
   }
-  if (!ctx.canWrite()) {
+  if (!ctx.SERVER_ONLINE) {
+    actions.append(ctx.el("span", { class: "inline-note" }, "server unavailable — changes disabled"));
+  } else if (!ctx.canWrite()) {
     actions.append(ctx.el("span", { class: "inline-note", title: ctx.READONLY_WHY },
       "readonly — you can look, but not change anything here"));
   } else if (d.state === "running") {
@@ -232,16 +249,22 @@ function renderDetail() {
   if (tri) panel.append(tri);
   panel.append(tabs, actions, ctx.el("div", { class: "d-body", id: "d-body" }));
   renderTab();
+  ctx.paintAvailability();
 }
 
-function closeLogs() { if (ctx.dstate.logsWS) { try { ctx.dstate.logsWS.close(); } catch (_) {} ctx.dstate.logsWS = null; } }
+function closeLogs() {
+  ctx.dstate.logsReconnect = null;
+  if (ctx.dstate.logsRetryTimer) { clearTimeout(ctx.dstate.logsRetryTimer); ctx.dstate.logsRetryTimer = null; }
+  if (ctx.dstate.logsWS) { try { ctx.dstate.logsWS.close(); } catch (_) {} ctx.dstate.logsWS = null; }
+  ctx.releaseLogsView();
+}
 function copy(text) { navigator.clipboard.writeText(text); ctx.toast("copied", "ok"); }
 // A urlbox row whose value is plain text rather than a link, with a copy button.
 const box2 = (label, shown, toCopy) => ctx.el("div", { class: "urlbox" },
   ctx.el("div", {}, ctx.el("div", { class: "k" }, label), ctx.el("div", { class: "flat" }, shown)),
   ctx.el("button", { class: "copy", onclick: () => copy(toCopy) }, "copy"));
 function renderTab() {
-  const d = ctx.dstate.detail, body = ctx.$("#d-body"); if (!body) return;
+  const d = ctx.displayRepro(ctx.dstate.detail), body = ctx.$("#d-body"); if (!body) return;
   closeLogs();
   body.innerHTML = "";
   if (ctx.dstate.tab === "overview") {
@@ -279,7 +302,7 @@ function renderTab() {
       kv("RC Version", d.rc_version), kv("MongoDB", d.mongo_tag),
       kv("Runs on", runsOn),
       kv("Uptime", d.uptime || "—", d.uptime ? "green" : ""),
-      kv("Scenario", d.preset || "default"),
+      kv("Scenario", (Array.isArray(d.presets) && d.presets.length > 1 ? d.presets.join(" + ") : d.preset) || "default"),
       // healthClass() knows unhealthy/starting/healthy; the kv only understood the
       // literal string "healthy", so a container reporting "running" rendered plain.
       kv("Health", d.health || d.state || "—", ctx.HEALTH_TONE[ctx.healthClass(d)] || ""));
@@ -374,7 +397,7 @@ function renderTab() {
       // and on that runtime it was always empty. It carries pods now, so an empty
       // list here means what it says again — but only ever about the right runtime.
       body.append(ctx.el("p", { class: "empty" },
-        d.state === "?" ? "Docker is unavailable."
+        d.state === "?" ? (ctx.SERVER_ONLINE ? "Docker is unavailable." : "Server unavailable — pod and container state is unknown.")
           : kube ? `No pods in houston-${d.name} — this workspace is ${d.state}.`
           : "No containers — this repro is down."));
     }

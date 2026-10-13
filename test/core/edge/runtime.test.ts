@@ -9,14 +9,17 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
+import * as YAML from 'yaml';
+
 import { compose as composeSeam, docker as dockerSeam } from '../../../src/seams/docker-cli';
 import { metadata, write as writeRecord } from '../../../src/core/runner/record';
 import { ACME_FILE, acmeDir } from '../../../src/core/tls';
 
+import { down } from '../../../src/core/edge/engine';
 import * as paths from '../../../src/core/edge/paths';
 import { registered } from '../../../src/core/edge/routes';
-import { deleteHost, ensureRunning } from '../../../src/core/edge/runtime';
-import { installed, write } from '../../../src/core/edge/spec';
+import { deleteHost, ensureRunning, up } from '../../../src/core/edge/runtime';
+import { current, installed, write } from '../../../src/core/edge/spec';
 import { edge } from '../../../src/core/edge/types';
 
 jest.mock('../../../src/seams/docker-cli', () => ({
@@ -81,6 +84,95 @@ describe('the lazy start', () => {
     await portHolding('good', 't1.example.com', 'acme');
     expect((await ensureRunning()).ok).toBe(true);
     expect(registered()).toEqual(['good']);
+  });
+});
+
+/** Read the generation compose actually sees, rather than an expected argument list. */
+function persistedCommand(): string[] {
+  const doc = YAML.parse(fs.readFileSync(paths.composePath(), 'utf8')) as {
+    services: { edge: { command: string[] } };
+  };
+  return doc.services.edge.command;
+}
+
+describe('concurrent shared edge operations', () => {
+  it('serialises cold local and domain starts without losing the ACME resolver', async () => {
+    let active = 0;
+    let peak = 0;
+    mocked(composeSeam).mockImplementation(async (args: string[]) => {
+      if (!args.includes('up')) return await answerEmpty(args);
+      active += 1;
+      peak = Math.max(peak, active);
+      // A real compose create takes time. Two overlapping creates own the same fixed
+      // container name, independently of the different workspace locks their callers hold.
+      const conflict = active > 1;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      active -= 1;
+      return {
+        argv: args,
+        exitCode: conflict ? 1 : 0,
+        signal: null,
+        stdout: '',
+        stderr: conflict ? 'container name houston_edge-edge-1 is already in use' : '',
+      };
+    });
+    const starts = await Promise.all([
+      ensureRunning(),
+      ensureRunning({ acmeEmail: 'ops@example.test', acmeStaging: true }),
+    ]);
+    expect(starts.map((result) => result.ok)).toEqual([true, true]);
+    expect(peak).toBe(1);
+    expect(current()?.acmeEmail).toBe('ops@example.test');
+    expect(persistedCommand()).toContain('--certificatesresolvers.le.acme.email=ops@example.test');
+  });
+
+  it('keeps one spec generation throughout compose while another writer waits', async () => {
+    await write(edge({ acmeEmail: 'first@example.test' }));
+    let entered!: () => void;
+    const creating = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let before: string[] = [];
+    let after: string[] = [];
+    mocked(composeSeam).mockImplementation(async (args: string[]) => {
+      if (args.includes('up')) {
+        before = persistedCommand();
+        entered();
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        after = persistedCommand();
+      }
+      return await answerEmpty(args);
+    });
+    const start = up({ pull: false });
+    await creating;
+    const changed = write(edge({ acmeEmail: 'second@example.test' }));
+    await Promise.all([start, changed]);
+    expect(after).toEqual(before);
+    expect(current()?.acmeEmail).toBe('second@example.test');
+  });
+
+  it('finishes a compose start before a concurrent edge stop enters compose', async () => {
+    await write(edge());
+    let entered!: () => void;
+    const creating = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const events: string[] = [];
+    mocked(composeSeam).mockImplementation(async (args: string[]) => {
+      if (args.includes('up')) {
+        events.push('start-in');
+        entered();
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        events.push('start-out');
+      } else if (args.includes('down')) {
+        events.push('stop');
+      }
+      return await answerEmpty(args);
+    });
+    const start = up({ pull: false });
+    await creating;
+    await Promise.all([start, down()]);
+    expect(events).toEqual(['start-in', 'start-out', 'stop']);
   });
 });
 

@@ -228,6 +228,7 @@ describe('the record a teardown leaves', () => {
   it('is an audit line naming the actor, the verb and the workspace', async () => {
     jest.doMock('../../src/core/runner/engine', () => ({
       ...jest.requireActual<object>('../../src/core/runner/engine'),
+      stop: async () => 0,
       down: async () => 0,
     }));
     await workspace('alice-rc8-5-1', 'alice');
@@ -431,7 +432,7 @@ describe('users refusals, in the order earlier releases make them', () => {
     ['remove looks the empty normalised name up', ['users', 'remove', '!!!'], null],
     ['role looks it up once the role is valid', ['users', 'role', '!!!', 'admin'], null],
     ['role refuses the role before the lookup', ['users', 'role', '!!!', 'frob'], null],
-    ['an unknown action with no name asks for the name', ['users', 'ls'], null],
+    ['an unknown action with no name is refused as unknown', ['users', 'ls'], null],
     ['the same, for an action with a quote in it', ['users', "it's"], null],
     ['an unknown action with a name is refused as unknown', ['users', 'rm', 'bob'], null],
     ['add refuses the name before any prompt', ['users', 'add', LONG, '--ask-password'], TYPED],

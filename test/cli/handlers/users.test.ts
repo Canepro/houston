@@ -218,3 +218,24 @@ describe('users, line for line against earlier releases', () => {
     },
   );
 });
+
+describe('a call that is wrong is a usage error, exit 2 (L7-07)', () => {
+  // Each exited 1, a refusal of no more specific kind, where `cluster frob` exits 2.
+  it.each([
+    // Unknown before it is nameless: it asked for a name, and the name then got "unknown".
+    [
+      ['users', 'frob'],
+      "unknown action 'frob' (want: list | add | passwd | remove | role | link-sso | unlink-sso)",
+    ],
+    [['users', 'frob', 'alice'], "unknown action 'frob'"],
+    [['users', 'role', 'alice'], '`users role alice` needs a role'],
+    [['users', 'passwd', 'alice', 'admin'], '`users passwd` takes no role'],
+  ])('%j', async (argv, message) => {
+    fs.writeFileSync(path.join(home, 'users'), TEAM, { mode: 0o600 });
+    const ran = await typescript(argv, null);
+    expect({ code: ran.code, stderr: ran.stderr }).toEqual({
+      code: 2,
+      stderr: expect.stringContaining(message) as string,
+    });
+  });
+});

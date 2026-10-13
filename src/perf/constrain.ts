@@ -167,6 +167,48 @@ async function update(cid: string, cpus: number | null, mem: string | null): Pro
   if (r.exitCode !== 0) throw new Error(`docker update failed: ${String(r.stderr).trim()}`);
 }
 
+/** The used half of `docker stats`' `1.417GiB / 9.79GiB`, in bytes; 0 when unread. */
+function usedBytes(text: string): number {
+  const m = /^\s*(\d+(?:\.\d+)?)\s*([kmgt]?)(i?)b/iu.exec(text);
+  if (m === null) return 0;
+  const power = ['', 'k', 'm', 'g', 't'].indexOf((m[2] ?? '').toLowerCase());
+  return Number(m[1]) * (m[3] === '' ? 1000 : 1024) ** Math.max(power, 0);
+}
+
+/** Docker's own reading of a `--memory` value: a bare number is bytes, k/m/g are binary. */
+function capBytes(mem: string): number {
+  const m = /^\s*(\d+(?:\.\d+)?)\s*([bkmg]?)b?\s*$/iu.exec(mem);
+  if (m === null) return Number.NaN;
+  const unit = { '': 1, b: 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3 }[(m[2] ?? '').toLowerCase()];
+  return Number(m[1]) * (unit ?? 1);
+}
+
+/**
+ * Refuse a memory cap the container is already over.
+ *
+ * Docker applies it at once and the kernel kills the process: `rc=1cpu/1g` on a Rocket.Chat
+ * using 1.4 GiB restarted it as the test began, every request failed, and the run reported
+ * 100% errors as a load result, exit 0, with nothing said. A cap that cannot hold what is
+ * already running measures the restart, not the load.
+ */
+async function refuseACapBelowUse(cid: string, svc: string, mem: string): Promise<void> {
+  const r = await docker(['stats', '--no-stream', '--format', '{{.MemUsage}}', cid], {
+    capture: true,
+    text: true,
+    timeoutMs: 30_000,
+  });
+  if (r.exitCode !== 0) return; // unread is not refused: the cap is the user's to try
+  const used = usedBytes(String(r.stdout));
+  const cap = capBytes(mem);
+  if (used > 0 && Number.isFinite(cap) && cap <= used) {
+    throw new Error(
+      `${svc}=${mem} is below the ${(used / 1024 ** 3).toFixed(2)} GiB it uses now, so ` +
+        'the kernel would kill it as the test starts and the run would measure its restart. ' +
+        'Give it more, or constrain only its CPU',
+    );
+  }
+}
+
 /**
  * Cap each service's running container(s); returns what was applied (with prior limits)
  * for `restore`.
@@ -184,6 +226,7 @@ export async function apply(name: string, perService: Record<string, Limit>): Pr
       }
       for (const cid of ids) {
         const [nano, mem, swap] = await inspectLimits(cid);
+        if (lim.mem) await refuseACapBelowUse(cid, svc, lim.mem);
         await update(cid, lim.cpus, lim.mem);
         applied.push({
           container: cid,

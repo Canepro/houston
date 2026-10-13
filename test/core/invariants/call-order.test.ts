@@ -76,6 +76,11 @@ function actual(module: string): Record<string, unknown> {
   return jest.requireActual(module) as Record<string, unknown>;
 }
 
+/** The program an exec runs, past an `env VAR=value` prefix. */
+function commandOf(argv: readonly string[]): string {
+  return String(argv.find((word) => word !== 'env' && !word.includes('=')));
+}
+
 describe('a Compose create attaches the edge after the workspace is up', () => {
   it('writes the record, starts the workspace, and only then joins its network', async () => {
     const log = recorder();
@@ -431,11 +436,11 @@ describe('a restore records the window where the database is empty', () => {
       '../../../src/core/runner/engine': () => ({
         ...actual('../../../src/core/runner/engine'),
         composeExecCapture: async (_name: string, _service: string, argv: readonly string[]) => {
-          log.calls.push(`exec:${String(argv[0])}`);
+          log.calls.push(`exec:${commandOf(argv)}`);
           return [0, ''];
         },
         composeExecFromFile: async (_name: string, _service: string, argv: readonly string[]) => {
-          log.calls.push(`exec:${String(argv[0])}`);
+          log.calls.push(`exec:${commandOf(argv)}`);
           return [loadRc, loadRc === 0 ? '' : 'mongorestore blew up'];
         },
         stopServices: async () => 0,

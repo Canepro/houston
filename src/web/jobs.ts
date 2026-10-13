@@ -7,9 +7,10 @@ import type { FastifyInstance } from 'fastify';
 import * as auditService from '../core/audit';
 import { currentContext, runWithContext } from '../lib/context';
 import { ReproError, ConflictError, errorText } from '../lib/errors';
-import { asDict, event } from '../lib/events';
+import { NOTHING_LEFT, asDict, event } from '../lib/events';
 import type { Emit, Event } from '../lib/events';
 import type * as EventlogNS from '../core/eventlog';
+import { Interrupted, stoppable } from '../seams/exec';
 
 export const MAX_JOBS = 100;
 export const MAX_EVENTS_PER_JOB = 2000;
@@ -62,6 +63,16 @@ export const JOB_KINDS = Object.freeze([
 
 /** One of the kinds a route may submit. */
 export type JobKind = (typeof JOB_KINDS)[number];
+
+/**
+ * The kinds a Stop may end, each because its code was read for what a Stop leaves behind.
+ * A stop is raised into every wait the job has, and a kind whose catches turn it into an
+ * ordinary failure carries on into its failure handling: an upgrade half rolled itself
+ * back, a load test left the API rate limiter off, a cluster build left CloudFormation
+ * building with nothing in houston watching it. Those stay unstoppable until read the same
+ * way. These four are the ones that get stuck waiting, and leave a workspace to delete.
+ */
+export const STOPPABLE_KINDS: ReadonlySet<JobKind> = new Set(['create', 'up', 'ready', 'state']);
 
 /**
  * Which ceiling a kind runs under. `none` is a DECISION, spelled out.
@@ -125,9 +136,23 @@ class Pool {
     return true;
   }
 
-  acquire(): Promise<void> {
-    if (this.tryAcquire()) return Promise.resolve();
-    return new Promise((resolve) => this.waiters.push(resolve));
+  /** True with a slot; false if `signal` was aborted first, holding no slot. */
+  acquire(signal?: AbortSignal): Promise<boolean> {
+    if (this.tryAcquire()) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const granted = (): void => {
+        signal?.removeEventListener('abort', gaveUp);
+        resolve(true);
+      };
+      const gaveUp = (): void => {
+        const at = this.waiters.indexOf(granted);
+        if (at < 0) return;
+        this.waiters.splice(at, 1);
+        resolve(false);
+      };
+      this.waiters.push(granted);
+      signal?.addEventListener('abort', gaveUp, { once: true });
+    });
   }
 
   release(): void {
@@ -177,8 +202,12 @@ export interface JobSummary {
   finished_at: number | null;
   n_events: number;
   error: string | null;
+  error_kind: string | null;
+  result_dropped: boolean;
   /** Where a cluster job acts, its AWS region; '' for every other job. */
   region: string;
+  /** Whether Stop may end it: an audited kind, still queued or running. */
+  stoppable: boolean;
 }
 
 export class Job<Result = unknown> {
@@ -196,12 +225,22 @@ export class Job<Result = unknown> {
    * the same name in another region while this one was built.
    */
   region = '';
+  /** Who pressed Stop, once somebody has; the job then ends at its next wait. */
+  stoppedBy = '';
+  /** Whether its own cleanup said it took everything back (`NOTHING_LEFT`). */
+  nothingLeft = false;
+  /**
+   * A create's audit line, held until it settles the workspace's name (or ends without one),
+   * so History names the workspace rather than the version asked for. Null once written.
+   */
+  auditOnName: ((label: string) => void) | null = null;
+  readonly stopper = new AbortController();
   private emitted = 0;
 
   constructor(
     readonly id: string,
     readonly kind: JobKind,
-    readonly label = '',
+    public label = '',
     readonly actor = '',
     queued = false,
   ) {
@@ -209,6 +248,13 @@ export class Job<Result = unknown> {
   }
 
   readonly emit: Emit = (item) => {
+    // A create names its workspace once it has settled the name (`announceName`); until then
+    // it is labelled with the version asked for, which no workspace answers to.
+    if (item.code === 'workspace-name' && typeof item.data.workspace === 'string') {
+      this.label = item.data.workspace;
+      this.writeHeldAudit();
+    }
+    if (item.code === NOTHING_LEFT) this.nothingLeft = true;
     this.events.push(item);
     this.emitted += 1;
     const overflow = this.events.length - MAX_EVENTS_PER_JOB;
@@ -217,6 +263,13 @@ export class Job<Result = unknown> {
 
   get nEvents(): number {
     return this.emitted;
+  }
+
+  /** The held audit line, with the label as it stands; once. */
+  writeHeldAudit(): void {
+    const write = this.auditOnName;
+    this.auditOnName = null;
+    write?.(this.label);
   }
 
   forgetResult(): void {
@@ -241,7 +294,10 @@ export class Job<Result = unknown> {
       finished_at: this.finishedAt,
       n_events: this.nEvents,
       error: this.error,
+      error_kind: this.errorKind,
+      result_dropped: this.resultDropped,
       region: this.region,
+      stoppable: STOPPABLE_KINDS.has(this.kind) && ACTIVE_STATUSES.has(this.status),
     };
   }
 
@@ -258,6 +314,8 @@ export interface SubmitOptions {
   label?: string;
   actor?: string;
   region?: string;
+  /** Audit once the job names its workspace (`workspace-name`), or when it ends without. */
+  auditWhenNamed?: boolean;
 }
 
 declare module 'fastify' {
@@ -309,7 +367,12 @@ export class JobManager {
     const id = `job_${this.nextId.toString(16).padStart(10, '0')}`;
     const job = new Job<Result>(id, kind, label, actor, pool !== undefined);
     job.region = options.region ?? '';
-    auditService.audit(actor, kind, label, { origin: request.origin });
+    if (options.auditWhenNamed === true) {
+      job.auditOnName = (named) =>
+        auditService.audit(actor, kind, named, { origin: request.origin, outcome: 'accepted' });
+    } else {
+      auditService.audit(actor, kind, label, { origin: request.origin, outcome: 'accepted' });
+    }
     this.jobs.set(id, job);
     this.evict();
     this.trimResults();
@@ -324,6 +387,31 @@ export class JobManager {
       .finally(() => this.running.delete(id));
     this.running.set(id, task);
     return job;
+  }
+
+  /**
+   * Stop a queued or running job: every wait in it rejects (see `stoppable`), so it unwinds
+   * through its own cleanup and ends as stopped. What it had done stays done. False if it
+   * had already ended.
+   */
+  stop(jobId: string, actor: string): boolean {
+    const job = this.jobs.get(jobId);
+    if (job === undefined || !ACTIVE_STATUSES.has(job.status)) return false;
+    if (!STOPPABLE_KINDS.has(job.kind)) return false;
+    if (job.stoppedBy === '') {
+      job.stoppedBy = actor || 'someone';
+      job.emit(event(`stopping — asked by ${job.stoppedBy}`, { phase: 'done', level: 'warn' }));
+      auditService.audit(actor, 'job-stop', `${job.kind} ${job.label}`.trim(), {
+        origin: currentContext().origin,
+      });
+      job.stopper.abort();
+    }
+    return true;
+  }
+
+  /** How many jobs are still running. */
+  active(): number {
+    return this.running.size;
   }
 
   async drain(timeoutMs = 25_000): Promise<string[]> {
@@ -353,30 +441,54 @@ export class JobManager {
     target: JobTarget<Result>,
     pool: Pool | undefined,
   ): Promise<void> {
+    let slot = false;
     try {
       logJobStarted(job.id, kind, job.label);
       if (pool !== undefined) {
-        if (!pool.tryAcquire()) {
+        slot = pool.tryAcquire();
+        if (!slot) {
           job.emit(
             event(`waiting for a free ${kind} slot — something else is using the machine`, {
               phase: 'queued',
             }),
           );
-          await pool.acquire();
+          slot = await pool.acquire(job.stopper.signal);
         }
+        // Stopped while queued: it ends without running at all.
+        if (job.stopper.signal.aborted) throw new Interrupted();
         job.status = 'running';
       }
-      const result = await target(job.emit);
+      const result = await stoppable(job.stopper.signal, async () => await target(job.emit));
       job.result = result;
       job.finishedAt = Date.now() / 1000;
       job.status = 'done';
       job.emit(event('done', { phase: 'done', terminal: true, data: { result } }));
     } catch (caught: unknown) {
+      job.finishedAt = Date.now() / 1000;
+      job.status = 'error';
+      if (job.stopper.signal.aborted) {
+        // The reason is the Stop -- but a houston error raised on the way out keeps its own
+        // words, which may be the only place a recovery instruction is written down.
+        // What it had done stays -- unless its cleanup has just said it took all of it back,
+        // where saying so contradicted the line above it.
+        const stopped =
+          `stopped by ${job.stoppedBy} before it finished; ` +
+          (job.nothingLeft ? 'nothing of it was left' : 'what it had done stays');
+        job.error = caught instanceof ReproError ? `${caught.message} (${stopped})` : stopped;
+        job.errorKind = 'Stopped';
+        job.emit(
+          event(job.error, {
+            phase: 'done',
+            level: 'error',
+            terminal: true,
+            data: { error: job.error, kind: 'Stopped' },
+          }),
+        );
+        return;
+      }
       const error = caught instanceof Error ? caught : new Error(errorText(caught));
       job.error = error.message || errorText(caught);
       job.errorKind = caught instanceof ReproError ? caught.constructor.name : 'InternalError';
-      job.finishedAt = Date.now() / 1000;
-      job.status = 'error';
       job.emit(
         event(caught instanceof ReproError ? error.message : `internal error: ${error.message}`, {
           phase: 'done',
@@ -389,8 +501,14 @@ export class JobManager {
         }),
       );
     } finally {
+      // A create that ended before it named its workspace is still on record, by the label it had.
+      job.writeHeldAudit();
+      auditService.audit(job.actor, kind, job.label, {
+        origin: currentContext().origin,
+        outcome: job.errorKind === 'Stopped' ? 'stopped' : job.status,
+      });
       logJobEnded(job, kind);
-      if (pool !== undefined) pool.release();
+      if (pool !== undefined && slot) pool.release();
     }
   }
 
@@ -411,6 +529,8 @@ export class JobManager {
 export interface InstallJobsOptions {
   manager?: JobManager;
   drainTimeoutMs?: number;
+  /** The jobs still running when the drain ends, as they are stopped. */
+  onStopping?: (jobIds: readonly string[]) => void;
   onAbandoned?: (jobIds: readonly string[]) => void;
 }
 
@@ -422,11 +542,26 @@ export interface InstallJobsOptions {
  */
 export function installJobs(
   app: FastifyInstance,
-  { manager = new JobManager(), drainTimeoutMs = 25_000, onAbandoned }: InstallJobsOptions = {},
+  {
+    manager = new JobManager(),
+    drainTimeoutMs = 25_000,
+    onStopping,
+    onAbandoned,
+  }: InstallJobsOptions = {},
 ): JobManager {
   app.decorate('jobs', manager);
-  app.addHook('onClose', async () => {
-    const abandoned = await manager.drain(drainTimeoutMs);
+  // A job's SSE response stays open until the job finishes. onClose runs only
+  // after those HTTP responses close, so draining there waits on itself.
+  app.addHook('preClose', async () => {
+    let abandoned = await manager.drain(drainTimeoutMs);
+    if (abandoned.length > 0) {
+      // STOPPED, then given a moment to unwind through their own cleanup, rather than left
+      // running in a server whose listener is already closed. What cannot be stopped is
+      // reported, and `serve` ends without it (`cli/serve`).
+      const stopping = abandoned.filter((id) => manager.stop(id, 'serve shutdown'));
+      if (stopping.length > 0) onStopping?.(stopping);
+      abandoned = await manager.drain(Math.min(drainTimeoutMs, 10_000));
+    }
     if (abandoned.length > 0) onAbandoned?.(abandoned);
   });
   return manager;

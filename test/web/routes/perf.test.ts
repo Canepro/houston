@@ -103,3 +103,25 @@ describe('the performance endpoints', () => {
     }
   });
 });
+
+describe('a load test or capacity search asked of a Kubernetes workspace', () => {
+  it('is refused as a 400, not run as a job that fails', async () => {
+    // The action pane expects a 400; the route answered 200 and a job that then ended
+    // "loadtest is Compose-only".
+    const { metadata, writeRecord } = require('../../../src/core/runner/record') as {
+      metadata: (values: Record<string, unknown>) => never;
+      writeRecord: (name: string, meta: never) => Promise<void>;
+    };
+    await writeRecord('kperf', metadata({ name: 'kperf', extra: { runtime: 'kubernetes' } }));
+    const app = await createApp({ accounts: false });
+    try {
+      for (const what of ['loadtest', 'capacity']) {
+        const response = await app.inject({ method: 'POST', url: `/api/repros/kperf/${what}` });
+        expect({ what, status: response.statusCode }).toEqual({ what, status: 400 });
+        expect(String(response.json().error)).toContain('is Compose-only');
+      }
+    } finally {
+      await app.close();
+    }
+  });
+});

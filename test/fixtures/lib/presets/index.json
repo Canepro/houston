@@ -39,7 +39,6 @@
    "fine@cfaeb4f9",
    "ldap@6136a0a9",
    "livechat@e11167fd",
-   "multi-instance@37fa0975",
    "oidc@0cde8e5c",
    "pinned@3d8c3a71",
    "s3_minio@8346d99e",
@@ -57,7 +56,6 @@
    "folder@6942ff20",
    "ldap@6136a0a9",
    "livechat@e11167fd",
-   "multi-instance@37fa0975",
    "oidc@0cde8e5c",
    "ordered@2d4fea70",
    "pinned@3d8c3a71",
@@ -94,7 +92,6 @@
     "email@9f10228f",
     "ldap@7653f059",
     "livechat@e11167fd",
-    "multi-instance@37fa0975",
     "oidc@0cde8e5c",
     "s3_minio@8346d99e",
     "saml@034f592b"
@@ -108,7 +105,6 @@
     "email@9f10228f",
     "ldap@7653f059",
     "livechat@e11167fd",
-    "multi-instance@37fa0975",
     "oidc@0cde8e5c",
     "s3_minio@8346d99e",
     "saml@034f592b"
@@ -122,7 +118,6 @@
     "email@9f10228f",
     "ldap@7653f059",
     "livechat@e11167fd",
-    "multi-instance@37fa0975",
     "oidc@0cde8e5c",
     "q@7c7cf6c4",
     "s3_minio@8346d99e",
@@ -137,7 +132,6 @@
     "email@9f10228f",
     "ldap@7653f059",
     "livechat@e11167fd",
-    "multi-instance@37fa0975",
     "oidc@0cde8e5c",
     "q@7c7cf6c4",
     "s3_minio@8346d99e",
@@ -152,7 +146,6 @@
     "email@9f10228f",
     "ldap@7653f059",
     "livechat@e11167fd",
-    "multi-instance@37fa0975",
     "oidc@0cde8e5c",
     "q@aae5aa38",
     "s3_minio@8346d99e",
@@ -167,7 +160,6 @@
     "email@9f10228f",
     "ldap@7653f059",
     "livechat@e11167fd",
-    "multi-instance@37fa0975",
     "oidc@0cde8e5c",
     "q@aae5aa38",
     "s3_minio@8346d99e",
@@ -182,7 +174,6 @@
     "email@9f10228f",
     "ldap@7653f059",
     "livechat@e11167fd",
-    "multi-instance@37fa0975",
     "oidc@0cde8e5c",
     "q@1761587d",
     "s3_minio@8346d99e",
@@ -197,7 +188,6 @@
     "email@9f10228f",
     "ldap@7653f059",
     "livechat@e11167fd",
-    "multi-instance@37fa0975",
     "oidc@0cde8e5c",
     "q@51828f43",
     "s3_minio@8346d99e",
@@ -212,7 +202,6 @@
     "email@9f10228f",
     "ldap@7653f059",
     "livechat@e11167fd",
-    "multi-instance@37fa0975",
     "oidc@0cde8e5c",
     "q@88a46057",
     "s3_minio@8346d99e",
@@ -227,7 +216,6 @@
     "email@9f10228f",
     "ldap@7653f059",
     "livechat@e11167fd",
-    "multi-instance@37fa0975",
     "oidc@0cde8e5c",
     "q@4cf3bfcd",
     "s3_minio@8346d99e",
@@ -242,7 +230,6 @@
     "email@9f10228f",
     "ldap@7653f059",
     "livechat@e11167fd",
-    "multi-instance@37fa0975",
     "oidc@0cde8e5c",
     "q@8729ee0a",
     "s3_minio@8346d99e",
@@ -257,7 +244,6 @@
     "email@9f10228f",
     "ldap@7653f059",
     "livechat@e11167fd",
-    "multi-instance@37fa0975",
     "oidc@0cde8e5c",
     "q@db72e2a7",
     "s3_minio@8346d99e",
@@ -272,7 +258,6 @@
     "email@9f10228f",
     "ldap@7653f059",
     "livechat@e11167fd",
-    "multi-instance@37fa0975",
     "oidc@0cde8e5c",
     "q@bbed166f",
     "s3_minio@8346d99e",
@@ -287,7 +272,6 @@
     "email@9f10228f",
     "ldap@7653f059",
     "livechat@e11167fd",
-    "multi-instance@37fa0975",
     "oidc@0cde8e5c",
     "q@8a3184eb",
     "s3_minio@8346d99e",
@@ -302,7 +286,6 @@
     "email@9f10228f",
     "ldap@7653f059",
     "livechat@e11167fd",
-    "multi-instance@37fa0975",
     "oidc@0cde8e5c",
     "q@50f55520",
     "s3_minio@8346d99e",
@@ -317,7 +300,6 @@
     "email@9f10228f",
     "ldap@7653f059",
     "livechat@e11167fd",
-    "multi-instance@37fa0975",
     "oidc@0cde8e5c",
     "q@e3a7c15d",
     "s3_minio@8346d99e",
@@ -332,7 +314,6 @@
     "email@9f10228f",
     "ldap@7653f059",
     "livechat@e11167fd",
-    "multi-instance@37fa0975",
     "oidc@0cde8e5c",
     "q@0e699354",
     "s3_minio@8346d99e",
@@ -347,7 +328,6 @@
     "email@9f10228f",
     "ldap@7653f059",
     "livechat@e11167fd",
-    "multi-instance@37fa0975",
     "oidc@0cde8e5c",
     "q@ac365ab3",
     "s3_minio@8346d99e",
@@ -529,7 +509,7 @@
   },
   "email@9f10228f": {
    "name": "email",
-   "description": "Mailpit mailcatcher wired to RC's SMTP. Every email RC sends — password resets, invites, verification, notification and 2FA mail — is captured at http://localhost:8025 instead of leaving the machine. Pair with --seed for users with verified emails.",
+   "description": "Mailpit mailcatcher wired to RC's SMTP. Every email RC sends — password resets, invites, verification, notification and 2FA mail — is captured at http://localhost:8025 (at /mailpit/ on an HTTPS workspace) instead of leaving the machine. Pair with --seed for users with verified emails.",
    "env": {
     "OVERWRITE_SETTING_SMTP_Host": "mailpit",
     "OVERWRITE_SETTING_SMTP_Port": "1025",
@@ -593,7 +573,7 @@
   },
   "email@f1ccbbfb": {
    "name": "email",
-   "description": "Mailpit mailcatcher wired to RC's SMTP. Every email RC sends — password resets, invites, verification, notification and 2FA mail — is captured at http://localhost:8025 instead of leaving the machine. Pair with --seed for users with verified emails.",
+   "description": "Mailpit mailcatcher wired to RC's SMTP. Every email RC sends — password resets, invites, verification, notification and 2FA mail — is captured at http://localhost:8025 (at /mailpit/ on an HTTPS workspace) instead of leaving the machine. Pair with --seed for users with verified emails.",
    "env": {
     "OVERWRITE_SETTING_SMTP_Host": "mailpit",
     "OVERWRITE_SETTING_SMTP_Port": "1025",
@@ -793,7 +773,15 @@
    ],
    "params_help": {
     "users": "number of LDAP users to generate (default 5; try 130000 for scale)",
-    "domain": "LDAP domain (default example.com)"
+    "domain": "LDAP domain (default example.com)",
+    "groups": "'on' adds groups rocket-chat (every user but the last), rocket-admin (user1) and employee (everyone), and lets only rocket-chat log in (default off)",
+    "bind": "'service' binds Rocket.Chat as a read-only directory user, whom slapd limits to 500 entries per search, as many real directories do (default 'admin', unlimited)",
+    "tls": "'ldaps' (port 636) or 'starttls' (389), with a certificate from houston's own CA (default none)",
+    "trust": "'none' leaves houston's CA out of Rocket.Chat, to reproduce a certificate error (default 'houston')",
+    "directory": "'ad' serves the same users from Samba as Active Directory: sAMAccountName, objectGUID, nested groups (default 'openldap')",
+    "idp": "'saml' or 'oidc' puts Keycloak in front of this directory, so the same users also sign in by SSO (default none)",
+    "mfa": "'on' has Keycloak ask for a one-time code at SSO sign-in; needs idp (default off)",
+    "idp_host": "with idp: hostname your browser reaches Keycloak on (default as the saml and oidc presets: localhost, or keycloak for oidc)"
    },
    "post_ready": [],
    "notes": [
@@ -883,7 +871,15 @@
    ],
    "params_help": {
     "users": "number of LDAP users to generate (default 5; try 130000 for scale)",
-    "domain": "LDAP domain (default example.com)"
+    "domain": "LDAP domain (default example.com)",
+    "groups": "'on' adds groups rocket-chat (every user but the last), rocket-admin (user1) and employee (everyone), and lets only rocket-chat log in (default off)",
+    "bind": "'service' binds Rocket.Chat as a read-only directory user, whom slapd limits to 500 entries per search, as many real directories do (default 'admin', unlimited)",
+    "tls": "'ldaps' (port 636) or 'starttls' (389), with a certificate from houston's own CA (default none)",
+    "trust": "'none' leaves houston's CA out of Rocket.Chat, to reproduce a certificate error (default 'houston')",
+    "directory": "'ad' serves the same users from Samba as Active Directory: sAMAccountName, objectGUID, nested groups (default 'openldap')",
+    "idp": "'saml' or 'oidc' puts Keycloak in front of this directory, so the same users also sign in by SSO (default none)",
+    "mfa": "'on' has Keycloak ask for a one-time code at SSO sign-in; needs idp (default off)",
+    "idp_host": "with idp: hostname your browser reaches Keycloak on (default as the saml and oidc presets: localhost, or keycloak for oidc)"
    },
    "post_ready": [],
    "notes": [
@@ -935,7 +931,15 @@
    "files": [],
    "params_help": {
     "users": "number of LDAP users to generate (default 5; try 130000 for scale)",
-    "domain": "LDAP domain (default example.com)"
+    "domain": "LDAP domain (default example.com)",
+    "groups": "'on' adds groups rocket-chat (every user but the last), rocket-admin (user1) and employee (everyone), and lets only rocket-chat log in (default off)",
+    "bind": "'service' binds Rocket.Chat as a read-only directory user, whom slapd limits to 500 entries per search, as many real directories do (default 'admin', unlimited)",
+    "tls": "'ldaps' (port 636) or 'starttls' (389), with a certificate from houston's own CA (default none)",
+    "trust": "'none' leaves houston's CA out of Rocket.Chat, to reproduce a certificate error (default 'houston')",
+    "directory": "'ad' serves the same users from Samba as Active Directory: sAMAccountName, objectGUID, nested groups (default 'openldap')",
+    "idp": "'saml' or 'oidc' puts Keycloak in front of this directory, so the same users also sign in by SSO (default none)",
+    "mfa": "'on' has Keycloak ask for a one-time code at SSO sign-in; needs idp (default off)",
+    "idp_host": "with idp: hostname your browser reaches Keycloak on (default as the saml and oidc presets: localhost, or keycloak for oidc)"
    },
    "post_ready": [],
    "notes": [
@@ -1120,7 +1124,7 @@
      ]
     },
     "traefik": {
-     "image": "docker.io/traefik:v3.4",
+     "image": "docker.io/traefik:v3.7",
      "restart": "unless-stopped",
      "command": [
       "--providers.file.filename=/etc/traefik/dynamic.yml",
@@ -1149,10 +1153,12 @@
    },
    "post_ready": [],
    "notes": [
-    "Verify the mesh (lists every connected instance):",
+    "Verify the mesh (lists every connected instance; one a restart replaced stays listed a while):",
     "    houston api --name <name> GET /api/v1/instances.get",
-    "Open two different instance URLs (shown above) in separate browsers,",
-    "  post in one and watch it arrive in the other (cross-instance real-time)."
+    "Cross-instance real-time needs an Enterprise license (its scalability module): without one,",
+    "  a message posted on one instance shows on the others only after a reload. Add one with",
+    "  `--license` or in Rocket.Chat under Workspace > Subscription, then open two instance URLs",
+    "  (shown above) in separate browsers and post in one."
    ],
    "instances": 2,
    "entry_service": "traefik",
@@ -1179,7 +1185,7 @@
      ]
     },
     "traefik": {
-     "image": "docker.io/traefik:v3.4",
+     "image": "docker.io/traefik:v3.7",
      "restart": "unless-stopped",
      "command": [
       "--providers.file.filename=/etc/traefik/dynamic.yml",
@@ -1208,10 +1214,12 @@
    },
    "post_ready": [],
    "notes": [
-    "Verify the mesh (lists every connected instance):",
+    "Verify the mesh (lists every connected instance; one a restart replaced stays listed a while):",
     "    houston api --name <name> GET /api/v1/instances.get",
-    "Open two different instance URLs (shown above) in separate browsers,",
-    "  post in one and watch it arrive in the other (cross-instance real-time)."
+    "Cross-instance real-time needs an Enterprise license (its scalability module): without one,",
+    "  a message posted on one instance shows on the others only after a reload. Add one with",
+    "  `--license` or in Rocket.Chat under Workspace > Subscription, then open two instance URLs",
+    "  (shown above) in separate browsers and post in one."
    ],
    "instances": 5,
    "entry_service": "traefik",
@@ -1877,7 +1885,7 @@
      "entrypoint": [
       "sh",
       "-c",
-      "until mc alias set local http://minio:9000 houston houston-secret; do sleep 1; done; mc mb -p local/my.bucket"
+      "until mc alias set local http://minio:9000 houston houston-secret && mc mb -p local/my.bucket; do sleep 1; done"
      ]
     }
    },
@@ -1922,7 +1930,7 @@
    "scenario": "",
    "scenario_params": {},
    "kubernetes_manifests": [
-    "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: minio\n  labels: &id001\n    app: houston-minio\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: minio\n    houston.io/repro: __HOUSTON_NAME__\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: houston-minio\n  template:\n    metadata:\n      labels: *id001\n    spec:\n      containers:\n      - name: minio\n        image: docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z\n        ports:\n        - containerPort: 9000\n        - containerPort: 9001\n        env:\n        - name: MINIO_ROOT_USER\n          value: houston\n        - name: MINIO_ROOT_PASSWORD\n          value: houston-secret\n        args:\n        - server\n        - /data\n        - --console-address\n        - :9001\n        readinessProbe:\n          httpGet:\n            path: /minio/health/ready\n            port: 9000\n          initialDelaySeconds: 3\n          periodSeconds: 3\n          failureThreshold: 40\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: minio\n  labels:\n    app: houston-minio\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: minio\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '9000'\nspec:\n  selector:\n    app: houston-minio\n  ports:\n  - name: p9000\n    port: 9000\n    targetPort: 9000\n  - name: p9001\n    port: 9001\n    targetPort: 9001\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: minio-console\n  labels:\n    app: houston-minio\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: minio\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '9001'\n    houston.io/ui-deployment: minio\nspec:\n  selector:\n    app: houston-minio\n  ports:\n  - name: http\n    port: 9001\n    targetPort: 9001\n",
+    "apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: minio-data\n  labels:\n    app: houston-minio\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: minio\n    houston.io/repro: __HOUSTON_NAME__\nspec:\n  accessModes:\n  - ReadWriteOnce\n  resources:\n    requests:\n      storage: 2Gi\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: minio\n  labels: &id001\n    app: houston-minio\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: minio\n    houston.io/repro: __HOUSTON_NAME__\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: houston-minio\n  template:\n    metadata:\n      labels: *id001\n    spec:\n      containers:\n      - name: minio\n        image: docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z\n        ports:\n        - containerPort: 9000\n        - containerPort: 9001\n        env:\n        - name: MINIO_ROOT_USER\n          value: houston\n        - name: MINIO_ROOT_PASSWORD\n          value: houston-secret\n        args:\n        - server\n        - /data\n        - --console-address\n        - :9001\n        readinessProbe:\n          httpGet:\n            path: /minio/health/ready\n            port: 9000\n          initialDelaySeconds: 3\n          periodSeconds: 3\n          failureThreshold: 40\n        volumeMounts:\n        - name: data\n          mountPath: /data\n      volumes:\n      - name: data\n        persistentVolumeClaim:\n          claimName: minio-data\n  strategy:\n    type: Recreate\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: minio\n  labels:\n    app: houston-minio\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: minio\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '9000'\nspec:\n  selector:\n    app: houston-minio\n  ports:\n  - name: p9000\n    port: 9000\n    targetPort: 9000\n  - name: p9001\n    port: 9001\n    targetPort: 9001\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: minio-console\n  labels:\n    app: houston-minio\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: minio\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '9001'\n    houston.io/ui-deployment: minio\nspec:\n  selector:\n    app: houston-minio\n  ports:\n  - name: http\n    port: 9001\n    targetPort: 9001\n",
     "apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: minio-init\n  labels: &id001\n    app: houston-minio-init\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: minio-init\n    houston.io/repro: __HOUSTON_NAME__\nspec:\n  backoffLimit: 10\n  template:\n    metadata:\n      labels: *id001\n    spec:\n      restartPolicy: OnFailure\n      containers:\n      - name: minio-init\n        image: docker.io/pgsty/mc:RELEASE.2026-08-04T00-00-00Z\n        command:\n        - sh\n        - -c\n        - until mc alias set local http://minio:9000 houston houston-secret; do sleep\n          2; done; mc mb -p local/my.bucket\n"
    ],
    "error": ""
@@ -1973,7 +1981,7 @@
      "entrypoint": [
       "sh",
       "-c",
-      "until mc alias set local http://minio:9000 houston houston-secret; do sleep 1; done; mc mb -p local/houston-uploads"
+      "until mc alias set local http://minio:9000 houston houston-secret && mc mb -p local/houston-uploads; do sleep 1; done"
      ]
     }
    },
@@ -2013,7 +2021,7 @@
    "scenario": "",
    "scenario_params": {},
    "kubernetes_manifests": [
-    "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: minio\n  labels: &id001\n    app: houston-minio\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: minio\n    houston.io/repro: __HOUSTON_NAME__\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: houston-minio\n  template:\n    metadata:\n      labels: *id001\n    spec:\n      containers:\n      - name: minio\n        image: docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z\n        ports:\n        - containerPort: 9000\n        - containerPort: 9001\n        env:\n        - name: MINIO_ROOT_USER\n          value: houston\n        - name: MINIO_ROOT_PASSWORD\n          value: houston-secret\n        args:\n        - server\n        - /data\n        - --console-address\n        - :9001\n        readinessProbe:\n          httpGet:\n            path: /minio/health/ready\n            port: 9000\n          initialDelaySeconds: 3\n          periodSeconds: 3\n          failureThreshold: 40\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: minio\n  labels:\n    app: houston-minio\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: minio\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '9000'\nspec:\n  selector:\n    app: houston-minio\n  ports:\n  - name: p9000\n    port: 9000\n    targetPort: 9000\n  - name: p9001\n    port: 9001\n    targetPort: 9001\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: minio-console\n  labels:\n    app: houston-minio\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: minio\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '9001'\n    houston.io/ui-deployment: minio\nspec:\n  selector:\n    app: houston-minio\n  ports:\n  - name: http\n    port: 9001\n    targetPort: 9001\n",
+    "apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: minio-data\n  labels:\n    app: houston-minio\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: minio\n    houston.io/repro: __HOUSTON_NAME__\nspec:\n  accessModes:\n  - ReadWriteOnce\n  resources:\n    requests:\n      storage: 2Gi\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: minio\n  labels: &id001\n    app: houston-minio\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: minio\n    houston.io/repro: __HOUSTON_NAME__\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: houston-minio\n  template:\n    metadata:\n      labels: *id001\n    spec:\n      containers:\n      - name: minio\n        image: docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z\n        ports:\n        - containerPort: 9000\n        - containerPort: 9001\n        env:\n        - name: MINIO_ROOT_USER\n          value: houston\n        - name: MINIO_ROOT_PASSWORD\n          value: houston-secret\n        args:\n        - server\n        - /data\n        - --console-address\n        - :9001\n        readinessProbe:\n          httpGet:\n            path: /minio/health/ready\n            port: 9000\n          initialDelaySeconds: 3\n          periodSeconds: 3\n          failureThreshold: 40\n        volumeMounts:\n        - name: data\n          mountPath: /data\n      volumes:\n      - name: data\n        persistentVolumeClaim:\n          claimName: minio-data\n  strategy:\n    type: Recreate\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: minio\n  labels:\n    app: houston-minio\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: minio\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '9000'\nspec:\n  selector:\n    app: houston-minio\n  ports:\n  - name: p9000\n    port: 9000\n    targetPort: 9000\n  - name: p9001\n    port: 9001\n    targetPort: 9001\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: minio-console\n  labels:\n    app: houston-minio\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: minio\n    houston.io/repro: __HOUSTON_NAME__\n    houston.io/ui-port: '9001'\n    houston.io/ui-deployment: minio\nspec:\n  selector:\n    app: houston-minio\n  ports:\n  - name: http\n    port: 9001\n    targetPort: 9001\n",
     "apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: minio-init\n  labels: &id001\n    app: houston-minio-init\n    app.kubernetes.io/managed-by: houston\n    houston.io/component: minio-init\n    houston.io/repro: __HOUSTON_NAME__\nspec:\n  backoffLimit: 10\n  template:\n    metadata:\n      labels: *id001\n    spec:\n      restartPolicy: OnFailure\n      containers:\n      - name: minio-init\n        image: docker.io/pgsty/mc:RELEASE.2026-08-04T00-00-00Z\n        command:\n        - sh\n        - -c\n        - until mc alias set local http://minio:9000 houston houston-secret; do sleep\n          2; done; mc mb -p local/houston-uploads\n"
    ],
    "error": ""

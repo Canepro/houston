@@ -2,6 +2,7 @@
  * The ingress controller, adopted when one is already there and installed when not.
  */
 import { CreateFailedError, DockerError, PreflightError } from '../../lib/errors';
+import { type PublicPath } from '../../lib/presets/public';
 import { info, nullEmit, type Emit } from '../../lib/events';
 
 import { why } from './ask';
@@ -178,7 +179,10 @@ export async function ensureIngress({
     });
     return seen[0] as string;
   }
-  if (!invited && !isLocalCluster(distribution || (await distributionOf(context)))) {
+  if (
+    !invited &&
+    !(await isLocalCluster(distribution || (await distributionOf(context)), context))
+  ) {
     throw new PreflightError(
       `cluster '${context}' has no ingress controller, and it is not on this machine, so ` +
         "houston will not install one: the chart's Service is a LoadBalancer and that " +
@@ -205,6 +209,51 @@ export async function ensureIngress({
       `would route to this workspace. \`kubectl get ingressclass\` and \`kubectl -n ` +
       `${INGRESS_NAMESPACE} get pods\`.`,
   );
+}
+
+/** The Ingress, in the workspace's namespace, that serves a preset's own UIs. */
+export const TOOLS_INGRESS = 'houston-tools';
+
+/**
+ * A preset's own UIs at paths of the workspace's HTTPS name (`lib/presets/public.ts`), each to
+ * its Service. Same host and the SAME certificate Secret as the chart's Ingress, so it asks
+ * cert-manager for nothing and costs no certificate; deleting the namespace removes it.
+ */
+export function toolsIngressManifest(
+  host: string,
+  {
+    ingressClass,
+    secretName,
+    paths,
+    labels,
+  }: {
+    ingressClass: string;
+    secretName: string;
+    paths: readonly PublicPath[];
+    labels: Record<string, string>;
+  },
+): string {
+  return JSON.stringify({
+    apiVersion: 'networking.k8s.io/v1',
+    kind: 'Ingress',
+    metadata: { name: TOOLS_INGRESS, labels },
+    spec: {
+      ingressClassName: ingressClass,
+      tls: [{ hosts: [host], secretName }],
+      rules: [
+        {
+          host,
+          http: {
+            paths: paths.map((p) => ({
+              path: p.path,
+              pathType: 'Prefix',
+              backend: { service: { name: p.service, port: { number: p.service_port } } },
+            })),
+          },
+        },
+      ],
+    },
+  });
 }
 
 /**

@@ -20,6 +20,12 @@ import { type NoteGroup, flattenNotes } from '../../../src/core/lifecycle/notes'
 import type * as PolicyNS from '../../testsetup-policy';
 import type * as HostNS from '../../../src/core/runner/host';
 import type * as PayloadNS from '../../../src/core/lifecycle/payload';
+import type * as InspectNS from '../../../src/core/lifecycle/inspect';
+import type * as CapabilitiesNS from '../../../src/core/kube/capabilities';
+import type * as NamespaceNS from '../../../src/core/kube/namespace';
+import type * as StatusNS from '../../../src/core/kube/status';
+import type * as RecordNS from '../../../src/core/runner/record';
+import type * as KubeExecNS from '../../../src/core/kube/exec';
 
 // `runner/host` is a GUARDED module and two cases here own it; the suite's healthy engine
 // goes back after each one rather than the real module's answers leaking into the next.
@@ -29,6 +35,10 @@ afterEach(() => {
   );
   jest.dontMock('../../../src/core/lifecycle/inspect');
   jest.dontMock('../../../src/core/kube/status');
+  jest.dontMock('../../../src/core/kube/capabilities');
+  jest.dontMock('../../../src/core/kube/namespace');
+  jest.dontMock('../../../src/core/kube/exec');
+  jest.dontMock('../../../src/core/runner/record');
   jest.resetModules();
 });
 
@@ -74,7 +84,7 @@ const SERVICES = [
 ];
 
 describe('what a workspace is right now', () => {
-  it('derives state, health and links the way earlier releases do', () => {
+  it('derives state, health and links the way earlier releases do', async () => {
     const recorded = RECORDED.derived;
     const meta = metadata({
       name: 'T-1',
@@ -100,11 +110,19 @@ describe('what a workspace is right now', () => {
       uptime: STATUSES.map((status) => [...uptimeHealth(status)]),
       degraded: SERVICES.map(degradedReason),
       links: reproLinks(meta),
-      summary: summary(meta),
+      summary: await summary(meta),
     }).toEqual(recorded);
   });
 
-  it('names the cluster a Kubernetes workspace runs in, and nothing for a Compose one', () => {
+  it("gives an HTTPS workspace's public address in the summary `up` and the GUI return", async () => {
+    // `up --json` and the create dialog offered only the http://localhost port, which from
+    // another machine names that machine.
+    const https = metadata({ name: 'w', publicUrl: 'https://w.example.com' });
+    expect(await summary(https)).toMatchObject({ public_url: 'https://w.example.com' });
+    expect((await summary(metadata({ name: 'plain' }))).public_url).toBe('');
+  });
+
+  it('names the cluster a Kubernetes workspace runs in, and nothing for a Compose one', async () => {
     // The record held the context all along; the panel and `list` showed "k8s" and an ARN
     // in a note card. The short name is what a person recognises, the context what a
     // command needs, and both are ALWAYS present so the payload's shape does not drift.
@@ -112,11 +130,11 @@ describe('what a workspace is right now', () => {
       name: 't1',
       extra: { runtime: 'kubernetes', context: 'arn:aws:eks:us-east-1:1:cluster/support' },
     });
-    expect(summary(kube)).toMatchObject({
+    expect(await summary(kube)).toMatchObject({
       context: 'arn:aws:eks:us-east-1:1:cluster/support',
       cluster: 'support',
     });
-    expect(summary(metadata({ name: 'c1' }))).toMatchObject({ context: '', cluster: '' });
+    expect(await summary(metadata({ name: 'c1' }))).toMatchObject({ context: '', cluster: '' });
   });
 
   it('returns every key the browser fixture renders from', async () => {
@@ -171,6 +189,8 @@ describe('what a workspace is right now', () => {
     expect(Array.isArray(d.links)).toBe(true);
     expect(Array.isArray(d.owner_history)).toBe(true);
     expect(typeof d.tls).toBe('string');
+    // What the pane's "Roll back to <version>" reads: always a string, "" for none.
+    expect(d.rollback_to).toBe('');
     expect(d.seed).toBeNull();
   });
 });
@@ -255,6 +275,73 @@ describe('reading a container status', () => {
 
 describe('the links a workspace publishes', () => {
   it.each([
+    ['172.18.0.7', 'http://localhost:3300', '172.18.0.7'],
+    ['2001:db8::7', 'http://localhost:3300', '[2001:db8::7]'],
+    ['', 'http://172.18.0.8:3300', '172.18.0.8'],
+    ['', 'http://[2001:db8::8]:3300', '[2001:db8::8]'],
+  ])(
+    'uses the actual published host for preset, LDAP IdP and replica links (bind=%s)',
+    async (bindHost, rootUrl, host) => {
+      const meta = metadata({
+        name: 'bound',
+        preset: 'email+ldap+s3_minio+multi-instance',
+        hostPort: 3300,
+        rootUrl,
+        extra: {
+          runtime: 'docker',
+          deployment: 'multi-instance',
+          instances: 2,
+          bind_host: bindHost,
+          preset_params: { ldap: { idp: 'saml' } },
+        },
+      });
+      expect(
+        Object.fromEntries(reproLinks(meta).map((link) => [link.label, link.url])),
+      ).toMatchObject({
+        Mailpit: `http://${host}:8025`,
+        phpLDAPadmin: `http://${host}:8082`,
+        Keycloak: `http://${host}:8081`,
+        'MinIO API': `http://${host}:9000`,
+        'MinIO console': `http://${host}:9001`,
+        'instance 1': `http://${host}:3301`,
+        'instance 2': `http://${host}:3302`,
+      });
+      expect((await summary(meta)).instance_urls).toEqual([
+        `http://${host}:3301`,
+        `http://${host}:3302`,
+      ]);
+    },
+  );
+
+  it('keeps loopback and wildcard links on localhost and public preset paths on their origin', () => {
+    for (const bind of ['127.0.0.1', '::1', '0.0.0.0', '::']) {
+      expect(
+        reproLinks(linksMeta('email', { bind_host: bind })).find((link) => link.label === 'Mailpit')
+          ?.url,
+      ).toBe('http://localhost:8025');
+    }
+    const meta = linksMeta('email+s3_minio', {
+      bind_host: '172.18.0.7',
+      public_paths: [
+        {
+          preset: 'email',
+          path: '/mailpit',
+          service: 'mailpit',
+          container_port: 8025,
+          service_port: 8025,
+        },
+      ],
+    });
+    meta.publicUrl = 'https://bound.example.com';
+    expect(
+      Object.fromEntries(reproLinks(meta).map((link) => [link.label, link.url])),
+    ).toMatchObject({
+      Mailpit: 'https://bound.example.com/mailpit/',
+      'MinIO API': 'http://172.18.0.7:9000',
+    });
+  });
+
+  it.each([
     ['docker', 'local', 'https://h', 'https://h/grafana'],
     ['docker', 'acme', 'https://h', 'https://h/grafana'],
     ['kubernetes', 'local', 'https://h', 'https://h/grafana'],
@@ -270,7 +357,7 @@ describe('the links a workspace publishes', () => {
         publicUrl,
         extra: { runtime, tls, monitoring: true, namespace: 'houston-w' },
       });
-      expect(summary(meta).grafana_url).toBe(expected);
+      expect((await summary(meta)).grafana_url).toBe(expected);
       expect(reproLinks(meta).find((link) => link.label === 'Grafana')?.url).toBe(expected);
       expect(
         (
@@ -283,17 +370,19 @@ describe('the links a workspace publishes', () => {
           })
         ).grafana_url,
       ).toBe(expected);
+      // Docker publishes Prometheus on 9090; Kubernetes forwards only Grafana, and a link to
+      // 9090 there answered nothing.
       expect(reproLinks(meta).find((link) => link.label === 'Prometheus')?.url).toBe(
-        'http://localhost:9090',
+        runtime === 'kubernetes' ? undefined : 'http://localhost:9090',
       );
     },
   );
-  it('keeps a Docker loopback workspace and a customer proxy on the original Grafana URL', () => {
+  it('keeps a Docker loopback workspace and a customer proxy on the original Grafana URL', async () => {
     for (const meta of [
       metadata({ extra: { monitoring: true } }),
       metadata({ publicUrl: 'https://h', rootUrl: 'https://h', extra: { monitoring: true } }),
     ]) {
-      expect(summary(meta).grafana_url).toBe('http://localhost:5050');
+      expect((await summary(meta)).grafana_url).toBe('http://localhost:5050');
     }
   });
   it("surfaces each scenario's own UI, the monitoring pair and every instance", () => {
@@ -313,8 +402,343 @@ describe('the links a workspace publishes', () => {
   });
 });
 
+describe('listing several Kubernetes workspaces', () => {
+  function records(): Metadata[] {
+    return Array.from({ length: 8 }, (_unused, index) =>
+      metadata({
+        name: `list-${String(index)}`,
+        project: `houston-list-${String(index)}`,
+        rootUrl: `http://localhost:${String(3300 + index)}`,
+        hostPort: 3300 + index,
+        extra: { runtime: 'kubernetes', context: index < 4 ? 'first' : 'second' },
+      }),
+    );
+  }
+
+  function clusterList(
+    metas: Metadata[],
+    namespaces: (context?: string) => Promise<string[] | null>,
+    replicas: (name: string) => Promise<number | null>,
+  ): typeof InspectNS {
+    jest.resetModules();
+    jest.doMock('../../../src/core/runner/host', () => ({
+      ...(require('../../testsetup-policy') as typeof PolicyNS).healthyHost(),
+      dockerAvailable: async () => false,
+    }));
+    jest.doMock('../../../src/core/runner/record', () => ({
+      ...(jest.requireActual('../../../src/core/runner/record') as typeof RecordNS),
+      listMeta: async () => metas,
+    }));
+    jest.doMock('../../../src/core/kube/capabilities', () => ({
+      ...(jest.requireActual('../../../src/core/kube/capabilities') as typeof CapabilitiesNS),
+      workspaceNamespaces: namespaces,
+    }));
+    jest.doMock('../../../src/core/kube/namespace', () => ({
+      ...(jest.requireActual('../../../src/core/kube/namespace') as typeof NamespaceNS),
+      namespaceFor: async (name: string) => `houston-${name}`,
+    }));
+    jest.doMock('../../../src/core/kube/status', () => ({
+      ...(jest.requireActual('../../../src/core/kube/status') as typeof StatusNS),
+      workloadReplicas: replicas,
+      workspaceReady: async () => true,
+      workspaceReplicasByNamespace: async () => null,
+      workspacePodsByNamespace: async () => null,
+    }));
+    return require('../../../src/core/lifecycle/inspect') as typeof InspectNS;
+  }
+
+  it('overlaps independent workspace probes with a bounded batch and preserves record order', async () => {
+    const metas = records();
+    const gates = new Map<string, { held: Promise<number>; release: () => void }>();
+    for (const meta of metas) {
+      let release!: () => void;
+      const held = new Promise<number>((resolve) => {
+        release = () => resolve(1);
+      });
+      gates.set(meta.name, { held, release });
+    }
+    const started: string[] = [];
+    let active = 0;
+    let maximum = 0;
+    const inspect = clusterList(
+      metas,
+      async () => metas.map((meta) => `houston-${meta.name}`),
+      async (name) => {
+        started.push(name);
+        active += 1;
+        maximum = Math.max(maximum, active);
+        try {
+          return await gates.get(name)!.held;
+        } finally {
+          active -= 1;
+        }
+      },
+    );
+    const listing = inspect.listRepros();
+    try {
+      for (let turn = 0; turn < 10; turn += 1)
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(started).toHaveLength(4);
+      expect(maximum).toBe(4);
+      for (const name of [...started].reverse()) gates.get(name)!.release();
+      for (let turn = 0; turn < 10; turn += 1)
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(started).toHaveLength(8);
+      expect(maximum).toBe(4);
+      for (const name of [...started].reverse()) gates.get(name)!.release();
+      expect((await listing).map((row) => row.name)).toEqual(metas.map((meta) => meta.name));
+    } finally {
+      for (const gate of gates.values()) gate.release();
+      await listing;
+    }
+  });
+
+  it('shares namespace reads only within one list call and refreshes each context on the next poll', async () => {
+    const metas = records();
+    let reachable = true;
+    const namespaces = jest.fn(async () =>
+      reachable ? metas.map((meta) => `houston-${meta.name}`) : null,
+    );
+    const inspect = clusterList(metas, namespaces, async () => 0);
+    expect((await inspect.listRepros()).map((row) => row.state)).toEqual(Array(8).fill('stopped'));
+    expect(namespaces.mock.calls).toEqual([['first'], ['second']]);
+    reachable = false;
+    expect((await inspect.listRepros()).map((row) => row.state)).toEqual(Array(8).fill('?'));
+    expect(namespaces.mock.calls).toEqual([['first'], ['second'], ['first'], ['second']]);
+  });
+
+  it('keeps absent namespaces down and unreadable namespaces unknown even when workload reads fail', async () => {
+    const metas = records();
+    const namespaces = jest.fn(async (context?: string) => (context === 'first' ? [] : null));
+    const inspect = clusterList(metas, namespaces, async () => {
+      throw new Error('workload read refused');
+    });
+    expect((await inspect.listRepros()).map((row) => row.state)).toEqual([
+      'down',
+      'down',
+      'down',
+      'down',
+      '?',
+      '?',
+      '?',
+      '?',
+    ]);
+    expect(namespaces).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('listing fresh Kubernetes workload snapshots', () => {
+  type PodDocument = {
+    metadata: { namespace: string; name: string; labels: Record<string, string> };
+    status: Record<string, unknown>;
+  };
+
+  function fixture(count = 8) {
+    const metas = Array.from({ length: count }, (_unused, index) =>
+      metadata({
+        name: `snapshot-${String(index)}`,
+        project: `houston-snapshot-${String(index)}`,
+        hostPort: 3300 + index,
+        rootUrl: `http://localhost:${String(3300 + index)}`,
+        extra: {
+          runtime: 'kubernetes',
+          context: index < 4 ? 'first' : 'second',
+          namespace: `recorded-space-${String(index)}`,
+        },
+      }),
+    );
+    return {
+      metas,
+      held: new Set(metas.map((meta) => String(meta.extra.namespace))),
+      replicas: new Map(metas.map((meta) => [String(meta.extra.namespace), 1 as number | null])),
+      ready: new Map(metas.map((meta) => [String(meta.extra.namespace), true])),
+      terminal: new Set<string>(),
+      broadRefused: new Set<string>(),
+      broadMalformed: new Set<string>(),
+      namespacesRefused: new Set<string>(),
+      scopedRefused: new Set<string>(),
+    };
+  }
+
+  function snapshotList(data: ReturnType<typeof fixture>) {
+    jest.resetModules();
+    jest.dontMock('../../../src/core/kube/status');
+    jest.dontMock('../../../src/core/kube/capabilities');
+    const run = jest.fn<Promise<KubeExecNS.KubectlResult>, [readonly string[]]>(async (argv) => {
+      const output = (doc?: unknown): KubeExecNS.KubectlResult => ({
+        argv,
+        returncode: 0,
+        stdout: doc === undefined ? '' : JSON.stringify(doc),
+        stderr: '',
+      });
+      const denied = (): KubeExecNS.KubectlResult => ({
+        argv,
+        returncode: 1,
+        stdout: '',
+        stderr: 'Error from server (Forbidden): this identity cannot list that collection',
+      });
+      if (argv[0] === 'helm') return output([]);
+      const context = argv[argv.indexOf('--context') + 1];
+      const requestedKind = argv[argv.indexOf('get') + 1] ?? '';
+      const kind = requestedKind === 'pods' ? 'pod' : requestedKind;
+      const broad = argv.includes('-A');
+      const namespace = argv.includes('-n') ? argv[argv.indexOf('-n') + 1] : '';
+      const metas = data.metas.filter((meta) => meta.extra.context === context);
+      if (kind === 'namespace') {
+        if (data.namespacesRefused.has(String(context))) return denied();
+        return output({
+          items: metas
+            .filter((meta) => data.held.has(String(meta.extra.namespace)))
+            .map((meta) => ({ metadata: { name: meta.extra.namespace } })),
+        });
+      }
+      if (broad && data.broadRefused.has(kind)) return denied();
+      if (broad && data.broadMalformed.has(kind)) {
+        return output({ items: [{ metadata: { name: 'no-namespace' } }] });
+      }
+      if (!broad && data.scopedRefused.has(kind)) return denied();
+      const selected = broad ? metas : metas.filter((meta) => meta.extra.namespace === namespace);
+      if (kind === 'deployment') {
+        const deployments = selected.flatMap((meta) => {
+          const count = data.replicas.get(String(meta.extra.namespace));
+          return count === null
+            ? []
+            : [
+                {
+                  metadata: { namespace: meta.extra.namespace, name: 'rocketchat-rocketchat' },
+                  spec: { replicas: count },
+                },
+              ];
+        });
+        return broad ? output({ items: deployments }) : output(deployments[0]);
+      }
+      if (kind === 'pod') {
+        const pods = selected.flatMap((meta) => {
+          const ns = String(meta.extra.namespace);
+          if (data.replicas.get(ns) === null || data.replicas.get(ns) === 0) return [];
+          const application: PodDocument = {
+            metadata: {
+              namespace: ns,
+              name: `${meta.name}-app`,
+              labels: { 'app.kubernetes.io/name': 'rocketchat' },
+            },
+            status: { containerStatuses: [{ ready: data.ready.get(ns) }] },
+          };
+          const sidecar: PodDocument = {
+            metadata: {
+              namespace: ns,
+              name: `${meta.name}-mongo`,
+              labels: { 'app.kubernetes.io/name': 'mongodb' },
+            },
+            status: {
+              initContainerStatuses: [
+                {
+                  state: {
+                    waiting: { reason: 'CreateContainerConfigError', message: 'missing secret' },
+                  },
+                },
+              ],
+            },
+          };
+          return data.terminal.has(ns) ? [application, sidecar] : [application];
+        });
+        return output({
+          items: argv.includes('-l')
+            ? pods.filter((pod) => pod.metadata.labels['app.kubernetes.io/name'] === 'rocketchat')
+            : pods,
+        });
+      }
+      throw new Error(`unexpected Kubernetes query: ${argv.join(' ')}`);
+    });
+    jest.doMock('../../../src/core/kube/exec', () => ({
+      ...(jest.requireActual('../../../src/core/kube/exec') as typeof KubeExecNS),
+      kube: { run },
+    }));
+    jest.doMock('../../../src/core/runner/host', () => ({
+      ...(require('../../testsetup-policy') as typeof PolicyNS).healthyHost(),
+      dockerAvailable: async () => false,
+    }));
+    jest.doMock('../../../src/core/runner/record', () => ({
+      ...(jest.requireActual('../../../src/core/runner/record') as typeof RecordNS),
+      listMeta: async () => data.metas,
+    }));
+    jest.doMock('../../../src/core/kube/namespace', () => ({
+      ...(jest.requireActual('../../../src/core/kube/namespace') as typeof NamespaceNS),
+      namespaceFor: async (name: string) =>
+        String(data.metas.find((meta) => meta.name === name)?.extra.namespace ?? ''),
+    }));
+    return { inspect: require('../../../src/core/lifecycle/inspect') as typeof InspectNS, run };
+  }
+
+  it('shares fresh workload and pod snapshots across a list and reuses pods for terminal failures', async () => {
+    const data = fixture();
+    data.replicas.set('recorded-space-1', 0);
+    data.replicas.set('recorded-space-2', null);
+    data.ready.set('recorded-space-3', false);
+    data.terminal.add('recorded-space-3');
+    data.ready.set('recorded-space-4', false);
+    const { inspect, run } = snapshotList(data);
+    const rows = await inspect.listRepros();
+    expect(rows.map((row) => row.name)).toEqual(data.metas.map((meta) => meta.name));
+    expect(rows.map((row) => row.state)).toEqual([
+      'running',
+      'stopped',
+      'down',
+      'failed',
+      'starting',
+      'running',
+      'running',
+      'running',
+    ]);
+    expect(run.mock.calls.filter(([argv]) => argv[0] === 'kubectl')).toHaveLength(6);
+    expect(
+      run.mock.calls.filter(([argv]) => argv.includes('-n') && argv[0] === 'kubectl'),
+    ).toHaveLength(0);
+    for (const meta of data.metas) data.replicas.set(String(meta.extra.namespace), 0);
+    expect((await inspect.listRepros()).map((row) => row.state)).toEqual(Array(8).fill('stopped'));
+    expect(run.mock.calls.filter(([argv]) => argv[0] === 'kubectl')).toHaveLength(12);
+  });
+
+  it('falls back independently to scoped reads when a broad collection is refused or malformed', async () => {
+    for (const kind of ['deployment', 'pod']) {
+      for (const malformed of [false, true]) {
+        const data = fixture(2);
+        data.replicas.set('recorded-space-1', 0);
+        (malformed ? data.broadMalformed : data.broadRefused).add(kind);
+        const { inspect, run } = snapshotList(data);
+        expect((await inspect.listRepros()).map((row) => row.state)).toEqual([
+          'running',
+          'stopped',
+        ]);
+        expect(run.mock.calls.filter(([argv]) => argv.includes('-A'))).toHaveLength(2);
+        const scoped = run.mock.calls.filter(([argv]) => argv.includes('-n'));
+        expect(scoped).toHaveLength(2);
+        expect(scoped.every(([argv]) => argv[argv.indexOf('get') + 1] === kind)).toBe(true);
+      }
+    }
+  });
+
+  it('keeps namespace authority and scoped deployment refusals when broad snapshots are unavailable', async () => {
+    const data = fixture(5);
+    data.held.delete('recorded-space-1');
+    data.namespacesRefused.add('second');
+    const { inspect, run } = snapshotList(data);
+    expect((await inspect.listRepros()).map((row) => row.state)).toEqual([
+      'running',
+      'down',
+      'running',
+      'running',
+      '?',
+    ]);
+    expect(run.mock.calls.filter(([argv]) => argv.includes('-n'))).toHaveLength(0);
+    data.broadRefused.add('deployment');
+    data.scopedRefused.add('deployment');
+    await expect(inspect.listRepros()).rejects.toThrow('could not ask cluster');
+  });
+});
+
 describe('what the record alone says', () => {
-  it('renders a workspace made before note groups existed as groups', () => {
+  it('renders a workspace made before note groups existed as groups', async () => {
     // Grouped notes were written into repro.json at create time, so they reached only
     // workspaces created after the release that added them -- and destroying a customer
     // repro to see the new shape is the one thing nobody can do. Notes are a pure function
@@ -345,7 +769,7 @@ describe('what the record alone says', () => {
         ],
       },
     });
-    const s = summary(meta);
+    const s = await summary(meta);
     const groups = s.note_groups as NoteGroup[];
     const titles = groups.map((group) => group.title);
     expect(titles.slice(0, 2)).toEqual(['Kubernetes', 'MongoDB']);
@@ -360,7 +784,8 @@ describe('what the record alone says', () => {
       Cluster: 'kind-houston-local',
       Namespace: 'houston-old',
       Arrangement: 'microservices',
-      Pods: 'about 9',
+      Pods: '9 for Rocket.Chat and MongoDB',
+      License: expect.stringContaining('microservices are an Enterprise feature') as unknown,
     });
     // And the flat list the CLI prints is the derived one, not the sentence above.
     expect(s.notes).toEqual(flattenNotes(groups));
@@ -369,7 +794,33 @@ describe('what the record alone says', () => {
     ).toEqual([]);
   });
 
-  it("carries the workspace's password, and an older record's real one", () => {
+  it('says microservices need a license only while the workspace has none', async () => {
+    // The second Rocket.Chat replica of an unlicensed microservices workspace crash-loops
+    // ("Enterprise license not found") and nothing said why. A license can be added once it
+    // is up, so this is said, not refused.
+    const rows = async (extra: Record<string, unknown>) => {
+      const meta = metadata({
+        name: 'm',
+        project: 'houston-m',
+        rootUrl: 'http://localhost:3000',
+        hostPort: 3000,
+        extra: { runtime: 'kubernetes', namespace: 'houston-m', ...extra },
+      });
+      const groups = (await summary(meta)).note_groups as NoteGroup[];
+      return Object.fromEntries(groups[0]?.rows ?? []) as Record<string, string>;
+    };
+    expect((await rows({ deployment: 'microservices' })).License).toBe(
+      'microservices are an Enterprise feature: without a license, Rocket.Chat replicas after ' +
+        'the first stop ("Enterprise license not found"). Add one with `--license` or in ' +
+        'Rocket.Chat under Workspace > Subscription.',
+    );
+    expect(await rows({ deployment: 'microservices', licensed: true })).not.toHaveProperty(
+      'License',
+    );
+    expect(await rows({ deployment: 'monolith' })).not.toHaveProperty('License');
+  });
+
+  it("carries the workspace's password, and an older record's real one", async () => {
     // The GUI renders `login` with a copy button and the create dialog shows the same
     // dict, so a generated password reaches a browser-only operator through this key.
     const meta = metadata({
@@ -385,9 +836,12 @@ describe('what the record alone says', () => {
       versionSource: 'live',
       adminPassword: 's3cret-generated-value',
     });
-    expect(summary(meta).login).toEqual({ user: 'admin', password: 's3cret-generated-value' });
+    expect((await summary(meta)).login).toEqual({
+      user: 'admin',
+      password: 's3cret-generated-value',
+    });
     meta.adminPassword = '';
-    expect((summary(meta).login as { password: string }).password).toBe('admin123');
+    expect(((await summary(meta)).login as { password: string }).password).toBe('admin123');
   });
 });
 
@@ -478,5 +932,140 @@ describe('the detail of a Kubernetes workspace', () => {
     expect(d.state).toBe('running');
     // ...and the links are still there.
     expect((d.links as unknown[]).length).toBeGreaterThan(0);
+  });
+});
+
+describe('a composed workspace in the payload', () => {
+  const combo = () =>
+    metadata({
+      name: 'combo',
+      project: 'houston-combo',
+      rcVersion: '8.5.1',
+      mongoTag: '8.0',
+      preset: 'email+ldap',
+      rootUrl: 'http://localhost:3110',
+      hostPort: 3110,
+      extra: {
+        runtime: 'docker',
+        presets: ['email', 'ldap'],
+        preset_params: { ldap: { users: '3' } },
+      },
+    });
+
+  it("links every preset's sidecar UI", () => {
+    const labels = reproLinks(combo()).map((link) => link.label);
+    expect(labels).toEqual(expect.arrayContaining(['Mailpit', 'phpLDAPadmin']));
+  });
+
+  it('carries the list only for a composed workspace', async () => {
+    expect((await summary(combo())).presets).toEqual(['email', 'ldap']);
+    expect('presets' in (await summary(metadata({ name: 'one', preset: 'ldap' })))).toBe(false);
+  });
+
+  it('names a multi-instance workspace’s presets without the deployment', async () => {
+    // Compose builds multi-instance through that preset, so the record lists it among the
+    // presets; the panel showed it as a preset chip beside the deployment that already says
+    // so, where the owner had settled it is the deployment, not a preset.
+    const multi = (preset: string) =>
+      summary(
+        metadata({
+          name: 'mi',
+          preset,
+          extra: { runtime: 'docker', deployment: 'multi-instance' },
+        }),
+      );
+    expect(await multi('email+ldap+multi-instance')).toMatchObject({
+      preset: 'email+ldap',
+      presets: ['email', 'ldap'],
+      deployment: 'multi-instance',
+    });
+    expect(String((await multi('multi-instance')).preset)).not.toContain('multi-instance');
+  });
+});
+
+describe("an HTTPS workspace's preset UIs", () => {
+  it('link to their public path; the demo page keeps its cross-origin port beside it', () => {
+    const meta = linksMeta('email+livechat', {
+      public_paths: [
+        {
+          preset: 'email',
+          path: '/mailpit',
+          service: 'mailpit',
+          container_port: 8025,
+          service_port: 8025,
+        },
+        {
+          preset: 'livechat',
+          path: '/livechat-demo',
+          service: 'widget-site',
+          container_port: 80,
+          service_port: 80,
+        },
+      ],
+    });
+    meta.publicUrl = 'https://r.houston.localhost';
+    const byLabel = Object.fromEntries(reproLinks(meta).map((link) => [link.label, link.url]));
+    expect(byLabel).toMatchObject({
+      Mailpit: 'https://r.houston.localhost/mailpit/',
+      'Widget site': 'http://localhost:8090',
+      'Widget site (same origin)': 'https://r.houston.localhost/livechat-demo/',
+    });
+    // Without a public name, nothing changes.
+    meta.publicUrl = '';
+    expect(reproLinks(meta).find((link) => link.label === 'Mailpit')?.url).toBe(
+      'http://localhost:8025',
+    );
+  });
+  it('replace the MinIO console and phpLDAPadmin links, which name the same pages', () => {
+    const meta = linksMeta('ldap+s3_minio', {
+      public_paths: [
+        {
+          preset: 's3_minio',
+          path: '/minio',
+          service: 'minio-ui',
+          container_port: 80,
+          service_port: 80,
+        },
+        {
+          preset: 'ldap',
+          path: '/phpldapadmin',
+          service: 'phpldapadmin',
+          container_port: 80,
+          service_port: 8082,
+        },
+      ],
+    });
+    meta.publicUrl = 'https://r.houston.localhost';
+    const links = reproLinks(meta);
+    expect(Object.fromEntries(links.map((link) => [link.label, link.url]))).toMatchObject({
+      'MinIO console': 'https://r.houston.localhost/minio/',
+      'MinIO API': 'http://localhost:9000',
+      phpLDAPadmin: 'https://r.houston.localhost/phpldapadmin/',
+    });
+    expect(links.filter((link) => link.label === 'MinIO console')).toHaveLength(1);
+  });
+});
+
+describe("ldap's own IdP", () => {
+  it('is linked, on the port its Keycloak publishes', () => {
+    // Links were by preset name only, so the Keycloak `--set idp=saml|oidc` brings -- the
+    // console holding the directory's SSO users -- had no link on loopback.
+    const { reproLinks } = require('../../../src/core/lifecycle/inspect') as {
+      reproLinks: (meta: never) => { label: string; url: string }[];
+    };
+    const { metadata } = require('../../../src/core/runner/record') as {
+      metadata: (values: Record<string, unknown>) => never;
+    };
+    for (const [idp, port] of [
+      ['saml', 8081],
+      ['oidc', 8085],
+    ] as const) {
+      const links = reproLinks(
+        metadata({ name: 'l', preset: 'ldap', hostPort: 3000, extra: { params: { idp } } }),
+      );
+      expect(links.find((link) => link.label === 'Keycloak')?.url).toBe(
+        `http://localhost:${String(port)}`,
+      );
+    }
   });
 });

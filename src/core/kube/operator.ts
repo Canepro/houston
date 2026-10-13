@@ -11,7 +11,18 @@ import * as config from '../../lib/config';
 import { CreateFailedError, DockerError, PreflightError } from '../../lib/errors';
 import { info, nullEmit, warn, type Emit } from '../../lib/events';
 
-import { REFUSED, askList, askObject, items, present, refused, why, type Answer } from './ask';
+import {
+  REFUSED,
+  absent,
+  answerWhy,
+  askList,
+  askObject,
+  items,
+  present,
+  refused,
+  why,
+  type Answer,
+} from './ask';
 import { helmEnv, kube } from './exec';
 import { scalar } from './manifests';
 import {
@@ -310,6 +321,21 @@ spec:
       db: admin
   statefulSet:
     spec:
+      # The mongod container's own limits, merged by container name. The operator's default
+      # is a 500M limit, and mongodump and mongorestore run INSIDE this container, under that
+      # same limit: a backup seconds after a re-up had the container OOMKilled, and Rocket.Chat
+      # crash-looping with it. These are the hand-written StatefulSet's values, which run the
+      # same tools in the same place; a limit is a ceiling, not a reservation.
+      template:
+        spec:
+          containers:
+          - name: mongod
+            resources:
+              requests:
+                cpu: 100m
+                memory: 256Mi
+              limits:
+                memory: 2Gi
 ${mongodbVolumeClaims(storageGb)}`;
 }
 
@@ -330,6 +356,31 @@ export const MONGO_URL_SECRET = 'rocketchat-mongodb-url';
 export const REG_TOKEN_SECRET = 'houston-reg-token';
 
 export const REG_TOKEN_KEY = 'token';
+
+/**
+ * The Enterprise licence, the same way: its own Secret, `valueFrom` in the container env.
+ * Not the chart's own `license:` value, which renders the licence into the Deployment in
+ * plain text and turns on LICENSE_DEBUG.
+ */
+export const LICENSE_SECRET = 'houston-license';
+export const LICENSE_KEY = 'license';
+
+/** An Opaque Secret holding the Enterprise licence. */
+export function licenseSecretManifest(
+  name: string,
+  { license, owner = '' }: { license: string; owner?: string },
+): string {
+  return YAML.stringify(
+    {
+      apiVersion: 'v1',
+      kind: 'Secret',
+      metadata: { name: LICENSE_SECRET, labels: labelsFor(name, owner) },
+      type: 'Opaque',
+      stringData: { [LICENSE_KEY]: license },
+    },
+    { compat: 'yaml-1.1', indentSeq: false, lineWidth: 0 },
+  );
+}
 
 /** An Opaque Secret holding the cloud registration token. */
 export function regTokenSecretManifest(
@@ -398,7 +449,8 @@ export function operatorMongoUrl(
 }
 
 /**
- * `mongodump`/`mongorestore` flags for an operator-managed MongoDB.
+ * The application user's password, for the database tools under an operator-managed MongoDB;
+ * '' when it cannot be read.
  *
  * The operator enables SCRAM, so an unauthenticated `mongodump` fails with "Command
  * listCollections requires authentication" -- which is exactly what it did: backup was
@@ -406,12 +458,13 @@ export function operatorMongoUrl(
  * perfectly on the hand-written StatefulSet that has no auth.
  *
  * The password is read back out of the Secret rather than kept anywhere: it is generated at
- * create time and deliberately never written to disk.
+ * create time and deliberately never written to disk. It reaches the tools on STDIN, through
+ * `toolAuthenticated` and `shellAuthenticated` below, never as an argument.
  */
 export async function mongoToolAuth(
   name: string,
   { context }: { context: string },
-): Promise<string[]> {
+): Promise<string> {
   const res = await kube.run(
     [
       'kubectl',
@@ -428,24 +481,74 @@ export async function mongoToolAuth(
     { own: isOurs(context) },
   );
   const encoded = res.stdout.trim();
-  if (res.returncode !== 0 || encoded === '') return [];
-  let password: string;
+  if (res.returncode !== 0 || encoded === '') return '';
   try {
-    password = Buffer.from(encoded, 'base64').toString('utf8').trim();
+    return Buffer.from(encoded, 'base64').toString('utf8').trim();
   } catch {
-    return [];
+    return '';
   }
-  if (password === '') return [];
-  // authenticationDatabase is the APP database, not `admin`: the app user is DEFINED in the
-  // application database, and authenticating against admin looks for a user that was never
-  // created there.
+}
+
+/**
+ * Hands a database tool its password as a `--config` file made from the first line of stdin,
+ * then runs it on the rest of stdin -- `mongorestore --archive` reads its archive there.
+ *
+ * NEVER AN ARGUMENT, here or on the host. `ps` shows every command line on the machine, and a
+ * local cluster's pods share the host's process table: `--password` in this argv was readable
+ * by any user, in the tool's command line, in `kubectl exec`'s and in the exec seam's relay.
+ * The file is 0600 in the pod's own /tmp and is unlinked before the tool starts; the tool
+ * reads it through the descriptor the shell keeps open. `read` and `printf` are shell
+ * builtins, so the line is never an argument of a process either.
+ */
+const CONFIG_FROM_STDIN =
+  'IFS= read -r line || exit 1; umask 077; f=$(mktemp) || exit 1; ' +
+  'printf "%s\\n" "$line" > "$f"; exec 3< "$f"; rm -f "$f"; exec "$@" --config=/dev/fd/3';
+
+/**
+ * A `mongodump`/`mongorestore` argv authenticated as the application user, and what goes on
+ * its stdin first.
+ *
+ * authenticationDatabase is the APP database, not `admin`: the app user is DEFINED in the
+ * application database, and authenticating against admin looks for a user that was never
+ * created there.
+ */
+export function toolAuthenticated(argv: readonly string[], password: string): [string[], string] {
   return [
-    '--username',
-    MONGO_APP_USER,
-    '--password',
-    password,
-    '--authenticationDatabase',
-    MONGO_APP_DB,
+    [
+      'sh',
+      '-c',
+      CONFIG_FROM_STDIN,
+      'sh',
+      ...argv,
+      '--username',
+      MONGO_APP_USER,
+      '--authenticationDatabase',
+      MONGO_APP_DB,
+    ],
+    // A JSON string is a YAML double-quoted scalar, and keeps the line one line.
+    `password: ${JSON.stringify(password)}\n`,
+  ];
+}
+
+/**
+ * `mongosh` running `script` against `database` as the application user, and its stdin.
+ *
+ * The script comes in on stdin and connects first, as the seed does, because the shell has
+ * no way to take a password other than an argument. Always `mongosh`: the operator manages
+ * MongoDB 6.0 and later, whose images ship no other shell. A WRITABLE HOME, or the shell's own
+ * ~/.mongodb warning fills the output in the operator's pod, whose user's home is not writable.
+ */
+export function shellAuthenticated(
+  database: string,
+  script: string,
+  password: string,
+): [string[], string] {
+  const uri =
+    `mongodb://${MONGO_APP_USER}:${encodeURIComponent(password)}@127.0.0.1:27017/` +
+    `${encodeURIComponent(database)}?authSource=${MONGO_APP_DB}&directConnection=true`;
+  return [
+    ['env', 'HOME=/tmp', 'mongosh', '--quiet', '--nodb', '--file', '/dev/stdin'],
+    `var db = connect(${JSON.stringify(uri)});\n${script}\n`,
   ];
 }
 
@@ -542,8 +645,53 @@ export function operatorWatches(scope: string, namespace: string): boolean {
     .includes(namespace);
 }
 
+/** Wait out an earlier teardown before Helm can reuse its shared namespace. */
+export async function waitForSystemNamespace(context: string, emit: Emit): Promise<void> {
+  const seen = await askObject('namespace', OPERATOR_NAMESPACE, {
+    context,
+    timeout: APPLY_TIMEOUT,
+  });
+  if (refused(seen)) {
+    throw new DockerError(`could not read namespace ${OPERATOR_NAMESPACE}: ${answerWhy(seen)}`);
+  }
+  if (!present(seen)) return;
+  const metadata = seen.doc.metadata as { deletionTimestamp?: unknown } | undefined;
+  const status = seen.doc.status as { phase?: unknown } | undefined;
+  const deleting =
+    typeof metadata?.deletionTimestamp === 'string' && metadata.deletionTimestamp !== '';
+  if (!deleting && status?.phase !== 'Terminating') return;
+  info(emit, `waiting for ${OPERATOR_NAMESPACE} to finish its previous teardown`, {
+    phase: 'provision',
+  });
+  const res = await kube.run(
+    [
+      'kubectl',
+      '--context',
+      context,
+      'wait',
+      '--for=delete',
+      `namespace/${OPERATOR_NAMESPACE}`,
+      '--timeout=90s',
+    ],
+    { timeout: APPLY_TIMEOUT, own: isOurs(context) },
+  );
+  if (res.returncode !== 0) {
+    // It may have disappeared between the read and kubectl's wait invocation. Only
+    // the cluster confirming absence makes that a successful wait.
+    const after = await askObject('namespace', OPERATOR_NAMESPACE, {
+      context,
+      timeout: APPLY_TIMEOUT,
+    });
+    if (absent(after)) return;
+    throw new CreateFailedError(
+      `${OPERATOR_NAMESPACE} has not finished its previous teardown: ${why(res)}`,
+    );
+  }
+}
+
 /** Install houston's shared operator release after adoption checks pass. */
 async function installOperator(context: string, emit: Emit): Promise<void> {
+  await waitForSystemNamespace(context, emit);
   await kube.run(['helm', 'repo', 'add', OPERATOR_REPO, OPERATOR_REPO_URL, '--force-update'], {
     timeout: APPLY_TIMEOUT,
     env: helmEnv(context),

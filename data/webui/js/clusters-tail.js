@@ -111,7 +111,7 @@ function awsSignIn() {
   }
   if (!c && !pre) return { state: "unknown" };
   const expired = /expired/iu.test(error);
-  return { state: expired ? "expired" : "none", error, profile: (c && c.profile) || "" };
+  return { state: expired ? "expired" : "none", error, profile: (c && c.profile) || "", profiles: (c && c.profiles) || [] };
 }
 
 async function clReadConnection(force = false) {
@@ -128,8 +128,12 @@ async function clReadConnection(force = false) {
 async function refreshClusterBadge() {
   const badge = ctx.$("#cluster-badge");
   if (!badge) return;
-  try { CLUSTERS = await ctx.api("/api/clusters"); }
-  catch (_) { badge.hidden = true; return; }      // no gui extra / no permission
+  try { CLUSTERS = await ctx.api("/api/clusters"); CLSTATE.listError = ""; }
+  catch (e) { CLSTATE.listError = e.message; badge.hidden = true; return; }      // no gui extra / no permission
+  // The rows every view draws from follow the list now, not only when a build starts or ends:
+  // the Clusters page opened after this read drew "no cluster on this machine" for a running
+  // k3s until its own read came back.
+  clSyncRows();
   // ALSO ONCE AFTER A PAGE LOAD. Read only while a job was already known, a build running
   // when the page was refreshed was invisible on Home and in this chip until someone opened
   // Clusters -- and its cluster's own warning arrived a minute later in its place.
@@ -192,6 +196,7 @@ async function openClusters() {
   ctx.$(".panes").classList.add("no-detail");
   ctx.$("#actpane").innerHTML = "";
   const read = ++pageReads;
+  if (CLUSTERS) clSyncRows();         // the first draw shows the clusters already known
   clRenderPage(fresh);
   try {
     CLUSTERS = await ctx.api("/api/clusters");
@@ -702,12 +707,12 @@ async function clCopyDoc(name) {
 // built, ③ ready. Every call is the one the CLI makes: connection, sweep, connect, approve,
 // estimate, create.
 const SETUP = { step: 1, back: false, branch: "build", sweeping: false, sweep: null, sweepError: "",
-  connected: null, connectedStatus: undefined, building: "", estimate: null,
+  connected: null, connectedStatus: undefined, building: "", estimate: null, checking: false, checkedAt: 0,
   f: { name: "", region: "", nodes: 3, expires: "7", zone: "", email: "" } };
 
 async function openEksSetup() {
   Object.assign(SETUP, { step: 1, back: false, branch: "build", sweeping: false, sweep: null, sweepError: "",
-    connected: null, connectedStatus: undefined, building: "", estimate: null,
+    connected: null, connectedStatus: undefined, building: "", estimate: null, checking: false, checkedAt: 0,
     f: { name: "", region: "", nodes: 3, expires: "7", zone: "", email: "" } });
   const dialog = ctx.$("#eks-setup");
   renderSetup(true);
@@ -715,9 +720,18 @@ async function openEksSetup() {
   await setupRecheck(false);
 }
 
+// Seen to happen: an answer that has not changed redrew the same screen, so a Re-check
+// looked like a button that did nothing.
 async function setupRecheck(force = true) {
-  await Promise.all([clReadConnection(force),
-    loadClusterOverview(force, { evenWithoutClusters: true, fresh: force }).catch(() => null)]);
+  SETUP.checking = true;
+  if (SETUP.step === 1 && ctx.$("#eks-setup").open) renderSetup(false);
+  try {
+    await Promise.all([clReadConnection(force),
+      loadClusterOverview(force, { evenWithoutClusters: true, fresh: force }).catch(() => null)]);
+  } finally {
+    SETUP.checking = false;
+    SETUP.checkedAt = Date.now();
+  }
   if (ctx.$("#eks-setup").open) renderSetup(false);
 }
 
@@ -802,6 +816,17 @@ function setupStepOne(step, foot) {
     step.append(ctx.el("div", { class: "way" }, ctx.el("h4", {}, "Sign in again on the server"),
       ctx.el("p", {}, "Run this as the user that runs Houston, then Re-check."), cmdBox(`aws sso login --profile ${profile}`)));
   } else if (s.state === "none") {
+    // The commonest cause: `aws` works in a shell that has AWS_PROFILE and the server was
+    // started from one that did not. Re-checking cannot fix that; a restart can.
+    if (!s.profile && s.profiles.length) {
+      const profile = s.profiles.length === 1 ? s.profiles[0] : "<profile>";
+      step.append(ctx.el("div", { class: "way", id: "eks-profiles", style: "margin-bottom:.7rem" },
+        ctx.el("h4", {}, "This server was started without AWS_PROFILE"),
+        ctx.el("p", {}, "Its AWS config has ", ctx.el("b", {}, s.profiles.join(", ")),
+          ". Restart houston serve with AWS_PROFILE set to the one that can use EKS. Running it as a service? "
+          + "Print the unit again with houston serve --print-service from a shell that has it set."),
+        cmdBox(`AWS_PROFILE=${profile} houston serve`)));
+    }
     step.append(ctx.el("p", { style: "margin:.2rem 0 .7rem" }, "On the server, use one of these, then Re-check:"),
       ctx.el("div", { class: "ways" },
         ctx.el("div", { class: "way" }, ctx.el("h4", {}, "Company SSO ", ctx.el("span", { class: "tag" }, "Recommended")),
@@ -821,9 +846,10 @@ function setupStepOne(step, foot) {
           .map(([key, label]) => fbtn(label, () => clCopyDoc(key), "btn sm")))));
   }
   const signed = s.state === "signed";
+  const checked = SETUP.checkedAt ? ` Checked at ${new Date(SETUP.checkedAt).toLocaleTimeString()}.` : "";
   foot.append(fbtn("Cancel", () => ctx.$("#eks-setup").close()),
-    fhint(signed ? "" : "Re-check after signing in on the server."));
-  if (!signed || !pre) foot.append(fbtn("Re-check", () => setupRecheck(true)));
+    fhint(signed ? "" : `Re-check after signing in on the server.${checked}`));
+  if (!signed || !pre) foot.append(fbtn(SETUP.checking ? "Checking…" : "Re-check", () => setupRecheck(true), "btn", SETUP.checking));
   foot.append(fbtn("Next →", () => setupGo(2), "btn solid", !signed));
 }
 
@@ -1300,7 +1326,8 @@ document.addEventListener("visibilitychange", () => {
   else { ctx.loadRepros(); startPolling(); }
 });
 
-ctx.loadRepros();
+ctx.loadRepros().then(ctx.restoreLocation);
+ctx.adoptRunningJobs();
 ctx.refreshKube();
 startPolling();
 

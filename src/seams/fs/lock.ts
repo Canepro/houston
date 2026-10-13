@@ -50,7 +50,15 @@ import { PassThrough } from 'node:stream';
 
 import { ConflictError } from '../../lib/errors';
 import { fileErrorOf } from '../../lib/format';
-import { capture, interruptibly, stream, SpawnFailure, type ProcessResult } from '../exec';
+import {
+  capture,
+  interruptibly,
+  sleep,
+  stream,
+  SpawnFailure,
+  unstoppable,
+  type ProcessResult,
+} from '../exec';
 
 export {
   MARKER_NAME,
@@ -266,7 +274,10 @@ function which(tool: string): string {
  * test can force the degraded path without uninstalling the binary.
  */
 export function flockTool(): Promise<FlockTool> {
-  probed ??= (async (): Promise<FlockTool> => {
+  // `unstoppable`: one answer for the whole process. Probed inside a job that was then
+  // stopped, the refused `flock --version` read as ABSENT, and every lock after it in this
+  // `serve` was in-process only -- no longer excluding a CLI on the same home.
+  probed ??= unstoppable(async (): Promise<FlockTool> => {
     const binary = which('flock');
     if (binary === '') return ABSENT;
     try {
@@ -286,7 +297,7 @@ export function flockTool(): Promise<FlockTool> {
       // rather than a failure -- see the module comment.
       return ABSENT;
     }
-  })();
+  });
   return probed;
 }
 
@@ -349,10 +360,9 @@ async function enterInProcess(key: string, timeoutMs: number): Promise<() => voi
     if (remaining <= 0) {
       throw new LockUnavailable('in-process', key, Date.now() - started, 'held by this process');
     }
-    await Promise.race([
-      waiting,
-      new Promise((resolve) => setTimeout(resolve, Math.min(remaining, 50))),
-    ]);
+    // The seam's sleep, so a job that is stopped while it queues for a busy workspace
+    // leaves the queue rather than waiting out the holder.
+    await Promise.race([waiting, sleep(Math.min(remaining, 50))]);
   }
   let release!: () => void;
   inProcess.set(

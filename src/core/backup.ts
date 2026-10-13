@@ -51,6 +51,8 @@ import {
 import { loads } from '../lib/json-text';
 import { mkdirParents } from '../lib/mkdir-parents';
 import { makeTempDir } from '../lib/tempdir';
+import { BUILD_IMAGE } from '../lib/versions';
+import { qualifiedParams } from '../lib/presets/composite';
 import { Interrupted, cleanup, unwindsOnInterrupt } from '../seams/exec';
 import {
   BadGzip,
@@ -64,9 +66,10 @@ import {
 import * as audit from './audit';
 import { compatibility } from './backup-compat';
 import * as journal from './journal';
+import { MONOLITH_SELECTOR } from './kube/names';
 import { login } from './lifecycle/admin';
 import { createRepro } from './lifecycle/create-docker';
-import { resolveName, sanitize } from './lifecycle/naming';
+import { ownerPrefix, resolveName, sanitize } from './lifecycle/naming';
 import { mayDestroy } from './lifecycle/ownership';
 import { requireDocker } from './lifecycle/preconditions';
 import { waitAndFinalize, waitServing } from './lifecycle/ready';
@@ -90,6 +93,7 @@ import {
   rcServices,
   updateMeta,
 } from './runner/record';
+import { runningWriterServices } from './runner/queries';
 import * as topology from './topology';
 
 type Bag = Record<string, unknown>;
@@ -121,18 +125,38 @@ export async function repairStopped(
 ): Promise<boolean> {
   const context = String(entry.detail.context ?? '');
   if (context !== '') {
-    const { scaleRocketchat } = await import('./kube/scale');
-    // A falsy recorded count (0, '', null) means 1, and a recorded string that is not an
-    // integer throws out of the handler -- `toInt` refuses it rather than silently falling
-    // back to 1.
+    const { restoreRocketchatReplicas, scaleRocketchat } = await import('./kube/scale');
+    if (entry.detail.deployment_replicas !== undefined) {
+      const counts = entry.detail.deployment_replicas;
+      if (counts === null || typeof counts !== 'object' || Array.isArray(counts)) return false;
+      return (
+        (await restoreRocketchatReplicas(entry.workspace, counts as Record<string, number>, {
+          context,
+        })) === 0
+      );
+    }
+    // Older notes carry one count. Missing/falsy legacy values still mean one, but zero
+    // is a real stopped state rather than permission to start a writer.
     const recorded = entry.detail.replicas;
-    const replicas = isTruthy(recorded) ? toInt(recorded) : 1;
-    return (await scaleRocketchat(entry.workspace, { replicas, context })) === 0;
+    const replicas = recorded === 0 ? 0 : isTruthy(recorded) ? toInt(recorded) : 1;
+    return (
+      (await scaleRocketchat(entry.workspace, {
+        replicas,
+        context,
+        selector: MONOLITH_SELECTOR,
+      })) === 0
+    );
   }
-  const services = Array.isArray(entry.detail.services)
-    ? entry.detail.services.map((name) => String(name))
-    : [];
-  return services.length > 0 && (await startServices(entry.workspace, services)) === 0;
+  const services = entry.detail.services;
+  if (
+    !Array.isArray(services) ||
+    services.some((service: unknown) => typeof service !== 'string' || service.trim() === '')
+  ) {
+    return false;
+  }
+  return (
+    services.length === 0 || (await startServices(entry.workspace, services as string[])) === 0
+  );
 }
 
 export function installJournalRepairs(): void {
@@ -209,16 +233,20 @@ function composeTimeoutMs(timeout?: number): number | undefined {
   return timeout === undefined ? undefined : timeout * 1000;
 }
 
+// `input` goes on stdin ahead of anything else, and only on Kubernetes: it carries the
+// operator's password (`mongoAuth`), and a Compose MongoDB has none.
 async function execCapture(
   name: string,
   argv: readonly string[],
   timeout?: number,
+  input = '',
 ): Promise<[number, string]> {
   const context = await kube(name);
   if (context !== '') {
     const { execCapture: kubeExecCapture } = await import('./kube/transfer');
     return await kubeExecCapture(name, argv, {
       context,
+      input,
       ...(timeout !== undefined ? { timeout } : {}),
     });
   }
@@ -230,12 +258,14 @@ async function execToFile(
   argv: readonly string[],
   dest: string,
   timeout?: number,
+  input = '',
 ): Promise<[number, string]> {
   const context = await kube(name);
   if (context !== '') {
     const { execToFile: kubeExecToFile } = await import('./kube/transfer');
     return await kubeExecToFile(name, argv, dest, {
       context,
+      input,
       ...(timeout !== undefined ? { timeout } : {}),
     });
   }
@@ -247,12 +277,14 @@ async function execFromFile(
   argv: readonly string[],
   src: string,
   timeout?: number,
+  input = '',
 ): Promise<[number, string]> {
   const context = await kube(name);
   if (context !== '') {
     const { execFromFile: kubeExecFromFile } = await import('./kube/transfer');
     return await kubeExecFromFile(name, argv, src, {
       context,
+      input,
       ...(timeout !== undefined ? { timeout } : {}),
     });
   }
@@ -260,18 +292,39 @@ async function execFromFile(
 }
 
 /**
- * Credential flags for the database tools, empty unless the operator manages it.
+ * The database tools' password, '' unless the operator manages this MongoDB.
  *
  * The hand-written StatefulSet runs without authentication, so both paths existed and
  * only one was exercised until an audit ran the operator too.
  */
-export async function mongoAuth(name: string): Promise<string[]> {
+export async function mongoAuth(name: string): Promise<string> {
   const context = await kube(name);
-  if (context === '') return [];
+  if (context === '') return '';
   const meta = await readMeta(name);
-  if (bagOf(meta.extra).mongo_managed_by !== 'operator') return [];
+  if (bagOf(meta.extra).mongo_managed_by !== 'operator') return '';
   const { mongoToolAuth } = await import('./kube/operator');
   return await mongoToolAuth(name, { context });
+}
+
+/** A database tool's argv and its stdin, authenticated where the operator manages MongoDB. */
+async function toolCommand(name: string, argv: readonly string[]): Promise<[string[], string]> {
+  const password = await mongoAuth(name);
+  if (password === '') return [[...argv], ''];
+  const { toolAuthenticated } = await import('./kube/operator');
+  return toolAuthenticated(argv, password);
+}
+
+/**
+ * What a failed database tool said, for an error: the END of its output, where the reason
+ * is -- mongodump opens with a line per collection, and the first 600 characters were all
+ * progress -- and that it was killed, when its exit says so. A tool the kernel kills for
+ * memory says nothing about it: in the MongoDB operator's pod the dump runs inside mongod's
+ * own memory limit.
+ */
+function toolFailure(rc: number, output: string, limit: number): string {
+  const tail = output.trim().slice(-limit);
+  if (rc !== 137) return tail;
+  return `it was killed (exit 137), most likely for running out of memory${tail === '' ? '' : `; it last said: ${tail}`}`;
 }
 
 /**
@@ -342,6 +395,9 @@ export async function rcServicesOf(name: string): Promise<string[]> {
  */
 export class Quiesced {
   note = '';
+  private context = '';
+  private replicas: Record<string, number> | null = null;
+  private runningServices: string[] = [];
 
   constructor(
     readonly name: string,
@@ -365,35 +421,61 @@ export class Quiesced {
       phase: 'backup',
       pct: 10,
     });
-    const context = await kube(this.name);
+    this.context = await kube(this.name);
+    if (this.context !== '') {
+      const { rocketchatReplicas } = await import('./kube/scale');
+      this.replicas = await rocketchatReplicas(this.name, { context: this.context });
+    } else {
+      this.runningServices = await runningWriterServices(this.name, this.services);
+    }
     // BEFORE it goes down, and carrying what will bring it back. `exit` starts it again
     // "no matter what" -- except the one case where nothing runs at all: a daemon job
     // thread killed by a restart or an OOM. This note is what lets a later `serve` or
     // `doctor` see it and fix it.
     this.note = journal.record(journal.ROCKETCHAT_STOPPED, this.name, {
-      context,
-      replicas: 1,
-      services: [...this.services],
+      context: this.context,
+      replicas: this.replicas === null ? 1 : Object.values(this.replicas)[0],
+      ...(this.replicas === null ? {} : { deployment_replicas: this.replicas }),
+      services: [...this.runningServices],
     });
-    if (context !== '') {
-      const { scaleRocketchat } = await import('./kube/scale');
-      // ONLY Rocket.Chat. `stopWorkspace` would take MongoDB with it, and a dump needs
-      // the database up and only its writers quiesced.
-      await scaleRocketchat(this.name, { replicas: 0, context });
-      const meta = await readMeta(this.name);
-      const pid = bagOf(meta.extra).port_forward_pid;
-      if (isTruthy(pid)) {
-        const { namespaceFor } = await import('./kube/namespace');
-        const { stopPortForward } = await import('./lifecycle/ready');
-        // `toInt(pid)`: a recorded pid that is not an integer throws rather than silently
-        // becoming 0.
-        stopPortForward(toInt(pid), { namespace: await namespaceFor(this.name) });
-        await updateMeta(this.name, (m) => {
-          delete bagOf(m.extra).port_forward_pid;
-        });
+    try {
+      if (this.context !== '') {
+        const { scaleRocketchat } = await import('./kube/scale');
+        // ONLY Rocket.Chat. `stopWorkspace` would take MongoDB with it, and a dump needs
+        // the database up and only its writers quiesced.
+        const stopped = await scaleRocketchat(this.name, { replicas: 0, context: this.context });
+        if (stopped !== 0)
+          throw new DockerError(
+            `could not stop Rocket.Chat writers for '${this.name}' (exit ${String(stopped)}); refusing to access the database`,
+          );
+        const meta = await readMeta(this.name);
+        const pid = bagOf(meta.extra).port_forward_pid;
+        if (isTruthy(pid)) {
+          const { namespaceFor } = await import('./kube/namespace');
+          const { stopPortForward } = await import('./lifecycle/ready');
+          // `toInt(pid)`: a recorded pid that is not an integer throws rather than silently
+          // becoming 0.
+          await stopPortForward(toInt(pid), { namespace: await namespaceFor(this.name) });
+          await updateMeta(this.name, (m) => {
+            delete bagOf(m.extra).port_forward_pid;
+          });
+        }
+      } else {
+        await stopWriters(this.name, this.services);
       }
-    } else {
-      await stopServices(this.name, this.services);
+    } catch (error) {
+      // Callers enter before their finally. A partially failed entry must restore its
+      // own original state, and keep the durable note if that recovery also fails.
+      try {
+        await this.exit();
+      } catch (recoveryError) {
+        warn(
+          this.emit,
+          `could not restore Rocket.Chat after failed quiescence: ${errorText(recoveryError)}`,
+          { phase: 'backup' },
+        );
+      }
+      throw error;
     }
     return this;
   }
@@ -407,30 +489,34 @@ export class Quiesced {
    * interrupt.
    */
   async exit(): Promise<void> {
-    if (this.skip) return;
+    if (this.skip || this.note === '') return;
     await cleanup(async () => await this.restart());
   }
 
   private async restart(): Promise<void> {
-    const context = await kube(this.name);
     let failed: boolean;
-    if (context !== '') {
-      const { scaleRocketchat } = await import('./kube/scale');
-      failed = (await scaleRocketchat(this.name, { replicas: 1, context })) !== 0;
+    let serving: boolean;
+    if (this.context !== '' && this.replicas !== null) {
+      const { restoreRocketchatReplicas } = await import('./kube/scale');
+      failed =
+        (await restoreRocketchatReplicas(this.name, this.replicas, { context: this.context })) !==
+        0;
+      serving = Object.values(this.replicas).some((count) => count > 0);
     } else {
-      failed = (await startServices(this.name, this.services)) !== 0;
+      failed =
+        this.runningServices.length > 0 &&
+        (await startServices(this.name, this.runningServices)) !== 0;
+      serving = this.runningServices.length > 0;
     }
     if (failed) {
-      warn(
-        this.emit,
-        `Rocket.Chat did not come back up on ${quotedText(this.name)} - the data is ` +
-          `safe, but the workspace is stopped. Start it with ` +
-          `\`houston start --name ${this.name}\`.`,
-        { phase: 'backup' },
+      throw new DockerError(
+        `Rocket.Chat's prior state could not be restored on ${quotedText(this.name)}; ` +
+          'the recovery note is retained with the original replica/service counts',
       );
-      return;
     }
     journal.clear(this.note);
+    this.note = '';
+    if (!serving) return;
     // Rocket.Chat has been STARTED, which is not the same as serving. `waitServing` is
     // runtime-aware and re-establishes the forward, so one call covers both runtimes.
     try {
@@ -448,6 +534,21 @@ export class Quiesced {
         { phase: 'backup' },
       );
     }
+  }
+}
+
+/** Verify a successful Compose stop really left no writers, before touching MongoDB. */
+export async function stopWriters(name: string, services: readonly string[]): Promise<void> {
+  const stopped = await stopServices(name, services);
+  if (stopped !== 0) {
+    throw new DockerError(
+      `could not stop Rocket.Chat writers for '${name}' (exit ${String(stopped)}); refusing to access the database`,
+    );
+  }
+  if ((await runningWriterServices(name, services)).length > 0) {
+    throw new DockerError(
+      `Rocket.Chat writers are still running for '${name}'; refusing to access the database`,
+    );
   }
 }
 
@@ -470,10 +571,9 @@ export async function create(
   if ((await kube(target)) === '') await requireDocker();
   const { reproLock } = await import('./runner/locks');
   // UNWOUND by a Ctrl-C: through `Quiesced.exit`, the staging directory's removal and the
-  // lock's release. The one catch on the way, `composeExecToFile`'s, answers the
-  // interrupted dump as a failed one (`[1, 'Interrupted']`), and the `finally` after
-  // it is the cleanup either way; the
-  // DockerError it then raises is answered as the interrupt it came from (see `runCli`).
+  // lock's release. `composeExecToFile` passes the interrupted dump's Interrupted on
+  // rather than answering it as a failed dump, so it reaches the `finally` that is the
+  // cleanup and then `runCli`, which answers it as the interrupt it is.
   return await unwindsOnInterrupt(
     async () =>
       await reproLock(target, async () => await createLocked(target, { out, note, live, emit })),
@@ -519,26 +619,40 @@ async function dumpToBundle({
   const staging = makeTempDir('houston-backup-');
   try {
     const archive = path.join(staging, ARCHIVE);
-    let rc: number;
-    let err: string;
+    let dump: { result: [number, string] } | { error: unknown };
     let started = 0;
+    let recoveryFailure: { error: unknown } | null = null;
     const quiesced = new Quiesced(target, services, emit, live);
     await quiesced.enter();
     try {
       info(emit, `dumping database ${quotedText(database)}`, { phase: 'backup', pct: 30 });
       started = performance.now();
-      [rc, err] = await execToFile(
-        target,
-        ['mongodump', '--archive', '--gzip', '--db', database, ...(await mongoAuth(target))],
-        archive,
-        DUMP_TIMEOUT,
-      );
+      const [argv, input] = await toolCommand(target, [
+        'mongodump',
+        '--archive',
+        '--gzip',
+        '--db',
+        database,
+      ]);
+      const result = await execToFile(target, argv, archive, DUMP_TIMEOUT, input);
+      dump = { result };
+    } catch (error) {
+      dump = { error };
     } finally {
-      await quiesced.exit();
+      try {
+        await quiesced.exit();
+      } catch (error) {
+        recoveryFailure = { error };
+      }
     }
+    if (recoveryFailure !== null && recoveryFailure.error instanceof Interrupted) {
+      throw recoveryFailure.error;
+    }
+    if ('error' in dump) throw dump.error;
+    const [rc, err] = dump.result;
     if (rc !== 0) {
       throw new DockerError(
-        `mongodump failed for ${quotedText(target)}: ${err.trim().slice(0, 600)}`,
+        `mongodump failed for ${quotedText(target)}: ${toolFailure(rc, err, 600)}`,
       );
     }
     if (!fs.existsSync(archive) || fs.statSync(archive).size === 0) {
@@ -561,8 +675,25 @@ async function dumpToBundle({
       mongo_flavor: meta.mongoFlavor,
       preset: meta.preset,
       params: bagOf(meta.extra).params ?? {},
+      // A composed workspace's list and params; absent for one preset, whose manifest is
+      // unchanged.
+      ...(bagOf(meta.extra).presets === undefined
+        ? {}
+        : {
+            presets: bagOf(meta.extra).presets,
+            preset_params: bagOf(meta.extra).preset_params ?? {},
+          }),
       runtime: topology.ofMeta(meta),
       deployment: bagOf(meta.extra)[config.EXTRA_DEPLOYMENT] ?? '',
+      // A Kubernetes workspace's cluster and whether the operator runs its MongoDB: a
+      // `restore --new` rebuilt on the default context with a plain StatefulSet, and said
+      // "the MongoDB operator is opt-in" about a copy of one that ran it. Absent for Compose.
+      ...(topology.ofMeta(meta) === topology.KUBERNETES
+        ? {
+            context: String(bagOf(meta.extra)[config.EXTRA_CONTEXT] ?? ''),
+            mongo_operator: bagOf(meta.extra).mongo_managed_by === 'operator',
+          }
+        : {}),
       env_overrides: bagOf(meta.extra).env ?? {},
       sidecar_volumes: await sidecarVolumes(target),
       archive_sha256: sha256File(archive),
@@ -582,10 +713,29 @@ async function dumpToBundle({
     ] as [string, string][]) {
       if (fs.existsSync(src)) copyWithMetadata(src, path.join(staging, dst), times);
     }
+    // THE REGISTRATION TOKEN STAYS HOME. It is a real licence, and a bundle is exactly what
+    // gets attached to a support case -- the guide says never to paste one there, and that
+    // backups leave the licence out. Nothing restores from this copy of the compose file
+    // (`restore --new` rebuilds from the manifest), so the copy says only that one was set.
+    const bundled = path.join(staging, COMPOSE);
+    if (fs.existsSync(bundled)) {
+      const text = fs.readFileSync(bundled, 'utf8');
+      const kept = text.replace(/^(\s*REG_TOKEN:)[^\n]*$/gmu, "$1 ''");
+      if (kept !== text) {
+        fs.writeFileSync(bundled, kept, 'utf8');
+        copyMetadata(joinPath(ws, 'docker-compose.yml'), bundled, times);
+      }
+    }
     copyPresetFiles(ws, path.join(staging, FILES_DIR), times);
 
     info(emit, 'packing the bundle', { phase: 'backup', pct: 85 });
     await writeTarGzFromDir(staging, dest, { mtimeNs: times });
+    if (recoveryFailure !== null) {
+      // The dump succeeded. Preserve that usable artifact while reporting the failed
+      // workspace recovery truthfully instead of saying the entire operation succeeded.
+      fs.chmodSync(dest, 0o600);
+      throw new DockerError(`backup saved at ${dest}, but ${errorText(recoveryFailure.error)}`);
+    }
     return manifest;
   } finally {
     fs.rmSync(staging, { recursive: true, force: true });
@@ -1060,7 +1210,13 @@ export async function restore(
   const manifest = await readManifest(bundleFile);
 
   if (isNew) {
-    const newName = name !== '' ? sanitize(name) : await deriveNewName(manifest);
+    // THE NAME THE CREATE WILL SETTLE ON, owner prefix and all: the create puts
+    // `<actor>-` in front, and the load went to the bare name -- a member's restore as new
+    // left `mem-x` running empty and failed on `x`, "half-written".
+    const newName =
+      name !== ''
+        ? sanitize(ownerPrefix(sanitize(name), audit.actor()))
+        : await deriveNewName(manifest, audit.actor());
     return await restoreNew(newName, bundleFile, manifest, emit, { allowUpgrade, force });
   }
 
@@ -1084,6 +1240,19 @@ export async function restore(
       }),
   );
 }
+
+/**
+ * Every collection dropped, not the database: the MongoDB operator's application user holds
+ * `readWrite`, which may drop a collection and may NOT run `dropDatabase`, so every restore
+ * into an operator workspace warned "could not drop" and merged. The same end -- nothing the
+ * bundle lacks survives -- under the role every flavour's user has. A failure is PRINTED,
+ * because only stdout comes back and the shell writes its errors to stderr: the warning's
+ * reason read "()". ES5 for the legacy `mongo` shell of MongoDB before 5.0.
+ */
+export const DROP_EVERY_COLLECTION =
+  'try { db.getCollectionNames().forEach(function (n) { ' +
+  "if (n.indexOf('system.') !== 0) db.getCollection(n).drop(); }); } " +
+  "catch (e) { print('drop failed: ' + e); quit(1); }";
 
 /**
  * Empty the target database so the restore is exact, not a merge.
@@ -1110,24 +1279,33 @@ export async function dropDatabase(
     phase: 'restore',
     pct: 40,
   });
-  const [rc, out] = await execCapture(
-    name,
-    [shell, database, '--quiet', ...(await mongoAuth(name)), '--eval', 'db.dropDatabase()'],
-    PROBE_TIMEOUT,
-  );
+  // A WRITABLE HOME, or the shell's own ~/.mongodb warning fills the output in the MongoDB
+  // operator's pod, whose user's home is not writable.
+  const password = await mongoAuth(name);
+  const [argv, input] =
+    password === ''
+      ? [['env', 'HOME=/tmp', shell, database, '--quiet', '--eval', DROP_EVERY_COLLECTION], '']
+      : (await import('./kube/operator')).shellAuthenticated(
+          database,
+          DROP_EVERY_COLLECTION,
+          password,
+        );
+  const [rc, out] = await execCapture(name, argv, PROBE_TIMEOUT, input);
   if (rc !== 0) {
     // Not fatal: --drop below still clears every collection the bundle carries.
     warn(
       emit,
-      `could not drop ${quotedText(database)} first (${out.trim().slice(0, 200)}); ` +
+      `could not drop ${quotedText(database)} first (${toolFailure(rc, out, 200)}); ` +
         'collections absent from the bundle may survive',
       { phase: 'restore' },
     );
   }
 }
 
-export async function deriveNewName(manifest: Bag): Promise<string> {
-  const base = sanitize(`${String(manifest.repro ?? '') || 'restored'}-restored`);
+export async function deriveNewName(manifest: Bag, actor = ''): Promise<string> {
+  const base = sanitize(
+    ownerPrefix(sanitize(`${String(manifest.repro ?? '') || 'restored'}-restored`), actor),
+  );
   let candidate = base;
   let n = 2;
   while (await exists(candidate)) {
@@ -1161,6 +1339,8 @@ export async function createFromManifest(target: string, manifest: Bag, emit: Em
           runtime: String(manifest.runtime ?? ''),
           deployment: String(deployment),
           preset: String(manifest.preset ?? '') || 'default',
+          context: String(manifest.context ?? ''),
+          mongoOperator: manifest.mongo_operator === true,
         }
       : { preset: String(manifest.preset ?? '') || 'default' };
   const req = createReq({
@@ -1168,8 +1348,18 @@ export async function createFromManifest(target: string, manifest: Bag, emit: Em
     name: target,
     ...axes,
     mongo: String(manifest.mongo_tag ?? ''),
-    params: bagOf(manifest.params),
+    params:
+      manifest.preset_params === undefined
+        ? bagOf(manifest.params)
+        : qualifiedParams(bagOf(manifest.preset_params)),
     env: bagOf(manifest.env_overrides) as Record<string, string | null>,
+    // A CI build's own image: its recorded `.dev0` version names no release image.
+    rcImage: String(manifest.rc_image ?? '').startsWith(`${BUILD_IMAGE}:`)
+      ? String(manifest.rc_image)
+      : '',
+    // WHO restores it owns it, as who creates a workspace does: from the GUI's Backups page
+    // a restored workspace had no owner at all, though the audit named the admin who made it.
+    actor: audit.actor(),
     wait: true,
   });
   await createRepro(req, emit);
@@ -1248,25 +1438,18 @@ export async function restoreArchive({
 }): Promise<number> {
   const sourceDb = String(manifest.database ?? '') || DEFAULT_DATABASE;
   // One collection at a time keeps old repros with Docker's 1024 fd limit alive.
-  const argv = [
-    'mongorestore',
-    '--archive',
-    '--gzip',
-    '--drop',
-    '--numParallelCollections=1',
-    ...(await mongoAuth(target)),
-  ];
+  const tool = ['mongorestore', '--archive', '--gzip', '--drop', '--numParallelCollections=1'];
   if (sourceDb !== database) {
-    argv.push(`--nsFrom=${sourceDb}.*`, `--nsTo=${database}.*`);
+    tool.push(`--nsFrom=${sourceDb}.*`, `--nsTo=${database}.*`);
     info(emit, `remapping database ${quotedText(sourceDb)} -> ${quotedText(database)}`, {
       phase: 'restore',
     });
   }
+  const [argv, input] = await toolCommand(target, tool);
   const quiesced = new Quiesced(target, services, emit);
   await quiesced.enter();
-  let rc: number;
-  let out: string;
-  let elapsed: number;
+  let restored: { rc: number; out: string; elapsed: number } | { error: unknown };
+  let recoveryFailure: { error: unknown } | null = null;
   try {
     // --drop is NOT enough on its own: a collection that exists here but is absent
     // from the bundle survives. NOTED BEFORE THE DROP: between here and mongorestore
@@ -1282,20 +1465,36 @@ export async function restoreArchive({
       pct: 50,
     });
     const started = performance.now();
-    [rc, out] = await execFromFile(target, argv, archive, DUMP_TIMEOUT);
-    elapsed = roundSeconds(performance.now() - started);
+    const [rc, out] = await execFromFile(target, argv, archive, DUMP_TIMEOUT, input);
+    const elapsed = roundSeconds(performance.now() - started);
+    restored = { rc, out, elapsed };
     if (rc === 0) {
       journal.clear(dropNote);
     }
+  } catch (error) {
+    restored = { error };
   } finally {
-    await quiesced.exit();
+    try {
+      await quiesced.exit();
+    } catch (recoveryError) {
+      recoveryFailure = { error: recoveryError };
+    }
   }
-  if (rc !== 0) {
+  if (recoveryFailure !== null) {
+    if (!('error' in restored) || !(restored.error instanceof Interrupted)) {
+      throw recoveryFailure.error;
+    }
+    warn(emit, `restore was stopped; recovery also failed: ${errorText(recoveryFailure.error)}`, {
+      phase: 'restore',
+    });
+  }
+  if ('error' in restored) throw restored.error;
+  if (restored.rc !== 0) {
     throw new DockerError(
-      `mongorestore failed for ${quotedText(target)}: ${out.trim().slice(-800)}`,
+      `mongorestore failed for ${quotedText(target)}: ${toolFailure(restored.rc, restored.out, 800)}`,
     );
   }
-  return elapsed;
+  return restored.elapsed;
 }
 
 /** Unpack the bundle and restore the database over the running workspace. */
@@ -1330,6 +1529,38 @@ export async function loadFromBundle({
     });
   } finally {
     fs.rmSync(staging, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The restored database holds the SOURCE's admin, so the record takes the password the
+ * bundle's own record gives for it. Kept, the target's own was the password, and every login
+ * answered 401: the Site_Url retarget below, `api`, `token`, `seed`. A bundle without a
+ * readable record changes nothing.
+ */
+async function adoptSourcePassword(target: string, bundle: string, emit: Emit): Promise<void> {
+  let source: unknown;
+  try {
+    const raw = await readMember(bundlePath(bundle), RECORD);
+    source = raw === null ? undefined : (JSON.parse(raw.toString('utf8')) as Bag).admin_password;
+  } catch {
+    return;
+  }
+  if (typeof source !== 'string') return;
+  let was = '';
+  const meta = await updateMeta(target, (m) => {
+    was = m.adminPassword;
+    m.adminPassword = source as string;
+  });
+  // A public workspace's generated password gives way to the source's shared one.
+  if (source === '' && was !== '') {
+    warn(
+      emit,
+      `${quotedText(target)} now signs in with the admin password its source was made with, ` +
+        `${adminPass(meta)}: the restored database holds it. Change it in Rocket.Chat if this ` +
+        'workspace is reachable from other machines.',
+      { phase: 'restore' },
+    );
   }
 }
 
@@ -1375,6 +1606,7 @@ export async function restoreLocked(
     phase: 'restore',
     pct: 85,
   });
+  await adoptSourcePassword(target, bundle, emit);
   const result = await waitAndFinalize(await readMeta(target), emit, 300.0, false);
   await retargetSiteUrl(target, emit);
   info(emit, `${quotedText(target)} restored from ${path.basename(bundle)}`, {

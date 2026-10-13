@@ -62,7 +62,33 @@ const ROOT = path.resolve(__dirname, '..');
  * the measured count in the commit that adds tests, and lowered only in a commit that removes
  * tests and says why; git holds its history.
  */
-const FLOOR = 3748;
+// Rich seed profiles, recovery, historical metadata, and actual Kubernetes runtime seams.
+// Twenty-seven re-verification regressions also cover shutdown, bind links, Kubernetes
+// polling, SAML registration, shared namespace deletion and ordered progress.
+// Thirty-eight post-integration cases cover shared-edge transactions, scoped origin
+// readiness, SAML reload/idempotence, limiter-safe seeding and public preset guidance.
+// Thirty-nine release-completion cases cover bounded SAML registration, awaited failure-safe
+// backend shutdown, rate-limited star readback, truthful unreadable-seed reasons, and the
+// process shutdown bound after the HTTP server closes with a live log-follow handle, and
+// configuration-before-enable plus bounded OIDC registration across replica roots, and
+// checked owned-edge ingress recovery with preservation guards for other runtimes/homes.
+// Sixty-eight blocker regression and boundary cases cover namespace identity, verified quiescence,
+// terminal job access/audit and complete atomic port publication.
+// The e2ee preset (its settings, test users and the enforced-version refusal), the owner kept
+// through a rebuild, the dashed email code, the Kubernetes typo wording and the origin's port.
+// Seeding under E2EE room defaults and against 8.8.0's request validation: the encryption
+// defaults held off and journalled, their repair, the marker in customFields, one invite per user.
+// A supervised port-forward that restarts its kubectl, stops with it and gives up on a dead
+// target; and the license line on an unlicensed microservices workspace.
+// `serve` names an earlier serve from this home when its port is in use.
+// Okta sign-in: settings and secret, every ID token and provider check, each way a person
+// resolves to an account, the /signin start and callback, the CLI link verbs, and the seam's cap;
+// and the review's: control characters in `next`, a stale link on a re-created account, the
+// canonical redirect made once, and no audit line for an unstarted callback.
+// The final re-verification's fixes: up resolving a name the actor may act on, a rebuild's
+// monitoring, pin and port, the operator password off every argv, the operator's memory and
+// PodMonitor, serve's shutdown, and the usage and wording answers it found untrue.
+const FLOOR = 4500;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

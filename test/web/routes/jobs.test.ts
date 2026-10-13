@@ -8,6 +8,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { performance } from 'node:perf_hooks';
 
 import type { FastifyInstance } from 'fastify';
 
@@ -18,6 +19,7 @@ import { sseEvents } from '../../../src/web/routes/jobs';
 
 import type * as AppNS from '../../../src/web/app';
 import type * as DataNS from '../../../src/core/data';
+import type * as ExecNS from '../../../src/seams/exec';
 import type * as RecordNS from '../../../src/core/runner/record';
 import type * as UsersNS from '../../../src/core/users';
 
@@ -220,6 +222,137 @@ describe('the job registry over HTTP', () => {
       ).map((one) => one.id);
     expect(await listed(carol)).not.toContain(job.id);
     expect(await listed(bob)).toContain(job.id);
+  });
+
+  /** A job stuck the way a create on a Mac was: waiting, at the seam, forever. */
+  function stuck(label: string, actor: string) {
+    const { sleep } = require('../../../src/seams/exec') as typeof ExecNS;
+    return app.jobs.submit(
+      'up',
+      async () => {
+        for (;;) await sleep(50);
+      },
+      { label, actor },
+    );
+  }
+
+  async function ended(job: { status: string }): Promise<void> {
+    for (let turn = 0; turn < 200 && ['queued', 'running'].includes(job.status); turn += 1) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  it('lets its owner or an admin stop a stuck job, and nobody else', async () => {
+    // Nothing in the GUI could end a job: a create that waited ten minutes on a forward it
+    // could not see held its workspace until the server itself was killed.
+    await users.add('bob', 'bobs-good-password', 'member');
+    await users.add('carol', 'carols-good-password', 'member');
+    await users.add('dave', 'daves-good-password', 'readonly');
+    const job = stuck('bobs-box', 'bob');
+    const stop = async (cookie: string) =>
+      await app.inject({ method: 'POST', url: `/api/jobs/${job.id}/stop`, headers: as(cookie) });
+    expect((await stop(await signIn('carol', 'carols-good-password'))).statusCode).toBe(404);
+    expect((await stop(await signIn('dave', 'daves-good-password'))).statusCode).toBe(403);
+    expect(job.status).toBe('running');
+    const bob = await signIn('bob', 'bobs-good-password');
+    const stopped = await stop(bob);
+    expect(stopped.statusCode).toBe(200);
+    expect(stopped.json()).toEqual({ id: job.id, stopping: true });
+    await ended(job);
+    expect(job.status).toBe('error');
+    expect(job.error).toBe('stopped by bob before it finished; what it had done stays');
+    expect((await stop(bob)).statusCode).toBe(409);
+    // An admin may stop anyone's.
+    const other = stuck('bobs-box', 'bob');
+    const byAdmin = await app.inject({
+      method: 'POST',
+      url: `/api/jobs/${other.id}/stop`,
+      headers: as(await signIn('alice')),
+    });
+    expect(byAdmin.statusCode).toBe(200);
+    await ended(other);
+    expect(other.error).toContain('stopped by alice');
+  });
+
+  it('refuses to stop a kind whose half-done state was never read, and says so', async () => {
+    const alice = await signIn('alice');
+    const { sleep } = require('../../../src/seams/exec') as typeof ExecNS;
+    const job = app.jobs.submit(
+      'cluster-create',
+      async () => {
+        for (;;) await sleep(50);
+      },
+      { label: 'support', actor: 'alice' },
+    );
+    const read = await app.inject({ url: `/api/jobs/${job.id}`, headers: as(alice) });
+    expect(read.json().stoppable).toBe(false);
+    const refused = await app.inject({
+      method: 'POST',
+      url: `/api/jobs/${job.id}/stop`,
+      headers: as(alice),
+    });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().error).toContain('a cluster-create job cannot be stopped from here');
+    expect(job.status).toBe('running');
+    job.stopper.abort();
+    await ended(job);
+  });
+
+  it('does not refuse a delete over a cluster job that merely shares the name', async () => {
+    // A cluster job's label is the CLUSTER: building EKS "demo" is not working on workspace
+    // "demo", and pointing the reader at its Stop would kill eksctl mid-build.
+    const alice = await signIn('alice');
+    const { sleep } = require('../../../src/seams/exec') as typeof ExecNS;
+    const build = app.jobs.submit(
+      'cluster-create',
+      async () => {
+        for (;;) await sleep(50);
+      },
+      { label: 'nothere', actor: 'alice' },
+    );
+    const answer = await app.inject({
+      method: 'DELETE',
+      url: '/api/repros/nothere?volumes=true&confirm=true',
+      headers: as(alice),
+    });
+    expect(answer.body).not.toContain('is busy');
+    build.stopper.abort();
+    await ended(build);
+  });
+
+  it('refuses a delete at once while a job works on the workspace, and says which', async () => {
+    // It waited a silent minute for the job's lock and then failed with "another houston
+    // operation is still working on it" -- no name, no way forward.
+    const record = require('../../../src/core/runner/record') as typeof RecordNS;
+    await record.write(
+      'alices-box',
+      'services: {}\n',
+      record.metadata({
+        name: 'alices-box',
+        project: 'houston-alices-box',
+        rcVersion: '8.5.1',
+        rootUrl: 'http://localhost:3000',
+        hostPort: 3000,
+        extra: { created_by: 'alice' },
+      }),
+    );
+    const alice = await signIn('alice');
+    const job = stuck('alices-box', 'alice');
+    const before = app.jobs.listJobs().length;
+    const asked = performance.now();
+    const refused = await app.inject({
+      method: 'DELETE',
+      url: '/api/repros/alices-box?volumes=true&confirm=true',
+      headers: as(alice),
+    });
+    expect(performance.now() - asked).toBeLessThan(5000);
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().error).toMatch(
+      /^'alices-box' is busy: its up job, started at \d\d:\d\d UTC by alice, is still running\. Open it in Activity and press Stop job/u,
+    );
+    expect(app.jobs.listJobs()).toHaveLength(before);
+    app.jobs.stop(job.id, 'alice');
+    await ended(job);
   });
 
   it('says when a result was released rather than showing an empty one', async () => {

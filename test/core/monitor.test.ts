@@ -3,6 +3,8 @@ import * as path from 'node:path';
 
 import type * as MonitorNS from '../../src/core/monitor';
 import type * as RecordNS from '../../src/core/runner/record';
+import type * as LocksNS from '../../src/core/runner/locks';
+import type * as FsLockNS from '../../src/seams/fs/lock';
 import type * as YamlNS from 'yaml';
 import type { KubectlResult } from '../../src/seams/kubectl';
 
@@ -475,12 +477,15 @@ describe('attaching monitoring on Kubernetes', () => {
 
   it('wires the workspace into the shared stack and reports the Grafana URL', async () => {
     jest.resetModules();
+    // The real lock: the Compose specs above stand it in, and a doMock outlives resetModules.
+    jest.dontMock('../../src/core/runner/locks');
     const calls: Record<string, unknown[]> = {
       ensure: [],
       labels: [],
       forwards: [],
       reachable: [],
       updates: [],
+      order: [],
     };
     const meta = {
       name: 'w',
@@ -525,9 +530,19 @@ describe('attaching monitoring on Kubernetes', () => {
       MONITORING_NAMESPACE: 'monitoring',
       ensureMonitoring: async (options: { context: string }) => {
         calls['ensure']?.push(options.context);
+        calls['order']?.push('ensure');
       },
       setMonitoringLabel: async (namespace: string, options: { wanted: boolean }) => {
         calls['labels']?.push([namespace, options.wanted]);
+        calls['order']?.push('label');
+      },
+      ensurePodMonitor: async (options: { namespace: string; context: string }) => {
+        // It renders the release again, so it runs under the workspace's lock: an `upgrade`
+        // holding it would otherwise race the re-render.
+        const { holdsFileLock } = require('../../src/seams/fs/lock') as typeof FsLockNS;
+        const { lockPath } = require('../../src/core/runner/locks') as typeof LocksNS;
+        const locked = holdsFileLock(lockPath('w')) ? 'locked' : 'unlocked';
+        calls['order']?.push(`podmonitor ${options.namespace} ${options.context} ${locked}`);
       },
     }));
     jest.doMock('../../src/core/kube/forward', () => ({
@@ -554,6 +569,17 @@ describe('attaching monitoring on Kubernetes', () => {
 
     expect(calls['ensure']).toEqual(['kind-houston-local']);
     expect(calls['labels']).toEqual([['houston-w', true]]);
+    // CLAIMED BEFORE THE INSTALL: the label is the reference count a teardown in any home
+    // reads, and set after the install it let another workspace's `down` remove the stack
+    // this attach was still installing.
+    // And the workspace's PodMonitor AFTER the stack, which is what brings its CRD: the first
+    // `up --monitor` installed the release before it, so helm rendered no PodMonitor and
+    // Grafana's Rocket.Chat dashboard had no data until a re-up.
+    expect(calls['order']).toEqual([
+      'label',
+      'ensure',
+      'podmonitor houston-w kind-houston-local locked',
+    ]);
     expect(calls['forwards']).toEqual([
       { context: 'kind-houston-local', hostPort: 5050, bindHost: '' },
     ]);

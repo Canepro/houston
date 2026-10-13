@@ -591,7 +591,14 @@ describe('an edge rebuilt from a spec.json holding values earlier releases wrote
         httpsPort: door.httpsPort,
       }),
     );
-    expect(edgeFiles()).toEqual(recorded);
+    const generated = edgeFiles();
+    // Keep the earlier-release fixture immutable: only the deliberate shared HTTP-01
+    // coexistence flag differs. Every recorded value, port spelling and other byte stays.
+    generated['compose.yml'] = (generated['compose.yml'] ?? '').replace(
+      '    - --entryPoints.web.allowACMEByPass=true\n',
+      '',
+    );
+    expect(generated).toEqual(recorded);
   });
 });
 
@@ -802,6 +809,43 @@ describe('the rest of the surface', () => {
     // token every restart minted a new one and killed every bookmark.
     expect(unit).toContain('Restart=always');
     expect(unit).toContain('WantedBy=multi-user.target');
+  });
+
+  it('carries the printing shell’s PATH and AWS profile into the unit', () => {
+    // systemd's own PATH has no nvm node: the unit died with "node: not found" (127).
+    const unit = systemdUnit('/opt/houston/bin/houston serve', 'support', {
+      PATH: '/home/support/.nvm/versions/node/v24.10.0/bin:/usr/bin',
+      AWS_PROFILE: 'support-eks-houston',
+      AWS_REGION: 'us-east-1',
+      AWS_DEFAULT_REGION: 'us-east-2',
+      AWS_SECRET_ACCESS_KEY: 'never-copied',
+    });
+    expect(unit).toContain(
+      '[Service]\nUser=support\n' +
+        'Environment="PATH=/home/support/.nvm/versions/node/v24.10.0/bin:/usr/bin"\n' +
+        'Environment="AWS_PROFILE=support-eks-houston"\n' +
+        'Environment="AWS_REGION=us-east-1"\n' +
+        'Environment="AWS_DEFAULT_REGION=us-east-2"\n' +
+        'ExecStart=/opt/houston/bin/houston serve\n',
+    );
+    expect(unit).not.toContain('never-copied');
+    // Unset or empty writes no line; quotes, backslashes and specifiers are escaped.
+    expect(
+      systemdUnit('/x serve', 'support', { PATH: '/a "b"\\c:100%', AWS_REGION: '' }),
+    ).toContain('User=support\nEnvironment="PATH=/a \\"b\\"\\\\c:100%%"\nExecStart=/x serve\n');
+    // Called as `--print-service` calls it, it reads this process's PATH.
+    expect(systemdUnit('/x serve', 'support')).toContain(
+      `Environment="PATH=${process.env.PATH ?? ''}"`,
+    );
+  });
+
+  it('carries the home it was printed from, absolute', () => {
+    // Printed from `HOUSTON_HOME=/srv/houston`, the unit served `User=`'s ~/.houston -- other
+    // accounts, other workspaces -- because the variable was not carried; and systemd starts
+    // it from `/`, so a relative home would name a different directory.
+    const unit = systemdUnit('/x serve', 'support', { PATH: '/usr/bin', HOUSTON_HOME: 'homes/t1' });
+    expect(unit).toContain(`Environment="HOUSTON_HOME=${path.resolve('homes/t1')}"\n`);
+    expect(systemdUnit('/x serve', 'support', { PATH: '/usr/bin' })).not.toContain('HOUSTON_HOME');
   });
 
   it('carries the ACME flags into the edge’s own spec, from one place', () => {

@@ -4,7 +4,7 @@ import * as path from 'node:path';
 
 import * as coreLoadtest from '../../src/core/loadtest';
 import * as runnerRecord from '../../src/core/runner/record';
-import { NotReadyError, ReproError } from '../../src/lib/errors';
+import { NotFoundError, NotReadyError, ReproError, ValidationError } from '../../src/lib/errors';
 import * as baseline from '../../src/perf/baseline';
 import * as constrain from '../../src/perf/constrain';
 import * as report from '../../src/perf/report';
@@ -417,8 +417,13 @@ describe('the CLI performance option boundary', () => {
     [{ endpoint: 'TRACE /x', scenario: 'custom' }, "bad --endpoint: unsupported method 'TRACE'"],
     [{ slo: 'nonsense' }, 'bad --slo'],
     [{ constrain: 'rc=lots' }, 'bad --constrain'],
+    [{ scenario: 'frob' }, "unknown scenario 'frob'"],
+    [{ ramp: 'abc' }, 'bad --ramp: ramp must be START:END'],
+    [{ save: '///' }, "'///' is not a usable baseline name"],
+    // Passed to k6 unchecked: it started, failed, and the command exited 1.
+    [{ duration: 'forever' }, "bad --duration: 'forever' is not a duration"],
   ] as const)(
-    'rejects an untrusted load option as earlier releases did, after the engine and before any workspace read: %j',
+    'rejects a wrong load option as a usage error, exit 2, after the engine and before any workspace read: %j',
     async (fields, text) => {
       const deps = loadtestDeps(jest.fn(), {
         constrain: { ...constrain },
@@ -427,11 +432,12 @@ describe('the CLI performance option boundary', () => {
         () => null,
         (error: unknown) => error,
       );
-      expect(refusal).toBeInstanceOf(ReproError);
+      // A plain REPRO_ERROR, exit 1, until L7-07: the GUI's preflight raised a ValidationError
+      // for the same refusals, and every other command's bad flag is exit 2.
+      expect(refusal).toBeInstanceOf(ValidationError);
       expect(refusal).toMatchObject({
-        constructor: ReproError,
-        code: 'REPRO_ERROR',
-        exitCode: 1,
+        code: 'VALIDATION_FAILED',
+        exitCode: 2,
         message: expect.stringContaining(text),
       });
       expect(deps.requireDocker).toHaveBeenCalledTimes(1);
@@ -440,7 +446,7 @@ describe('the CLI performance option boundary', () => {
   );
 
   it.each([
-    [{ live: true }, {}, '--live needs the monitoring stack'],
+    [{ live: true }, {}, ValidationError, 2, '--live needs the monitoring stack'],
     [
       { live: true },
       {
@@ -450,17 +456,28 @@ describe('the CLI performance option boundary', () => {
           services: { prometheus: { command: '--web.enable-remote-write-receiver' } },
         })),
       },
+      ValidationError,
+      2,
       '--live needs Prometheus with remote-write enabled',
     ],
     [
       { scenario: 'webhook' },
       { createIncomingWebhook: jest.fn(async () => '') },
+      ReproError,
+      1,
       'could not create',
     ],
-    [{ compare: 'gone' }, { baseline: { ...baseline } }, "no saved baseline 'gone'"],
+    // A missing named thing is 4, as a missing workspace is; it was a plain exit 1 (L7-07).
+    [
+      { compare: 'gone' },
+      { baseline: { ...baseline } },
+      NotFoundError,
+      4,
+      "no saved baseline 'gone'",
+    ],
   ] as const)(
-    'refuses what the workspace cannot do as earlier releases did: %j',
-    async (fields, overrides, text) => {
+    'refuses what the workspace cannot do, each with its own class: %j',
+    async (fields, overrides, kind, exitCode, text) => {
       const deps = loadtestDeps(jest.fn(), {
         readMeta: jest.fn(async () => meta()),
         ...overrides,
@@ -470,9 +487,8 @@ describe('the CLI performance option boundary', () => {
         (error: unknown) => error,
       );
       expect(refusal).toMatchObject({
-        constructor: ReproError,
-        code: 'REPRO_ERROR',
-        exitCode: 1,
+        constructor: kind,
+        exitCode,
         message: expect.stringContaining(text),
       });
     },
@@ -601,21 +617,24 @@ describe('the CLI capacity orchestration', () => {
     [{ scenario: 'custom' }, 'capacity supports the built-in scenarios'],
     [{ start: 0 }, '--start must be >= 1 and --max >= --start'],
     [{ start: 20, maxVus: 10 }, '--start must be >= 1 and --max >= --start'],
+    [{ stepDuration: 'a while' }, "bad --step-duration: 'a while' is not a duration"],
     [{ slo: 'unknown=1' }, 'bad --slo'],
     [{ start: -5 }, '--start must be >= 1 and --max >= --start'],
     [{ constrain: 'rc=lots' }, 'bad --constrain'],
+    [{ scenario: 'webhook' }, 'capacity supports the built-in scenarios'],
   ] as const)(
-    'rejects an unsupported search as earlier releases did, after the engine and before reading the workspace: %j',
+    'rejects an unsupported search as a usage error, exit 2, after the engine and before reading the workspace: %j',
     async (fields, text) => {
       const deps = loadtestDeps(jest.fn(), { constrain: { ...constrain } });
       const refusal = await runCapacityCli({ ...CAPACITY_DEFAULTS, ...fields }, sink(), deps).then(
         () => null,
         (error: unknown) => error,
       );
+      // REPRO_ERROR, exit 1, until L7-07.
       expect(refusal).toMatchObject({
-        constructor: ReproError,
-        code: 'REPRO_ERROR',
-        exitCode: 1,
+        constructor: ValidationError,
+        code: 'VALIDATION_FAILED',
+        exitCode: 2,
         message: expect.stringContaining(text),
       });
       expect(deps.requireDocker).toHaveBeenCalledTimes(1);
@@ -734,11 +753,14 @@ describe('Commander to performance-handler integration', () => {
         undefined,
         expect.any(Function),
       );
+      // A missed SLO is a failure on both channels: exit 1 came under `ok: true, error: null`,
+      // so a script branching on `ok` and one on the exit code read different answers. The
+      // run's numbers stay in `data`.
       expect(JSON.parse(stdout.trim())).toMatchObject({
-        schema: 'houston.loadtest.v1',
-        ok: true,
+        schema: 'houston.error.v1',
+        ok: false,
         data: { passed: false, warnings: ['measured warning'] },
-        warnings: [],
+        error: { code: 'REPRO_ERROR', message: expect.stringContaining('missed its --slo') },
       });
 
       stdout = '';
@@ -1537,7 +1559,23 @@ describe("loadtest's result, as earlier releases drew it and said where it was s
     expect(expected.code).toBe(1);
     const driven = await drivePerf(loadArgv(spec), script);
     expect(driven.code).toBe(1);
-    expect(envelopeText(driven.envelope)).toBe(envelopeText(expected.out));
+    // This run missed its `error=0.1%` rule. Earlier releases put that under `ok: true`; it
+    // is the error envelope now (the owner's 2026-10-09 decision), and its `data` is still
+    // what they wrote, byte for byte -- which is what this case is about.
+    const head = (text: string): string =>
+      envelopeText(text).replace(/"data": \{.*\}, "error"/su, '"data": $DATA, "error"');
+    const dataOf = (text: string): string =>
+      /"data": (\{.*\}), "error"/su.exec(envelopeText(text))?.[1] ?? '';
+    expect(dataOf(driven.envelope)).toBe(dataOf(expected.out));
+    expect(head(driven.envelope)).toBe(
+      head(expected.out)
+        .replace(
+          '"error": null',
+          '"error": {"code": "REPRO_ERROR", "message": "the run missed its --slo: 0.1%"}',
+        )
+        .replace('"ok": true', '"ok": false')
+        .replace('"schema": "houston.loadtest.v1"', '"schema": "houston.error.v1"'),
+    );
     for (const spelled of [
       '"pct": 0.0',
       '"span_s": 8.0',

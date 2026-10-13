@@ -92,7 +92,7 @@ describe('a Kubernetes read never answers a failed call with an empty one', () =
     // THESE TWO ARE THE HAZARD AND ARE CARRIED, NOT ENDORSED, and this walk is how they
     // became visible at all. Both write `if (res.returncode !== 0 || <empty>)` -- a
     // COMPOUND condition -- and earlier releases' walk only matches a bare comparison, so it
-    // has never seen either of them. `mongoToolAuth` answering `[]` to a refused
+    // has never seen either of them. `mongoToolAuth` answering `''` to a refused
     // `kubectl get secret` sends `mongodump` at an operator-managed MongoDB with no
     // credentials; `mongoPodsTheOperatorKeeps` answering an empty set to a refused read
     // would scale down the pods the operator will not give up. Fixing either changes what the
@@ -101,6 +101,9 @@ describe('a Kubernetes read never answers a failed call with an empty one', () =
     // somebody looked.
     'mongoToolAuth',
     'mongoPodsTheOperatorKeeps',
+    // `false` here is "not this machine", which REFUSES: an unreadable kubeconfig server
+    // keeps houston's CA key on this box. The failed read lands on the safe side.
+    'serverIsThisMachine',
   ]);
 
   it('recognises the construct it forbids', () => {

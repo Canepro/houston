@@ -7,13 +7,19 @@
  */
 import { quotedText } from '../lib/format';
 import { PROFILES, type Shape } from '../lib/seed-profiles';
+import { SCENARIOS, seedSelection } from '../lib/seed-options';
+import { ValidationError } from '../lib/errors';
 
 import {
   ANCHOR_MESSAGES,
   CHANNEL,
-  DISCUSSABLE,
   DISCUSSION,
   DM,
+  GROUP_DM,
+  READ_ONLY,
+  BROADCAST,
+  ARCHIVED,
+  PERMISSIONS,
   GENERAL,
   PRIVATE,
   PRIVATE_KINDS,
@@ -51,6 +57,23 @@ export interface RoomSpec {
    * product and they produce different system messages.
    */
   readonly fromMessage: number;
+  readonly replyCount: number;
+  readonly files: readonly string[];
+  readonly content: readonly ContentSpec[];
+}
+
+export interface ContentSpec {
+  readonly key: string;
+  readonly kind: 'main' | 'reply' | 'file';
+  readonly author: string;
+  readonly text: string;
+  readonly parent: string;
+  readonly reactions: readonly { author: string; emoji: string }[];
+  readonly pin: boolean;
+  readonly star: string;
+  readonly mention: string;
+  readonly editedText: string;
+  readonly file: string;
 }
 
 export function roomSpec(values: Partial<RoomSpec> & { kind: string; name: string }): RoomSpec {
@@ -61,6 +84,9 @@ export function roomSpec(values: Partial<RoomSpec> & { kind: string; name: strin
     reactions: [],
     parent: '',
     fromMessage: -1,
+    replyCount: 1,
+    files: [],
+    content: [],
     ...values,
   };
 }
@@ -70,7 +96,7 @@ export function isPrivate(spec: RoomSpec): boolean {
 }
 
 export function replies(spec: RoomSpec): number {
-  return spec.threads.length;
+  return spec.threads.length * spec.replyCount;
 }
 
 export function reacted(spec: RoomSpec): number {
@@ -90,7 +116,12 @@ export function reacted(spec: RoomSpec): number {
  * message-anchored discussion report more than planned on a perfectly good seed.
  */
 export function totalMessages(spec: RoomSpec): number {
-  return spec.messages + replies(spec) + (spec.fromMessage >= 0 ? ANCHOR_MESSAGES : 0);
+  return (
+    spec.messages +
+    replies(spec) +
+    spec.files.length +
+    (spec.fromMessage >= 0 ? ANCHOR_MESSAGES : 0)
+  );
 }
 
 /** The manifest: what will exist when seeding finishes. */
@@ -106,6 +137,9 @@ export interface Plan {
   readonly messages: number;
   readonly reactions: boolean;
   readonly rooms: readonly RoomSpec[];
+  readonly customEmoji: readonly string[];
+  readonly scenarios: readonly string[];
+  readonly historyDays: number | null;
 }
 
 export function dms(plan: Plan): number {
@@ -150,7 +184,8 @@ function discussionsAndDms(
   rooms: RoomSpec[],
   shape: Shape,
 ): void {
-  const parents = rooms.filter((r) => DISCUSSABLE.includes(r.kind));
+  const categories = [CHANNEL, PRIVATE, TEAM, TEAM_PRIVATE, TEAM_CHANNEL, TEAM_CHANNEL_PRIVATE];
+  const parents = categories.flatMap((kind) => rooms.filter((r) => r.kind === kind).slice(0, 1));
   for (let d = 0; d < shape.discussions; d += 1) {
     if (parents.length === 0) break;
     const parent = parents[d % parents.length] as RoomSpec;
@@ -162,7 +197,11 @@ function discussionsAndDms(
       wording.poolName(wording.DISCUSSION_NAMES, d, ' '),
       3,
       Math.max(2, Math.floor(shape.messages / 4)),
-      { parent: parent.name, fromMessage: d % 2 === 0 ? 0 : -1 },
+      {
+        parent: parent.name,
+        members: parent.members.slice(0, 3),
+        fromMessage: d % 2 === 0 && parent.messages > 0 ? 0 : -1,
+      },
     );
   }
 
@@ -182,10 +221,35 @@ function discussionsAndDms(
         name: `${a}~${b}`,
         members: [a, b],
         messages: msgs,
+        replyCount: shape.replyCount,
         threads: wording.threads(msgs),
         reactions: shape.reactions ? wording.threads(msgs, REACT_EVERY) : [],
       }),
     );
+  }
+  let groups = 0;
+  for (let a = 0; a < names.length && groups < shape.groupDms; a += 1) {
+    for (let b = a + 1; b < names.length && groups < shape.groupDms; b += 1) {
+      for (let c = b + 1; c < names.length && groups < shape.groupDms; c += 1) {
+        const members = [names[a] as string, names[b] as string, names[c] as string];
+        const messages = Math.max(
+          3,
+          Math.floor(shape.messages * (shape.replyCount === 5 ? 0.15 : 0.3)),
+        );
+        rooms.push(
+          roomSpec({
+            kind: GROUP_DM,
+            name: members.join('~'),
+            members,
+            messages,
+            replyCount: shape.replyCount,
+            threads: wording.threads(messages),
+            reactions: shape.reactions ? wording.threads(messages, REACT_EVERY) : [],
+          }),
+        );
+        groups += 1;
+      }
+    }
   }
 }
 
@@ -209,14 +273,25 @@ function channelsAndTeams(
     // a different object from a private channel -- its main room is type `p` AND it owns
     // other rooms -- and only one of the two is exercised by making every team public.
     const tname = wording.teamName(t);
-    add(t % 2 === 0 ? TEAM : TEAM_PRIVATE, tname, 4, Math.max(3, Math.floor(shape.messages / 2)));
+    const team = add(
+      t % 2 === 0 ? TEAM : TEAM_PRIVATE,
+      tname,
+      4,
+      Math.max(3, Math.floor(shape.messages / 2)),
+    );
     for (let c = 0; c < shape.teamChannels; c += 1) {
       add(
         c % 2 === 0 ? TEAM_CHANNEL : TEAM_CHANNEL_PRIVATE,
         wording.teamChannelName(t, c),
         3,
         Math.max(3, Math.floor(shape.messages / 2)),
-        { parent: tname },
+        {
+          parent: tname,
+          members: team.members.slice(
+            c % Math.max(1, team.members.length - 2),
+            (c % Math.max(1, team.members.length - 2)) + 3,
+          ),
+        },
       );
     }
   }
@@ -228,6 +303,7 @@ function channelsAndTeams(
       name: 'general',
       members: [...names],
       messages: shape.messages,
+      replyCount: shape.replyCount,
       threads: wording.threads(shape.messages),
       reactions: shape.reactions ? wording.threads(shape.messages, REACT_EVERY) : [],
     }),
@@ -253,6 +329,7 @@ function build(shape: Shape, names: readonly string[]): RoomSpec[] {
       messages,
       threads: wording.threads(messages),
       reactions: shape.reactions ? wording.threads(messages, REACT_EVERY) : [],
+      replyCount: shape.replyCount,
       ...extra,
     });
     rooms.push(spec);
@@ -269,6 +346,8 @@ export interface PlanOverrides {
   readonly users?: number | null;
   readonly channels?: number | null;
   readonly messages?: number | null;
+  readonly scenarios?: readonly string[];
+  readonly historyDays?: number | null;
 }
 
 /**
@@ -308,13 +387,132 @@ export function planFrom(profile: string, overrides: PlanOverrides = {}): Plan {
   };
   const names: string[] = [];
   for (let i = 0; i < shape.users; i += 1) names.push(wording.username(i));
+  const selection = seedSelection(overrides.scenarios, overrides.historyDays);
+  for (const scenario of selection.scenarios)
+    if (names.length < SCENARIOS[scenario as keyof typeof SCENARIOS].minimumUsers)
+      throw new ValidationError(
+        `the ${scenario} scenario requires at least ${SCENARIOS[scenario as keyof typeof SCENARIOS].minimumUsers} seeded users`,
+      );
+  const rooms = build(shape, names);
+  if (selection.scenarios.includes('room-states')) {
+    for (const [kind, name] of [
+      [READ_ONLY, 'seed-read-only'],
+      [BROADCAST, 'seed-broadcast'],
+      [ARCHIVED, 'seed-archived'],
+    ]) {
+      rooms.push(
+        roomSpec({
+          kind: kind as string,
+          name: name as string,
+          members: names.slice(0, 3),
+          messages: 5,
+          replyCount: 0,
+        }),
+      );
+    }
+  }
+  if (selection.scenarios.includes('permissions')) {
+    rooms.push(
+      roomSpec({
+        kind: PERMISSIONS,
+        name: 'seed-permissions',
+        members: names.slice(0, 3),
+        messages: 5,
+        replyCount: 0,
+      }),
+    );
+  }
+  const customEmoji = Array.from({ length: shape.emoji }, (_, i) => `houston_seed_${i + 1}`);
+  for (let i = 0; i < rooms.length; i += 1) {
+    const room = rooms[i] as RoomSpec;
+    if (room.members.length < 2) rooms[i] = { ...room, threads: [], replyCount: 0, reactions: [] };
+  }
+  const fileKinds = [CHANNEL, PRIVATE, DISCUSSION, TEAM, TEAM_CHANNEL, DM];
+  for (let i = 0; i < shape.fileSets; i += 1) {
+    const room = rooms.find((r) => r.kind === fileKinds[i]);
+    if (room !== undefined)
+      rooms[rooms.indexOf(room)] = { ...room, files: ['png', 'txt', 'pdf', 'csv'] };
+  }
+  let edits = shape.edits;
+  let serial = 0;
+  const detailed = rooms.map((room) => {
+    const scenario = [READ_ONLY, BROADCAST, ARCHIVED, PERMISSIONS].includes(room.kind);
+    const content: ContentSpec[] = [];
+    for (let i = 0; i < room.messages; i += 1) {
+      const author =
+        room.kind === BROADCAST ? '' : (room.members[i % Math.max(1, room.members.length)] ?? '');
+      const others = room.members.filter((n) => n !== author);
+      const mention = i === 0 && !scenario ? (others[0] ?? '') : '';
+      const custom = customEmoji[serial % customEmoji.length] as string;
+      const text = wording.conversation(room.name, i, mention, i === 0 && !scenario ? custom : '');
+      const actions: { author: string; emoji: string }[] = [];
+      if (room.reactions.includes(i) && others.length > 0) {
+        const emoji = i === 0 ? `:${custom}:` : (wording.EMOJI[i % wording.EMOJI.length] as string);
+        actions.push({ author: others[0] as string, emoji });
+        if (others.length > 1) actions.push({ author: others[1] as string, emoji });
+        actions.push({ author: others[0] as string, emoji: ':white_check_mark:' });
+      }
+      const editedText =
+        edits > 0 ? `${text}\n\nUpdate: evidence attached; next checkpoint confirmed.` : '';
+      if (edits > 0) edits -= 1;
+      const main = {
+        key: `main-${i}`,
+        kind: 'main' as const,
+        author,
+        text,
+        parent: '',
+        reactions: actions,
+        pin: i === 0 && ![DM, GROUP_DM].includes(room.kind),
+        star: i === 0 && !scenario ? author : '',
+        mention,
+        editedText,
+        file: '',
+      };
+      content.push(main);
+      if (room.threads.includes(i)) {
+        for (let j = 0; j < room.replyCount; j += 1) {
+          content.push({
+            key: `reply-${i}-${j}`,
+            kind: 'reply',
+            author: others[j % Math.max(1, others.length)] ?? author,
+            text: wording.threadReply(room.name, i, j),
+            parent: main.key,
+            reactions: [],
+            pin: false,
+            star: '',
+            mention: '',
+            editedText: '',
+            file: '',
+          });
+        }
+      }
+      serial += 1;
+    }
+    for (const file of room.files)
+      content.push({
+        key: `file-${file}`,
+        kind: 'file',
+        author: room.members[0] ?? '',
+        text: `INC-4821 ${room.name}: sample ${file.toUpperCase()} evidence`,
+        parent: '',
+        reactions: [],
+        pin: false,
+        star: '',
+        mention: '',
+        editedText: '',
+        file,
+      });
+    return { ...room, content };
+  });
   return {
     profile,
     users: shape.users,
     channels: shape.channels,
     messages: shape.messages,
     reactions: shape.reactions,
-    rooms: build(shape, names),
+    rooms: detailed,
+    customEmoji,
+    ...selection,
   };
 }
 

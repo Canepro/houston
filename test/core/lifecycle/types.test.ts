@@ -6,6 +6,7 @@ import { ConflictError, ValidationError } from '../../../src/lib/errors';
 import type { Event } from '../../../src/lib/events';
 import type { Resolved } from '../../../src/lib/versions';
 import { register } from '../../../src/core/edge/routes';
+import { metadata, writeRecord } from '../../../src/core/runner/record';
 import { preflight as emptyPreflight } from '../../../src/core/kube/tools';
 
 import type * as CreateDockerNS from '../../../src/core/lifecycle/create-docker';
@@ -98,6 +99,8 @@ describe('the lifecycle constants', () => {
       'reg_token',
       'bind',
       'context',
+      // Added 2026-10-08: the GUI takes a license, under the same create policy.
+      'license',
     ]);
     // `tuning` is a mutable object rather than a baked number, following `kube/names.ts`'s:
     // a test patches one property and every reader resolves it at call time.
@@ -223,7 +226,9 @@ describe('where the HTTPS name comes from', () => {
 
   it('refuses a hostname another workspace holds, and lets its owner come back', async () => {
     // Refused where BOTH runtimes pass, so neither can grow its own answer. A passthrough
-    // route is planted because it is the one kind written without asking docker anything.
+    // route is planted because it is the one kind written without asking docker anything,
+    // beside the record that makes `first` a workspace.
+    await writeRecord('first', metadata({ name: 'first', project: 'houston-first' }));
     await register('first', 'taken.example.com', { passthrough: '10.0.0.1:443' });
     const second = Types.createReq({
       version: '8.5.1',
@@ -248,6 +253,48 @@ describe('where the HTTPS name comes from', () => {
     expect((await resolveTls(again, 'first', '127.0.0.1', 'first'))?.host).toBe(
       'taken.example.com',
     );
+  });
+});
+
+describe('a hostname claim with no workspace behind it', () => {
+  it('is released, rather than blocking the name with advice nothing can follow', async () => {
+    // A route that outlived its record refused every later `up --domain`, saying `houston
+    // down --name gone` -- which answered NOT_FOUND -- and `prune` could not see it either.
+    await register('gone', 'orphan.example.com', { passthrough: '10.0.0.1:443' });
+    const req = Types.createReq({
+      version: '8.5.1',
+      name: 'fresh',
+      domain: 'orphan.example.com',
+      acmeEmail: 'o@e.com',
+    });
+    expect((await resolveTls(req, 'fresh', '127.0.0.1', 'fresh'))?.host).toBe('orphan.example.com');
+  });
+
+  it('lets go of its network too, which the edge otherwise holds for ever', async () => {
+    // Releasing only the route left the edge attached to the vanished workspace's network,
+    // so that network could not be removed and outlived even `edge stop`.
+    const detached: string[] = [];
+    jest.resetModules();
+    jest.doMock('../../../src/core/edge/networks', () => ({
+      ...jest.requireActual('../../../src/core/edge/networks'),
+      releaseVanished: async (name: string) => {
+        detached.push(name);
+      },
+    }));
+    const fresh = require('../../../src/core/lifecycle/tlsplan') as {
+      resolveTls: typeof resolveTls;
+    };
+    await register('gone', 'orphan.example.com', { passthrough: '10.0.0.1:443' });
+    const req = Types.createReq({
+      version: '8.5.1',
+      name: 'fresh',
+      domain: 'orphan.example.com',
+      acmeEmail: 'o@e.com',
+    });
+    await fresh.resolveTls(req, 'fresh', '127.0.0.1', 'fresh');
+    expect(detached).toEqual(['gone']);
+    jest.dontMock('../../../src/core/edge/networks');
+    jest.resetModules();
   });
 });
 

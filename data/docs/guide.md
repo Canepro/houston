@@ -60,7 +60,9 @@ The commands that delete data ask first, and `prune` lists what it will remove. 
 **`up` on an existing name reuses that workspace exactly as it was.** If you asked
 for a different version, preset or monitoring, it warns and ignores the request. To try
 another version, use `houston upgrade` or pick a new name. `--force` rebuilds the
-workspace, and `--fresh` also wipes its data.
+workspace, and `--fresh` also wipes its data. A rebuild keeps what you leave out: its
+deployment, instance count, cluster, admin password, monitoring, pin and port (a new port
+only when something else has taken the old one).
 
 **One workspace you use every day:** create it once with `--pin`, then `stop` and
 `start` it. A command without `--name` acts on the pinned workspace, or on the one
@@ -97,6 +99,7 @@ houston up --version 8.5.1 --name ticket-1234 --preset ldap --wait
 | `email` | Mailpit, catching every mail Rocket.Chat sends | invites, password resets, verification, 2FA codes |
 | `s3_minio` | MinIO as the file-upload store | uploads, previews, presigned URLs |
 | `livechat` | Omnichannel, an agent and a demo page with the widget | the widget, CORS, routing |
+| `e2ee` | end-to-end encryption switched on, and three test users | encrypted DMs, rooms and files ([guide](e2ee.md)) |
 
 For `ldap`, `saml` and `oidc`, sign in as **`user1` / `user1`**. `houston info` lists
 each preset's consoles and logins.
@@ -106,21 +109,48 @@ parameters and defaults:
 
 ```bash
 houston up --version 8.5.1 --name big-ldap --preset ldap --set users=130000   # a large directory
+houston up --version 8.5.1 --name groups --preset ldap --set groups=on       # group-restricted login, role and channel sync
+houston up --version 8.5.1 --name svc --preset ldap --set bind=service       # a read-only bind, limited to 500 entries
+houston up --version 8.5.1 --name tls --preset ldap --set tls=ldaps           # LDAPS, houston's CA trusted
+houston up --version 8.5.1 --name bad --preset ldap --set tls=ldaps --set trust=none   # the certificate error
+houston up --version 8.5.1 --name ad --preset ldap --set directory=ad --set groups=on  # Active Directory (Samba): sAMAccountName, objectGUID, nested groups
+houston up --version 8.5.1 --name sso --preset ldap --set idp=saml --set mfa=on       # SSO through Keycloak, backed by the same directory, with a one-time code
 houston up --version 8.5.1 --name mail --preset email --seed --wait            # users with mail
 houston up --version 8.5.1 --name s3 --preset s3_minio --set presigned=true
 ```
 
 Things to know:
 
-- **One preset per workspace.** To reproduce two scenarios, start two workspaces.
+- **Presets combine.** Give `--preset` more than once:
+
+  ```bash
+  houston up --version 8.5.1 --name ticket-1234 --preset ldap --preset email --wait
+  ```
+
+  Directory users then get email two-factor codes in Mailpit. Order does not matter: the
+  workspace is recorded as `email+ldap`. When two presets set the same thing, a default
+  gives way: `ldap` turns email 2FA off only because there is no mail server, and `email`
+  turns it on. Two values neither presets treat as a default are refused until you choose
+  one with `--setting` or `--env`. `saml` and `oidc` each run their own Keycloak and cannot
+  be combined yet.
+- **Parameters of combined presets** take the preset's name, `--set ldap.users=500`; a
+  single preset accepts that spelling too. A plain `--set users=500` works when only one
+  of the presets takes `users`.
+- **A directory and an SSO preset are two user stores.** With `ldap` and `saml` (or `oidc`),
+  directory users are `user1..N` and Keycloak users are `sso-user1..N`
+  (`sso-user1@example.com`), so neither login lands in the other's account.
+- **`up --force` with no `--preset`** keeps a combined workspace's presets, and on
+  Kubernetes any workspace's preset. To change them on Kubernetes, `down --volumes` first.
 - **`oidc` needs a hosts entry:** add `127.0.0.1  keycloak` to `/etc/hosts`. Your
   browser and Rocket.Chat must resolve the login URL the same way. `up` and `info`
   print this reminder.
 - **Several Rocket.Chat instances is a deployment, not a preset.** Use
   `--deployment multi-instance --replicas 3` on Docker. It starts the instances behind
   a load balancer, with NATS and one MongoDB. The old spelling, `--preset
-  multi-instance`, still works and prints a hint. It cannot be combined with another
-  preset.
+  multi-instance`, still works and prints a hint. A preset combines with it: every
+  instance gets the preset's settings. Messages reach the other instances live only
+  with an Enterprise license, Rocket.Chat's scalability module; without one they show
+  after a reload.
 
 ### Your own presets
 
@@ -152,38 +182,106 @@ To stop typing it, put `reg_token:` in `~/.houston/config.yaml` or export
 `HOUSTON_REG_TOKEN`. **A registration token is a real licence.** Never paste one into a
 support case.
 
+Or hand it the licence itself, from a file or from stdin, never on the command line:
+
+```bash
+houston up --version 8.5.1 --name ee --license ./licence.txt --wait
+pbpaste | houston up --version 8.5.1 --name ee --license - --wait
+```
+
+On Docker it goes into `.license.env` in the workspace (mode 0600), which the compose file
+names and never holds; on Kubernetes into a Secret the pod reads it from. `env`, the GUI and
+`houston.log` never show it; backups leave it out, and `up --force` keeps it.
+
+Rocket.Chat 8.8 and 8.9 announce that LDAP, SAML and Custom OAuth login will need a Premium
+plan from 9.0. On Rocket.Chat 9 and later, `up` warns when an `ldap`, `saml` or `oidc`
+workspace has neither `--license` nor `--reg-token`.
+
 ---
 
 ## Sample data
 
-A new workspace is empty. `--seed` fills it with users, rooms and messages over the
-REST API, then reads everything back and checks it against the plan.
+`--seed` adds realistic conversations through Rocket.Chat's REST API, then reads the
+latest batch back by identity. Both CLI and GUI use the same plans and executor.
 
 ```bash
 houston up --version 8.5.1 --name ticket-1234 --seed --seed-profile standard --verify-seed
-houston seed --name ticket-1234 --profile large              # seed a running workspace
+houston seed --name ticket-1234 --profile large --verify-seed
 houston seed --name ticket-1234 --users 30 --channels 10 --messages 40
+houston seed --name ticket-1234 --profile small --scenario room-states --scenario permissions --history-days 180 --verify-seed
 ```
 
-| Profile | Users | Rooms | Messages | Threads |
-|---|---|---|---|---|
-| `small` (default) | 5 | 11 | 48 | 11 |
-| `standard` | 20 | 22 | 287 | 48 |
-| `large` | 100 | 52 | 3006 | 500 |
+| Profile | Users | Rooms | Main messages | Thread replies | Files | Total content |
+|---|---|---|---|---|---|---|
+| `small` (default) | 5 | 12 | 38 | 24 | 4 | 68 |
+| `standard` | 20 | 25 | 253 | 162 | 12 | 431 |
+| `large` | 100 | 60 | 2620 | 2620 | 24 | 5270 |
 
-The messages column counts every message the rooms end up holding, including the two
-each discussion starts from. `seed` prints the ones it posted, so `small` reports
-`messages: 46`, `standard` 283 and `large` 3000.
+Total content includes file messages and the opening messages of newly created
+discussions. The existing `messages` summary counts main messages plus thread
+replies; `threads` counts replies. On a repeat, existing discussions gain no new
+opening messages: ordinary totals are 66, 427 and 5264. Users, rooms and custom
+assets are reused; each completed invocation appends a fresh conversation batch.
+`--messages` overrides the number per public channel, including General. Derived
+room kinds retain their minima. Zero users explicitly uses the administrator for
+content; reduced participant sets omit conversations that need more people.
 
-Every profile has every kind of room: public and private channels, public and private
-teams, channels inside teams, discussions, direct messages and threads. `standard` and
-`large` also add reactions; `small` has none.
+All profiles include public/private channels, teams and their child channels,
+discussions, DMs and group DMs. Conversations include markdown, code, Unicode and
+predictable `INC-4821` search text, varied replies, reactions by other participants,
+pins, personal stars, mentions, edited messages and custom emoji. Bundled PNG,
+text, CSV and PDF files can be previewed or downloaded. New sample users receive
+names, avatars and bios; passwords are their usernames (`alice`, `bob`, and so on).
+Existing profile values and nonempty room metadata are preserved.
+Objects from an older seed can be adopted only when a successful saved seed result
+and their actual authorship establish provenance. An unrelated name collision is
+reported instead of changing that object.
 
-- Seed users are `alice`, `bob` and so on, and each password is the username.
-- Email 2FA and the rate limiter are off while seeding, and are put back afterwards.
-- **Check the result, not the request.** The result has `verification.ok`. Treat a
-  false or missing one as not proven. `--verify-seed` makes a mismatch fail the
-  command.
+`--scenario room-states` adds readonly, broadcast and archived channels.
+`--scenario permissions` adds a private room with Alice as owner, Bob as moderator,
+Carol muted and Dave outside; it needs at least four sample users. Both scenarios
+add four rooms, 20 main messages and four pins. Repeat `--scenario` to combine them.
+On creation, use `--seed-scenario` and `--seed-history-days` alongside `--seed`.
+These options cannot be combined with `--scale` or `--clear-scale`.
+
+`--history-days 180` spreads this batch over the preceding 180 days with one saved
+UTC reference. History is optional (1–36500 days); omitting it retains current
+timestamps. Parent/reply order, copied discussion dates, file dates, thread activity
+and room latest-message summaries are reconciled, including copied dates in new
+pin notifications. Pin and edit action dates remain current. Existing message dates are never
+changed. Reused discussion anchors remain intact and may narrow that room's range;
+the result reports those constraints. Dates are synthetic: REST notifications and
+hooks still run now. Refresh or sign in with a fresh client to read the adjusted dates.
+Native date search uses `after:DD/MM/YYYY before:DD/MM/YYYY`.
+
+History needs writable access to the workspace's managed MongoDB on Docker or
+Kubernetes. Houston checks all live Rocket.Chat instances' `MONGO_URL` values and
+refuses an external, inaccessible or ambiguous target before creating content.
+SCRAM credentials and custom database names are read from the live configuration;
+credentials are never put in command arguments or seed receipts.
+
+A durable receipt records exact identities before and after writes. If interrupted,
+repeat the same options or run `houston ready --name ticket-1234`; the original run
+and historical reference are resumed. An unidentified upload or an ambiguous media
+confirmation is refused rather than creating duplicates. Keep the receipt to
+investigate that refusal; do not delete it and replay the batch.
+Historical adjustment starts only after API creation completes. Its saved timeline
+must cover every captured content record and related notice; an incomplete saved
+timeline is a failure, and its selected dates are never silently expanded or replaced.
+Results show planned and read feature counts, the effective date range, and room
+locations with the accounts whose personal Stars panels contain the examples.
+
+Email 2FA and the REST rate limiter are restored to their original values on exit.
+Only newly created sample accounts have personal email 2FA disabled for their fixed
+sample login. Existing accounts' security settings are preserved. Fresh workspaces
+use the safe API query default required by the custom-emoji client; an existing
+workspace that explicitly enables unsafe query parameters retains that setting and
+may need its configuration corrected for native custom emoji to load.
+
+**Check the result.** `verification.ok` is true only after complete readback, false
+for a confirmed mismatch and null when a check is unreadable. `--verify-seed` accepts
+only true. `seed` has no `--json`; its exit code is the strict gate, and
+`houston info --name ticket-1234 --json` exposes the saved result at `data.seed.ok`.
 
 ### Large volumes
 
@@ -265,14 +363,17 @@ houston upgrade --name ticket-1234 --rollback
 - Rocket.Chat is stopped while a backup is taken, so the dump is consistent. `--live`
   skips the stop.
 - A restore replaces the target database completely. `--new` restores into a new
-  workspace instead.
+  workspace instead. The copy comes up on this machine (loopback), without the source's
+  HTTPS name and without its registration token, which a bundle never carries; give it
+  `--domain` or `--https` again if it needs one.
 - Restoring newer data into an older version is refused. Older into newer needs
   `--allow-upgrade`.
 - A backup does not include the side services' data: MinIO files, Keycloak realms,
   LDAP entries or Mailpit mail.
 - `upgrade` needs the workspace running, because Rocket.Chat migrates its database when
   it starts. `--dry-run` shows the plan without changing anything.
-- An upgrade that also needs a new major MongoDB version is refused. MongoDB majors
+- An upgrade keeps the workspace's MongoDB when the new Rocket.Chat still runs on it, as
+  7.13 runs on 7.0. One that needs a new major MongoDB version is refused: MongoDB majors
   have to be upgraded one step at a time.
 
 ---
@@ -297,6 +398,19 @@ houston up --version 8.5.1 --name ticket-1234 --https         # https://ticket-1
 The email is remembered (`houston config set acme.email <address>`). Rocket.Chat's
 `ROOT_URL` becomes the HTTPS URL, which is what OAuth and SAML redirects need.
 
+A preset's own pages are served on the same name and certificate, on both runtimes, so
+they work from any browser, not only on this machine:
+
+| Path | What |
+|---|---|
+| `/mailpit/` | Mailpit, every email Rocket.Chat sends (`email`) |
+| `/keycloak/` | Keycloak, for sign-in and its admin console (`saml`, `oidc`, ldap's `idp`). SSO needs no `idp_host` and no hosts entry. |
+| `/livechat-demo/` | the livechat demo page. It is the same origin as Rocket.Chat there, so cross-origin problems (CORS, framing) show only on its own port. |
+| `/minio/` | the MinIO console, to watch uploads land in the bucket (`s3_minio`) |
+| `/phpldapadmin/` | phpLDAPadmin, to browse and edit the directory (`ldap`, OpenLDAP and AD) |
+
+`houston info` and the GUI link to them. Grafana is at `/grafana/` (see [Monitoring](#monitoring)).
+
 ```bash
 houston edge status              # is it running, which names, can it reach each one
 houston edge stop                # frees ports 80 and 443
@@ -319,7 +433,9 @@ chmod 600 ~/.houston/acme/dns.env
 
 A `--domain` workspace can be reached by anyone who can reach that name, so houston
 gives it a generated admin password instead of `admin123`, as it does for a workspace
-bound beyond this machine (`--bind 0.0.0.0`). `houston info` shows it.
+bound beyond this machine (`--bind 0.0.0.0`). `houston info` shows it. A workspace made
+on this machine alone and brought back public keeps `admin123`, because Rocket.Chat sets
+the password only on an empty database; `up` says so.
 
 ---
 
@@ -381,7 +497,10 @@ workspace's own network.
   how long p95 took to recover. `--stats` on a long run reports memory growth per
   hour, the sign of a leak.
 - **The customer's hardware:** `--constrain "rc=2cpu/2g,mongo=1cpu/1g"` limits the
-  services for the run and removes the limits afterwards.
+  services for the run and puts back what they had afterwards. Docker cannot clear a limit, so
+  a service that had none is given this machine's whole capacity, which is the same thing. A
+  memory cap below what a service already uses is refused: the kernel would restart it as the
+  test began, and the run would measure the restart.
 - **`--slo p95=300ms,error=1%`** makes the command fail when the target is missed, so it
   fits in CI.
 - **Diagnosis is on by default:** Rocket.Chat's event-loop lag, MongoDB's slow queries
@@ -425,6 +544,25 @@ houston versions 8.5.1        # which MongoDB houston would pair with 8.5.1, and
 Give full versions such as `8.5.1`. MongoDB 8 and newer runs the
 `mongodb/mongodb-community-server` image; older MongoDB runs `bitnamilegacy/mongodb`.
 
+### Unreleased builds
+
+`--version` also takes a CI build of Rocket.Chat, pulled from `ghcr.io/rocketchat/rocket.chat`:
+`develop`, `pr-<number>`, either with `-fips` or `-cov`, and `-gha-run-<id>` for one run's
+build rather than the latest.
+
+```bash
+houston versions pr-42617                                  # its version and MongoDB pairing
+houston up --version pr-42617 --name pr-42617 --wait       # the pull request's build
+houston up --version develop-fips --name fips --wait       # FIPS: amd64 only
+```
+
+The build's version comes from that branch's `apps/meteor/package.json` on GitHub, so this
+needs the network. It is recorded as `8.10.0.dev0` for `8.10.0-develop`, which sorts below
+the release, and MongoDB is paired as for that release. Moving to the release later is an
+`upgrade`. Offline, or for a build GitHub does not know, `up` stops and names the way round:
+`--rc-image ghcr.io/rocketchat/rocket.chat:<tag> --version <x.y.z>`. On a shared GUI a build
+version is limited to admins under `gui.create_policy admin`, as `rc_image` is.
+
 ---
 
 ## Where state lives
@@ -437,6 +575,8 @@ directory.
 ├── IMPLEMENTATION            # which houston versions may use this directory
 ├── config.yaml               # your defaults: bind_host, reg_token, acme.email, GUI policies
 ├── users  sessions           # web GUI accounts and sign-ins (mode 0600)
+├── sso.env                   # the Okta client secret (mode 0600), if Okta sign-in is on
+├── sso-identities.json       # which houston account each Okta person signs in as
 ├── first-run                 # the web GUI's one-time setup key, until the first account exists
 ├── audit.log                 # who did what
 ├── logs/houston.log          # one start and one end line for every command
@@ -449,7 +589,8 @@ directory.
 ├── clusters/<name>/          # a cloud cluster houston built, and its kubeconfig
 └── repros/<name>/
     ├── docker-compose.yml    # generated: run `up` again instead of editing it
-    └── repro.json            # the workspace record: version, runtime, ports, seed result, notes
+    ├── repro.json            # the workspace record: version, runtime, ports, seed result, notes
+    └── seed-receipts/        # durable seed manifests and write-ahead logs
 ```
 
 **Every command writes to `logs/houston.log`**, even `--help` and `--version`. When you
@@ -461,4 +602,6 @@ export HOUSTON_HOME=$(mktemp -d)
 
 Settings can also come from the environment, which wins over `config.yaml`:
 `HOUSTON_HOME`, `HOUSTON_REG_TOKEN`, `HOUSTON_RC_IMAGE`, `HOUSTON_BIND_HOST` (the
-`--bind` flag wins over both) and `HOUSTON_KUBE_CONTEXT`.
+`--bind` flag wins over both) and `HOUSTON_KUBE_CONTEXT`. `HOUSTON_SSO_CLIENT_SECRET` is
+the Okta client secret, and wins over `sso.env`; see
+[Sign in with Okta](gui.md#sign-in-with-okta).

@@ -116,13 +116,14 @@ module.exports = {
     {
       name: 'only-rcapi-speaks-http',
       comment:
-        'The Rocket.Chat HTTP seam. Everything that knows a Rocket.Chat path lives in ' +
-        '`core/rcapi.ts`, and the seam knows none -- so a second importer is a second ' +
+        'The HTTP seam. Everything that knows a Rocket.Chat path lives in ' +
+        '`core/rcapi.ts`, and everything that knows an identity provider in `core/sso.ts`; ' +
+        'the seam knows neither -- so a third importer is a third ' +
         'place that decides what a timeout is and what a transport failure looks like. ' +
         'The `fetch` global itself is fenced by `no-restricted-globals` in eslint, ' +
         'because a global has no specifier for this rule to key on.',
       severity: 'error',
-      from: { path: '^src/', pathNot: '^src/core/rcapi\\.ts$' },
+      from: { path: '^src/', pathNot: '^src/core/(rcapi|sso)\\.ts$' },
       to: { path: '^src/seams/rc-http\\.ts$' },
     },
     {

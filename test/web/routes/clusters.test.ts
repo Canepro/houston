@@ -59,6 +59,7 @@ jest.mock('../../../src/core/eks', () => ({
     error: '',
   })),
   region: jest.fn(async () => 'eu-west-1'),
+  profiles: jest.fn(async () => ['support-eks-houston']),
   connectExisting: jest.fn(async (arn: string) => ({
     context: arn,
     account: '111122223333',
@@ -172,9 +173,12 @@ describe('the existing-cluster connection', () => {
       expect(JSON.parse(read.body)).toMatchObject({
         source: 'named profile',
         profile: 'support-sso',
+        profiles: [],
         account: '111122223333',
         region: 'eu-west-1',
       });
+      // Signed in: nothing to suggest, so the AWS config is not read.
+      expect(eks.profiles).not.toHaveBeenCalled();
       expect(read.body).not.toMatch(/SECRET_ACCESS_KEY|SESSION_TOKEN/u);
       const arn = 'arn:aws:eks:eu-west-1:111122223333:cluster/support';
       const denied = await app.inject({

@@ -7,6 +7,7 @@
  * production with the whole suite green.
  */
 import * as config from '../../lib/config';
+import { mapLimit } from '../../lib/map-limit';
 import { grafanaUrl } from '../../lib/monitoring';
 import { workspaceNamespaces } from '../kube/capabilities';
 import { shortName } from '../kube/context';
@@ -14,7 +15,15 @@ import { forwardAlive } from '../kube/forward';
 import { CONTEXT as KUBE_CONTEXT, RELEASE } from '../kube/names';
 import { namespaceFor } from '../kube/namespace';
 import { PENDING_STATES, releaseState } from '../kube/release';
-import { terminalPodFailure, workloadReplicas, workspaceReady } from '../kube/status';
+import {
+  terminalFailureOfPods,
+  terminalPodFailure,
+  workloadReplicas,
+  workspacePodsByNamespace,
+  workspacePodsReady,
+  workspaceReady,
+  workspaceReplicasByNamespace,
+} from '../kube/status';
 import { dockerAvailable } from '../runner/host';
 import { projectStates, rcStatusByProject, servicesByProject } from '../runner/queries';
 import { type Metadata, externalUrl, listMeta, readMeta } from '../runner/record';
@@ -22,7 +31,11 @@ import * as topology from '../topology';
 
 import * as naming from './naming';
 import * as notes from './notes';
+import { callHost } from './request';
 import { ESSENTIAL_SERVICES, PRESET_LINKS } from './types';
+import { namesOf } from '../../lib/presets/composite';
+import { publicPathsOf } from '../../lib/presets/public';
+import { BUILD_IMAGE, isBuildTag } from '../../lib/versions';
 
 function bag(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -65,6 +78,18 @@ export function reproState(rcStatus: string, hasContainers: boolean): string {
   return low.split(' (')[0]?.split(' ')[0] || 'down';
 }
 
+interface KubernetesReads {
+  workloadReplicas: typeof workloadReplicas;
+  workspaceReady: typeof workspaceReady;
+  terminalPodFailure: typeof terminalPodFailure;
+}
+
+const scopedKubernetesReads: KubernetesReads = {
+  workloadReplicas,
+  workspaceReady,
+  terminalPodFailure,
+};
+
 /**
  * `running` / `down` for a Kubernetes workspace.
  *
@@ -72,7 +97,12 @@ export function reproState(rcStatus: string, hasContainers: boolean): string {
  * Kubernetes workspace `down` -- the state column was reporting on the wrong runtime
  * entirely.
  */
-export async function kubernetesState(name: string, meta: Metadata): Promise<string> {
+export async function kubernetesState(
+  name: string,
+  meta: Metadata,
+  namespaces: typeof workspaceNamespaces = workspaceNamespaces,
+  reads: KubernetesReads = scopedKubernetesReads,
+): Promise<string> {
   const extra = bag(meta.extra);
   const context = isTruthy(extra[config.EXTRA_CONTEXT])
     ? String(extra[config.EXTRA_CONTEXT])
@@ -89,12 +119,12 @@ export async function kubernetesState(name: string, meta: Metadata): Promise<str
   // are taken in the order the rule needs, so a missing namespace still decides first and
   // a refused workload read still raises only once the namespace is known to be there.
   const [held, workload, ready] = await Promise.all([
-    workspaceNamespaces(context),
-    workloadReplicas(name, { context }).then(
+    namespaces(context),
+    reads.workloadReplicas(name, { context }).then(
       (replicas) => ({ replicas, failure: null as unknown }),
       (failure: unknown) => ({ replicas: null, failure }),
     ),
-    workspaceReady(name, { context }),
+    reads.workspaceReady(name, { context }),
   ]);
   if (held === null) return '?';
   if (!held.includes(await namespaceFor(name))) return 'down';
@@ -113,7 +143,7 @@ export async function kubernetesState(name: string, meta: Metadata): Promise<str
   // not manufacture a failure, so each probe is guarded and falls back to the honest
   // "starting".
   try {
-    if ((await terminalPodFailure(name, { context })) !== null) return 'failed';
+    if ((await reads.terminalPodFailure(name, { context })) !== null) return 'failed';
   } catch {
     // a refused probe is not evidence of failure
   }
@@ -171,7 +201,7 @@ export async function forwardGap(meta: Metadata): Promise<string> {
   const pid = extra.port_forward_pid;
   if (!isTruthy(pid)) return '';
   const ns = isTruthy(extra.namespace) ? String(extra.namespace) : await namespaceFor(meta.name);
-  if (forwardAlive(Number(pid), { namespace: ns, hostPort: meta.hostPort })) return '';
+  if (await forwardAlive(Number(pid), { namespace: ns, hostPort: meta.hostPort })) return '';
   return (
     'no port-forward, so the URL will not answer — ' +
     `\`houston ready --name ${meta.name}\` re-establishes it`
@@ -182,9 +212,50 @@ export async function forwardGap(meta: Metadata): Promise<string> {
  * Clickable URLs for a repro: RC, extra instances, preset sidecars (S3, Keycloak,
  * Mailpit, widget), and monitoring -- [{label, url, kind}].
  */
+/**
+ * A composed workspace's presets as a list, for a reader that should not split the string.
+ * ABSENT for one preset, so every other workspace's payload is byte for byte what it was.
+ */
+function presetsOf(meta: Metadata): { presets?: string[] } {
+  const names = namesOf(scenarioOf(meta));
+  return names.length > 1 ? { presets: names } : {};
+}
+
+/**
+ * The presets without the deployment. Compose builds multi-instance through that preset, so
+ * the record lists it among them, and the panel showed it as a preset chip beside the
+ * deployment that already says so: it is the deployment, not a preset.
+ */
+function scenarioOf(meta: Metadata): string {
+  return String(topology.axesOfMeta(meta).preset ?? meta.preset);
+}
+
+/**
+ * What the panel badges: the CI build a workspace runs (its ghcr tag, or ''), and whether it
+ * was given a license. Always present, so the panel reads one shape.
+ */
+function buildAndLicense(meta: Metadata): { ci_build: string; licensed: boolean } {
+  const prefix = `${BUILD_IMAGE}:`;
+  const tag = meta.rcImage.startsWith(prefix) ? meta.rcImage.slice(prefix.length) : '';
+  return { ci_build: isBuildTag(tag) ? tag : '', licensed: bag(meta.extra).licensed === true };
+}
+
+/** The side ports and replicas are published on the workspace's recorded bind. */
+function linkHost(meta: Metadata): string {
+  const recorded = bag(meta.extra).bind_host;
+  if (typeof recorded === 'string' && recorded.trim() !== '') return callHost(recorded);
+  // Older records predate bind_host but already carry the address readiness uses.
+  try {
+    return callHost(new URL(meta.rootUrl).hostname);
+  } catch {
+    return 'localhost';
+  }
+}
+
 export function reproLinks(meta: Metadata): { label: string; url: string; kind: string }[] {
   const links = [{ label: 'Rocket.Chat', url: externalUrl(meta), kind: 'rc' }];
   const extra = bag(meta.extra);
+  const host = linkHost(meta);
   if (meta.publicUrl) {
     // Keep the plain http way in as well: with the local CA the browser warns until
     // `trust-ca` has run, and this is the link that always just works.
@@ -195,19 +266,62 @@ export function reproLinks(meta: Metadata): { label: string; url: string; kind: 
     for (let i = 1; i <= n; i += 1) {
       links.push({
         label: `instance ${String(i)}`,
-        url: `http://localhost:${String(meta.hostPort + i)}`,
+        url: `http://${host}:${String(meta.hostPort + i)}`,
         kind: 'rc',
       });
     }
   }
-  const ports = config.PRESET_PORTS[meta.preset] ?? [];
-  for (const [label, idx] of PRESET_LINKS[meta.preset] ?? []) {
-    if (idx < ports.length) {
-      links.push({
-        label,
-        url: `http://localhost:${String(ports[idx])}`,
-        kind: 'sidecar',
-      });
+  // Every preset of a composed workspace, in its canonical order.
+  for (const name of namesOf(meta.preset)) {
+    const ports = config.PRESET_PORTS[name] ?? [];
+    for (const [label, idx] of PRESET_LINKS[name] ?? []) {
+      if (idx < ports.length) {
+        links.push({
+          label,
+          url: `http://${host}:${String(ports[idx])}`,
+          kind: 'sidecar',
+        });
+      }
+    }
+  }
+  // ldap's OWN Keycloak, when it federates the directory (`--set idp=saml|oidc`): it is
+  // published on the IdP preset's port, and linked by preset name only, so the console that
+  // holds the directory's SSO users had no link -- unless HTTPS added its path.
+  if (namesOf(meta.preset).includes('ldap') && !links.some((link) => link.label === 'Keycloak')) {
+    const idp = String(
+      bag(extra.params).idp ?? bag(bag(extra.preset_params).ldap).idp ?? '',
+    ).toLowerCase();
+    const port = idp === 'saml' || idp === 'oidc' ? config.PRESET_PORTS[idp]?.[0] : undefined;
+    if (port !== undefined) {
+      links.push({ label: 'Keycloak', url: `http://${host}:${String(port)}`, kind: 'sidecar' });
+    }
+  }
+  // Over HTTPS, a preset's own UIs at paths of the name (`lib/presets/public.ts`). Mailpit,
+  // Keycloak and the MinIO console then answer only under their path, so their link IS the
+  // public one, as is phpLDAPadmin's; the demo page keeps its own port (the cross-origin one)
+  // and gains the same-origin path beside it.
+  if (meta.publicUrl) {
+    const base = meta.publicUrl.replace(/\/+$/u, '');
+    for (const p of publicPathsOf(extra)) {
+      const url = `${base}${p.path}/`;
+      const label =
+        (
+          {
+            mailpit: 'Mailpit',
+            keycloak: 'Keycloak',
+            'widget-site': 'Widget site',
+            'minio-ui': 'MinIO console',
+            phpldapadmin: 'phpLDAPadmin',
+          } as Record<string, string>
+        )[p.service] ?? p.service;
+      const at = links.findIndex((link) => link.label === label);
+      if (p.service !== 'widget-site' && at >= 0) links[at] = { label, url, kind: 'sidecar' };
+      else
+        links.push({
+          label: p.service === 'widget-site' ? `${label} (same origin)` : label,
+          url,
+          kind: 'sidecar',
+        });
     }
   }
   if (isTruthy(extra.monitoring)) {
@@ -216,11 +330,14 @@ export function reproLinks(meta: Metadata): { label: string; url: string; kind: 
       url: grafanaUrlOf(meta),
       kind: 'monitor',
     });
-    links.push({
-      label: 'Prometheus',
-      url: `http://localhost:${String(config.MONITOR_PORTS[0])}`,
-      kind: 'monitor',
-    });
+    // Docker's alone: Kubernetes forwards Grafana and nothing else, so this link led nowhere.
+    if (topology.ofMeta(meta) !== topology.KUBERNETES) {
+      links.push({
+        label: 'Prometheus',
+        url: `http://localhost:${String(config.MONITOR_PORTS[0])}`,
+        kind: 'monitor',
+      });
+    }
   }
   return links;
 }
@@ -268,8 +385,8 @@ export function clusterOf(meta: Metadata): { context: string; cluster: string } 
   return { context, cluster: context === '' ? '' : shortName(context) };
 }
 
-export function summary(meta: Metadata): Record<string, unknown> {
-  const groups = notes.noteGroupsOf(meta);
+export async function summary(meta: Metadata): Promise<Record<string, unknown>> {
+  const groups = await notes.noteGroupsOf(meta);
   const extra = bag(meta.extra);
   const recorded = Array.isArray(extra.notes) ? extra.notes : [];
   const d: Record<string, unknown> = {
@@ -279,8 +396,14 @@ export function summary(meta: Metadata): Record<string, unknown> {
     rc_version: meta.rcVersion,
     mongo_tag: meta.mongoTag,
     mongo_flavor: meta.mongoFlavor,
-    preset: meta.preset,
+    preset: scenarioOf(meta),
+    ...presetsOf(meta),
+    ...buildAndLicense(meta),
     root_url: meta.rootUrl,
+    // The address a person opens, when the workspace has one: `up`'s result and the GUI's
+    // create dialog offered only `root_url`, the http://localhost port, which from any other
+    // machine is that machine's own. "" without HTTPS, as the list row and the panel say.
+    public_url: meta.publicUrl,
     host_port: meta.hostPort,
     login: { user: config.ADMIN_USERNAME, password: meta.adminPassword || config.ADMIN_PASSWORD },
     pinned: meta.pinned,
@@ -301,7 +424,12 @@ export function summary(meta: Metadata): Record<string, unknown> {
       ? {
           profile: seed.profile ?? '',
           at: seed.at ?? '',
-          ok: Boolean(bag(seed.verification).ok),
+          ok:
+            bag(seed.verification).ok === true
+              ? true
+              : bag(seed.verification).ok === false
+                ? false
+                : null,
         }
       : null;
   const n = extra.instances;
@@ -310,7 +438,7 @@ export function summary(meta: Metadata): Record<string, unknown> {
     d.instances = count;
     d.instance_urls = Array.from(
       { length: count },
-      (_unused, index) => `http://localhost:${String(meta.hostPort + index + 1)}`,
+      (_unused, index) => `http://${linkHost(meta)}:${String(meta.hostPort + index + 1)}`,
     );
   }
   if (isTruthy(extra.monitoring)) {
@@ -321,7 +449,7 @@ export function summary(meta: Metadata): Record<string, unknown> {
 }
 
 export async function describe(name: string): Promise<Record<string, unknown>> {
-  return summary(await readMeta(await naming.resolveName(name)));
+  return await summary(await readMeta(await naming.resolveName(name)));
 }
 
 /**
@@ -338,12 +466,16 @@ export async function rowFor(
     states,
     statusMap,
     svcMap,
+    namespaces,
+    kubeReads,
   }: {
     default: string;
     dockerUp: boolean;
     states: Record<string, string>;
     statusMap: Record<string, string>;
     svcMap: Record<string, Record<string, string>>;
+    namespaces?: typeof workspaceNamespaces;
+    kubeReads?: KubernetesReads;
   },
 ): Promise<Record<string, unknown>> {
   const rcStatus = statusMap[meta.project] ?? '';
@@ -353,7 +485,7 @@ export async function rowFor(
   // running.
   let state: string;
   if (topology.ofMeta(meta) === topology.KUBERNETES) {
-    state = await kubernetesState(meta.name, meta);
+    state = await kubernetesState(meta.name, meta, namespaces, kubeReads);
   } else {
     state = dockerUp ? reproState(rcStatus, Boolean(states[meta.project])) : '?';
   }
@@ -392,7 +524,8 @@ export async function rowFor(
     // The https URL when `up --https` was used; "" otherwise.
     public_url: meta.publicUrl,
     tls: isTruthy(extra.tls) ? String(extra.tls) : '',
-    preset: meta.preset,
+    preset: scenarioOf(meta),
+    ...presetsOf(meta),
     pinned: meta.pinned,
     default: meta.name === defaultName,
     monitoring: monitored,
@@ -405,28 +538,73 @@ export async function rowFor(
   };
 }
 
+function shareContextRead<T>(
+  probe: (context: string) => Promise<T>,
+): (context: string) => Promise<T> {
+  const reads = new Map<string, Promise<T>>();
+  return (context) => {
+    const held = reads.get(context);
+    if (held !== undefined) return held;
+    const reading = probe(context);
+    reads.set(context, reading);
+    return reading;
+  };
+}
+
 export async function listRepros(): Promise<Record<string, unknown>[]> {
   const metas = await listMeta();
   const fallback = config.loadConfig().default_repro;
   const defaultName = isTruthy(fallback) ? String(fallback) : '';
   const dockerUp = await dockerAvailable();
-  const states = dockerUp ? ((await projectStates()) ?? {}) : {};
+  const [states, svcMap] = dockerUp
+    ? await Promise.all([projectStates().then((value) => value ?? {}), servicesByProject()])
+    : [{}, {}];
   // ONE docker ps for every service of every project, so the list and the panel cannot
   // disagree about whether a workspace is degraded -- which is exactly how they came to
   // disagree about `state` before reproState existed.
-  const svcMap = dockerUp ? await servicesByProject() : {};
-  const statusMap = dockerUp ? await rcStatusByProject() : {};
-  const out: Record<string, unknown>[] = [];
-  for (const meta of metas) {
-    out.push(
-      await rowFor(meta, {
-        default: defaultName,
-        dockerUp,
-        states,
-        statusMap,
-        svcMap,
-      }),
-    );
-  }
-  return out;
+  const statusMap = dockerUp ? await rcStatusByProject(svcMap) : {};
+  // Share a cluster read only within this list. Every poll asks again so a deleted
+  // namespace or an unavailable cluster is never hidden behind an older answer.
+  const reads = new Map<string, ReturnType<typeof workspaceNamespaces>>();
+  const namespaces: typeof workspaceNamespaces = (context) => {
+    const held = reads.get(context ?? '');
+    if (held !== undefined) return held;
+    const reading = workspaceNamespaces(context);
+    reads.set(context ?? '', reading);
+    return reading;
+  };
+  // A list needs current answers, but not one kubectl process per row and per question.
+  // Keep these snapshots inside this call; a later poll must read the cluster again.
+  // Broad RBAC is optional: a refused collection falls back to the original scoped probe.
+  const replicas = shareContextRead(workspaceReplicasByNamespace);
+  const pods = shareContextRead(workspacePodsByNamespace);
+  const kubeReads: KubernetesReads = {
+    workloadReplicas: async (name, options) => {
+      const [seen, namespace] = await Promise.all([replicas(options.context), namespaceFor(name)]);
+      return seen === null ? await workloadReplicas(name, options) : (seen.get(namespace) ?? null);
+    },
+    workspaceReady: async (name, options) => {
+      const [seen, namespace] = await Promise.all([pods(options.context), namespaceFor(name)]);
+      return seen === null
+        ? await workspaceReady(name, options)
+        : workspacePodsReady(seen.get(namespace) ?? []);
+    },
+    terminalPodFailure: async (name, options) => {
+      const [seen, namespace] = await Promise.all([pods(options.context), namespaceFor(name)]);
+      return seen === null
+        ? await terminalPodFailure(name, options)
+        : terminalFailureOfPods(seen.get(namespace) ?? []);
+    },
+  };
+  return await mapLimit(metas, 4, async (meta) =>
+    rowFor(meta, {
+      default: defaultName,
+      dockerUp,
+      states,
+      statusMap,
+      svcMap,
+      namespaces,
+      kubeReads,
+    }),
+  );
 }

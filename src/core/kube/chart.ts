@@ -10,6 +10,7 @@ import * as config from '../../lib/config';
 import { CreateFailedError, ValidationError } from '../../lib/errors';
 import { nullEmit, type Emit } from '../../lib/events';
 import { toTextYaml } from '../../lib/format';
+import { BUILD_IMAGE } from '../../lib/versions';
 
 import { why } from './ask';
 import { kube } from './exec';
@@ -22,7 +23,7 @@ import {
   MONGO_OPLOG_URL,
   MONGO_URL,
 } from './names';
-import { REG_TOKEN_KEY } from './operator';
+import { LICENSE_KEY, LICENSE_SECRET, REG_TOKEN_KEY } from './operator';
 import { versionKey } from './tools';
 
 /**
@@ -203,13 +204,61 @@ export interface ChartEnvEntry {
   valueFrom?: { secretKeyRef: { name: string; key: string } };
 }
 
-/** The environment the chart passes to Rocket.Chat, registration token included. */
+/**
+ * Env the chart's Rocket.Chat Deployment writes ITSELF, always or under a value houston sets
+ * or leaves at its default. Measured from chart 7.0.2's `chat-deployment.yaml`, the only
+ * template that renders `extraEnv`. One of these in `extraEnv` is a duplicate key, which
+ * server-side apply refuses -- after MongoDB is already up, rolling the whole create back.
+ */
+export const CHART_OWNED_ENV: Readonly<Record<string, string>> = Object.freeze({
+  ROOT_URL: 'use --root-url, or --domain for a public name',
+  MONGO_URL: 'the chart reads it from the workspace Secret',
+  REG_TOKEN: 'use --reg-token',
+  MAIL_URL: 'the chart owns it',
+  INSTANCE_IP: 'the chart sets it to the pod IP',
+  DEPLOY_PLATFORM: 'the chart owns it',
+  ROCKETCHAT_LICENSE: 'the chart owns it',
+  LICENSE_DEBUG: 'the chart owns it',
+  OVERWRITE_SETTING_Prometheus_Enabled: 'the chart sets it (prometheusScraping)',
+  OVERWRITE_SETTING_Prometheus_Port: 'the chart sets it (prometheusScraping)',
+  MS_METRICS: 'the chart owns it',
+  MS_METRICS_PORT: 'the chart owns it',
+  DB_WATCHERS: 'the chart owns it',
+  MOLECULER_LOG_LEVEL: 'the chart owns it',
+  HEARTBEAT_INTERVAL: 'the chart owns it',
+  HEARTBEAT_TIMEOUT: 'the chart owns it',
+  RETRY_ENABLED: 'the chart owns it',
+});
+
+/** Refuse an override the chart would duplicate, before anything is created. */
+export function refuseChartOwnedEnv(overrides: Record<string, string | null>): void {
+  for (const key of Object.keys(overrides)) {
+    const reason =
+      CHART_OWNED_ENV[key] ?? (key.startsWith('DEPLOY_') ? 'the chart owns it' : undefined);
+    if (reason === undefined) continue;
+    throw new ValidationError(
+      `${key} cannot be set with --env or --setting on Kubernetes: ${reason}. A second ` +
+        'entry for a variable the chart writes is a server-side-apply conflict, not an ' +
+        'override.',
+    );
+  }
+}
+
+/**
+ * The environment the chart passes to Rocket.Chat, registration token included.
+ *
+ * A MAP, in the order base < preset < `overrides`, as Compose builds it: a key set twice
+ * replaces the earlier value in place. Appending put a second entry for the same name in
+ * `extraEnv`, which server-side apply refuses. A null override removes the key.
+ */
 export function chartEnv(
   adminPassword: string,
   host: string,
   presetEnv: Record<string, unknown> | undefined,
   regTokenSecret: string,
   rootUrl: string,
+  overrides: Record<string, string | null> = {},
+  licensed = false,
 ): ChartEnvEntry[] {
   // THE WORKSPACE HAS TO BE USABLE ON ARRIVAL, which is what these give and what Kubernetes
   // was missing entirely. `up` printed "Login admin / admin123" for a workspace where that
@@ -225,7 +274,7 @@ export function chartEnv(
     { name: 'ADMIN_NAME', value: config.ADMIN_NAME },
     { name: 'ADMIN_EMAIL', value: config.ADMIN_EMAIL },
     { name: 'ADMIN_PASS', value: adminPassword || config.ADMIN_PASSWORD },
-    { name: 'ALLOW_UNSAFE_QUERY_AND_FIELDS_API_PARAMS', value: 'true' },
+    { name: 'ALLOW_UNSAFE_QUERY_AND_FIELDS_API_PARAMS', value: 'false' },
   ];
   // ROOT_URL, WHICH THIS RUNTIME HAD NEVER SET. The chart emits one only from
   // `.Values.host`, and nothing passed that -- so Rocket.Chat ran on its built-in default
@@ -239,15 +288,27 @@ export function chartEnv(
   // ride extraEnv here exactly as they ride the service environment on Compose. AFTER the
   // base list, so a preset can override a default rather than being overridden by one.
   // `toTextYaml` of the value the preset's YAML holds, as compose.ts writes it.
+  const byName = new Map(env.map((entry) => [entry.name, entry]));
   for (const [key, value] of Object.entries(presetEnv ?? {})) {
-    env.push({ name: String(key), value: toTextYaml(value, config.yamlDateText) });
+    byName.set(String(key), { name: String(key), value: toTextYaml(value, config.yamlDateText) });
   }
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === null) byName.delete(key);
+    else byName.set(key, { name: key, value: String(value) });
+  }
+  env.splice(0, env.length, ...byName.values());
   if (regTokenSecret !== '') {
     // By REFERENCE, so the token is never a value in this document. The chart renders
     // extraEnv verbatim, so valueFrom survives -- verified against the published chart.
     env.push({
       name: 'REG_TOKEN',
       valueFrom: { secretKeyRef: { name: regTokenSecret, key: REG_TOKEN_KEY } },
+    });
+  }
+  if (licensed) {
+    env.push({
+      name: 'ROCKETCHAT_LICENSE',
+      valueFrom: { secretKeyRef: { name: LICENSE_SECRET, key: LICENSE_KEY } },
     });
   }
   return env;
@@ -283,18 +344,34 @@ function baseChartValues(
   replicas: number,
   env: ChartEnvEntry[],
 ): Record<string, unknown> {
+  // A CI BUILD moves under the same tag, so it is pulled every time, and its microservice
+  // images live beside it on ghcr (Docker Hub has releases only). stream-hub is not built
+  // for pull requests or FIPS (measured), so it stays off.
+  const build = repo === BUILD_IMAGE;
+  const ghcr = (service: string) => ({
+    image: { repository: `ghcr.io/rocketchat/${service}`, pullPolicy: 'Always' },
+  });
   return {
     // pullPolicy and the NATS cluster name are the guide's own values.yaml. IfNotPresent
     // also matters here specifically: a repro box re-creates workspaces on the same
     // versions constantly, and Always would re-pull 1.6 GB each time.
-    image: { repository: repo, tag, pullPolicy: 'IfNotPresent' },
+    image: { repository: repo, tag, pullPolicy: build ? 'Always' : 'IfNotPresent' },
     // `enabled` FOLLOWS microservices, because NATS is what the microservices talk over and
     // a monolith never opens a connection to it. The chart defaults it on independently, so
     // `--deployment monolith` ran a 3-pod NATS cluster that nothing used -- three more pods
     // to schedule, to wait for, and to tear down.
     nats: { enabled: microservices, cluster: { name: 'rocketchat-nats-cluster' } },
     replicaCount: Math.max(1, Math.trunc(replicas) || 1),
-    microservices: { enabled: microservices },
+    microservices: build
+      ? {
+          enabled: microservices,
+          presence: ghcr('presence-service'),
+          ddpStreamer: ghcr('ddp-streamer-service'),
+          account: ghcr('account-service'),
+          authorization: ghcr('authorization-service'),
+          streamHub: { enabled: false },
+        }
+      : { enabled: microservices },
     mongodb: { enabled: false },
     extraEnv: env,
   };
@@ -350,6 +427,10 @@ export interface ValuesOptions {
   regTokenSecret?: string;
   adminPassword?: string;
   presetEnv?: Record<string, unknown>;
+  /** `up --env`/`--setting`, carried forward; merged last, a null removes the key. */
+  envOverrides?: Record<string, string | null>;
+  /** Whether the namespace holds the `houston-license` Secret to reference. */
+  licensed?: boolean;
 }
 
 /**
@@ -382,10 +463,20 @@ export function valuesFor({
   regTokenSecret = '',
   adminPassword = '',
   presetEnv,
+  envOverrides = {},
+  licensed = false,
 }: ValuesOptions): Record<string, unknown> {
   validateRootAddress(rootUrl, host);
   const [repo, tag] = splitImage(rcImage, rcVersion);
-  const env = chartEnv(adminPassword, host, presetEnv, regTokenSecret, rootUrl);
+  const env = chartEnv(
+    adminPassword,
+    host,
+    presetEnv,
+    regTokenSecret,
+    rootUrl,
+    envOverrides,
+    licensed,
+  );
   const values = baseChartValues(repo, tag, microservices, replicas, env);
   applyOptionalValues(host, mongoSecret, mongoUrl, oplog, oplogUrl, values);
   return values;

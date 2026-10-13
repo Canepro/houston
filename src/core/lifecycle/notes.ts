@@ -8,10 +8,12 @@
  * `noteGroupsOf`'s callers, so a builder can return an empty group rather than branching
  * at every call site.
  */
+import { namesOf, presetsLabel } from '../../lib/presets/composite';
 import * as config from '../../lib/config';
 import { grafanaUrl, notes as monitoringNotes } from '../../lib/monitoring';
 import { toText } from '../../lib/format';
 import * as presets from '../../lib/presets/index';
+import { publicPathsOf, withPublicUrl } from '../../lib/presets/public';
 import { ACME_ISSUER, CA_ISSUER, tlsSecretFor } from '../kube/certmanager';
 import { forwardAlive } from '../kube/forward';
 import { CONTEXT as KUBE_CONTEXT, RELEASE, isOurs } from '../kube/names';
@@ -140,21 +142,38 @@ function urlHostname(value: string): string {
 export function localUrlNote(meta: Metadata, scenario: readonly NoteGroup[]): NoteGroup[] {
   const extra = bag(meta.extra);
   const body = scenario.flatMap((group) => group.body);
-  if (!body.some((line) => line.includes('localhost'))) return [];
-  const ports = (Array.isArray(extra.sidecar_ports) ? extra.sidecar_ports : []).filter(isInt);
+  // `://localhost`, not the bare word: an HTTPS workspace's own name may be
+  // `<name>.houston.localhost`, and its UIs' public paths are not what this corrects.
+  if (!body.some((line) => /:\/\/localhost[:/]/u.test(line))) return [];
+  let ports = (Array.isArray(extra.sidecar_ports) ? extra.sidecar_ports : []).filter(isInt);
+  // Over HTTPS most UIs moved to paths of the name and their ports serve them no more:
+  // offer only the ports a note still gives (livechat's cross-origin demo page).
+  if (publicPathsOf(extra).length > 0) {
+    const given = new Set(
+      [...body.join('\n').matchAll(/:\/\/localhost:(\d+)/gu)].map((match) => Number(match[1])),
+    );
+    ports = ports.filter((port) => given.has(port));
+  }
   const bindHost = toText(extra.bind_host);
   const advertised = toText(extra.advertised_url);
   if (ports.length === 0 || !(advertised || !['', '127.0.0.1', 'localhost'].includes(bindHost))) {
     return [];
   }
-  const host = urlHostname(advertised) || '<this-box>';
+  // BOUND TO ONE ADDRESS, the ports are published there alone, and houston calls the
+  // workspace by it (`request.callHost`): `localhost` answers nothing, on this box either.
+  const direct = urlHostname(meta.rootUrl);
+  const only = direct !== '' && direct !== 'localhost' ? direct : '';
+  const host = only || urlHostname(advertised) || '<this-box>';
   const shown = [...ports].sort((a, b) => a - b).slice(0, 4);
+  const urls = shown.map((port) => `http://${host}:${String(port)}`).join(', ');
   return [
     noteGroup("Reaching this preset's own pages", {
       body: [
-        'The URLs above say `localhost`, which names whichever machine the browser ' +
-          `is on. From anywhere but this box, use ${host} instead: ` +
-          `${shown.map((port) => `http://${host}:${String(port)}`).join(', ')}.`,
+        only
+          ? 'The URLs above say `localhost`, which answers nothing here or anywhere else. ' +
+            `Use ${host} instead: ${urls}.`
+          : 'The URLs above say `localhost`, which names whichever machine the browser ' +
+            `is on. From anywhere but this box, use ${host} instead: ${urls}.`,
         `Those ports are published on ${bindHost || '127.0.0.1'}, so they are ` +
           'reachable only as far as that bind allows.',
       ],
@@ -175,15 +194,32 @@ export function scenarioGroup(meta: Metadata): NoteGroup[] {
   if (!name || name === 'default') return [];
   const extra = bag(meta.extra);
   const params = bag(extra.params);
+  const names = namesOf(name);
   let pre;
   try {
     // The SAME resolution the create used, per runtime: a scenario yields native
     // manifests on Kubernetes and a compose service on Docker, and its notes follow the
-    // shape it was built in.
-    pre =
-      topology.ofMeta(meta) === topology.KUBERNETES
-        ? presets.resolve(name, topology.KUBERNETES, params)
-        : presets.load(name, params);
+    // shape it was built in. A composed workspace merges its presets as the create did,
+    // into ONE group, so a reader that renders the first scenario group shows them all.
+    const runtime = topology.ofMeta(meta);
+    if (names.length > 1) {
+      pre = presets.loadMany(
+        names,
+        bag(extra.preset_params) as Record<string, Record<string, unknown>>,
+        runtime,
+        new Set(Object.keys(bag(extra.env))),
+      );
+    } else {
+      pre =
+        runtime === topology.KUBERNETES
+          ? presets.resolve(name, topology.KUBERNETES, params)
+          : presets.load(name, params);
+    }
+    // Over HTTPS the create served the preset's own UIs at paths of the name, and moved
+    // their notes there (`lib/presets/public.ts`); derive them the way it did.
+    if (meta.publicUrl && publicPathsOf(extra).length > 0) {
+      pre = withPublicUrl(pre, meta.publicUrl, runtime);
+    }
   } catch {
     // A preset file removed after the create. This runs on a READ path (`info`, the GUI
     // panel), and a workspace whose preset is no longer loadable still has to be able to
@@ -193,7 +229,7 @@ export function scenarioGroup(meta: Metadata): NoteGroup[] {
   const notes = [...pre.notes];
   if (notes.length === 0) return [];
   // kind="scenario", not a title the panel has to recognise by its prefix.
-  return [noteGroup(`Scenario · ${pre.name}`, { kind: 'scenario', body: notes })];
+  return [noteGroup(`Scenario · ${presetsLabel(pre.name)}`, { kind: 'scenario', body: notes })];
 }
 
 /**
@@ -332,7 +368,7 @@ export function kubernetesMongoGroup(
 }
 
 /** A port-forward that has died, and an address other machines can use. */
-export function forwardAndReachNotes(
+export async function forwardAndReachNotes(
   addr: string,
   bindHost: string,
   extra: Record<string, unknown>,
@@ -340,14 +376,14 @@ export function forwardAndReachNotes(
   ns: string,
   port: number,
   root: string,
-): [NoteGroup[], NoteGroup[]] {
+): Promise<[NoteGroup[], NoteGroup[]]> {
   let forward: NoteGroup[] = [];
   const recordedPid = extra.port_forward_pid;
   if (
     ns &&
     typeof recordedPid === 'number' &&
     recordedPid !== 0 &&
-    !forwardAlive(recordedPid, { namespace: ns, hostPort: port })
+    !(await forwardAlive(recordedPid, { namespace: ns, hostPort: port }))
   ) {
     forward = [
       noteGroup('The URL is not published right now', {
@@ -474,18 +510,22 @@ export function howToWorkWithIt(
 }
 
 /** What a Kubernetes workspace is and how to reach it, from its record. */
-export function kubernetesNoteGroups(meta: Metadata): NoteGroup[] {
+export async function kubernetesNoteGroups(meta: Metadata): Promise<NoteGroup[]> {
   const extra = bag(meta.extra);
   const ns = toText(extra.namespace) || meta.project || '';
   const release = toText(extra.release) || RELEASE;
   const context = toText(extra[config.EXTRA_CONTEXT]) || KUBE_CONTEXT;
   const micro = String(topology.axesOfMeta(meta).deployment ?? '') === topology.MICROSERVICES;
-  const pods = micro ? 9 : 5;
+  // What the chart and MongoDB run, which is all the record can count: five for a monolith
+  // (NATS runs regardless), nine for microservices, one more per extra Rocket.Chat replica.
+  // A preset's own services are not in it. "about 5" stood beside nine running pods.
+  const pods = (micro ? 9 : 5) + Math.max(0, (Number(extra.instances) || 1) - 1);
+  const presetPods = (meta.preset || 'default') !== 'default' ? ', plus what its preset runs' : '';
   const bindHost = toText(extra.bind_host);
   const port = meta.hostPort || 3000;
   const root = meta.rootUrl || `http://localhost:${String(port)}`;
   const [addr, mongoGroup, shared] = kubernetesMongoGroup(bindHost, extra, meta, ns);
-  const [forward, reach] = forwardAndReachNotes(addr, bindHost, extra, meta, ns, port, root);
+  const [forward, reach] = await forwardAndReachNotes(addr, bindHost, extra, meta, ns, port, root);
   // A managed cluster by the name a person knows, its region and its kind; the ARN is
   // what a command needs and the summary carries it as `context`. And the one fact about
   // a managed cluster nothing on the workspace said: it bills whether or not this runs.
@@ -499,7 +539,18 @@ export function kubernetesNoteGroups(meta: Metadata): NoteGroup[] {
         ['Cluster', clusterRow],
         ['Namespace', ns],
         ['Arrangement', micro ? 'microservices' : 'monolith'],
-        ['Pods', `about ${String(pods)}`],
+        ['Pods', `${String(pods)} for Rocket.Chat and MongoDB${presetPods}`],
+        // Said, not refused: a license can be added after the workspace is up.
+        ...(micro && extra.licensed !== true
+          ? [
+              [
+                'License',
+                'microservices are an Enterprise feature: without a license, Rocket.Chat ' +
+                  'replicas after the first stop ("Enterprise license not found"). Add one ' +
+                  'with `--license` or in Rocket.Chat under Workspace > Subscription.',
+              ] as [string, string],
+            ]
+          : []),
         ...(managed
           ? [
               [
@@ -573,12 +624,12 @@ export function composeNoteGroups(meta: Metadata): NoteGroup[] {
 }
 
 /** Every group this workspace has, scenario first. The one entry point. */
-export function noteGroupsOf(meta: Metadata): NoteGroup[] {
+export async function noteGroupsOf(meta: Metadata): Promise<NoteGroup[]> {
   const scenario = scenarioGroup(meta);
   if (topology.ofMeta(meta) === topology.KUBERNETES) {
     // Not corrected here: a Kubernetes workspace is reached through a port-forward the
     // reader runs themselves, so `localhost` is genuinely their localhost.
-    return [...scenario, ...kubernetesNoteGroups(meta)];
+    return [...scenario, ...(await kubernetesNoteGroups(meta))];
   }
   return [...scenario, ...composeNoteGroups(meta), ...localUrlNote(meta, scenario)];
 }

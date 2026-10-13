@@ -5,13 +5,23 @@
  * `terminalPodFailure` exists so a mistyped version or an unreachable registry costs a second
  * rather than the full readiness timeout, and reports the cause rather than the timeout.
  */
-import { DockerError, NotReadyError } from '../../lib/errors';
+import { DockerError, NotReadyError, PreflightError } from '../../lib/errors';
 import { quotedText, textLines } from '../../lib/format';
 import { stream, type ProcessResult } from '../../seams/exec';
 
-import { answerWhy, askList, askObject, items, present, refused, why } from './ask';
+import {
+  answerWhy,
+  askList,
+  askObject,
+  items,
+  present,
+  refused,
+  why,
+  type Answer,
+  type KubeDocument,
+} from './ask';
 import { envFor, kube } from './exec';
-import { APPLY_TIMEOUT, RELEASE, isOurs } from './names';
+import { APPLICATION_SELECTOR, APPLY_TIMEOUT, MONOLITH_SELECTOR, RELEASE, isOurs } from './names';
 import { namespaceFor } from './namespace';
 
 /**
@@ -34,7 +44,7 @@ export const READY_SELECTOR = 'app.kubernetes.io/name in (rocketchat,rocketchat-
  * Selected by RELEASE with nats excluded, rather than by listing the four names: a
  * microservice the chart adds later is then included automatically.
  */
-export const LOG_SELECTOR = `app.kubernetes.io/instance=${RELEASE},app.kubernetes.io/name!=nats`;
+export const LOG_SELECTOR = APPLICATION_SELECTOR;
 
 /**
  * The MONOLITH Rocket.Chat deployment alone, and its container. Anything asking a question
@@ -42,7 +52,7 @@ export const LOG_SELECTOR = `app.kubernetes.io/instance=${RELEASE},app.kubernete
  * ddp-streamer and presence too, so `items[0]` under it could answer with a microservice's
  * environment instead of Rocket.Chat's.
  */
-export const APP_SELECTOR = 'app.kubernetes.io/name=rocketchat';
+export const APP_SELECTOR = MONOLITH_SELECTOR;
 
 export const LOG_CONTAINER = 'rocketchat';
 
@@ -179,6 +189,10 @@ export async function workspaceReady(
   } catch {
     return false;
   }
+  return readyPodRows(pods);
+}
+
+function readyPodRows(pods: readonly KubeDocument[]): boolean {
   if (pods.length === 0) return false;
   for (const pod of pods) {
     const statuses = listOf(mapOf(pod.status).containerStatuses);
@@ -186,6 +200,69 @@ export async function workspaceReady(
     if (!statuses.every((container) => container.ready === true)) return false;
   }
   return true;
+}
+
+/** A broad collection must be usable before an omitted namespace can mean absence. */
+function namespaceRows(seen: Answer): KubeDocument[] | null {
+  if (refused(seen) || !Array.isArray(seen.doc?.items)) return null;
+  const rows = items(seen);
+  for (const row of rows) {
+    const meta = mapOf(mapOf(row).metadata);
+    if (
+      typeof meta.namespace !== 'string' ||
+      meta.namespace === '' ||
+      typeof meta.name !== 'string' ||
+      meta.name === ''
+    ) {
+      return null;
+    }
+  }
+  return rows;
+}
+
+/**
+ * One fresh Deployment read for a workspace list, keyed by its actual namespace.
+ * A refused broad read is null so a namespace-scoped identity can use the scoped probe.
+ */
+export async function workspaceReplicasByNamespace(
+  context: string,
+): Promise<ReadonlyMap<string, number> | null> {
+  const rows = namespaceRows(await askList('deployment', { context, allNamespaces: true }));
+  if (rows === null) return null;
+  const replicas = new Map<string, number>();
+  for (const row of rows) {
+    const meta = mapOf(row.metadata);
+    if (meta.name !== `${RELEASE}-rocketchat`) continue;
+    const count = mapOf(row.spec).replicas;
+    replicas.set(String(meta.namespace), typeof count === 'number' ? count : -1);
+  }
+  return replicas;
+}
+
+/** One fresh pod read shared by readiness and failure checks in a workspace list. */
+export async function workspacePodsByNamespace(
+  context: string,
+): Promise<ReadonlyMap<string, readonly KubeDocument[]> | null> {
+  const rows = namespaceRows(await askList('pod', { context, allNamespaces: true }));
+  if (rows === null) return null;
+  const pods = new Map<string, KubeDocument[]>();
+  for (const row of rows) {
+    const namespace = String(mapOf(row.metadata).namespace);
+    const held = pods.get(namespace) ?? [];
+    held.push(row);
+    pods.set(namespace, held);
+  }
+  return pods;
+}
+
+/** Apply the existing readiness selector to an unfiltered pod snapshot. */
+export function workspacePodsReady(pods: readonly KubeDocument[]): boolean {
+  return readyPodRows(
+    pods.filter((pod) => {
+      const name = mapOf(mapOf(pod.metadata).labels)['app.kubernetes.io/name'];
+      return name === 'rocketchat' || name === 'rocketchat-ddp-streamer';
+    }),
+  );
 }
 
 async function podCount(
@@ -413,7 +490,9 @@ export interface PodMetric {
  *
  * Needs metrics-server, which kind does NOT ship. When it is absent the refusal says so
  * and how to install it, rather than reporting zero -- a resource figure that is quietly
- * wrong is worse than one that is missing.
+ * wrong is worse than one that is missing. A PreflightError, exit 3 and a 409: the answer is
+ * to install it (or, on kind, to let it scrape), and polling changes nothing. It was a
+ * NotReadyError, exit 5, which tells a script to poll again -- forever, here.
  */
 export async function podMetrics(
   name: string,
@@ -433,7 +512,7 @@ export async function podMetrics(
       // Both commands, because the second is not optional on kind: its kubelet serves a
       // self-signed certificate that metrics-server refuses by default, so the install
       // succeeds and never reports a metric.
-      throw new NotReadyError(
+      throw new PreflightError(
         'this cluster has no metrics-server, so there is nothing to read CPU and memory ' +
           'from. Install it with:\n' +
           '  kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/' +
@@ -576,6 +655,13 @@ export async function terminalPodFailure(
   } catch {
     return null;
   }
+  return terminalFailureOfPods(rows);
+}
+
+/** The same terminal-failure rule for a caller that already read these pods. */
+export function terminalFailureOfPods(
+  rows: readonly KubeDocument[],
+): [string, string, string] | null {
   for (const item of rows) {
     const pod = String(mapOf(item.metadata).name ?? '');
     const st = mapOf(item.status);

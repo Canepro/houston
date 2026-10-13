@@ -235,6 +235,8 @@ describe('the namespaces houston owns', () => {
           stdout: JSON.stringify({
             metadata: {
               name: 'houston-k',
+              uid: 'namespace-k-uid',
+              resourceVersion: '1',
               labels: { [OWNER_LABEL_KEY]: OWNER_LABEL_VALUE, [WORKSPACE_LABEL]: 'k' },
             },
             status: { phase },

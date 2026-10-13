@@ -9,6 +9,7 @@ import {
   flattenNotes,
   noteGroup,
   noteGroupsOf,
+  scenarioGroup,
 } from '../../../src/core/lifecycle/notes';
 
 describe('note groups', () => {
@@ -143,7 +144,7 @@ describe('which notes a record produces', () => {
     expect(flattenNotes([noteGroup('', { body: ['a bare line'] })])).toEqual(['a bare line']);
   });
 
-  it("groups a compose workspace's add-ons, and a plain one gets no empty sections", () => {
+  it("groups a compose workspace's add-ons, and a plain one gets no empty sections", async () => {
     // The edge lines and the monitoring block were appended to one flat list, so a
     // monitored workspace behind HTTPS had five unrelated bullets in a row. Same words,
     // three sections -- and derived, so an older record gets them as well.
@@ -153,16 +154,16 @@ describe('which notes a record produces', () => {
       publicUrl: 'https://c.example.test',
       extra: { edge: true, tls: 'local', monitoring: true },
     });
-    const groups = titled(noteGroupsOf(meta));
+    const groups = titled(await noteGroupsOf(meta));
     expect(Object.keys(groups)).toEqual(['HTTPS', 'Monitoring']);
     expect((groups.HTTPS?.body ?? []).join(' ')).toContain('https://c.example.test');
     expect((groups.Monitoring?.body ?? []).some((note) => note.includes('Grafana'))).toBe(true);
     meta.extra = {};
     meta.publicUrl = '';
-    expect(noteGroupsOf(meta)).toEqual([]);
+    expect(await noteGroupsOf(meta)).toEqual([]);
   });
 
-  it("says which host a shared workspace's preset pages are on, and only when they need it", () => {
+  it("says which host a shared workspace's preset pages are on, and only when they need it", async () => {
     // phpLDAPadmin, MinIO's console, Mailpit's inbox and the livechat page all print
     // `localhost`, written when the browser was assumed to be on the docker host. On a
     // workspace bound wide or given a public URL, `localhost` names the reader's own
@@ -178,7 +179,7 @@ describe('which notes a record produces', () => {
         extra,
       });
     const shared = bodyOf(
-      noteGroupsOf(
+      await noteGroupsOf(
         ldap({
           sidecar_ports: [8082],
           bind_host: '0.0.0.0',
@@ -190,20 +191,24 @@ describe('which notes a record produces', () => {
     // Name the thing being corrected, not just the fix.
     expect(shared).toContain('localhost');
     // Bound wide with no URL given: the host is unknown, so it is not invented.
-    expect(bodyOf(noteGroupsOf(ldap({ sidecar_ports: [8082], bind_host: '0.0.0.0' })))).toContain(
-      '<this-box>:8082',
-    );
+    expect(
+      bodyOf(await noteGroupsOf(ldap({ sidecar_ports: [8082], bind_host: '0.0.0.0' }))),
+    ).toContain('<this-box>:8082');
     const heading = "Reaching this preset's own pages";
     // An ordinary laptop workspace gains nothing: localhost really is localhost...
     expect(
-      noteGroupsOf(ldap({ sidecar_ports: [8082], bind_host: '127.0.0.1' })).map((g) => g.title),
+      (await noteGroupsOf(ldap({ sidecar_ports: [8082], bind_host: '127.0.0.1' }))).map(
+        (g) => g.title,
+      ),
     ).not.toContain(heading);
     // ...and a preset with no pages of its own has nothing to correct.
-    expect(noteGroupsOf(ldap({ bind_host: '0.0.0.0' })).map((g) => g.title)).not.toContain(heading);
+    expect((await noteGroupsOf(ldap({ bind_host: '0.0.0.0' }))).map((g) => g.title)).not.toContain(
+      heading,
+    );
     // THE CORRECTION MUST NOT DESCRIBE TEXT THAT IS NOT THERE: a saml workspace with a
     // derived idp_host already prints the real host, and the first version told its reader
     // "the URLs above say localhost" about notes that said no such thing.
-    const saml = noteGroupsOf(
+    const saml = await noteGroupsOf(
       record({
         name: 's',
         project: 'p',
@@ -223,11 +228,32 @@ describe('which notes a record produces', () => {
     expect(bodyOf(saml)).not.toContain('localhost');
   });
 
-  it("carries the preset's notes derived on every read, not the copy the record froze", () => {
+  it('names the one address a workspace bound to it publishes its pages on', async () => {
+    // `--bind 172.16.0.2` publishes Mailpit on that address alone, where the link already
+    // pointed, while the text said `http://localhost:8025` -- nothing answers there, on this
+    // box either -- and offered `<this-box>` as the way round.
+    const groups = await noteGroupsOf(
+      record({
+        name: 'g1',
+        project: 'p',
+        preset: 'email',
+        rootUrl: 'http://172.16.0.2:3000',
+        hostPort: 3000,
+        versionSource: 't',
+        extra: { runtime: 'docker', sidecar_ports: [8025], bind_host: '172.16.0.2' },
+      }),
+    );
+    const reach = groups.find((group) => group.title === "Reaching this preset's own pages");
+    expect(reach?.body.join(' ')).toContain('Use 172.16.0.2 instead: http://172.16.0.2:8025.');
+    expect(reach?.body.join(' ')).not.toContain('<this-box>');
+    expect(reach?.body.join(' ')).not.toContain('From anywhere but this box');
+  });
+
+  it("carries the preset's notes derived on every read, not the copy the record froze", async () => {
     // A note written into repro.json at create time kept its wording for the life of the
     // workspace -- which is how a Kubernetes workspace went on saying `backup` had no path
     // on that runtime for three releases after it grew one.
-    const s = summary(
+    const s = await summary(
       record({
         name: 'x',
         project: 'houston-x',
@@ -246,36 +272,70 @@ describe('which notes a record produces', () => {
     expect((s.notes as string[]).some((note) => note.includes('/etc/hosts'))).toBe(true);
   });
 
-  it('names a managed cluster by its short name and region, and says it bills', () => {
+  it('names a managed cluster by its short name and region, and says it bills', async () => {
     // The Cluster row held the sixty-character ARN; the panel and `info` showed it as
     // the only way to learn where a workspace ran, and nothing said the cluster costs.
-    const rowsFor = (context: string): [string, string][] =>
-      (noteGroupsOf(
-        record({
-          name: 'w',
-          project: 'houston-w',
-          rcImage: 'registry.rocket.chat/rocketchat/rocket.chat:8.5.1',
-          mongoFlavor: 'community',
-          versionSource: 'shipped',
-          extra: { runtime: 'kubernetes', namespace: 'houston-w', context, deployment: 'monolith' },
-        }),
+    const rowsFor = async (context: string): Promise<[string, string][]> =>
+      ((
+        await noteGroupsOf(
+          record({
+            name: 'w',
+            project: 'houston-w',
+            rcImage: 'registry.rocket.chat/rocketchat/rocket.chat:8.5.1',
+            mongoFlavor: 'community',
+            versionSource: 'shipped',
+            extra: {
+              runtime: 'kubernetes',
+              namespace: 'houston-w',
+              context,
+              deployment: 'monolith',
+            },
+          }),
+        )
       ).find((group) => group.title === 'Kubernetes')?.rows ?? []) as [string, string][];
-    const eks = rowsFor('arn:aws:eks:us-east-1:1:cluster/support');
+    const eks = await rowsFor('arn:aws:eks:us-east-1:1:cluster/support');
     expect(eks).toContainEqual(['Cluster', 'support · us-east-1 · EKS']);
     expect(eks.find(([key]) => key === 'Costs')?.[1]).toContain('bills by the hour');
     // The local cluster reads as it always did, and costs nothing.
-    const kind = rowsFor(KUBE_CONTEXT);
+    const kind = await rowsFor(KUBE_CONTEXT);
     expect(kind).toContainEqual(['Cluster', KUBE_CONTEXT]);
     expect(kind.some(([key]) => key === 'Costs')).toBe(false);
   });
 
-  it('exports a kubeconfig only for the cluster houston itself made', () => {
+  it('says what its pod count counts, rather than "about" a number nine pods ran beside', async () => {
+    // `info` said "Pods  about 5" for a monolith with five presets and nine pods running: the
+    // number is the chart's and MongoDB's, and a preset's own services were never in it.
+    const podsOf = async (values: Partial<Metadata>): Promise<string> =>
+      ((
+        await noteGroupsOf(
+          record({
+            name: 'w',
+            project: 'houston-w',
+            ...values,
+            extra: { runtime: 'kubernetes', namespace: 'houston-w', ...values.extra },
+          }),
+        )
+      )
+        .find((group) => group.title === 'Kubernetes')
+        ?.rows.find(([key]) => key === 'Pods')?.[1] ?? '') as string;
+    expect(await podsOf({ preset: 'e2ee+ldap', extra: { deployment: 'monolith' } })).toBe(
+      '5 for Rocket.Chat and MongoDB, plus what its preset runs',
+    );
+    expect(await podsOf({ extra: { deployment: 'monolith', instances: 3 } })).toBe(
+      '7 for Rocket.Chat and MongoDB',
+    );
+    expect(await podsOf({ extra: { deployment: 'microservices' } })).toBe(
+      '9 for Rocket.Chat and MongoDB',
+    );
+  });
+
+  it('exports a kubeconfig only for the cluster houston itself made', async () => {
     // On a cluster houston ADOPTED, `export KUBECONFIG=<houston's own>` is wrong three
     // ways -- it made no cluster, that file does not describe yours, and your kubectl
     // already pointed at the right one -- so pasting step 1 broke the shell.
-    const noteText = (context: string): string =>
+    const noteText = async (context: string): Promise<string> =>
       flattenNotes(
-        noteGroupsOf(
+        await noteGroupsOf(
           record({
             name: 'w',
             project: 'houston-w',
@@ -291,10 +351,10 @@ describe('which notes a record produces', () => {
           }),
         ),
       ).join('\n');
-    const ours = noteText(KUBE_CONTEXT);
+    const ours = await noteText(KUBE_CONTEXT);
     expect(ours).toContain('export KUBECONFIG=');
     expect(ours).toContain(ownedKubeconfig());
-    const adopted = noteText('default');
+    const adopted = await noteText('default');
     expect(adopted).not.toContain('export KUBECONFIG=');
     // "a cluster you supplied" was wrong for every EKS cluster houston built itself; the
     // note describes the kubeconfig mechanism, which is the same either way.
@@ -309,13 +369,13 @@ describe('which notes a record produces', () => {
     expect(adopted).toContain('# if it is not default: kubectl config use-context default');
   });
 
-  it('says the MongoDB operator is shared exactly when it is used', () => {
+  it('says the MongoDB operator is shared exactly when it is used', async () => {
     // The official guide installs the operator INTO the Rocket.Chat namespace; houston
     // installs it once in houston-system. Undocumented, the guide's `kubectl -n <ns> get
     // pods` finds no operator and the reader concludes it was never installed.
-    const groupsFor = (managedBy: string) =>
+    const groupsFor = async (managedBy: string) =>
       titled(
-        noteGroupsOf(
+        await noteGroupsOf(
           record({
             name: 'k',
             project: 'houston-k',
@@ -333,7 +393,7 @@ describe('which notes a record produces', () => {
       );
     const rowsOf = (group: NoteGroup | undefined) =>
       (group?.rows ?? []).map((row) => JSON.stringify([...row]));
-    const op = groupsFor('operator');
+    const op = await groupsFor('operator');
     const shared = op['The MongoDB operator is shared'];
     expect((shared?.body ?? []).join(' ')).toContain('official guide');
     // It says where to look, not just that it is elsewhere.
@@ -345,21 +405,21 @@ describe('which notes a record produces', () => {
     );
     // A plain StatefulSet has no operator to explain, and says so where the guide would
     // have led someone to expect authentication.
-    const sts = groupsFor('statefulset');
+    const sts = await groupsFor('statefulset');
     expect(Object.keys(sts)).not.toContain('The MongoDB operator is shared');
     expect(rowsOf(sts.MongoDB)).toContain(JSON.stringify(['Authentication', 'none']));
     expect((sts.MongoDB?.body ?? []).join(' ')).toContain('official guide');
   });
 
-  it('does not repeat the URL as a note on loopback, and warns when bound wide', () => {
+  it('does not repeat the URL as a note on loopback, and warns when bound wide', async () => {
     // "reachable on this box at http://localhost:3000" was the fourth copy of that string
     // on one screen. What is said nowhere else is what a NON-loopback bind means.
-    const quiet = noteGroupsOf(k8sMeta());
+    const quiet = await noteGroupsOf(k8sMeta());
     expect(quiet.map((group) => group.title)).not.toContain('Reachable from other machines');
     expect(flattenNotes(quiet).filter((note) => note.includes('reachable on this box'))).toEqual(
       [],
     );
-    const loud = titled(noteGroupsOf(k8sMeta({ bind_host: '0.0.0.0' })));
+    const loud = titled(await noteGroupsOf(k8sMeta({ bind_host: '0.0.0.0' })));
     const warned = (loud['Reachable from other machines']?.body ?? []).join(' ');
     expect(warned).toContain('0.0.0.0');
     // What it exposes.
@@ -367,5 +427,108 @@ describe('which notes a record produces', () => {
     // The port-forward comes back the way it was published, or the workspace is
     // unreachable from the machines the note just warned about.
     expect(loud['2 · Open the way in']?.commands[0]).toContain('--address 0.0.0.0');
+  });
+});
+
+describe("a composed workspace's notes", () => {
+  it('are ONE scenario group, merged as the create merged them, with the combined note', () => {
+    const groups = scenarioGroup(
+      metadata({
+        name: 'combo',
+        preset: 'email+ldap',
+        extra: { runtime: 'docker', preset_params: { ldap: { users: '3' } } },
+      }),
+    );
+    expect(groups).toHaveLength(1);
+    const body = (groups[0]?.body ?? []).join('\n');
+    expect(body).toContain('Mailpit');
+    expect(body).toContain('an LDAP login asks for a code');
+    expect(groups[0]?.title).toBe('Scenario · email+ldap');
+  });
+
+  it('are titled by the presets asked for, not the deployment Compose builds with them', () => {
+    // A multi-instance SAML workspace was "Scenario · multi-instance+saml" while its panel's
+    // Preset row said `saml`: multi-instance is the deployment, not a preset.
+    const groups = scenarioGroup(
+      metadata({
+        name: 'd2',
+        preset: 'multi-instance+saml',
+        extra: { runtime: 'docker', deployment: 'multi-instance', instances: 2 },
+      }),
+    );
+    expect(groups[0]?.title).toBe('Scenario · saml');
+    // Its notes stay: the deployment's lines are about this workspace too.
+    expect((groups[0]?.body ?? []).join('\n')).toContain('instances.get');
+  });
+});
+
+describe("an HTTPS workspace's scenario notes", () => {
+  const https = (publicPaths: unknown[]) =>
+    scenarioGroup(
+      metadata({
+        name: 'td',
+        preset: 'ldap+s3_minio',
+        publicUrl: 'https://td.houston.localhost',
+        extra: { runtime: 'docker', public_paths: publicPaths },
+      }),
+    )
+      .flatMap((group) => group.body)
+      .join('\n');
+
+  it("give the UIs' public paths, as the create served them", () => {
+    const body = https([{ path: '/minio', service: 'minio-ui', container_port: 80 }]);
+    expect(body).toContain('MinIO console: https://td.houston.localhost/minio/');
+    expect(body).toContain('phpLDAPadmin: https://td.houston.localhost/phpldapadmin/');
+    expect(body).not.toContain('localhost:9001');
+  });
+
+  it('are not "corrected" for saying localhost when only the HTTPS name does', async () => {
+    const groups = await noteGroupsOf(
+      record({
+        name: 'td',
+        project: 'p',
+        preset: 'ldap+s3_minio',
+        rootUrl: 'http://localhost:3720',
+        publicUrl: 'https://td.houston.localhost',
+        hostPort: 3720,
+        versionSource: 't',
+        extra: {
+          runtime: 'docker',
+          sidecar_ports: [8082, 9000, 9001],
+          advertised_url: 'https://td.houston.localhost',
+          public_paths: [{ path: '/minio', service: 'minio-ui', container_port: 80 }],
+        },
+      }),
+    );
+    expect(groups.map((group) => group.title)).not.toContain("Reaching this preset's own pages");
+  });
+
+  it('offer only the ports a note still gives when one stays on localhost', async () => {
+    // livechat keeps its cross-origin demo page on a port; Mailpit, Keycloak, the MinIO
+    // console and phpLDAPadmin moved to paths, so their ports are not offered as pages.
+    const groups = await noteGroupsOf(
+      record({
+        name: 'd20',
+        project: 'p',
+        preset: 'email+livechat',
+        rootUrl: 'http://localhost:3730',
+        publicUrl: 'https://d20.houston.localhost',
+        hostPort: 3730,
+        versionSource: 't',
+        extra: {
+          runtime: 'docker',
+          sidecar_ports: [8025, 8090],
+          advertised_url: 'https://d20.houston.localhost',
+          public_paths: [{ path: '/mailpit', service: 'mailpit', container_port: 8025 }],
+        },
+      }),
+    );
+    const reach = groups.find((group) => group.title === "Reaching this preset's own pages");
+    expect(reach?.body.join(' ')).toContain('http://d20.houston.localhost:8090');
+    expect(reach?.body.join(' ')).not.toContain(':8025');
+  });
+
+  it('keep the ports for a workspace whose UIs were not moved', () => {
+    expect(https([])).toContain('MinIO console: http://localhost:9001');
   });
 });

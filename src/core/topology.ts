@@ -25,6 +25,7 @@
  */
 import * as config from '../lib/config';
 import { ValidationError } from '../lib/errors';
+import { compositeName, namesOf } from '../lib/presets/composite';
 
 import { readMeta } from './runner/record';
 
@@ -405,6 +406,11 @@ export function resolveAxes(options: ResolveAxesOptions = {}): Axes {
   let rawDeployment = String(deployment || '')
     .trim()
     .toLowerCase();
+  // `multi-instance` named among several presets is the deployment axis too, absorbed by the
+  // same rule as the single legacy spelling; the rest stay presets.
+  const named = namesOf(rawPreset);
+  const listed = named.length > 1 && named.includes(LEGACY_MULTI_PRESET);
+  const rest = compositeName(named.filter((name) => name !== LEGACY_MULTI_PRESET));
 
   // `--deployment microservices` with no --runtime implies Kubernetes. There is no other
   // runtime it could mean.
@@ -415,31 +421,24 @@ export function resolveAxes(options: ResolveAxesOptions = {}): Axes {
   const [legacyN, absorbedDeployment, absorbedPreset] = absorbLegacySpellings(
     out,
     rawDeployment,
-    rawPreset,
+    listed ? LEGACY_MULTI_PRESET : rawPreset,
     replicas,
   );
   rawDeployment = absorbedDeployment;
-  rawPreset = absorbedPreset;
+  rawPreset = listed ? rest : absorbedPreset;
 
   out.deployment = normalizeDeployment(rawDeployment, out.runtime);
   out.preset = rawPreset;
 
-  // A scenario on top of multi-instance would need the two Presets merged, and a Preset is
-  // all-or-nothing today -- `services`, `env` and `files` are additive but nothing adds
-  // them. Refusing is honest; silently dropping one would hand back a workspace missing the
-  // thing that was asked for.
-  if (out.deployment === MULTI_INSTANCE && out.preset !== '' && out.preset !== 'default') {
-    throw new ValidationError(
-      `the '${out.preset}' scenario cannot yet be combined with a multi-instance ` +
-        'deployment on Docker Compose. Run them separately, or use --runtime kubernetes ' +
-        '--replicas N once that lands.',
-    );
-  }
-
   out.replicas = resolveReplicas(replicas, legacyN, out);
   if (out.deployment === MULTI_INSTANCE) {
-    // Reached through the preset loader exactly as before -- see `Axes`.
-    out.preset = LEGACY_MULTI_PRESET;
+    // Reached through the preset loader exactly as before -- see `Axes`. A scenario on top
+    // composes with it: every instance gets the scenario's settings, which the compose
+    // build applies to each clone.
+    out.preset = compositeName([
+      ...namesOf(out.preset).filter((name) => name !== 'default'),
+      LEGACY_MULTI_PRESET,
+    ]);
     if (out.params[LEGACY_REPLICA_PARAM] === undefined) {
       out.params[LEGACY_REPLICA_PARAM] = out.replicas;
     }
@@ -493,8 +492,10 @@ export function axesOfMeta(meta: HasExtra | null | undefined): Record<string, un
         ? MULTI_INSTANCE
         : ((DEPLOYMENTS[runtime] as readonly string[])[0] as string);
   }
-  // It is the deployment axis, not a scenario.
-  if (deployment === MULTI_INSTANCE) preset = 'default';
+  // It is the deployment axis, not a scenario; any scenarios composed with it stay.
+  if (deployment === MULTI_INSTANCE) {
+    preset = compositeName(namesOf(preset).filter((name) => name !== LEGACY_MULTI_PRESET));
+  }
   // The recorded count read as an integer, 0 when it is absent, empty or not an integer.
   const raw = extra[LEGACY_REPLICA_PARAM];
   const replicas = (raw === undefined || raw === null || raw === '' ? 0 : toInt(raw)) ?? 0;
@@ -508,5 +509,9 @@ export function axesOfMeta(meta: HasExtra | null | undefined): Record<string, un
   const out: Record<string, unknown> = { runtime, deployment, preset, replicas };
   const context = String(extra[config.EXTRA_CONTEXT] ?? '').trim();
   if (context) out.context = context;
+  // Who runs MongoDB is an axis too: rebuilt without it, a workspace whose database the
+  // operator runs had houston's own MongoDB applied over it, and the apply failed. Absent
+  // otherwise, as `context` is.
+  if (extra.mongo_managed_by === 'operator') out.mongoOperator = true;
   return out;
 }

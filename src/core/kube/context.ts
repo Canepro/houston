@@ -5,6 +5,10 @@
  * including `planCluster`'s five-step precedence, whose step 0 never sets `create: true` on a
  * named context, because houston may only create the cluster it owns.
  */
+import * as dns from 'node:dns/promises';
+import * as net from 'node:net';
+import * as os from 'node:os';
+
 import { PreflightError, ValidationError } from '../../lib/errors';
 
 import { why } from './ask';
@@ -23,7 +27,7 @@ import { which } from './tools';
  */
 export async function clusters(): Promise<[string[], string]> {
   const res = await kube.run(['kind', 'get', 'clusters'], { own: true });
-  if (res.returncode !== 0) return [[], why(res, { limit: 120 })];
+  if (res.returncode !== 0) return [[], why(res)];
   return [
     res.stdout
       .split('\n')
@@ -52,7 +56,7 @@ export async function contextServers(): Promise<[Record<string, string>, string]
   for (const own of [false, true]) {
     const res = await kube.run(['kubectl', 'config', 'view', '-o', 'json'], { own });
     if (res.returncode !== 0) {
-      reasons.push(why(res, { limit: 120 }));
+      reasons.push(why(res));
       continue;
     }
     let doc: Record<string, unknown>;
@@ -107,7 +111,7 @@ export async function contexts(): Promise<[string[], string]> {
   for (const own of [false, true]) {
     const res = await kube.run(['kubectl', 'config', 'get-contexts', '-o', 'name'], { own });
     if (res.returncode !== 0) {
-      reasons.push(why(res, { limit: 120 }));
+      reasons.push(why(res));
       continue;
     }
     for (const line of res.stdout.split('\n')) {
@@ -182,13 +186,73 @@ export const LOCAL_DISTRIBUTIONS: readonly string[] = [
 ];
 
 /**
+ * The distributions whose name says nothing about WHERE they run: a k3s or rke2 server is
+ * as often another machine as this one.
+ */
+const SERVER_CHECKED: readonly string[] = ['k3s', 'rke2'];
+
+/**
  * Whether a cluster of this distribution runs on this machine.
  *
  * Unknown answers false, deliberately. The question this gates is "may the CA key leave
  * this box", and "I do not know where this cluster is" must not come out as yes.
+ *
+ * FOR K3S AND RKE2 THE NAME WAS THE WHOLE ANSWER, and it is no answer at all: a `--context`
+ * whose server was `https://k3s.example.net:6443` passed as local, and `--https` wrote
+ * houston's CA private key into that cluster's `cert-manager/houston-ca` (measured: the
+ * in-cluster key matched `ca/ca.key`). For those two the context's API server has to be
+ * this machine too -- loopback, or an address one of its interfaces holds.
  */
-export function isLocalCluster(distribution: string): boolean {
-  return LOCAL_DISTRIBUTIONS.includes(distribution.trim().toLowerCase());
+export async function isLocalCluster(distribution: string, context = ''): Promise<boolean> {
+  const name = distribution.trim().toLowerCase();
+  if (!LOCAL_DISTRIBUTIONS.includes(name)) return false;
+  if (!SERVER_CHECKED.includes(name)) return true;
+  return await serverIsThisMachine(context);
+}
+
+/** Whether `context`'s API server is this machine. False whenever that cannot be read. */
+async function serverIsThisMachine(context: string): Promise<boolean> {
+  const res = await kube.run(
+    [
+      'kubectl',
+      'config',
+      'view',
+      '--minify',
+      ...(context === '' ? [] : ['--context', context]),
+      '-o',
+      'jsonpath={.clusters[0].cluster.server}',
+    ],
+    { own: isOurs(context) },
+  );
+  if (res.returncode !== 0) return false;
+  let host: string;
+  try {
+    host = new URL(res.stdout.trim()).hostname.replace(/^\[(.*)\]$/u, '$1');
+  } catch {
+    return false;
+  }
+  if (host === 'localhost') return true;
+  let addresses: string[];
+  if (net.isIP(host) !== 0) {
+    addresses = [host];
+  } else {
+    try {
+      addresses = (await dns.lookup(host, { all: true })).map((entry) => entry.address);
+    } catch {
+      return false;
+    }
+  }
+  const mine = new Set(
+    Object.values(os.networkInterfaces())
+      .flat()
+      .map((entry) => entry?.address ?? ''),
+  );
+  return (
+    addresses.length > 0 &&
+    addresses.every(
+      (address) => address.startsWith('127.') || address === '::1' || mine.has(address),
+    )
+  );
 }
 
 /**

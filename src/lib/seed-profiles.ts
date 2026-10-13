@@ -14,8 +14,13 @@ export interface Shape {
   readonly teamChannels: number;
   readonly discussions: number;
   readonly dms: number;
+  readonly groupDms: number;
   readonly messages: number;
   readonly reactions: boolean;
+  readonly replyCount: number;
+  readonly fileSets: number;
+  readonly edits: number;
+  readonly emoji: number;
 }
 
 export const PROFILES: Record<string, Shape> = {
@@ -27,8 +32,13 @@ export const PROFILES: Record<string, Shape> = {
     teamChannels: 2,
     discussions: 2,
     dms: 2,
+    groupDms: 1,
     messages: 5,
-    reactions: false,
+    reactions: true,
+    replyCount: 2,
+    fileSets: 1,
+    edits: 2,
+    emoji: 1,
   },
   standard: {
     users: 20,
@@ -38,8 +48,13 @@ export const PROFILES: Record<string, Shape> = {
     teamChannels: 2,
     discussions: 3,
     dms: 5,
+    groupDms: 3,
     messages: 20,
     reactions: true,
+    replyCount: 3,
+    fileSets: 3,
+    edits: 6,
+    emoji: 3,
   },
   large: {
     users: 100,
@@ -49,7 +64,12 @@ export const PROFILES: Record<string, Shape> = {
     teamChannels: 2,
     discussions: 6,
     dms: 20,
+    groupDms: 8,
     messages: 100,
     reactions: true,
+    replyCount: 5,
+    fileSets: 6,
+    edits: 20,
+    emoji: 6,
   },
 };

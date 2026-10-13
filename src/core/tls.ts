@@ -33,6 +33,7 @@ import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as path from 'node:path';
 import * as tlsSocket from 'node:tls';
+import { X509Certificate } from 'node:crypto';
 
 import * as config from '../lib/config';
 import { ValidationError } from '../lib/errors';
@@ -40,11 +41,8 @@ import { joinPath } from '../lib/home';
 import { socketErrorText } from '../lib/format';
 import { capture } from '../seams/exec';
 
-/**
- * Pinned to match the multi-instance preset, so a repro that uses both runs one Traefik
- * version rather than two.
- */
-export const TRAEFIK_TAG = 'v3.4';
+/** The edge's Traefik, which is the multi-instance preset's too (`config.TRAEFIK_TAG`). */
+export const TRAEFIK_TAG = config.TRAEFIK_TAG;
 export const SERVICE = 'traefik';
 
 export const LOCAL_SUFFIX = 'houston.localhost';
@@ -637,10 +635,13 @@ async function handshake(
       timeout: Math.round(timeout * 1000),
     });
     const finish = (pem: string, error: string): void => {
+      clearTimeout(deadline);
       socket.removeAllListeners();
       socket.destroy();
       resolve({ pem, error });
     };
+    // A socket idle timeout alone can be extended by handshake traffic indefinitely.
+    const deadline = setTimeout(() => finish('', 'TimeoutError: timed out'), timeout * 1000);
     socket.once('secureConnect', () => {
       // `getPeerCertificate` is TYPED as always returning a certificate and does not:
       // for a peer that offered none it returns an empty object, so `raw` is absent at
@@ -659,6 +660,20 @@ async function handshake(
     socket.once('timeout', () => finish('', 'TimeoutError: timed out'));
     socket.once('error', (error: NodeJS.ErrnoException) => finish('', socketErrorText(error)));
   });
+}
+
+/**
+ * The exact peer currently offered by an owned loopback edge for this SNI. This is
+ * observation for a credential-free route probe, not an issuer or public-trust verdict.
+ */
+export async function originCertificate(
+  servername: string,
+  { port = 443, timeout = 5 } = {},
+): Promise<{ pem: string; fallback: boolean; error: string }> {
+  const observed = await handshake('127.0.0.1', port, timeout, servername);
+  const fallback =
+    observed.pem !== '' && new X509Certificate(observed.pem).subject === `CN=${TRAEFIK_FALLBACK}`;
+  return { ...observed, fallback };
 }
 
 /** Whether the endpoint validates under the requested trust store. */

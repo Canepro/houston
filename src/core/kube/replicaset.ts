@@ -211,7 +211,9 @@ export async function initReplicaSet({
     );
   }
 
-  info(emit, 'initiating the replica set', { phase: 'boot', pct: 45 });
+  // This is still database provisioning; scenario resources follow at 25%, then the
+  // Rocket.Chat chart at 60%. Naming 45 here sent the create progress backwards.
+  info(emit, 'initiating the replica set', { phase: 'boot', pct: 22 });
   const res = await mongoExec(context, namespace, RS_INITIATE, { sleep });
   const combined = `${res.stdout}${res.stderr}`.toLowerCase();
   if (res.returncode !== 0 && !combined.includes('already initialized')) {

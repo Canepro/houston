@@ -79,7 +79,7 @@ Keep it that way: every workspace uses the same well-known passwords.
 | read its logs | `houston logs --name <name> --tail 100` (add `-f` to follow) |
 | pause it, then resume it | `houston stop --name <name>`, then `houston start --name <name>` |
 | start one with LDAP, SAML, email and so on | `houston up --version 8.5.1 --name <name> --preset ldap --wait` |
-| fill it with users, rooms and messages | `houston seed --name <name>` |
+| fill it with conversations, files and profiles | `houston seed --name <name> --verify-seed` |
 | back it up | `houston backup --name <name>` |
 | upgrade it to another version | `houston upgrade --name <name> --to 8.6.1` |
 | remove it and keep its data | `houston down --name <name>` |
@@ -94,9 +94,10 @@ Every command explains itself with `--help`, for example `houston up --help`.
 | Guide | Read it when |
 |---|---|
 | [User guide](data/docs/guide.md) | you need a scenario (preset), sample data, a customer's settings, backups and upgrades, HTTPS, monitoring, a load test or the REST API |
+| [Encrypted conversations (E2EE)](data/docs/e2ee.md) | the ticket concerns encrypted DMs, rooms or files |
 | [Kubernetes](data/docs/kubernetes.md) | the ticket needs Kubernetes, or Rocket.Chat as microservices |
 | [Rocket.Chat on EKS](data/docs/eks.md) | the ticket needs a real cloud cluster. A cluster costs money by the hour, so read the guide before you create one. `houston cluster guide` prints it, and `houston cluster overview` shows what is billing |
-| [Web GUI](data/docs/gui.md) | you prefer a browser, or you share one machine with your team |
+| [Web GUI](data/docs/gui.md) | you prefer a browser, or you share one machine with your team, signing in with Okta or a password |
 | [Scripts and agents](data/docs/automation.md) | a script or a coding agent drives houston: `--json`, exit codes, the agent skill |
 | [Troubleshooting](data/docs/troubleshooting.md) | something does not work |
 | [Upgrading](data/docs/upgrading.md) | you used houston 1.x or rc-repro before |

@@ -1,11 +1,19 @@
 import Fastify from 'fastify';
+import sse from '@fastify/sse';
 import * as fs from 'node:fs';
+import { get, type ClientRequest, type IncomingMessage } from 'node:http';
 import { performance } from 'node:perf_hooks';
 
+import { setTimeout as delay } from 'node:timers/promises';
+
 import { currentContext, runWithContext } from '../../src/lib/context';
-import { event } from '../../src/lib/events';
-import { ConflictError, ValidationError } from '../../src/lib/errors';
+import { reproLock } from '../../src/core/runner/locks';
+import { cleanup, sleep } from '../../src/seams/exec';
+import { NOTHING_LEFT, event } from '../../src/lib/events';
+import { ConflictError, DockerError, ValidationError } from '../../src/lib/errors';
 import * as eventlog from '../../src/core/eventlog';
+import type * as AuditNS from '../../src/core/audit';
+import { register as registerJobRoutes } from '../../src/web/routes/jobs';
 import {
   installJobs,
   Job,
@@ -62,6 +70,316 @@ describe('Job', () => {
     expect(job.result).toBeNull();
     expect(job.events.at(-1)?.data).not.toHaveProperty('result');
     expect(job.resultDropped).toBe(true);
+  });
+
+  it('is labelled with the workspace a create settled on, not the version asked for', () => {
+    // Activity listed a create without a typed name as "8.5.1", which nothing answers to.
+    const job = new Job('job_x', 'create', '8.5.1');
+    job.emit(event('pulling', { phase: 'pull' }));
+    expect(job.summary().label).toBe('8.5.1');
+    job.emit(
+      event('workspace name: alice-rc8-5-1-email--ldap', {
+        phase: 'create',
+        code: 'workspace-name',
+        data: { workspace: 'alice-rc8-5-1-email--ldap' },
+      }),
+    );
+    expect(job.summary().label).toBe('alice-rc8-5-1-email--ldap');
+  });
+});
+
+describe("a create's audit line", () => {
+  /** The accepted creates' labels, oldest first; completion has its own audit line. */
+  const audited = (): string[] =>
+    (require('../../src/core/audit') as typeof AuditNS)
+      .read({ limit: 1000 })
+      .lines.filter((line) => line.kind === 'create' && line.outcome === 'accepted')
+      .map((line) => line.label);
+
+  it('names the workspace a derived-name create settled on, once', async () => {
+    // History read the audit, written at submit, so every create without a typed name was
+    // listed as "8.5.1". It now waits for the name.
+    const manager = new JobManager();
+    const job = manager.submit(
+      'create',
+      (emit) => {
+        emit(
+          event('workspace name: alice-rc8-5-1-ldap', {
+            phase: 'create',
+            code: 'workspace-name',
+            data: { workspace: 'alice-rc8-5-1-ldap' },
+          }),
+        );
+        return {};
+      },
+      { label: '8.5.1', actor: 'alice', auditWhenNamed: true },
+    );
+    await finish(job);
+    expect(
+      audited().filter((label) => label.includes('rc8-5-1-ldap') || label === '8.5.1'),
+    ).toEqual(['alice-rc8-5-1-ldap']);
+  });
+
+  it('still records a create that ended before it was named, by the version asked for', async () => {
+    const manager = new JobManager();
+    const job = manager.submit(
+      'create',
+      () => {
+        throw new ValidationError('no such version 9.9.9');
+      },
+      { label: '9.9.9', actor: 'alice', auditWhenNamed: true },
+    );
+    await finish(job);
+    expect(audited().filter((label) => label === '9.9.9')).toEqual(['9.9.9']);
+  });
+});
+
+describe('job acceptance and final outcomes', () => {
+  it('records acceptance separately from success, failure and an owner-requested stop', async () => {
+    const audit = require('../../src/core/audit') as typeof AuditNS;
+    const manager = new JobManager();
+    const [done, failed, stopped] = runWithContext(
+      { actor: 'alice', origin: 'session' },
+      () =>
+        [
+          manager.submit('state', () => ({ value: 'retained' }), { label: 'f5-done' }),
+          manager.submit(
+            'state',
+            () => {
+              throw new ValidationError('deliberate f5 refusal');
+            },
+            { label: 'f5-failed' },
+          ),
+          // Cancellation enters at a real interruptible wait; an arbitrary
+          // Promise does not observe the job's AbortSignal by itself.
+          manager.submit('state', async () => await sleep(100), { label: 'f5-stopped' }),
+        ] as const,
+    );
+    expect(
+      audit
+        .read({ limit: 1000 })
+        .lines.filter((row) => row.label.startsWith('f5-'))
+        .map((row) => [row.label, row.outcome]),
+    ).toEqual([
+      ['f5-stopped', 'accepted'],
+      ['f5-failed', 'accepted'],
+      ['f5-done', 'accepted'],
+    ]);
+    expect(manager.stop(stopped.id, 'alice')).toBe(true);
+    expect(await manager.drain()).toEqual([]);
+    expect(done.status).toBe('done');
+    expect(failed.status).toBe('error');
+    expect(stopped.errorKind).toBe('Stopped');
+    const records = audit
+      .read({ limit: 1000 })
+      .lines.filter((row) => row.kind === 'state' && row.label.startsWith('f5-'));
+    for (const [label, outcome] of [
+      ['f5-done', 'done'],
+      ['f5-failed', 'error'],
+      ['f5-stopped', 'stopped'],
+    ]) {
+      expect(
+        records
+          .filter((row) => row.label === label)
+          .map((row) => row.outcome)
+          .sort(),
+      ).toEqual(['accepted', outcome].sort());
+      expect(
+        records
+          .filter((row) => row.label === label)
+          .every((row) => row.actor === 'alice' && row.origin === 'session'),
+      ).toBe(true);
+    }
+  });
+
+  it('makes released output and stopped outcomes visible without copying results into summaries', () => {
+    const job = new Job('f5-summary', 'state', 'f5-workspace', 'alice');
+    job.status = 'error';
+    job.errorKind = 'Stopped';
+    job.result = { private: 'not in a summary' };
+    job.forgetResult();
+    expect(job.summary()).toMatchObject({ error_kind: 'Stopped', result_dropped: true });
+    expect(job.summary()).not.toHaveProperty('result');
+  });
+});
+
+describe('stopping a job', () => {
+  it('ends a stuck job at its wait, frees its workspace lock, and leaves other jobs running', async () => {
+    // A create waited on a forward it could not see while holding the workspace's lock, so a
+    // delete behind it could never start, and only killing the server ended it.
+    const manager = new JobManager();
+    let turns = 0;
+    const stuck = manager.submit(
+      'up',
+      async () =>
+        await reproLock('ws', async () => {
+          for (;;) {
+            turns += 1;
+            await sleep(200);
+          }
+        }),
+      { label: 'ws', actor: 'alice' },
+    );
+    const other = manager.submit(
+      'ready',
+      async () => {
+        for (;;) await sleep(200);
+      },
+      { label: 'elsewhere' },
+    );
+    for (let wait = 0; wait < 200 && turns === 0; wait += 1) await delay(10);
+    expect(manager.stop(stuck.id, 'alice')).toBe(true);
+    for (let wait = 0; wait < 300 && stuck.status === 'running'; wait += 1) await delay(10);
+    expect(stuck.status).toBe('error');
+    expect(stuck.error).toBe('stopped by alice before it finished; what it had done stays');
+    expect(stuck.errorKind).toBe('Stopped');
+    expect(stuck.events.map((one) => one.message)).toContain('stopping — asked by alice');
+    // The lock went with it: the delete that was waiting can take the workspace now.
+    expect(await reproLock('ws', async () => 'free', { timeoutMs: 5000 })).toBe('free');
+    // One job's Stop is that job's alone.
+    expect(other.status).toBe('running');
+    expect(manager.stop(stuck.id, 'alice')).toBe(false);
+    manager.stop(other.id, 'test');
+    for (let wait = 0; wait < 300 && other.status === 'running'; wait += 1) await delay(10);
+    expect(other.status).toBe('error');
+  });
+
+  it('does not say what it had done stays when its cleanup took all of it back', async () => {
+    // A stopped Kubernetes create rolled back, said "nothing of 'w' was left in the cluster,
+    // so its record goes too", and the job's own last line went on: "what it had done stays".
+    const manager = new JobManager();
+    const create = manager.submit(
+      'create',
+      async (emit) => {
+        try {
+          for (;;) await sleep(100);
+        } finally {
+          await cleanup(async () => {
+            emit(event("nothing of 'w' was left in the cluster", { code: NOTHING_LEFT }));
+          });
+        }
+      },
+      { label: 'w' },
+    );
+    await delay(50);
+    manager.stop(create.id, 'alice');
+    for (let wait = 0; wait < 300 && create.status === 'running'; wait += 1) await delay(10);
+    expect(create.error).toBe('stopped by alice before it finished; nothing of it was left');
+  });
+
+  it('ends a queued job without running it, and frees no slot it never held', async () => {
+    // Stop on a job still waiting for a slot answered 200, and the job ran later anyway.
+    const manager = new JobManager();
+    const forever = async () => {
+      for (;;) await sleep(100);
+    };
+    const holders = [manager.submit('create', forever), manager.submit('create', forever)];
+    let ran = false;
+    const queued = manager.submit('create', async () => {
+      ran = true;
+    });
+    for (let wait = 0; wait < 100 && queued.status !== 'queued'; wait += 1) await delay(10);
+    await delay(50);
+    expect(queued.status).toBe('queued');
+    expect(manager.stop(queued.id, 'alice')).toBe(true);
+    for (let wait = 0; wait < 100 && queued.status === 'queued'; wait += 1) await delay(10);
+    expect([queued.status, queued.errorKind, ran]).toEqual(['error', 'Stopped', false]);
+    // The slots are as they were: the two holders still have theirs, and once one ends the
+    // next job runs at once -- neither leaked nor handed out twice.
+    for (const holder of holders) expect(holder.status).toBe('running');
+    manager.stop(holders[0]?.id ?? '', 'alice');
+    let next = false;
+    const after = manager.submit('create', async () => {
+      next = true;
+    });
+    for (let wait = 0; wait < 300 && after.status !== 'done'; wait += 1) await delay(10);
+    expect(next).toBe(true);
+    manager.stop(holders[1]?.id ?? '', 'alice');
+    for (let wait = 0; wait < 300 && holders[1]?.status === 'running'; wait += 1) await delay(10);
+  });
+
+  it('keeps a houston error’s own words, which may be the only recovery instruction', async () => {
+    const manager = new JobManager();
+    const job = manager.submit('up', async () => {
+      try {
+        for (;;) await sleep(100);
+      } catch {
+        throw new DockerError('left half done: restore it with `houston restore b.tgz --force`');
+      }
+    });
+    await delay(50);
+    manager.stop(job.id, 'alice');
+    for (let wait = 0; wait < 300 && job.status === 'running'; wait += 1) await delay(10);
+    expect(job.error).toBe(
+      'left half done: restore it with `houston restore b.tgz --force` ' +
+        '(stopped by alice before it finished; what it had done stays)',
+    );
+  });
+
+  it('stops a job queued for a busy workspace, not after the holder lets go', async () => {
+    // Waiting on another job's lock was a bare timer: Stop said "stopping" until the holder
+    // finished, however long that was.
+    const manager = new JobManager();
+    const seen = { holding: false };
+    const holder = manager.submit('create', async () =>
+      reproLock('busy', async () => {
+        seen.holding = true;
+        for (;;) await sleep(100);
+      }),
+    );
+    for (let wait = 0; wait < 200 && !seen.holding; wait += 1) await delay(10);
+    const waiter = manager.submit('ready', async () => await reproLock('busy', async () => 'in'));
+    await delay(100);
+    manager.stop(waiter.id, 'alice');
+    for (let wait = 0; wait < 200 && waiter.status === 'running'; wait += 1) await delay(10);
+    expect([waiter.status, waiter.errorKind, holder.status]).toEqual([
+      'error',
+      'Stopped',
+      'running',
+    ]);
+    manager.stop(holder.id, 'alice');
+    for (let wait = 0; wait < 300 && holder.status === 'running'; wait += 1) await delay(10);
+  });
+
+  it('will not stop a kind whose half-done state nobody has read', async () => {
+    // An upgrade stopped mid-migration half rolled itself back; a load test left the API rate
+    // limiter off; a cluster build left CloudFormation building unwatched.
+    const manager = new JobManager();
+    const job = manager.submit('upgrade', async () => {
+      for (;;) await sleep(100);
+    });
+    await delay(20);
+    expect(job.summary().stoppable).toBe(false);
+    expect(manager.stop(job.id, 'alice')).toBe(false);
+    await delay(150);
+    expect(job.status).toBe('running');
+    expect(manager.submit('up', async () => undefined).summary().stoppable).toBe(true);
+    // Ended here only so the test does not leave it running.
+    job.stopper.abort();
+    for (let wait = 0; wait < 300 && job.status === 'running'; wait += 1) await delay(10);
+  });
+
+  it('runs a cleanup to its end even when the job is stopped inside it', async () => {
+    const manager = new JobManager();
+    const done: string[] = [];
+    let inside = false;
+    const job = manager.submit('up', async () => {
+      try {
+        for (;;) await sleep(100);
+      } finally {
+        await cleanup(async () => {
+          inside = true;
+          await sleep(150);
+          done.push('cleaned up');
+        });
+      }
+    });
+    await delay(50);
+    manager.stop(job.id, 'alice');
+    for (let wait = 0; wait < 300 && job.status === 'running'; wait += 1) await delay(10);
+    expect(inside).toBe(true);
+    expect(done).toEqual(['cleaned up']);
+    expect(job.errorKind).toBe('Stopped');
   });
 });
 
@@ -400,6 +718,26 @@ describe('JobManager', () => {
     }
   });
 
+  it('stops a job still running when the drain ends, rather than living on with it', async () => {
+    // The drain returned the abandoned job and nothing stopped it: serve went on running a
+    // seed with its listener closed -- neither serving nor gone -- after the event log said
+    // it had ended.
+    const app = Fastify();
+    const abandoned: string[][] = [];
+    const manager = installJobs(app, {
+      drainTimeoutMs: 50,
+      onAbandoned: (ids) => abandoned.push([...ids]),
+    });
+    const stuck = manager.submit('up', async () => {
+      for (;;) await sleep(200);
+    });
+    for (let wait = 0; wait < 100 && stuck.status !== 'running'; wait += 1) await delay(10);
+    await app.close();
+    expect(stuck.errorKind).toBe('Stopped');
+    expect(manager.active()).toBe(0);
+    expect(abandoned).toEqual([]);
+  });
+
   it('drains the application registry before Fastify closes', async () => {
     const app = Fastify();
     const manager = installJobs(app);
@@ -428,6 +766,64 @@ describe('JobManager', () => {
     release();
     await observed;
     expect(cleaned).toBe(true);
+  });
+
+  it('stops a running job and closes a listening server while its HTTP SSE stream is open', async () => {
+    const app = Fastify();
+    const manager = installJobs(app, { drainTimeoutMs: 50 });
+    await app.register(sse);
+    registerJobRoutes(app);
+    const job = manager.submit('up', async (emit) => {
+      emit(event('stream verification started'));
+      for (;;) await sleep(200);
+    });
+    let request: ClientRequest | undefined;
+    let response: IncomingMessage | undefined;
+    let closing: Promise<void> | undefined;
+    let timeout: NodeJS.Timeout | undefined;
+    let body = '';
+    try {
+      const origin = await app.listen({ host: '127.0.0.1', port: 0 });
+      response = await new Promise<IncomingMessage>((resolve, reject) => {
+        request = get(
+          `${origin}/api/jobs/${job.id}/stream`,
+          {
+            headers: { accept: 'text/event-stream' },
+            agent: false,
+          },
+          resolve,
+        );
+        request.once('error', reject);
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['content-type']).toContain('text/event-stream');
+      expect(job.status).toBe('running');
+      response.setEncoding('utf8');
+      response.on('data', (chunk: string) => {
+        body += chunk;
+      });
+      const streamEnded = new Promise<void>((resolve, reject) => {
+        response!.once('end', resolve);
+        response!.once('error', reject);
+      });
+      closing = app.close();
+      const closedWhileSubscribed = await Promise.race([
+        Promise.all([closing, streamEnded]).then(() => true),
+        new Promise<boolean>((resolve) => {
+          timeout = setTimeout(() => resolve(false), 1000);
+        }),
+      ]);
+      expect(closedWhileSubscribed).toBe(true);
+      expect(job.errorKind).toBe('Stopped');
+      expect(manager.active()).toBe(0);
+      expect(body).toContain('"kind":"Stopped"');
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+      response?.destroy();
+      request?.destroy();
+      manager.stop(job.id, 'test cleanup');
+      await (closing ?? app.close());
+    }
   });
 
   it('keeps registries isolated between Fastify applications', async () => {

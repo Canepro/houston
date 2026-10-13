@@ -7,6 +7,7 @@ import * as path from 'node:path';
 import * as YAML from 'yaml';
 
 import { foldCase } from '../../lib/format';
+import { type PublicPath } from '../../lib/presets/public';
 import { atomicWrite } from '../runner/paths';
 
 import { attach, workspaceNetwork } from './networks';
@@ -84,16 +85,47 @@ export function isPassthrough(name: string): boolean {
 export async function register(
   name: string,
   host: string,
+  options: {
+    instances?: number;
+    local?: boolean;
+    passthrough?: string;
+    /** The cluster's plain-HTTP `<address>:<port>`, for its http-01 challenge. */
+    passthroughHttp?: string;
+    grafana?: boolean;
+    publicPaths?: readonly PublicPath[];
+  } = {},
+): Promise<boolean> {
+  // A compose recreation must not race the network attach and leave this new route
+  // pointing at a network joined only by the container it just replaced.
+  return await paths.edgeLock(async () => await registerLocked(name, host, options));
+}
+
+async function registerLocked(
+  name: string,
+  host: string,
   {
     instances = 1,
     local = false,
     passthrough = '',
+    passthroughHttp = '',
     grafana = false,
-  }: { instances?: number; local?: boolean; passthrough?: string; grafana?: boolean } = {},
+    publicPaths = [],
+  }: {
+    instances?: number;
+    local?: boolean;
+    passthrough?: string;
+    /** The cluster's plain-HTTP `<address>:<port>`, for its http-01 challenge. */
+    passthroughHttp?: string;
+    grafana?: boolean;
+    publicPaths?: readonly PublicPath[];
+  } = {},
 ): Promise<boolean> {
   fs.mkdirSync(paths.dynamicDir(), { recursive: true });
   if (passthrough !== '') {
-    await atomicWrite(paths.routePath(name), passthroughRouteYml(name, host, passthrough));
+    await atomicWrite(
+      paths.routePath(name),
+      passthroughRouteYml(name, host, passthrough, passthroughHttp),
+    );
     return false;
   }
   const door = current();
@@ -104,6 +136,7 @@ export async function register(
       instances,
       local,
       grafana,
+      paths: publicPaths,
       wildcardBase: covered ? (door as Edge).domain : '',
     }),
   );

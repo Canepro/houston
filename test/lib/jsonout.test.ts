@@ -113,10 +113,19 @@ describe('the error envelope', () => {
 });
 
 describe('warnings', () => {
-  it('deduplicates by code, because the code is the stable half', () => {
-    warnOnce('REUSED', 'first');
-    warnOnce('REUSED', 'second');
-    expect(warningsSoFar()).toEqual([{ code: 'REUSED', message: 'first' }]);
+  it('keeps every distinct warning, and one entry for the same warning twice', () => {
+    // By code alone, every plain warn event shares `WARNING`, so `up --json` kept only the
+    // first: the RC 9 Premium-plan warning after an unknown-release one never reached it.
+    warnOnce('WARNING', 'releases.rocket.chat has no 9.0.0');
+    warnOnce('WARNING', 'Rocket.Chat 9.0 is set to require a Premium plan for LDAP login');
+    warnOnce('WARNING', 'releases.rocket.chat has no 9.0.0');
+    expect(warningsSoFar()).toEqual([
+      { code: 'WARNING', message: 'releases.rocket.chat has no 9.0.0' },
+      {
+        code: 'WARNING',
+        message: 'Rocket.Chat 9.0 is set to require a Premium plan for LDAP login',
+      },
+    ]);
   });
 
   it('are folded into reply() BY DEFAULT, so a call site cannot forget them', () => {

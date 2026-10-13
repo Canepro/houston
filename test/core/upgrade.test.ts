@@ -172,6 +172,39 @@ describe('planning an upgrade', () => {
     expect(await upgrade.plan('w', to, { offline: true })).toEqual({ ...PLANNED, ...expected });
   });
 
+  it('keeps a MongoDB the target still runs on: 7.12 -> 7.13 on 7.0', async () => {
+    // The map pairs a FRESH 7.13 with 8.0, and the plan demanded that move: "(7 -> 8)",
+    // although 7.13 runs on 7.0 and an upgrade only replaces Rocket.Chat.
+    stubPlanInputs({ ...BASE_META, rcVersion: '7.12.0', mongoTag: '7.0' });
+    const upgrade = require('../../src/core/upgrade') as typeof UpgradeNS;
+    const planned = await upgrade.plan('w', '7.13.0', { offline: true });
+    expect(planned).toMatchObject({ allowed: true, to_mongo: '7.0', mongo_blocked: '' });
+    expect(planned.warnings).toContain(
+      'MongoDB stays at 7.0: Rocket.Chat 7.13.0 runs on it (a new 7.13.0 workspace would get 8.0)',
+    );
+  });
+
+  it('refuses a version releases.rocket.chat does not have', async () => {
+    // From the map alone any x.y.z in a known series looked real: the GUI planned, and
+    // enabled, an upgrade to 8.99.0 that would have taken a backup and failed on the pull.
+    stubPlanInputs(BASE_META);
+    const upgrade = require('../../src/core/upgrade') as typeof UpgradeNS;
+    const planned = await upgrade.plan('w', '8.99.0', {
+      fetcher: () => ({ status: 404, json: () => ({}) }),
+    });
+    expect(planned.allowed).toBe(false);
+    expect(String(planned.blocked_reason)).toContain('releases.rocket.chat has no 8.99.0');
+  });
+
+  it('says what a CI build needs, not flags upgrade does not have', async () => {
+    // The refusal offered `--rc-image ... --version ...`, which are `up`'s flags.
+    stubPlanInputs(BASE_META);
+    const upgrade = require('../../src/core/upgrade') as typeof UpgradeNS;
+    const refusal = upgrade.plan('w', 'develop', { offline: true });
+    await expect(refusal).rejects.toThrow('needs the network: run the upgrade without --offline');
+    await expect(upgrade.plan('w', 'develop', { offline: true })).rejects.not.toThrow('--rc-image');
+  });
+
   it('refuses a garbage target as a validation error', async () => {
     stubPlanInputs(BASE_META);
     const upgrade = require('../../src/core/upgrade') as typeof UpgradeNS;
@@ -283,6 +316,18 @@ describe('the image rewrite', () => {
   });
 });
 
+describe('an image that already names its tag', () => {
+  it('is applied as given, never as repo:tag:version', () => {
+    const { applyImage } = require('../../src/core/upgrade') as typeof UpgradeNS;
+    const doc = { services: { rocketchat: { image: 'old' }, 'rocketchat-2': { image: 'old' } } };
+    applyImage(doc, 'ghcr.io/rocketchat/rocket.chat:develop', '8.10.0.dev0', false);
+    expect(Object.values(doc.services).map((svc) => svc.image)).toEqual([
+      'ghcr.io/rocketchat/rocket.chat:develop',
+      'ghcr.io/rocketchat/rocket.chat:develop',
+    ]);
+  });
+});
+
 describe('the migration-error filter', () => {
   afterEach(() => {
     jest.dontMock('../../src/core/topology');
@@ -321,6 +366,49 @@ describe('the migration-error filter', () => {
       'unrelated error on migrationless line',
       'error while processing migration batch 9',
     ]);
+  });
+
+  it("reads Rocket.Chat's own logs, every instance of it, and not Grafana's", async () => {
+    // Every service's logs were read, and Grafana logs `msg="Migration successfully executed"
+    // id="add snapshot error_string column"` at info level on each start: a clean upgrade
+    // with monitoring reported four "migration error(s)", all of them Grafana's.
+    const LOGS: Record<string, string> = {
+      grafana:
+        'grafana-1  | logger=migrator level=info msg="Migration successfully executed" ' +
+        'id="add snapshot error_string column"',
+      'rocketchat-1': 'rocketchat-1-1  | Migration 312 failed',
+      'rocketchat-2': 'rocketchat-2-1  | FATAL migration',
+    };
+    jest.resetModules();
+    jest.doMock('../../src/core/topology', () => ({
+      ...jest.requireActual('../../src/core/topology'),
+      ofRepro: async () => 'docker',
+    }));
+    jest.doMock('../../src/core/runner/record', () => ({
+      ...jest.requireActual('../../src/core/runner/record'),
+      rcServices: async () => ['rocketchat-1', 'rocketchat-2'],
+    }));
+    jest.doMock('../../src/core/runner/engine', () => ({
+      ...jest.requireActual('../../src/core/runner/engine'),
+      // As `docker compose logs [SERVICE...]` answers: no service named is every service.
+      composeLogsCapture: async (
+        _name: string,
+        { services = [] }: { services?: readonly string[] } = {},
+      ) =>
+        Object.entries(LOGS)
+          .filter(([service]) => services.length === 0 || services.includes(service))
+          .map(([, line]) => line)
+          .join('\n'),
+    }));
+    try {
+      const upgrade = require('../../src/core/upgrade') as typeof UpgradeNS;
+      expect(await upgrade.migrationErrors('w')).toEqual([
+        'rocketchat-1-1  | Migration 312 failed',
+        'rocketchat-2-1  | FATAL migration',
+      ]);
+    } finally {
+      jest.dontMock('../../src/core/runner/record');
+    }
   });
 });
 
@@ -375,12 +463,14 @@ describe('running an upgrade', () => {
     noBackup = false,
     failRestore = false,
     fakeClock = false,
+    stopRc = 0,
   ): Promise<RunResult & { recordedExtra: Record<string, unknown> | undefined }> {
     jest.resetModules();
     if (fakeClock) {
       jest.spyOn(performance, 'now').mockReturnValueOnce(100_000).mockReturnValueOnce(101_250);
     }
     const order: string[] = [];
+    let writersRunning = true;
     const recorded: Record<string, unknown> = {};
     const meta: Record<string, unknown> = {
       name: 'w',
@@ -405,6 +495,7 @@ describe('running an upgrade', () => {
       ...jest.requireActual('../../src/core/runner/queries'),
       rcState: async () => 'running',
       containerDetails: async () => [],
+      runningWriterServices: async () => (writersRunning ? ['rocketchat'] : []),
     }));
     jest.doMock('../../src/core/runner/record', () => ({
       ...jest.requireActual('../../src/core/runner/record'),
@@ -439,6 +530,12 @@ describe('running an upgrade', () => {
       ...jest.requireActual('../../src/core/runner/engine'),
       stopServices: async () => {
         order.push('stopServices');
+        if (stopRc === 0) writersRunning = false;
+        return stopRc;
+      },
+      startServices: async () => {
+        order.push('startServices');
+        writersRunning = true;
         return 0;
       },
       up: async () => {
@@ -500,6 +597,15 @@ describe('running an upgrade', () => {
       recordedExtra: recorded['extra'] as Record<string, unknown> | undefined,
     } as unknown as RunResult & { recordedExtra: Record<string, unknown> | undefined };
   }
+
+  it('refuses a returned writer-stop failure before changing the image or record', async () => {
+    prepareWorkspace();
+    const mine = await runTypescript(false, false, false, false, 47);
+    expect(mine.error).toMatch(/could not stop Rocket.Chat writers/u);
+    expect(mine.order).toEqual(['backup', 'stopServices', 'startServices']);
+    expect(mine.meta.rc_version).toBe('8.5.1');
+    expect(mine.result).toBeNull();
+  });
 
   it('backs up, stops, rewrites and recreates, in that order', async () => {
     prepareWorkspace();
@@ -904,7 +1010,10 @@ describe('rolling a Kubernetes rollback back', () => {
     jest.doMock('../../src/core/kube/chart', () => ({
       resolveChartVersion: async () => 'chart-1',
     }));
-    jest.doMock('../../src/core/kube/manifests', () => ({ splitImage: () => ['repo', 'tag'] }));
+    // A tagless image, as the real one splits it: the tag is the version.
+    jest.doMock('../../src/core/kube/manifests', () => ({
+      splitImage: (_image: string, version: string) => ['repo', version],
+    }));
     jest.doMock('../../src/core/kube/release', () => ({
       upgradeImage: async (opts: Record<string, unknown>) => {
         options.push(opts);
@@ -1320,5 +1429,40 @@ describe('an upgrade against a real record', () => {
     const install = seen.filter((argv) => argv.includes('upgrade') && argv.includes('--install'));
     expect(install.length).toBeGreaterThan(0);
     expect((install[0] ?? []).join(' ')).toContain('operator.telemetry.send.enabled=false');
+  });
+});
+
+describe('a MongoDB move below 5.0', () => {
+  type Move = typeof UpgradeNS.mongoMove;
+  const move = (from: string, to: string): { blocked: string; warnings: string[] } => {
+    const { mongoMove } = require('../../src/core/upgrade') as typeof UpgradeNS;
+    const warnings: string[] = [];
+    const { blocked } = mongoMove(
+      '',
+      { mongoTag: from } as unknown as Parameters<Move>[1],
+      'w',
+      { rcVersion: '6.0.0', mongoTag: to } as unknown as Parameters<Move>[3],
+      warnings,
+    );
+    return { blocked, warnings };
+  };
+
+  it('refuses 4.0 -> 4.4: before 5.0 each of 4.0, 4.2 and 4.4 is its own fCV step', () => {
+    const { blocked, warnings } = move('4.0', '4.4');
+    expect(blocked).toContain('stepped one at a time (4.0 -> 4.2 -> 4.4)');
+    expect(warnings).toEqual([]);
+  });
+
+  it('spells the steps out of 4.4 into the majors, and leaves 5.0 and later as they were', () => {
+    expect(move('4.4', '6.0').blocked).toContain('(4.4 -> 5 -> 6)');
+    expect(move('3.6', '4.2').blocked).toContain('(3.6 -> 4.0 -> 4.2)');
+    expect(move('6.0', '8.0').blocked).toContain('(6 -> 7 -> 8)');
+    expect(move('8.2', '8.0')).toEqual({
+      blocked: '',
+      warnings: [
+        'MongoDB minor moves 8.2 -> 8.0; the container keeps its data volume and is not ' +
+          'recreated by this upgrade',
+      ],
+    });
   });
 });

@@ -134,6 +134,34 @@ describe('managing people', () => {
     expect(rows.implicit_admins).toEqual(['legacy']);
   });
 
+  it('names the Okta email an account is linked to, and only an active link', async () => {
+    await users.add('bob', 'bobs-good-password', 'member');
+    await users.add('carol', 'carols-good-password', 'member');
+    const binding = (name: string, status: string) => ({
+      issuer: 'https://login.example.com',
+      sub: `00u-${name}`,
+      name,
+      email: `${name}@example.com`,
+      display: name,
+      status,
+      at: '2026-10-13T00:00:00.000Z',
+    });
+    fs.writeFileSync(
+      path.join(home, 'sso-identities.json'),
+      JSON.stringify({
+        version: 1,
+        bindings: [binding('bob', 'active'), binding('carol', 'disabled')],
+        approvals: [],
+      }),
+    );
+    const rows = (await app.inject({ url: '/api/users', headers: as(admin) })).json() as {
+      users: { name: string; sso_email?: string }[];
+    };
+    expect(rows.users.find((row) => row.name === 'bob')?.sso_email).toBe('bob@example.com');
+    expect(rows.users.find((row) => row.name === 'carol')).not.toHaveProperty('sso_email');
+    expect(rows.users.find((row) => row.name === 'alice')).not.toHaveProperty('sso_email');
+  });
+
   it('ends a user’s live sessions when their role changes', async () => {
     await users.add('bob', 'bobs-good-password', 'member');
     const token = await sessions.create('bob');

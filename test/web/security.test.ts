@@ -73,6 +73,51 @@ describe('security primitives', () => {
     expect(originOk(guard, 'proxy.example', 'proxy.example')).toBe(true);
   });
 
+  it('compares the port of an Origin naming this host, so another local server is foreign', () => {
+    // Without Sec-Fetch-Site the check compared hostnames only: a page on localhost:9999 --
+    // another workspace's Rocket.Chat, say -- passed as this server on localhost:9944.
+    const guard = context();
+    expect(originOk(guard, 'localhost:9999', 'localhost:9944')).toBe(false);
+    expect(originOk(guard, '127.0.0.1:3300', 'localhost:9944')).toBe(false);
+    expect(originOk(guard, '[::1]:3300', '[::1]:9944')).toBe(false);
+    expect(originOk(guard, 'localhost:9944', 'LOCALHOST:9944')).toBe(true);
+    expect(originOk(guard, '[::1]:9944', '[::1]:9944')).toBe(true);
+    expect(crossSite(guard, { host: 'localhost:9944', origin: 'http://localhost:9999' })).toBe(
+      true,
+    );
+    expect(crossSite(guard, { host: 'localhost:9944', origin: 'http://localhost:9944' })).toBe(
+      false,
+    );
+    // A host the operator named still matches by name behind a proxy that rewrote Host.
+    const proxied = context({}, { allowed: new Set(['localhost', 'rc.example.com']) });
+    expect(originOk(proxied, 'rc.example.com', 'localhost:9944')).toBe(true);
+    expect(originOk(proxied, 'rc.example.com:8443', 'rc.example.com:9944')).toBe(false);
+  });
+
+  it('refuses a state change from another local port through the installed guard', async () => {
+    const app = Fastify();
+    let handled = 0;
+    installSecurity(app, context({ 'POST /api/act': '' }), dependencies());
+    app.post('/api/act', async () => {
+      handled += 1;
+      return { ok: true };
+    });
+    const from = async (origin: string) =>
+      await app.inject({
+        method: 'POST',
+        url: '/api/act',
+        payload: {},
+        headers: { host: 'localhost:9944', origin },
+      });
+    const foreign = await from('http://localhost:9999');
+    expect(foreign.statusCode).toBe(403);
+    expect(foreign.json().error).toBe('cross-site request refused');
+    expect(handled).toBe(0);
+    expect((await from('http://localhost:9944')).statusCode).toBe(200);
+    expect(handled).toBe(1);
+    await app.close();
+  });
+
   it('treats Sec-Fetch-Site as authoritative when a browser supplies it', () => {
     const guard = context();
     expect(

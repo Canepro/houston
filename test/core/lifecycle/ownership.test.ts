@@ -15,6 +15,7 @@ import { add } from '../../../src/core/users';
 
 import type * as CreateDockerNS from '../../../src/core/lifecycle/create-docker';
 import {
+  carryOwnership,
   mayChown,
   mayDestroy,
   maySetPrivilegedFields,
@@ -59,7 +60,7 @@ describe('the ownership gate', () => {
         [
           [
             false,
-            'owned belongs to alice — ask alice, or an admin can force it. (alice or an admin can run `houston chown -n owned --to bob` to hand it over for good.)',
+            'owned belongs to alice — ask alice, or an admin can force it. (alice or an admin can hand it over to bob for good: Hand over… in its panel, or `houston chown -n owned --to bob`.)',
           ],
           [
             false,
@@ -179,19 +180,19 @@ describe('the recorded owner', () => {
     const recorded: string[][] = [
       [
         'NotFoundError',
-        'no account named "o\'brien" (see `houston users list`) — a workspace cannot be handed to somebody who cannot sign in',
+        'no account named "o\'brien" (People lists them; `houston users list` from a shell) — a workspace cannot be handed to somebody who cannot sign in',
       ],
       [
         'NotFoundError',
-        "no account named 'a\\\\b' (see `houston users list`) — a workspace cannot be handed to somebody who cannot sign in",
+        "no account named 'a\\\\b' (People lists them; `houston users list` from a shell) — a workspace cannot be handed to somebody who cannot sign in",
       ],
       [
         'NotFoundError',
-        "no account named 'x\"y' (see `houston users list`) — a workspace cannot be handed to somebody who cannot sign in",
+        "no account named 'x\"y' (People lists them; `houston users list` from a shell) — a workspace cannot be handed to somebody who cannot sign in",
       ],
       [
         'NotFoundError',
-        "no account named 'tab\\there' (see `houston users list`) — a workspace cannot be handed to somebody who cannot sign in",
+        "no account named 'tab\\there' (People lists them; `houston users list` from a shell) — a workspace cannot be handed to somebody who cannot sign in",
       ],
     ];
     const ours: unknown[] = [];
@@ -203,14 +204,16 @@ describe('the recorded owner', () => {
       }
     }
     expect(ours).toEqual(recorded);
-    expect(recorded[0]?.[1]).toMatch(/^no account named "o'brien" \(see/u);
+    expect(recorded[0]?.[1]).toMatch(/^no account named "o'brien" \(People lists them/u);
   });
 
   it('names who can act in a destroy refusal, not a chown the caller cannot run', async () => {
     await add('alice', GOOD, 'member');
     await add('bob', GOOD, 'member');
     await workspace('alice-rc8-5-1', 'alice');
-    expect((await mayDestroy('alice-rc8-5-1', 'bob'))[1]).toContain('alice or an admin can run');
+    expect((await mayDestroy('alice-rc8-5-1', 'bob'))[1]).toContain(
+      'alice or an admin can hand it over to bob for good: Hand over… in its panel',
+    );
   });
 });
 
@@ -471,5 +474,28 @@ describe('what `down --volumes` reports', () => {
     expect(removed.code).toBe(0);
     expect(removed.out).toContain('removed');
     expect(removed.out).not.toContain('NOT removed');
+  });
+});
+
+describe('carryOwnership', () => {
+  const meta = (extra: Record<string, unknown>) => {
+    const m = metadata({ name: 'w', rcVersion: '8.8.0' });
+    m.extra = extra;
+    return m;
+  };
+  it('keeps a handed-over owner and its history on a record rebuilt by somebody else', () => {
+    const before = meta({
+      created_by: 'mem2',
+      owner: 'mem',
+      owner_history: [{ from: 'mem2', to: 'mem', by: 'admin', at: '2026-10-12T13:00:00Z' }],
+    });
+    const rebuilt = meta({ created_by: 'mem2' });
+    carryOwnership(before, rebuilt);
+    expect(rebuilt.extra).toMatchObject({ owner: 'mem', owner_history: [{ to: 'mem' }] });
+  });
+  it('leaves a first create, with nothing before it, alone', () => {
+    const fresh = meta({ created_by: 'mem2' });
+    carryOwnership(null, fresh);
+    expect(fresh.extra).toEqual({ created_by: 'mem2' });
   });
 });

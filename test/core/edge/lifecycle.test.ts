@@ -194,6 +194,10 @@ describe('checking a published name', () => {
       )
       .mockResolvedValueOnce(
         report({ serving: true, fallback: false, issuer: 'CN = houston local CA' }),
+      )
+      // The origin behind the edge, asked once the name serves a real certificate.
+      .mockResolvedValueOnce(
+        report({ serving: true, fallback: false, issuer: 'CN = houston local CA' }),
       );
     const said: string[] = [];
     await publishKubernetesName(
@@ -215,7 +219,9 @@ describe('checking a published name', () => {
     const joined = said.join('\n');
     expect(joined).not.toContain('warn:');
     expect(joined).toContain("is serving the cluster's certificate");
-    // It must actually retry, not give up after one look -- and stop once it is right.
-    expect(probe).toHaveBeenCalledTimes(3);
+    // It must actually retry, not give up after one look -- and stop once it is right: three
+    // looks at the name, then one at the origin it passes through to.
+    expect(probe).toHaveBeenCalledTimes(4);
+    expect(joined).not.toContain('itself answers with');
   });
 });

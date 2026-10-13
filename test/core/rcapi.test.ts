@@ -27,6 +27,8 @@ import {
   password2faHeaders,
   rcapi,
   releaseInfo,
+  samlProviderReady,
+  samlProviderState,
   setSetting,
   settingIds,
   waitReady,
@@ -144,6 +146,136 @@ describe('readiness', () => {
   it('returns the payload as soon as it is serving', async () => {
     script([], { status: 200, text: '{"version":"8.5.1"}' });
     expect(await waitReady('http://x', { sleep: nowait })).toEqual({ version: '8.5.1' });
+  });
+
+  it('does not declare an exposed route ready until its complete page also answers', async () => {
+    let pages = 0;
+    script(
+      [
+        [at('/api/info'), { text: '{"version":"8.5.1"}' }],
+        [
+          (url) => {
+            if (url !== 'http://x/') return false;
+            pages += 1;
+            return pages > 1;
+          },
+          { text: '<html>Rocket.Chat</html>' },
+        ],
+      ],
+      { status: 503, text: 'not ready' },
+    );
+    expect(await waitReady('http://x', { page: true, sleep: nowait })).toEqual({
+      version: '8.5.1',
+    });
+    expect(pages).toBe(2);
+  });
+});
+
+describe('a SAML login service is actually loaded', () => {
+  it('uses the existing admin session without consuming the anonymous provider-list quota', async () => {
+    script(
+      [
+        [
+          (url, options) => {
+            const headers = options.headers as Record<string, string> | undefined;
+            return (
+              url.endsWith('/api/v1/service.configurations') &&
+              headers !== undefined &&
+              headers['X-Auth-Token'] === 'admin-token' &&
+              headers['X-User-Id'] === 'admin-user'
+            );
+          },
+          {
+            text: JSON.stringify({
+              success: true,
+              configurations: [{ service: 'saml', clientConfig: { provider: 'keycloak' } }],
+            }),
+          },
+        ],
+        [at('/_saml/metadata/keycloak'), { text: '<md:EntityDescriptor entityID="rc" />' }],
+      ],
+      { status: 429, text: '{"success":false}' },
+    );
+    expect(
+      await samlProviderReady('http://x', { auth: { token: 'admin-token', userId: 'admin-user' } }),
+    ).toBe(true);
+    expect(seen[1]?.headers).toEqual({ Host: 'x', 'X-Forwarded-Proto': 'http' });
+  });
+
+  it('requires both a SAML service document and metadata from the responding instance', async () => {
+    const configurations = {
+      success: true,
+      configurations: [{ service: 'saml', clientConfig: { provider: 'keycloak' } }],
+    };
+    script([
+      [at('service.configurations'), { text: JSON.stringify(configurations) }],
+      [at('/_saml/metadata/keycloak'), { text: '<md:EntityDescriptor entityID="rc" />' }],
+    ]);
+    expect(await samlProviderReady('http://x/')).toBe(true);
+    expect(seen.map((request) => request.url)).toEqual([
+      'http://x/api/v1/service.configurations',
+      'http://x/_saml/metadata/keycloak',
+    ]);
+
+    script([[at('service.configurations'), { text: '{"success":true,"configurations":[]}' }]]);
+    expect(await samlProviderReady('http://x')).toBe(false);
+    script([
+      [at('service.configurations'), { text: JSON.stringify(configurations) }],
+      [at('/_saml/metadata/keycloak'), { status: 404, text: 'Provider not found' }],
+    ]);
+    expect(await samlProviderReady('http://x')).toBe(false);
+    script([
+      [at('service.configurations'), { text: JSON.stringify(configurations) }],
+      [at('/_saml/metadata/keycloak'), { text: '<html>Rocket.Chat</html>' }],
+    ]);
+    expect(await samlProviderReady('http://x')).toBe(false);
+    script([], new RequestFailed('refused', 'http://x'));
+    expect(await samlProviderReady('http://x')).toBe(false);
+  });
+
+  it('keeps a replica metadata probe on that replica with the advertised host and scheme', async () => {
+    script(
+      [
+        [
+          at('service.configurations'),
+          {
+            text: JSON.stringify({
+              success: true,
+              configurations: [{ service: 'saml', clientConfig: { provider: 'keycloak' } }],
+            }),
+          },
+        ],
+        [
+          (url, options) =>
+            url === 'http://localhost:3602/_saml/metadata/keycloak' &&
+            options.followRedirects === false &&
+            (options.headers as Record<string, string>).Host === 'workspace.localhost' &&
+            (options.headers as Record<string, string>)['X-Forwarded-Proto'] === 'https',
+          { text: '<md:EntityDescriptor entityID="rc" />' },
+        ],
+      ],
+      { status: 302, headers: { location: 'https://workspace.localhost/home' } },
+    );
+    expect(
+      await samlProviderReady('http://localhost:3602', {
+        publicUrl: 'https://workspace.localhost',
+      }),
+    ).toBe(true);
+  });
+
+  it('distinguishes a completed provider unload from a request it could not make', async () => {
+    script([], { status: 302, headers: { location: 'https://workspace.localhost/home' } });
+    expect(
+      await samlProviderState('http://localhost:3602', 'keycloak', {
+        publicUrl: 'https://workspace.localhost',
+      }),
+    ).toBe('unloaded');
+    script([], new RequestFailed('refused', 'http://localhost:3602'));
+    expect(await samlProviderState('http://localhost:3602', 'keycloak')).toBe('unknown');
+    script([], { status: 500, text: 'reload failed' });
+    expect(await samlProviderState('http://localhost:3602', 'keycloak')).toBe('unknown');
+    script([], { status: 302, headers: { location: 'http://[' } });
+    expect(await samlProviderState('http://localhost:3602', 'keycloak')).toBe('unknown');
   });
 });
 
@@ -270,10 +402,10 @@ describe('logging in', () => {
         return Promise.resolve(respond({ text: JSON.stringify({ messages }) }, url));
       }
       if (url.includes('/api/v1/message/new')) {
-        return Promise.resolve(respond({ text: JSON.stringify({ Text: 'code 424242' }) }, url));
+        return Promise.resolve(respond({ text: JSON.stringify(rcCodeMail('424-242')) }, url));
       }
       if (url.includes('/api/v1/message/old')) {
-        return Promise.resolve(respond({ text: JSON.stringify({ Text: 'code 111111' }) }, url));
+        return Promise.resolve(respond({ text: JSON.stringify(rcCodeMail('111-111')) }, url));
       }
       if (url.includes('sendEmailCode')) return Promise.resolve(respond({ text: '{}' }, url));
       loginAttempt += 1;
@@ -305,12 +437,74 @@ describe('logging in', () => {
   });
 });
 
+/**
+ * The 2FA code mail as Mailpit hands it back, modelled on what Rocket.Chat 8.5.1 and 8.8.0
+ * send (`EmailCheck.send2FAEmail`, en strings, the default Email_Header/Email_Footer with
+ * `email_style` inlined): the code is `ddd-ddd` in both parts. `header` stands in for a
+ * customised Email_Header, the one part of the mail a workspace owner writes.
+ */
+function rcCodeMail(code: string, header = ''): { Text: string; HTML: string } {
+  const Text =
+    '\nHere is your authentication code:\n\n' +
+    `${code}\n\n` +
+    'Do not provide this code to anyone.\n' +
+    "If you didn't try to login in your account please ignore this email.\n";
+  const HTML =
+    '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" ' +
+    '"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd"><html xmlns="http://www.w3.org/1999/xhtml">' +
+    '<head><meta name="viewport" content="width=device-width" /><meta http-equiv="Content-Type" ' +
+    'content="text/html; charset=UTF-8" /><title>Rocket.Chat Cloud</title></head>' +
+    '<body bgcolor="#F7F8FA" style="width: 100%; height: 100%;"><table class="body" bgcolor="#F7F8FA" ' +
+    'width="100%"><tr><td><table class="wrap" bgcolor="#F7F8FA"><tr><td class="header container" ' +
+    'style="max-width: 640px;"><div class="header-content"><table bgcolor="#F7F8FA" width="100%"><tr><td>' +
+    '<img src="http://localhost:3000/assets/logo.png" alt="Rocket.chat" width="150px" /></td></tr>' +
+    `</table>${header}</div></td></tr></table></td></tr><tr><td><table class="wrap"><tr>` +
+    '<td class="container" bgcolor="#FFFFFF"><div class="content"><table><tr><td> ' +
+    '\n\t\t\t\t<p>Here is your authentication code:</p>\n' +
+    '\t\t\t\t<p style="font-size: 30px;">\n' +
+    `\t\t\t\t\t<b>${code}</b>\n` +
+    '\t\t\t\t</p>\n\t\t\t\t<p>Do not provide this code to anyone.</p>\n' +
+    "\t\t\t\t<p>If you didn't try to login in your account please ignore this email.</p>\n\t\t\t " +
+    '</td></tr></table></div></td></tr></table></td></tr><tr style="margin: 0; padding: 0;">' +
+    '<td style="margin: 0; padding: 0;"><table class="wrap"><tr><td class="container"><div class="content">' +
+    '<table width="100%"><tr><td align="center" class="social"><a href="https://rocket.chat/blog" ' +
+    'style="color: #1D74F5;">Blog</a> | <a href="https://github.com/RocketChat">Github</a></td></tr>' +
+    '<tr><td align="center"><h6 style="font-weight: 500; font-size: 10px; color: #6c727A; ' +
+    'line-height: 1.7;">© Rocket.Chat Technologies Corp.</h6></td></tr></table></div></td></tr>' +
+    '</table></td></tr></table></body></html>';
+  return { Text, HTML };
+}
+
 describe('reading a code out of an inbox', () => {
-  it('takes a standalone six-digit number and nothing else', () => {
-    expect(extractOtp('Your login code is 428913, valid 5 min.')).toBe('428913');
-    expect(extractOtp('<b>042891</b>')).toBe('042891');
-    expect(extractOtp('order #12345678 shipped')).toBeNull(); // not six digits
+  it('reads the ddd-ddd code Rocket.Chat mails, as the six digits it verifies', () => {
+    // Rocket.Chat's `verify` strips non-digits, and the six digits are what it stored.
+    const mail = rcCodeMail('428-913');
+    expect(extractOtp(mail.Text)).toBe('428913');
+    expect(extractOtp(mail.HTML)).toBe('428913');
+    expect(extractOtp(rcCodeMail('042-891').HTML)).toBe('042891');
     expect(extractOtp('')).toBeNull();
+  });
+
+  it('takes nothing but that shape, so a year, a date or a colour is never sent as a code', () => {
+    // A customised header ahead of the code: none of it is the code, and the code still is.
+    const header =
+      '<p style="color: #000000">Ticket 202610 opened 2026-10-12, call +1-555-123-4567</p>';
+    expect(extractOtp(rcCodeMail('731-406', header).HTML)).toBe('731406');
+    // With no code at all, a bare six-digit run or a longer dashed one is not taken for one.
+    expect(extractOtp(header)).toBeNull();
+    expect(extractOtp('Your login code is 428913, valid 5 min.')).toBeNull();
+    expect(extractOtp('order 1234-5678 and 123-4567 and 12-345678')).toBeNull();
+  });
+
+  it('hands the code from a real-format mail to the login, digits only', async () => {
+    script([
+      [
+        at('/api/v1/messages'),
+        { text: JSON.stringify({ messages: [{ ID: '1', Created: 'z', To: [] }] }) },
+      ],
+      [at('/api/v1/message/1'), { text: JSON.stringify(rcCodeMail('555-019')) }],
+    ]);
+    expect(await fetchEmailOtp('http://m', { timeout: 0, sleep: nowait })).toBe('555019');
   });
 
   it('matches the recipient case-insensitively, and only the right one', async () => {
@@ -339,7 +533,7 @@ describe('reading a code out of an inbox', () => {
           respond({ text: JSON.stringify({ messages: [{ ID: '1', Created: 'z', To: [] }] }) }, url),
         );
       }
-      return Promise.resolve(respond({ text: JSON.stringify({ Text: 'code 999111' }) }, url));
+      return Promise.resolve(respond({ text: JSON.stringify(rcCodeMail('999-111')) }, url));
     };
     expect(await fetchEmailOtp('http://m', { sleep: nowait })).toBe('999111');
     expect(tries).toBeGreaterThan(2);
@@ -611,6 +805,23 @@ describe('the rest of the surface', () => {
     script([], { status: 200, text: '{}' });
     await call('http://rc', 'GET', '/api/info');
     expect(seen[0]?.params).toBeUndefined();
+  });
+
+  it('preserves rate-limit response headers without changing the status/body tuple', async () => {
+    const responseHeaders = { obsolete: 'a previous response' };
+    script([], {
+      status: 429,
+      text: '{"success":false}',
+      headers: { 'x-ratelimit-reset': '1791625753228', 'retry-after': '49' },
+    });
+    await expect(
+      call('http://rc', 'POST', '/api/v1/chat.react', { responseHeaders }),
+    ).resolves.toEqual([429, '{"success":false}']);
+    expect(responseHeaders).toEqual({
+      'x-ratelimit-reset': '1791625753228',
+      'retry-after': '49',
+    });
+    expect(seen[0]?.headers).toEqual({});
   });
 
   it('does NOT swallow a transport failure in call(), unlike the best-effort helpers', async () => {

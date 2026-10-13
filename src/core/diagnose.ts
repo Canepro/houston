@@ -46,6 +46,16 @@ const SIGNATURES: readonly (readonly [readonly string[], string])[] = Object.fre
     'The image has no build for this CPU architecture (e.g. arm64). Pick an image/' +
       'tag that ships this arch, or run the engine with emulation.',
   ],
+  // BEFORE the replica set's group, whose "topology is closed" this also logs: a container
+  // whose start failed on a held port is left with no network, and on the next start
+  // Rocket.Chat cannot resolve `mongodb` at all -- measured on Docker 29.9, where this was
+  // blamed on emulation on an x86_64 host.
+  [
+    ['getaddrinfo eai_again mongodb', 'getaddrinfo enotfound mongodb'],
+    "Rocket.Chat cannot resolve its database's name: its container has no network, which a " +
+      'start that failed on a held port leaves behind. `houston restart` recreates it, ' +
+      'keeping the data.',
+  ],
   [
     ['notyetinitialized', 'replicasetnoprimary', 'topology is closed', 'no primary detected'],
     'MongoDB is up but its replica set never initialised (no primary). This is ' +
@@ -82,6 +92,14 @@ const SIGNATURES: readonly (readonly [readonly string[], string])[] = Object.fre
     ['no space left on device'],
     'The engine ran out of disk. Free space (RC images are ~1.5 GB each), then retry ' +
       '- e.g. `docker system prune` or `houston prune`.',
+  ],
+  // Not in earlier releases, which had no `--license`. Measured on 8.5.1: a licence it cannot
+  // verify is an unhandled InvalidLicenseError at startup, and the server never serves or exits.
+  [
+    ['invalidlicenseerror'],
+    'Rocket.Chat refused the licence given with --license (InvalidLicenseError) and does ' +
+      'not finish starting with it. Re-create with the licence text exactly as issued, or ' +
+      'without --license.',
   ],
 ]);
 

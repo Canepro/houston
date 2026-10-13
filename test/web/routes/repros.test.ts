@@ -17,12 +17,14 @@ import * as path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 
 import { AUDIT_FILE } from '../../../src/core/audit';
+import { event } from '../../../src/lib/events';
 import * as admin from '../../../src/core/lifecycle/admin';
 import * as createDocker from '../../../src/core/lifecycle/create-docker';
+import { deriveFor } from '../../../src/core/lifecycle/naming';
 import * as inspect from '../../../src/core/lifecycle/inspect';
 import * as payload from '../../../src/core/lifecycle/payload';
 import * as state from '../../../src/core/lifecycle/state';
-import { CREATE_POLICY_KEY } from '../../../src/core/lifecycle/types';
+import { CREATE_POLICY_KEY, DESTROY_POLICY_KEY } from '../../../src/core/lifecycle/types';
 import * as envvars from '../../../src/core/envvars';
 import { CONTEXT } from '../../../src/core/kube/names';
 import * as kubeStatus from '../../../src/core/kube/status';
@@ -413,6 +415,36 @@ describe('creating', () => {
     expect(jest.mocked(createDocker.createRepro).mock.calls[0]?.[0].version).toBe('8.5.1');
   });
 
+  it('takes several presets as a list, spelled into the one canonical preset', async () => {
+    const response = await post('/api/repros', {
+      version: '8.5.1',
+      presets: ['ldap', 'email'],
+      params: { ldap: { users: 7 } },
+    });
+    expect(response.statusCode).toBe(200);
+    await app.jobs.drain();
+    const req = jest.mocked(createDocker.createRepro).mock.calls[0]?.[0];
+    expect([req?.preset, req?.params]).toEqual(['email+ldap', { 'ldap.users': 7 }]);
+  });
+
+  it('refuses preset and presets together, a list that is not names, and a bad name', async () => {
+    const both = await post('/api/repros', {
+      version: '8.5.1',
+      preset: 'ldap',
+      presets: ['email'],
+    });
+    expect([both.statusCode, String(both.json().error)]).toEqual([
+      400,
+      'give `preset` or `presets`, not both',
+    ]);
+    expect((await post('/api/repros', { version: '8.5.1', presets: 'ldap' })).statusCode).toBe(400);
+    const bad = await post('/api/repros', { version: '8.5.1', presets: ['ldap', '../evil'] });
+    expect([bad.statusCode, String(bad.json().error)]).toEqual([
+      400,
+      expect.stringContaining('is not a preset name'),
+    ]);
+  });
+
   it('is a 400 without a version, not a 500', async () => {
     const missing = await post('/api/repros', { preset: 'default' });
     expect(missing.statusCode).toBe(400);
@@ -511,6 +543,37 @@ describe('who may choose the image and the interface', () => {
     expect(everything.statusCode).toBe(200);
   });
 
+  it('takes a license as text, governed like the registration token', async () => {
+    // The GUI pastes or reads the license; the create gets the TEXT, as `--license` reads it
+    // from a file. Who may set it is the same policy as `reg_token`: anyone by default.
+    await as('bob');
+    expect(
+      (await post('/api/repros', { version: '8.5.1', license: 'LICENSE-TEXT' })).statusCode,
+    ).toBe(200);
+    await app.jobs.drain();
+    expect(jest.mocked(createDocker.createRepro).mock.calls[0]?.[0].license).toBe('LICENSE-TEXT');
+    config.updateConfig((cfg) => {
+      (cfg as Record<string, unknown>)[CREATE_POLICY_KEY] = 'admin';
+    });
+    const refused = await post('/api/repros', { version: '8.5.1', license: 'LICENSE-TEXT' });
+    expect(refused.statusCode).toBe(400);
+    expect(String(refused.json().error)).toContain('license is limited to admins');
+    // The refusal names the field, never the license itself.
+    expect(String(refused.json().error)).not.toContain('LICENSE-TEXT');
+  });
+
+  it('gates a CI build version as it gates rc_image: it picks unreleased code', async () => {
+    config.updateConfig((cfg) => {
+      (cfg as Record<string, unknown>)[CREATE_POLICY_KEY] = 'admin';
+    });
+    await as('bob');
+    const refused = await post('/api/repros', { version: 'pr-42617' });
+    expect(refused.statusCode).toBe(400);
+    expect(String(refused.json().error)).toContain('a CI build version is limited to admins');
+    cookie = await signIn('alice');
+    expect((await post('/api/repros', { version: 'pr-42617' })).statusCode).toBe(200);
+  });
+
   it('never included the host port, which guarded nothing', async () => {
     // 80 and 443 are refused for EVERYBODY by lifecycle's 1024-65535 check.
     await as('bob');
@@ -574,6 +637,59 @@ describe('acting on a workspace', () => {
       wait: true,
       offline: true,
     });
+  });
+
+  it('brings a workspace back as its creator, for its owner and for an admin', async () => {
+    // A Kubernetes namespace carries its creator as its owner label, and this route sent no
+    // actor: the create refused the owner themselves ("HOUSTON_USER is not set"), so on
+    // Kubernetes a GUI user could take a workspace down and never bring it back.
+    jest.mocked(record.readMeta).mockResolvedValue(
+      realRecord.metadata({
+        name: 'mia-w3',
+        rcVersion: '8.5.1',
+        extra: { runtime: 'kubernetes', created_by: 'mia' },
+      }) as never,
+    );
+    // Its owner, then an admin.
+    await as('mia', 'member');
+    expect((await post('/api/repros/mia-w3/up')).statusCode).toBe(200);
+    cookie = await signIn('alice');
+    expect((await post('/api/repros/mia-w3/up')).statusCode).toBe(200);
+    await app.jobs.drain();
+    const actors = jest.mocked(createDocker.createRepro).mock.calls.map(([req]) => req.actor);
+    expect(actors).toEqual(['mia', 'mia']);
+  });
+
+  it('brings back the workspace it names, one made from the CLI included, for its owner and an admin', async () => {
+    // A workspace made from the CLI has no `created_by`, so the clicker stood in as its
+    // creator and their prefix went on its name: `k1` came back as `kmem-k1` and
+    // `alice-k1`, which failed on the preset ports k1 holds. Anyone else is refused, not
+    // handed a new workspace of their own.
+    jest
+      .mocked(record.readMeta)
+      .mockResolvedValue(
+        realRecord.metadata({ name: 'k1', rcVersion: '8.5.1', extra: { owner: 'kmem' } }) as never,
+      );
+    await as('kmem', 'member');
+    expect((await post('/api/repros/k1/up')).statusCode).toBe(200);
+    cookie = await signIn('alice');
+    expect((await post('/api/repros/k1/up')).statusCode).toBe(200);
+    await app.jobs.drain();
+    const names = jest.mocked(createDocker.createRepro).mock.calls.map(([req]) => deriveFor(req));
+    expect(names).toEqual(['k1', 'k1']);
+    // With the hook that attaches monitoring, as the create gives it: without it a monitored
+    // Kubernetes workspace came back saying "monitoring did not attach: monitoring attachment
+    // was not supplied by the caller".
+    const hooks = jest
+      .mocked(createDocker.createRepro)
+      .mock.calls.map(([, , options]) => typeof options?.monitorAttach);
+    expect(hooks).toEqual(['function', 'function']);
+    await as('mem2', 'member');
+    const refused = await post('/api/repros/k1/up');
+    expect([refused.statusCode, String(refused.json().error)]).toEqual([
+      409,
+      'k1 belongs to kmem — only kmem or an admin can bring it back up.',
+    ]);
   });
 
   it('sets the default workspace', async () => {
@@ -720,6 +836,27 @@ describe('the API console', () => {
       headers: { host: 'localhost' },
     });
     expect(response.statusCode).toBe(401);
+  });
+});
+
+describe('starting a stopped workspace', () => {
+  it("rebuilds a composed workspace with its set and each preset's params", async () => {
+    jest.mocked(record.readMeta).mockResolvedValue(
+      realRecord.metadata({
+        name: 'combo',
+        rcVersion: '8.5.1',
+        preset: 'email+ldap',
+        extra: {
+          runtime: 'docker',
+          presets: ['email', 'ldap'],
+          preset_params: { ldap: { users: '7' } },
+        },
+      }) as never,
+    );
+    expect((await post('/api/repros/combo/up', {})).statusCode).toBe(200);
+    await app.jobs.drain();
+    const req = jest.mocked(createDocker.createRepro).mock.calls[0]?.[0];
+    expect([req?.preset, req?.params]).toEqual(['email+ldap', { 'ldap.users': '7' }]);
   });
 });
 
@@ -912,6 +1049,15 @@ describe('sessions and credentials', () => {
 });
 
 describe('attribution and the audit trail', () => {
+  /** Every job ended: a create without a typed name is audited once it names its workspace, or ends. */
+  async function settled(): Promise<void> {
+    for (let tries = 0; tries < 100; tries += 1) {
+      const jobs = (await get('/api/jobs')).json().jobs as { status: string }[];
+      if (jobs.every((job) => job.status !== 'queued' && job.status !== 'running')) return;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+  }
+
   it('records who ran each job', async () => {
     expect((await post('/api/repros', { version: '8.5.1' })).statusCode).toBe(200);
     expect((await get('/api/jobs')).json().jobs[0].actor).toBe('alice');
@@ -919,18 +1065,20 @@ describe('attribution and the audit trail', () => {
 
   it('writes the audit log to disk, so it survives a restart, with the appended columns last', async () => {
     await post('/api/repros', { version: '8.5.1' });
+    await settled();
     const lines = fs
       .readFileSync(path.join(home, AUDIT_FILE), 'utf8')
       .split('\n')
       .filter((line) => line.includes('\tcreate\t'));
-    expect(lines).toHaveLength(1);
+    expect(lines).toHaveLength(2);
+    expect(lines.map((line) => line.split('\t')[5])).toEqual(['accepted', 'done']);
     const [when, who, kind, label, origin, outcome] = (lines[0] ?? '').split('\t');
     expect({ who, kind, label, origin, outcome }).toEqual({
       who: 'alice',
       kind: 'create',
       label: '8.5.1',
       origin: 'session',
-      outcome: 'ok',
+      outcome: 'accepted',
     });
     expect(when?.startsWith('20')).toBe(true);
   });
@@ -947,19 +1095,42 @@ describe('attribution and the audit trail', () => {
     expect(line?.split('\t')[3]).toBe('alice-gui-1');
   });
 
+  it('audits a derived name as the workspace the create settled on', async () => {
+    // History read "8.5.1" for every create without a typed name: the line was written at
+    // submit, before the version lookup that names the workspace.
+    jest.mocked(createDocker.createRepro).mockImplementationOnce(async (_req, emit) => {
+      emit?.(
+        event('workspace name: alice-rc8-5-1', {
+          phase: 'create',
+          code: 'workspace-name',
+          data: { workspace: 'alice-rc8-5-1' },
+        }),
+      );
+      return {};
+    });
+    await post('/api/repros', { version: '8.5.1' });
+    await settled();
+    const created = fs
+      .readFileSync(path.join(home, AUDIT_FILE), 'utf8')
+      .split('\n')
+      .filter((row) => row.includes('\tcreate\t'))
+      .filter((row) => row.split('\t')[5] === 'accepted')
+      .map((row) => row.split('\t')[3]);
+    expect(created).toEqual(['alice-rc8-5-1']);
+  });
+
   it('can finally be read', async () => {
     await post('/api/repros', { version: '8.5.1' });
+    await settled();
     const lines = (await get('/api/audit')).json().lines as {
       kind: string;
       actor: string;
       origin: string;
       outcome: string;
     }[];
-    expect(lines.find((line) => line.kind === 'create')).toMatchObject({
-      actor: 'alice',
-      origin: 'session',
-      outcome: 'ok',
-    });
+    const created = lines.filter((line) => line.kind === 'create');
+    expect(created.map((line) => line.outcome)).toEqual(['done', 'accepted']);
+    for (const line of created) expect(line).toMatchObject({ actor: 'alice', origin: 'session' });
   });
 
   it('records a refusal, so the role lines can be reviewed', async () => {
@@ -1052,6 +1223,23 @@ describe('roles and ownership', () => {
     const response = await post('/api/repros/t4471/owner', { to: 'ghost' });
     expect(response.statusCode).toBe(404);
     expect(String(response.json().error)).toContain('no account');
+  });
+
+  it('tells the panel whether this viewer passes the gate a hand-over and a rollback need', async () => {
+    // The GUI had no hand-over control at all, and its delete confirm sent everyone to a
+    // shell command. The pane needs the SERVER's answer for this viewer, not a guess at it.
+    jest.mocked(payload.detail).mockImplementation(async (name) => ({ name }) as never);
+    await workspace('alices-box', 'alice');
+    const mayDestroy = async () => (await get('/api/repros/alices-box/detail')).json().may_destroy;
+    expect(await mayDestroy()).toBe(true); // the owner, and an admin
+    await as('bob');
+    expect(await mayDestroy()).toBe(false); // a member who does not own it
+    config.updateConfig((cfg) => {
+      cfg[DESTROY_POLICY_KEY] = 'anyone';
+    });
+    expect(await mayDestroy()).toBe(true); // a box that lets anyone
+    // And it is the answer the hand-over itself gets.
+    expect((await post('/api/repros/alices-box/owner', { to: 'bob' })).statusCode).toBe(200);
   });
 
   it('will not let a member destroy somebody else’s workspace', async () => {

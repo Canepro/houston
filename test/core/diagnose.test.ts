@@ -73,10 +73,40 @@ describe('the same table as earlier releases', () => {
     // The hint TEXT is the contract: it is what a support engineer reads at the moment a
     // boot failed, and a hint worded differently from the one earlier releases gave is two
     // answers to one ticket. Compared character for character rather than paraphrased.
+    // Two groups are added: one appended, for `--license`, which earlier releases never had,
+    // and one for a container a failed start left with no network, which has to come
+    // BEFORE the replica set's -- its logs say "topology is closed" too, and first match
+    // wins, so it was blamed on emulation on an x86_64 host.
     const expected = RECORDED.signatures;
     const mine = signatures().map(([needles, hint]) => [[...needles], hint]);
-    expect(mine).toEqual(expected);
-    expect(SIGNATURE_COUNT).toBe(expected.length);
+    const NETWORK = ['getaddrinfo eai_again mongodb', 'getaddrinfo enotfound mongodb'];
+    const at = mine.findIndex(([needles]) => JSON.stringify(needles) === JSON.stringify(NETWORK));
+    const replicaSet = mine.findIndex(([needles]) =>
+      (needles as string[]).includes('topology is closed'),
+    );
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(at).toBeLessThan(replicaSet);
+    const theirs = mine.filter((_, index) => index !== at);
+    expect(theirs.slice(0, expected.length)).toEqual(expected);
+    expect(theirs.slice(expected.length).map(([needles]) => needles)).toEqual([
+      ['invalidlicenseerror'],
+    ]);
+    expect(SIGNATURE_COUNT).toBe(expected.length + 2);
+  });
+
+  it('names a Rocket.Chat that lost its network, not the replica set', () => {
+    // Logged by a container a failed start detached, alongside "Topology is closed".
+    const logs =
+      'MongoServerSelectionError: getaddrinfo EAI_AGAIN mongodb\n' +
+      'MongoTopologyClosedError: Topology is closed';
+    expect(match(logs)).toContain('has no network');
+  });
+
+  it('names a licence Rocket.Chat refused, from the line 8.5.1 logs', () => {
+    const logs =
+      '=== UnHandledPromiseRejection ===\nInvalidLicenseError: Invalid license\n' +
+      '    at validateFormat (/app/bundle/programs/server/npm/node_modules/@rocket.chat/license/dist/validation/validateFormat.js:14:15)';
+    expect(match(logs)).toContain('refused the licence given with --license');
   });
 
   it('answers identically for every sample, including the ones it does not know', () => {

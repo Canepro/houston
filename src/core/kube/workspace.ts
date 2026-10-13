@@ -7,12 +7,14 @@
  */
 import * as crypto from 'node:crypto';
 
-import { PreflightError } from '../../lib/errors';
+import { MissingRecordError, PreflightError } from '../../lib/errors';
 import { info, nullEmit, warn, type Emit } from '../../lib/events';
+import { presetsLabel } from '../../lib/presets/composite';
+import { publicPathsOf } from '../../lib/presets/public';
 import type { Preset } from '../../lib/presets/types';
 import type { Resolved } from '../../lib/versions';
 
-import { architectureBlocker, storageBlocker, workspaceNamespaces } from './capabilities';
+import { architectureBlocker, storageBlocker } from './capabilities';
 import {
   ensureIssuer,
   issuerName,
@@ -23,9 +25,10 @@ import {
 import { deleteCluster, ensureKubeconfig } from './cluster';
 import { planCluster, type ClusterPlan } from './context';
 import { ensureRepo, resolveChartVersion, valuesFor } from './chart';
-import { kube } from './exec';
+import { Interrupted, cleanup } from '../../seams/exec';
+import { updateMeta } from '../runner/record';
 import { forwardAlive, portForward, scenarioUiForwards } from './forward';
-import { ingressValues } from './ingress';
+import { ingressValues, toolsIngressManifest } from './ingress';
 import {
   containerSecurityContext,
   mongoManifest,
@@ -33,7 +36,6 @@ import {
   renderScenarioManifest,
 } from './manifests';
 import {
-  APPLY_TIMEOUT,
   CHART,
   MONGO_OPLOG_URL,
   MONGO_URL,
@@ -42,7 +44,7 @@ import {
   isOurs,
   mongoImage,
 } from './names';
-import { ensureNamespace, namespaceFor } from './namespace';
+import { deleteNamespace, ensureNamespace, labelsFor, type NamespaceReceipt } from './namespace';
 import {
   MONGO_URL_SECRET,
   OPERATOR_MIN_MONGO,
@@ -56,6 +58,7 @@ import {
   operatorMongoUrl,
   operatorSupports,
   operatorVersion,
+  licenseSecretManifest,
   regTokenSecretManifest,
   waitForMongodb,
 } from './operator';
@@ -120,7 +123,8 @@ async function prepareCluster(
   const chartVersion = await resolveChartVersion(resolved.rcVersion, emit);
   info(emit, `chart ${chartVersion} for Rocket.Chat ${resolved.rcVersion}`, { phase: 'plan' });
   const pre = await preflight(context);
-  const blocked = storageBlocker(pre) || architectureBlocker(pre, resolved.rcVersion);
+  const blocked =
+    storageBlocker(pre) || architectureBlocker(pre, resolved.rcVersion, resolved.rcImage);
   if (blocked !== '') throw new PreflightError(blocked);
   return { plan, context, hadCluster, chartVersion };
 }
@@ -131,16 +135,12 @@ async function ensureWorkspaceNamespace(
   context: string,
   owner: string,
   emit: Emit,
-): Promise<{ namespace: string; hadNamespace: boolean }> {
-  // Whether the namespace was already here decides what a failure may undo. A re-create
-  // over a namespace kept by `down` must NOT have its rollback delete that namespace: the
-  // PVC goes with it, and `down` had just promised the data would be there. REFUSED READS
-  // COUNT AS "IT WAS ALREADY THERE": never destroy data we could not prove was ours to
-  // destroy.
-  const held = await workspaceNamespaces(context);
-  const hadNamespace = held === null || held.includes(await namespaceFor(name));
-  const namespace = await ensureNamespace(name, { context, owner, emit });
-  return { namespace, hadNamespace };
+): Promise<{ namespace: string; receipt: NamespaceReceipt }> {
+  // Only this call's successful atomic CREATE proves rollback may remove a namespace.
+  // A separate list can miss an existing or concurrently-created namespace.
+  const receipt = { uid: '', owner: '', createdUid: '' };
+  const namespace = await ensureNamespace(name, { context, owner, emit, receipt });
+  return { namespace, receipt };
 }
 
 /** Install an operator-managed MongoDB and return its connection metadata. */
@@ -237,11 +237,13 @@ async function applyScenarioAndSecrets(
   name: string,
   preset: Preset | null,
   regToken: string,
+  license: string,
   owner: string,
   namespace: string,
   context: string,
   database: Database,
   emit: Emit,
+  advertised = '',
 ): Promise<void> {
   const rendered = database.rendered;
   const manifests = preset?.kubernetesManifests ?? [];
@@ -249,12 +251,12 @@ async function applyScenarioAndSecrets(
     const count = manifests.length;
     info(
       emit,
-      `applying the ${preset?.scenario || (preset?.name ?? '')} scenario — ` +
+      `applying the ${presetsLabel(preset?.name ?? '')} scenario — ` +
         `${String(count)} resource${count === 1 ? '' : 's'}`,
       { phase: 'provision', pct: 25 },
     );
     for (const [index, manifest] of manifests.entries()) {
-      const body = renderScenarioManifest(manifest, name);
+      const body = renderScenarioManifest(manifest, name, advertised);
       rendered[index === 0 ? 'scenario' : `scenario-${String(index)}`] = body;
       await apply(body, { namespace, context });
     }
@@ -271,6 +273,11 @@ async function applyScenarioAndSecrets(
     info(emit, 'installing the registration token Secret', { phase: 'boot' });
     await apply(regTokenSecretManifest(name, { token: regToken, owner }), { namespace, context });
   }
+  if (license !== '') {
+    // Not added to `rendered`: that is written to the workspace for a human to read.
+    info(emit, 'installing the licence Secret', { phase: 'boot' });
+    await apply(licenseSecretManifest(name, { license, owner }), { namespace, context });
+  }
 }
 
 interface ChartInstall {
@@ -283,6 +290,8 @@ interface ChartInstall {
   readonly regToken: string;
   readonly adminPassword: string;
   readonly preset: Preset | null;
+  readonly envOverrides: Record<string, string | null>;
+  readonly licensed: boolean;
   readonly issuer: IssuerSpec | null;
   readonly ingressClass: string;
   readonly namespace: string;
@@ -308,6 +317,8 @@ async function installChart(options: ChartInstall): Promise<Record<string, unkno
     regTokenSecret: regToken !== '' ? REG_TOKEN_SECRET : '',
     adminPassword: options.adminPassword,
     ...(options.preset !== null ? { presetEnv: options.preset.env } : {}),
+    envOverrides: options.envOverrides,
+    licensed: options.licensed,
   });
   if (tlsHost !== '') {
     const spec: IssuerSpec = options.issuer ?? { mode: 'local' };
@@ -329,18 +340,35 @@ async function installChart(options: ChartInstall): Promise<Record<string, unkno
     { phase: 'boot', pct: 60 },
   );
   await install({ namespace, context, values, chartVersion, emit });
+  // The preset's own UIs at paths of the same name (Mailpit, Keycloak, the demo page).
+  const tools = options.preset === null ? [] : publicPathsOf(options.preset.extra);
+  if (tlsHost !== '' && tools.length > 0) {
+    info(emit, `serving ${tools.map((p) => p.path).join(', ')} at https://${tlsHost}`, {
+      phase: 'tls',
+    });
+    await apply(
+      toolsIngressManifest(tlsHost, {
+        ingressClass: options.ingressClass,
+        secretName: tlsSecretFor(name),
+        paths: tools,
+        labels: labelsFor(name),
+      }),
+      { namespace, context },
+    );
+  }
   return values;
 }
 
 /** Undo only the resources this create proved it introduced. */
 async function rollbackCreate(
+  name: string,
   namespace: string,
   context: string,
-  hadNamespace: boolean,
+  receipt: NamespaceReceipt,
   hadCluster: boolean,
   emit: Emit,
 ): Promise<void> {
-  if (hadNamespace) {
+  if (receipt.createdUid === '') {
     warn(emit, `create failed — namespace ${namespace} and its volume are left as they were`, {
       phase: 'teardown',
     });
@@ -348,11 +376,14 @@ async function rollbackCreate(
   }
   warn(emit, `create failed — removing namespace ${namespace}`, { phase: 'teardown' });
   try {
-    await kube.run(
-      ['kubectl', '--context', context, 'delete', 'namespace', namespace, '--wait=false'],
-      { timeout: APPLY_TIMEOUT, own: isOurs(context) },
-    );
-    if (!hadCluster) await deleteCluster({ emit });
+    const gone = await deleteNamespace(name, {
+      context,
+      volumes: true,
+      owner: receipt.owner,
+      expectedUid: receipt.createdUid,
+      emit,
+    });
+    if (gone && !hadCluster) await deleteCluster({ emit });
   } catch {
     // The ORIGINAL failure is what matters; a rollback that fails must not replace it.
   }
@@ -376,6 +407,38 @@ interface ConnectOptions {
   readonly sleep: Sleep;
 }
 
+/**
+ * Forward pids, into the write-ahead record the moment they exist.
+ *
+ * They reached the record only once the whole create finished, so a create killed after
+ * "port-forward established" left a kubectl holding the port that no record named:
+ * `down --volumes` said it had removed everything, and the listener outlived the namespace
+ * (it exits only when something next connects). Best effort: a path with no record yet
+ * has its final record carry them.
+ */
+async function noteForwards(name: string, fields: Record<string, unknown>): Promise<void> {
+  try {
+    await updateMeta(name, (meta) => {
+      Object.assign(meta.extra, fields);
+    });
+  } catch (error) {
+    if (error instanceof Interrupted) throw error;
+  }
+}
+
+/** Persist the namespace identity before installing anything into it. */
+async function noteNamespace(name: string, receipt: NamespaceReceipt): Promise<void> {
+  try {
+    await updateMeta(name, (meta) => {
+      Object.assign(meta.extra, { namespace_uid: receipt.uid, namespace_owner: receipt.owner });
+    });
+  } catch (error) {
+    // Low-level callers without a write-ahead record receive these fields in the result.
+    // An existing record whose identity cannot be saved must not continue unbound.
+    if (!(error instanceof MissingRecordError)) throw error;
+  }
+}
+
 /** Wait for TLS, establish the forwards, persist the manifests, and return the metadata. */
 async function connectWorkspace(options: ConnectOptions): Promise<Record<string, unknown>> {
   const { name, namespace, context, hostPort, bindHost, tlsHost, emit } = options;
@@ -392,8 +455,9 @@ async function connectWorkspace(options: ConnectOptions): Promise<Record<string,
     previousPort: options.previousPort,
     emit,
   });
+  await noteForwards(name, { port_forward_pid: pid });
   await options.sleep(1.0);
-  if (forwardAlive(pid, { namespace, hostPort })) {
+  if (await forwardAlive(pid, { namespace, hostPort })) {
     info(emit, `port-forward established — http://localhost:${String(hostPort)}`, {
       phase: 'boot',
       pct: 90,
@@ -411,10 +475,12 @@ async function connectWorkspace(options: ConnectOptions): Promise<Record<string,
   }
   await recordRendered(name, { values: options.values, manifests: options.rendered });
   const ui = await scenarioUiForwards(name, { namespace, context, bindHost, emit });
+  const scenarioForwards = Object.fromEntries(
+    Object.entries(ui).map(([port, forwardPid]) => [String(port), forwardPid]),
+  );
+  await noteForwards(name, { scenario_forwards: scenarioForwards });
   return {
-    scenario_forwards: Object.fromEntries(
-      Object.entries(ui).map(([port, forwardPid]) => [String(port), forwardPid]),
-    ),
+    scenario_forwards: scenarioForwards,
     context,
     namespace,
     bind_host: bindHost,
@@ -441,6 +507,12 @@ export interface CreateWorkspaceOptions {
   readonly useOperator?: boolean;
   readonly regToken?: string;
   readonly preset?: Preset | null;
+  /** `up --env`/`--setting`, carried forward; the last word over base and preset env. */
+  readonly envOverrides?: Record<string, string | null>;
+  /** This run's licence text, installed as a Secret; '' installs none. */
+  readonly license?: string;
+  /** Whether the release references the licence Secret: this run's, or one already there. */
+  readonly licensed?: boolean;
   readonly plan?: ClusterPlan | null;
   readonly tlsHost?: string;
   readonly ingressClass?: string;
@@ -476,6 +548,9 @@ export async function createWorkspace({
   useOperator = false,
   regToken = '',
   preset = null,
+  envOverrides = {},
+  license = '',
+  licensed = false,
   plan = null,
   tlsHost = '',
   ingressClass = '',
@@ -489,10 +564,11 @@ export async function createWorkspace({
   const prepared = await prepareCluster(plan, resolved, emit);
   const { context, hadCluster, chartVersion } = prepared;
 
-  const { namespace, hadNamespace } = await ensureWorkspaceNamespace(name, context, owner, emit);
+  const { namespace, receipt } = await ensureWorkspaceNamespace(name, context, owner, emit);
   let database: Database;
   let values: Record<string, unknown>;
   try {
+    await noteNamespace(name, receipt);
     database = await provisionDatabase(
       name,
       resolved,
@@ -506,11 +582,14 @@ export async function createWorkspace({
       name,
       preset,
       regToken,
+      license,
       owner,
       namespace,
       context,
       database,
       emit,
+      // Where a browser reaches Rocket.Chat: the HTTPS name, else the workspace's own URL.
+      tlsHost !== '' ? `https://${tlsHost}` : rootUrl,
     );
     values = await installChart({
       name,
@@ -522,6 +601,8 @@ export async function createWorkspace({
       regToken,
       adminPassword,
       preset,
+      envOverrides,
+      licensed,
       issuer,
       ingressClass,
       namespace,
@@ -535,8 +616,12 @@ export async function createWorkspace({
     // `down` -- and on Compose a failed `up` at least leaves a workspace directory you can
     // find. The cluster goes too if this call created it and nothing else is using it:
     // `deleteCluster` refuses while any other workspace namespace is there, so a
-    // colleague's concurrent `up` is safe from this.
-    await rollbackCreate(namespace, context, hadNamespace, hadCluster, emit);
+    // colleague's concurrent `up` is safe from this. As cleanup, so it runs to the end
+    // when the failure IS a Ctrl-C or a stopped job: refused there, it left a namespace
+    // no record pointed at.
+    await cleanup(async () => {
+      await rollbackCreate(name, namespace, context, receipt, hadCluster, emit);
+    });
     throw error;
   }
 
@@ -544,7 +629,7 @@ export async function createWorkspace({
   // that installed perfectly well. cert-manager issues asynchronously from the Ingress
   // annotation, so this is the difference between "the name works" and "the name will work
   // in a moment, probably".
-  return await connectWorkspace({
+  const connected = await connectWorkspace({
     name,
     namespace,
     context,
@@ -561,4 +646,5 @@ export async function createWorkspace({
     emit,
     sleep,
   });
+  return { ...connected, namespace_uid: receipt.uid, namespace_owner: receipt.owner };
 }

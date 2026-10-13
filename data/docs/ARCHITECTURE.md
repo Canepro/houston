@@ -72,7 +72,7 @@ argv, a timeout, an environment, a URL. The tool-specific ones have a domain hal
 | `seams/docker-cli.ts` | `docker`, `docker compose` | `core/runner/`, `core/edge/`, `core/doctor`, `core/migrate`, `perf/constrain` |
 | `seams/kubectl.ts` | `kubectl`, `helm`, `kind` | `core/kube/exec.ts` alone, which decides which client state a call may see |
 | `seams/aws-cli.ts` | `aws`, `eksctl` | `core/eks.ts` alone, which decides whose account is being spent in |
-| `seams/rc-http.ts` | every HTTP request | `core/rcapi.ts` alone, where every Rocket.Chat path lives |
+| `seams/rc-http.ts` | every HTTP request | `core/rcapi.ts`, where every Rocket.Chat path lives, and `core/sso.ts`, where the identity provider's do |
 | `seams/fs/lock.ts` | the cross-process file lock (Node has no `flock`) | the state owners: `core/runner/locks`, `core/users`, `core/sessions`, `core/eventlog`, `core/promote` |
 
 Narrow seams are why the suite runs without Docker, a cluster, an AWS account or the
@@ -178,6 +178,16 @@ per client address at `doSignin` in `web/security.ts`, where the scrypt is spent
 scrypt from `node:crypto`, with no bcrypt or argon dependency, and an unknown name is checked
 against a dummy hash so it costs what a wrong password costs. `yarn test:timing` measures it.
 
+**Okta sign-in is a second way in, never the only one.** `core/sso.ts` runs OpenID Connect
+(authorization code, PKCE, a confidential client) from `GET /signin`, verifies the RS256 ID
+token with `node:crypto`, and resolves the person to an account by the provider's `sub`, kept
+in `core/sso-identities.ts` beside the unchanged `users` file. A first sign-in links an
+account of exactly the same name, or creates a member; an admin account links only after
+`houston users link-sso`, and a different name never links. Every failure is a fixed reason
+code, so a provider that is down or misconfigured costs the button, never `serve`, a password
+sign-in or a live session. Removing an account turns its link into a tombstone in the same
+lock, so the person's next Okta sign-in is refused rather than recreating it.
+
 **TLS is a runtime property, not a build-time one.** One Traefik edge holds `:80`/`:443` for
 the box. A workspace gains or loses HTTPS when a route file appears or disappears, never by a
 rebuild. The edge joins each workspace's network live, and each workspace keeps its own
@@ -203,15 +213,20 @@ and a create that cannot finish leaves a half-made workspace behind.
 **Everything binds loopback unless told otherwise.** Reproductions ship weak fixed credentials
 (`admin` / `admin123`), so everything binds `DEFAULT_BIND_HOST` (`127.0.0.1`) unless opted out
 with `--bind`, `HOUSTON_BIND_HOST` or `config set bind_host`. A workspace reachable beyond
-loopback gets a generated admin password instead. `PRESET_PORTS` in `lib/config.ts` is the one
-port registry, and `core/lifecycle/ports.ts` allocates Rocket.Chat's own port under a lock.
+loopback gets a generated admin password instead, when it is made: a rebuild keeps the one
+its database holds (`keptAdminPassword`), since Rocket.Chat sets it only on an empty
+database. `PRESET_PORTS` in `lib/config.ts` is the one port registry, and
+`core/lifecycle/ports.ts` allocates Rocket.Chat's own port under a lock.
 
 ## Runtimes and the cloud
 
 `core/topology.ts` records the runtime, the deployment and the replicas. `docker` runs on this
 machine as `monolith` or `multi-instance`; `kubernetes` runs on any cluster (kind, k3s, EKS) as
-`microservices` or `monolith`. `seed`, `api`, `token`, `pat` and `config-import` only speak
-REST to a URL, so they do not care which. Operations that need a compose project call
+`microservices` or `monolith`. `api`, `token`, `pat`, `config-import` and ordinary `seed` speak REST to a URL.
+Historical seed creates content through REST, then `core/seed-db.ts` resolves and validates
+the live managed MongoDB target before adjusting only captured message/file timestamps.
+It uses the recorded Docker project or Kubernetes namespace/context and feeds credentials
+through stdin. External or ambiguous databases are refused. Operations that need a compose project call
 `topology.requireCompose()`, which refuses **and names the Kubernetes equivalent**. "Not
 supported" alone leaves the user to find what the author already knew.
 
@@ -240,17 +255,17 @@ One line per directory. Where a line uses `·`, it separates ranks, bottom first
 `git ls-files src` is the authority on what exists (tests live in `test/`), and each module's
 header comment says what it is for.
 
-- **`lib/`**, below every service: `errors` `events` `jsonout` `config` `lock` `context`, the registries `audit` `journal` `teammode`, then `compose` `versions` `monitoring` `mongo-kernel` `redact` `seed-profiles` `targz`, and the exact-format modules `format` `float-text` `json-text` `yaml-dump` `close-matches` `mkdir-parents` `tempdir` `login-name` `platform-name` `home` `version-spec` `unicode-tables`, and `map-limit` (a bounded concurrent map the cluster ledger and the region sweep share)
-- **`lib/presets/`**, the dynamic scenarios (static presets are YAML in `data/presets/`): `types` · `registry` · `common` `scenario` · `keycloak` · `email` `ldap` `livechat` `multi-instance` `oidc` `s3-minio` `saml` · `index`
+- **`lib/`**, below every service: `errors` `events` `jsonout` `config` `lock` `context`, the registries `audit` `journal` `teammode`, then `compose` `versions` `monitoring` `mongo-kernel` `redact` `seed-profiles` `seed-options` `targz`, and the exact-format modules `format` `float-text` `json-text` `yaml-dump` `close-matches` `mkdir-parents` `tempdir` `login-name` `platform-name` `home` `version-spec` `unicode-tables`, and `map-limit` (a bounded concurrent map the cluster ledger and the region sweep share)
+- **`lib/presets/`**, the dynamic scenarios (static presets are YAML in `data/presets/`): `types` · `registry` · `common` `scenario` `composite` (several presets as one) · `keycloak` `public` (a preset's UIs at paths of the HTTPS name) · `e2ee` `email` `ldap` `livechat` `multi-instance` `oidc` `s3-minio` `saml` · `index`
 - **`seams/`**, the only doors out: `exec` `docker-cli` `kubectl` `aws-cli` `rc-http`
 - **`seams/fs/`**: `lock`
-- **`core/`**, the shared brain. REST and cloud: `rcapi` `eks` `eks-docs` `cluster` `topology`. HTTPS: `tls` `tls-local`. Data: `backup` `backup-compat` `database-of` `upgrade` `envvars` `monitor` `data` `configimport` `scaleseed` `loadtest` `postready`. Diagnosis: `diagnose` `doctor`. Records: `journal` `recovery` `eventlog` `audit`. People: `users` `sessions` `firstrun`. The home: `skill` `migrate` `promote`
+- **`core/`**, the shared brain. REST and cloud: `rcapi` `eks` `eks-docs` `cluster` `topology`. HTTPS: `tls` `tls-local`. Data: `backup` `backup-compat` `database-of` `seed-db` `upgrade` `envvars` `monitor` `data` `configimport` `scaleseed` `loadtest` `postready`. Diagnosis: `diagnose` `doctor`. Records: `journal` `recovery` `eventlog` `audit`. People: `users` `sessions` `firstrun`, and Okta sign-in, `sso` with its links `sso-identities`. The home: `skill` `migrate` `promote`
 - **`core/runner/`**, Docker per workspace: `paths` `locks` · `engine` `record` · `host` `ports` `queries`
 - **`core/edge/`**, the shared Traefik edge: `paths` `types` · `engine` · `acme` `networks` · `routeyml` · `spec` · `routes` · `runtime`
 - **`core/kube/`**, the Kubernetes domain half, which selects by label and never by name prefix: `names` · `exec` · `ask` `tools` · `capabilities` `reachability` `replicaset` · `context` · `cluster` `endpoints` `namespace` · `manifests` `probe` `scale` `status` `transfer` · `release` · `operator` · `chart` `monitoring` · `certmanager` `forward` · `ingress` `grafana-ingress` · `workspace`
 - **`core/lifecycle/`**, create, inspect, change and destroy, with no façade (import the module that defines a name): `types` `notes` `admin` · `naming` `request` `ports` `tlsplan` · `sizing` `seeding` `ownership` `inspect` · `preconditions` `payload` `ready` · `state` · `destroy` `pruning` · `create-k8s` · `create-docker`
 - **`perf/`**, what `loadtest` and `capacity` measure: `timings` `slo` `baseline` · `rcmetrics` `resources` `mongoprof` `constrain` `k6` `verdict` `timeline` · `report`
-- **`seed/`**, sample data planned before anything is created and read back after: `kinds` · `wording` · `plan` · `apply` `repairs` · `check`
+- **`seed/`**, sample data planned before anything is created and read back after: `kinds` · `wording` `assets` · `plan` `client` · `receipt` · `executor` `history` `verification` · `apply` `repairs` · `check`
 - **`cli/`**, the terminal front door: `spec-types` `wire` `cell-widths` · `spec-data` `error-panel` · `help` `capabilities` `perf` `serve` · `usage-error` · `app` · `render` · `handlers` · `index` `entry`
 - **`cli/handlers/`**: `actor` · `prompt` · `https` `users`
 - **`web/`**, the `serve` server: `jobs` `signin` `security` · `route-deps` `route-table` · `app`
@@ -259,6 +274,19 @@ header comment says what it is for.
 Outside `src/`, `bin/houston` is the entry and `data/` ships beside the code: `versions.yaml`,
 the static presets, dashboards, k6 scripts, the GUI, the agent skill, the IAM documents and
 these documents. `test/` and `tools/` do not ship.
+
+## Durable sample data
+
+`lib/seed-options.ts` supplies both front-ends with the profile/scenario catalogue.
+`seed/plan.ts` assigns content and actions to named participants before mutation.
+`core/lifecycle/seeding.ts` drives the executor, optional history and exact verification.
+Workspace locks serialize all entry points. `seed/receipt.ts` fsyncs immutable manifests
+and a hash-chained write-ahead log under `repros/<name>/seed-receipts/`; no credentials
+are stored. Uncertain writes reconcile by exact identity or refuse replay. In particular,
+media confirmation is not replayed: supported servers can create a second message.
+`ready` resumes the recorded batch after rechecking its identity under the lock.
+Verification checks the latest batch, preserves true/false/null, and reads personal
+features with their actor token. Existing content and customized metadata remain intact.
 
 ## The GUI
 

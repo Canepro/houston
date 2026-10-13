@@ -41,6 +41,11 @@ same `~/.houston`. Scripts should branch on the exit code and `error.code` (see
   changes. 1.x keeps working beside 2.x on that home.
 - **If it stops with exit 3** because `~/.houston/IMPLEMENTATION.transition` exists, and
   no houston is running, delete that file; the next command adopts again.
+- **A workspace with several presets** (`--preset ldap --preset email`, recorded as
+  `email+ldap`) is 2.x's alone. 1.x lists it, shows its `info` and backs it up. Its
+  `restore --new` refuses it ("'email+ldap' is not a preset name"), as does its GUI's start
+  button. Its `up --force` rebuilds it with no presets, as 1.x does for any preset
+  workspace. Manage such a workspace with 2.x.
 
 ## From rc-repro
 

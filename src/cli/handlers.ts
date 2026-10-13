@@ -42,6 +42,7 @@ import type * as RunnerQueriesNS from '../core/runner/queries';
 import type * as LocksNS from '../core/runner/locks';
 import type * as RecordNS from '../core/runner/record';
 import type * as ScaleseedNS from '../core/scaleseed';
+import type * as SsoNS from '../core/sso';
 import type * as SkillNS from '../core/skill';
 import type * as TopologyNS from '../core/topology';
 import type * as UpgradeNS from '../core/upgrade';
@@ -56,13 +57,14 @@ import type * as BaselineNS from '../perf/baseline';
 import type * as SloNS from '../perf/slo';
 import type * as TimelineNS from '../perf/timeline';
 import type * as TimingsNS from '../perf/timings';
-import type * as SeedApplyNS from '../seed/apply';
 import type * as SeedPlanNS from '../seed/plan';
 import type * as ExecNS from '../seams/exec';
+import type * as FsNS from 'node:fs';
 
 import {
   ConflictError,
   CreateFailedError,
+  NotFoundError,
   NotReadyError,
   PreflightError,
   ReproError,
@@ -110,6 +112,9 @@ import { usersCommand } from './handlers/users';
 import { ljust, asciiOf, wrapWords, say, writeBox, writePanel, paint, writeTable } from './render';
 import { PROCESS_CONSOLE, consoleColumns, type ConsoleEnvironment } from './error-panel';
 import { runWithContext } from '../lib/context';
+import { redactArgv } from '../lib/redact';
+import { imageRef } from '../lib/compose';
+import { compositeName } from '../lib/presets/composite';
 import { capabilities } from './capabilities';
 import { runCapacityCli, runLoadtestCli, type LoadtestView } from './perf';
 import { serve, type ServeDependencies } from './serve';
@@ -125,6 +130,16 @@ export interface HandlerDependencies {
 
 function text(value: unknown): string {
   return typeof value === 'string' ? value : value === null ? '' : String(value ?? '');
+}
+
+/** A loadtest's missed `--slo` rules as the failure its exit 1 reports, or undefined. */
+function sloMissed(data: unknown): ReproError | undefined {
+  const bag = (data ?? {}) as { passed?: unknown; slo?: unknown };
+  if (bag.passed !== false) return undefined;
+  const missed = (Array.isArray(bag.slo) ? (bag.slo as { ok?: unknown; raw?: unknown }[]) : [])
+    .filter((rule) => rule.ok === false)
+    .map((rule) => text(rule.raw));
+  return new ReproError(`the run missed its --slo: ${missed.join(', ') || 'a rule'}`);
 }
 
 function number(value: unknown): number {
@@ -245,44 +260,35 @@ async function metadata(name: string) {
 /**
  * `versions`: resolve one version and hand back the pairing the renderer prints.
  *
- * A VERSION `resolve` REFUSES IS A CALLER MISTAKE, NOT A CRASH. The refusal is reported as a
- * plain error, so `houston versions notaversion --offline` prints exactly
- * `error: 'notaversion' is not a valid version (want e.g. 6.5.3)`, exits 1, and logs code
- * REPRO_ERROR with `trace: false` -- measured against the previous implementation, as are
- * `versions ''`, `versions 1.2.3.4.5.x` and `versions 8.0rc1 --offline` (the
- * no-rule-matches sentence, the other refusal `resolve` raises). An earlier version called
- * `resolve` bare, so its `InvalidVersionError` reached `runCli` as an unhandled Error: a
- * JavaScript stack on stderr, the message restated as "this is unhandled ... If it names a
- * file under HOUSTON_HOME, that file is the problem", and `trace: true` in the durable log
- * -- which is the event log's signal for a defect, raised by a typo.
+ * A VERSION `resolve` REFUSES IS A CALLER MISTAKE, NOT A CRASH. `houston versions notaversion
+ * --offline` prints exactly `error: 'notaversion' is not a valid version (want e.g. 6.5.3)`,
+ * exits 2 and logs VALIDATION_FAILED with `trace: false`. An earlier version called `resolve`
+ * bare, so its `InvalidVersionError` reached `runCli` as an unhandled Error: a JavaScript
+ * stack, "this is unhandled", and `trace: true` in the durable log -- the event log's signal
+ * for a defect, raised by a typo.
  *
- * The BASE `ReproError`, because a plain error is the base: code REPRO_ERROR and exit 1, not
- * the ValidationError that `upgrade.plan` and `GET /api/versions/:version` translate the
- * same refusal into. Only `InvalidVersionError` is translated, so a broken shipped map or a
- * resolver bug still surfaces as unhandled, as it always has.
+ * A ValidationError, as `up --version`, `upgrade --to` and `GET /api/versions/:version` raise
+ * for the same refusal: one input, one exit code. This was a plain ReproError, exit 1, so
+ * `versions not.a.version` exited 1 where `up --version not.a.version` exited 2. Only
+ * `InvalidVersionError` is translated, so a broken shipped map or a resolver bug still
+ * surfaces as unhandled.
  */
 async function runVersions(args: Values, options: Values): Promise<Bag> {
   const versions = require('../lib/versions') as typeof VersionsNS;
-  const rcapi = require('../core/rcapi') as typeof RcapiNS;
+  const request = require('../core/lifecycle/request') as typeof RequestNS;
   const version = text(args.version);
   const offline = bool(options.offline);
   // An invalid version is refused by `resolve` below WITHOUT asking the network first.
-  const fetched =
-    offline || !versions.isValidVersion(version)
-      ? null
-      : await rcapi.releaseInfo(versions.RELEASES_URL.replace('{version}', version));
+  const fetcher = await request.releaseFetcher(version, offline);
   let resolved: VersionsNS.Resolved;
   try {
     resolved = versions.resolve(version, {
       offline,
-      ...(fetched === null ? {} : { fetcher: () => fetched }),
+      ...(fetcher === undefined ? {} : { fetcher }),
     });
   } catch (error) {
-    if (error instanceof versions.InvalidVersionError) throw new ReproError(error.message);
+    if (error instanceof versions.InvalidVersionError) throw new ValidationError(error.message);
     throw error;
-  }
-  if (resolved.source === versions.NOT_A_RELEASE) {
-    warnOnce('UNKNOWN_VERSION', `${version} is not a known Rocket.Chat release`);
   }
   return {
     rc_version: resolved.rcVersion,
@@ -297,8 +303,9 @@ async function runVersions(args: Values, options: Values): Promise<Bag> {
 }
 
 /**
- * The workspace's admin login, then the plan, before anything is written -- each refusal a
- * plain ReproError: code REPRO_ERROR, exit 1, no trace, and under `--json` an envelope.
+ * The workspace's admin login, then the plan, before anything is written -- a login refusal a
+ * plain ReproError (exit 1), an unknown profile a ValidationError (exit 2, as the GUI's seed
+ * raises it), neither with a trace, and under `--json` an envelope.
  *
  * Both were called bare, so a login Rocket.Chat refused (401), one its rate limiter refused
  * (429), one that could not connect, and a typo in `--profile` / `--seed-profile` each left
@@ -351,10 +358,17 @@ async function seedPreamble(
           options.messages === null || options.messages === undefined
             ? null
             : number(options.messages),
+        scenarios: strings(options.scenario ?? options.seed_scenario),
+        historyDays:
+          options.history_days === null || options.history_days === undefined
+            ? options.seed_history_days === null || options.seed_history_days === undefined
+              ? null
+              : number(options.seed_history_days)
+            : number(options.history_days),
       }),
     ];
   } catch (error) {
-    if (error instanceof plans.UnknownProfileError) throw new ReproError(error.message);
+    if (error instanceof plans.UnknownProfileError) throw new ValidationError(error.message);
     throw error;
   }
 }
@@ -377,8 +391,6 @@ async function seedPreamble(
 async function runSeed(meta: Awaited<ReturnType<typeof metadata>>, options: Values, io: CliIo) {
   const seeding = require('../core/lifecycle/seeding') as typeof SeedingNS;
   const locks = require('../core/runner/locks') as typeof LocksNS;
-  const apply = require('../seed/apply') as typeof SeedApplyNS;
-  const record = require('../core/runner/record') as typeof RecordNS;
   const resources = require('../perf/resources') as typeof ResourcesNS;
   const events = require('../lib/events') as typeof EventsNS;
   // UNDER THE WORKSPACE LOCK, from the login to the gate, as the GUI's seed runs. The CLI's
@@ -402,12 +414,14 @@ async function runSeed(meta: Awaited<ReturnType<typeof metadata>>, options: Valu
     let summary: Bag;
     let report: Awaited<ReturnType<ResourcesNS.ResourceMonitor['stop']>> | null = null;
     try {
-      summary = await apply.seed(meta.rootUrl, auth, plan, {
-        tokensOut: tokens,
-        adminPassword: record.adminPass(meta),
-        workspace: meta.name,
-        ...(quiet ? {} : { log: (message: string) => say(io, `  ${message}`) }),
-      });
+      summary = await seeding.seedPrepared(
+        meta,
+        auth,
+        plan,
+        events.nullEmit,
+        tokens,
+        quiet ? () => undefined : (message: string) => say(io, `  ${message}`),
+      );
     } finally {
       // Stopped even if the seed throws: the sampler never outlives the seed.
       if (monitor !== null) report = await monitor.stop();
@@ -417,8 +431,8 @@ async function runSeed(meta: Awaited<ReturnType<typeof metadata>>, options: Valu
     // NO emit: `checkSeed` emits the facts this renders from the returned verdict, so
     // passing one said every line twice -- and under `--json` put a readback event and a
     // WARNING into a stream that has never carried either.
-    const verdict = await seeding.checkSeed(meta, auth, plan, summary, events.nullEmit, tokens);
-    if (!quiet) printSeedVerification(verdict, io);
+    const verdict = bag(summary.verification);
+    if (!quiet) printSeedVerification(verdict, io, summary);
     // `--verify-seed` gates AFTER the report is shown. UNPROVEN IS NOT PASSED, and it is not
     // "failed: 0 mismatch(es)" either: it is a readback that could not run.
     if (bool(options.verify ?? options.verify_seed)) {
@@ -429,17 +443,24 @@ async function runSeed(meta: Awaited<ReturnType<typeof metadata>>, options: Valu
         );
       }
       const faults = verdict.faults;
-      if (isTruthy(faults)) {
+      if (verdict.ok !== true) {
         throw new CreateFailedError(
-          `seed verification failed: ${String((faults as unknown[]).length)} mismatch(es) ` +
+          `seed verification failed: ${String(Array.isArray(faults) ? faults.length : 0)} mismatch(es) ` +
             'between the plan and the workspace (drop --verify-seed to seed anyway; the ' +
             'readback is recorded in repro.json either way)',
         );
       }
     }
     // The summary with the profile and `elapsed_s`, rounded to 2 places -- a float, which
-    // the envelope spells as one (`preserveFloatFields`).
-    return { ...summary, profile, elapsed_s: Number(formatFixed(total, 2)) };
+    // the envelope spells as one (`preserveFloatFields`). And what `--stats` measured, which
+    // was printed in prose and dropped under `--json`: the sampler ran and nobody got its
+    // numbers.
+    return {
+      ...summary,
+      profile,
+      elapsed_s: Number(formatFixed(total, 2)),
+      ...(report === null ? {} : { resources: report }),
+    };
   });
 }
 
@@ -474,6 +495,8 @@ function printSeedResult(
   row('messages', s.messages, seconds('messages'), latency);
   if (isTruthy(s.threads)) row('threads', s.threads, 0);
   if (isTruthy(s.reactions)) row('reactions', s.reactions, 0);
+  if (isTruthy(s.files)) row('files', s.files, 0);
+  if (isTruthy(s.total_content)) row('content', s.total_content, 0);
   if (isTruthy(s.rooms_total)) {
     const kinds = Object.entries(bag(s.rooms)).sort(([a], [b]) => compareCodePoints(a, b));
     row(
@@ -484,14 +507,81 @@ function printSeedResult(
     );
   }
   row('DMs', s.dms, seconds('dms'));
+  const planned = bag(s.planned);
+  if (planned.rooms_total !== undefined)
+    say(
+      io,
+      `  Planned: ${toTextAny(planned.users)} users · ${toTextAny(planned.rooms_total)} rooms · ` +
+        `${toTextAny(planned.messages)} messages · ${toTextAny(planned.threads)} thread replies · ${toTextAny(planned.files)} files`,
+    );
+  if (Array.isArray(s.scenarios) && s.scenarios.length > 0)
+    say(io, `  Scenarios: ${s.scenarios.map(toTextAny).join(' · ')}`);
+  const history = bag(s.history);
+  if (history.days !== undefined) {
+    say(
+      io,
+      `  Synthetic history: ${toTextAny(history.days)} days · ${toTextAny(history.oldest)} to ${toTextAny(history.latest)}`,
+    );
+    if (Array.isArray(history.constrained) && history.constrained.length > 0)
+      say(
+        io,
+        `  Existing discussion anchors constrain ${String(history.constrained.length)} room(s); details are saved in the seed result.`,
+      );
+  }
+  if (Array.isArray(s.created))
+    for (const raw of s.created) {
+      const location = bag(raw);
+      const stars = Array.isArray(location.starred_by) ? location.starred_by.map(toTextAny) : [];
+      const files = Array.isArray(location.files) ? location.files.map(toTextAny) : [];
+      if (stars.length === 0 && files.length === 0 && location.kind !== 'discussion') continue;
+      const details = [
+        ...(stars.length > 0 ? [`personal stars: sign in as ${stars.join(', ')}`] : []),
+        ...(files.length > 0 ? [`files: ${files.join(', ')}`] : []),
+        ...(location.kind === 'discussion' ? [`discussion in ${toTextAny(location.parent)}`] : []),
+      ];
+      say(io, `  ${toTextAny(location.name)}: ${details.join(' · ')}`);
+    }
   renderResources(report ?? {}, io, toTextAny(meta.name));
 }
 
 /** The seed's readback, in one line when it agrees and a list when not. */
-function printSeedVerification(verdict: Bag, io: CliIo): void {
+function printSeedVerification(verdict: Bag, io: CliIo, summary: Bag): void {
+  const features = bag(verdict.features);
+  const planned = bag(summary.planned);
+  const featureRows: readonly (readonly [string, string, string])[] = [
+    ['files', 'files', 'files'],
+    ['thread_parents', 'thread_parents', 'thread roots'],
+    ['reactions', 'reaction_actions', 'reactions'],
+    ['pins', 'pins', 'pins'],
+    ['stars', 'stars', 'stars'],
+    ['mentions', 'mentions', 'mentions'],
+    ['edits', 'edits', 'edits'],
+  ];
+  if (Object.keys(features).length > 0)
+    say(
+      io,
+      '  Features (read/planned): ' +
+        featureRows
+          .map(
+            ([actual, expected, label]) =>
+              `${toTextAny(features[actual] ?? 0)}/${toTextAny(planned[expected] ?? 0)} ${label}`,
+          )
+          .join(' · '),
+    );
   if (verdict.ok === null || verdict.ok === undefined) {
     // NOT SILENCE: a readback that could not run at all says so, and why.
-    const why = isTruthy(verdict.why) ? toTextAny(verdict.why) : 'no reason recorded';
+    const reasons = bags(verdict.unreadable)
+      .filter((entry) => isTruthy(entry.why))
+      .map((entry) =>
+        isTruthy(entry.what)
+          ? `${toTextAny(entry.what)}: ${toTextAny(entry.why)}`
+          : toTextAny(entry.why),
+      );
+    const why = isTruthy(verdict.why)
+      ? toTextAny(verdict.why)
+      : reasons.length > 0
+        ? reasons.join('; ')
+        : 'no reason recorded';
     say(
       io,
       `  ⚠ the seed readback could not run (${why}), so nothing about this seed is verified. ` +
@@ -502,7 +592,7 @@ function printSeedVerification(verdict: Bag, io: CliIo): void {
   const faults = isTruthy(verdict.faults) ? (verdict.faults as unknown[]) : [];
   const unreadable = isTruthy(verdict.unreadable) ? (verdict.unreadable as unknown[]) : [];
   const extra = isTruthy(verdict.extra) ? (verdict.extra as unknown[]) : [];
-  if (faults.length === 0 && unreadable.length === 0 && extra.length === 0) {
+  if (verdict.ok === true && faults.length === 0 && unreadable.length === 0 && extra.length === 0) {
     say(io, `✓ readback: ${toTextAny(verdict.checked)} rooms match the plan`);
     return;
   }
@@ -533,10 +623,27 @@ function parseSetParams(items: readonly string[]): Record<string, string> {
   const params: Record<string, string> = {};
   for (const item of items) {
     const at = item.indexOf('=');
-    if (at < 0) throw new ReproError(`--set expects KEY=VALUE, got ${quotedText(item)}`);
+    if (at < 0) throw new ValidationError(`--set expects KEY=VALUE, got ${quotedText(item)}`);
     params[stripText(item.slice(0, at))] = stripText(item.slice(at + 1));
   }
   return params;
+}
+
+/**
+ * `--license <file|->`: the licence TEXT from a file or stdin, never from argv, where `ps`
+ * shows it to every user on the box. Validated by the create; a read failure names the path
+ * and never the content.
+ */
+function licenseFrom(source: string): string {
+  if (source === '') return '';
+  const fs = require('node:fs') as typeof FsNS;
+  try {
+    return fs.readFileSync(source === '-' ? 0 : source, 'utf8');
+  } catch (error) {
+    throw new ValidationError(
+      `--license ${quotedText(source)} could not be read: ${errorText(error)}`,
+    );
+  }
 }
 
 async function runUp(invocation: Invocation, io: CliIo): Promise<unknown> {
@@ -552,7 +659,11 @@ async function runUp(invocation: Invocation, io: CliIo): Promise<unknown> {
   const params = parseSetParams(strings(o.set_));
   const req = types.createReq({
     version,
-    preset: text(o.preset),
+    // Repeatable: several presets compose into one workspace, spelled one canonical way.
+    // None at all is '' rather than `default`, so a rebuild of a composed workspace can
+    // tell "not said" from "said default" and keep its presets; the create reads '' as
+    // `default` everywhere else.
+    preset: strings(o.preset).length > 0 ? compositeName(strings(o.preset)) : '',
     runtime: text(o.runtime),
     deployment: text(o.deployment),
     replicas: number(o.replicas),
@@ -568,6 +679,7 @@ async function runUp(invocation: Invocation, io: CliIo): Promise<unknown> {
     rcImage: text(o.rc_image),
     mongo: text(o.mongo),
     regToken: text(o.reg_token),
+    license: licenseFrom(text(o.license)),
     params,
     seed: bool(o.seed),
     // ALWAYS true: the note is this command's to close, below, and it records what a killed
@@ -575,6 +687,11 @@ async function runUp(invocation: Invocation, io: CliIo): Promise<unknown> {
     // wrote `seed_here: false` into every other.
     seedHere: true,
     seedProfile: text(o.seed_profile),
+    seedScenarios: strings(o.seed_scenario),
+    seedHistoryDays:
+      o.seed_history_days === null || o.seed_history_days === undefined
+        ? null
+        : number(o.seed_history_days),
     pin: bool(o.pin),
     wait: bool(o.wait),
     offline: bool(o.offline),
@@ -615,7 +732,7 @@ async function runUp(invocation: Invocation, io: CliIo): Promise<unknown> {
   // `--seed-profile`, `--verify-seed` refusing) left a workspace that is up and serving with
   // no panel at all: no URL, no login. Rendered here, so the value returned for a person
   // renders nothing more.
-  if (createdMeta !== null) renderHuman(invocation, withMeta(created, createdMeta), io);
+  if (createdMeta !== null) await renderHuman(invocation, withMeta(created, createdMeta), io);
   const seed = await runSeed(await metadata(String(created.name ?? req.name)), o, io);
   journal.clearKind(journal.CREATE_UNFINISHED, String(created.name));
   // Folded in, not printed beside: exactly one envelope per command.
@@ -632,6 +749,13 @@ const CONFIG_KEYS: Readonly<Record<string, string>> = Object.freeze({
   bind_host: 'bind_host',
   'gui.create_policy': 'gui.create_policy',
   'gui.destroy_policy': 'gui.destroy_policy',
+  // Okta sign-in for the GUI. The client secret is never one of these: `config list` prints
+  // them, so it lives in `<home>/sso.env` or the environment (see `core/sso`).
+  'sso.issuer': 'sso.issuer',
+  'sso.client_id': 'sso.client_id',
+  'sso.public_url': 'sso.public_url',
+  'sso.email_domains': 'sso.email_domains',
+  'sso.provision': 'sso.provision',
 });
 
 /**
@@ -829,17 +953,14 @@ async function dispatch(
       try {
         return await state.setState(name, action, emit);
       } catch (error) {
-        // `start` answers EVERY domain failure with one fixed sentence, keeping the class's
-        // exit code: a red error line and a plain exit, so the log has an `end` record and no
-        // `error` one. This let the service's own message take the generic path -- another
-        // sentence, and an `error ENGINE_UNAVAILABLE` (or NOT_FOUND) record the log never
-        // held for it. `stop` and `restart` throw through the error contract there and keep
-        // that path.
+        // `start` answers a domain failure with a red error line and a plain exit, keeping the
+        // class's exit code, so the log has an `end` record and no `error` one; `stop` and
+        // `restart` throw through the error contract and keep that path. The line is the
+        // SERVICE'S OWN now. It was one fixed sentence for every failure -- "if it was
+        // `down`ed, use `houston up`" -- which sent a workspace that was merely stopped with
+        // its port held to recreate itself, while the core knew which it was and why.
         if (!(error instanceof ReproError)) throw error;
-        io.writeErr(
-          `error: could not start ${quotedText(name)} — if it was \`down\`ed, use ` +
-            '`houston up` to recreate it\n',
-        );
+        io.writeErr(`error: ${error.message}\n`);
         return commandOutcome(undefined, error.exitCode);
       }
     }
@@ -895,15 +1016,17 @@ async function dispatch(
           ]),
         );
       }
-      // `config`'s established order, which is why `validateInvocation` leaves its action to
-      // this branch: `list`, then the KEY, then `get`/`unset`, then `set` or an unknown
-      // action -- so `config frob` is `unknown key ''` and `config frob bind_host` is the
-      // unknown action. Every refusal quotes what was typed with `quotedText`, the established
-      // quoting: hand-written quotes printed `'it's'` for `"it's"` and a raw tab for
-      // `'a\tb'`.
+      // THE ACTION FIRST: the order earlier releases kept checked the key first, so `config
+      // frob x` answered "unknown key 'x'" about a command whose mistake was `frob`. Every
+      // refusal quotes what was typed with `quotedText`: hand-written quotes printed `'it's'`
+      // for `"it's"` and a raw tab for `'a\tb'`.
+      if (!['get', 'set', 'unset'].includes(action))
+        throw new ValidationError(
+          `unknown action ${quotedText(action)} (want: list | get | set | unset)`,
+        );
       const internal = CONFIG_KEYS[key];
       if (internal === undefined)
-        throw new ReproError(
+        throw new ValidationError(
           `unknown key ${quotedText(key)} (want: ${Object.keys(CONFIG_KEYS).join(', ')})`,
         );
       if (action === 'get') return { key, value: config.loadConfig()[internal] ?? null };
@@ -913,25 +1036,33 @@ async function dispatch(
         });
         return { key, unset: true };
       }
-      if (action !== 'set')
-        throw new ReproError(
-          `unknown action ${quotedText(action)} (want: list | get | set | unset)`,
-        );
       const given = text(a.value);
-      if (given === '') throw new ReproError(`\`config set ${key}\` needs a value`);
+      if (given === '') throw new ValidationError(`\`config set ${key}\` needs a value`);
       if (key === 'gui.create_policy' || key === 'gui.destroy_policy') {
         const strict = key === 'gui.create_policy' ? 'admin' : 'owner';
         if (given !== 'anyone' && given !== strict)
-          throw new ReproError(`${key} takes 'anyone' or '${strict}' (got ${quotedText(given)})`);
+          throw new ValidationError(
+            `${key} takes 'anyone' or '${strict}' (got ${quotedText(given)})`,
+          );
+      }
+      // Refused like the policies: the edge reads only these three (`forcedChallenge`), so
+      // any other value was stored and silently did nothing.
+      if (key === 'acme.challenge' && !['http', 'tlsalpn', 'dns'].includes(given)) {
+        throw new ValidationError(`${key} takes http, tlsalpn or dns (got ${quotedText(given)})`);
       }
       let value: unknown = given;
+      if (key.startsWith('sso.')) {
+        const sso = require('../core/sso') as typeof SsoNS;
+        value = sso.checkSetting(key, given);
+        if (key === 'sso.issuer') sso.requireReadyForIssuer(config.loadConfig(false));
+      }
       if (key === 'acme.staging') {
         // `TRUE_WORDS` + `FALSE_WORDS` after `stripText`, the empty word excluded: `y`, `t`,
         // `n` and `f` were refused here, and `trim()` stripped a BOM `stripText` keeps and
         // kept the separators and NEL it strips.
         const low = stripText(given).toLowerCase();
         if (low === '' || !(config.TRUE_WORDS.includes(low) || config.FALSE_WORDS.includes(low)))
-          throw new ReproError(`${key} takes true or false (got ${quotedText(given)})`);
+          throw new ValidationError(`${key} takes true or false (got ${quotedText(given)})`);
         value = config.truthy(given);
       }
       await (require('../core/runner/locks') as typeof LocksNS).updateConfig((stored) => {
@@ -1048,7 +1179,7 @@ async function dispatch(
         // `-d '{"b":1,"2":2}'` with the `2` first.
         body = text(o.data) === '' ? undefined : jsonLoads(text(o.data), { spelledRoot: true });
       } catch (error) {
-        throw new ReproError(`--data is not valid JSON: ${errorText(error)}`);
+        throw new ValidationError(`--data is not valid JSON: ${errorText(error)}`);
       }
       const extraHeaders = bool(o.two_fa)
         ? await rcapi.password2faHeaders(record.adminPass(meta))
@@ -1079,6 +1210,14 @@ async function dispatch(
     case 'seed': {
       const data = require('../core/data') as typeof DataNS;
       const events = require('../lib/events') as typeof EventsNS;
+      if (
+        (strings(o.scenario).length > 0 ||
+          (o.history_days !== null && o.history_days !== undefined)) &&
+        (text(o.scale) !== '' || bool(o.clear_scale))
+      )
+        throw new ValidationError(
+          '--scenario and --history-days cannot be combined with --scale or --clear-scale',
+        );
       // `engineMetadata` -- the name, the engine check, the record -- as `seed` has always
       // opened: a stopped engine is ENGINE_UNAVAILABLE, exit 3, before any login, prefill or
       // undo. This read the record and went on to a REST login, refused in its own words with
@@ -1108,7 +1247,7 @@ async function dispatch(
       // plan, and an import -- where the stat of the typed text failed with ENOTDIR and
       // this said "no such file". The refusal quotes what was typed.
       const file = joinPath(typed);
-      if (!pathIsFile(file)) throw new ReproError(`no such file: ${typed}`);
+      if (!pathIsFile(file)) throw new NotFoundError(`no such file: ${typed}`);
       // Each comma-separated term, stripped, or no filter for no `--only`: an EMPTY term is
       // kept. Dropped here, `--only ,` or `--only ' '` was an empty set, which the plan
       // reads as no filter at all -- so a filter that matches nothing applied the WHOLE
@@ -1162,7 +1301,7 @@ async function dispatch(
       if (bool(o.rollback))
         return await upgrade.rollback(text(o.name), { bundle: text(o.bundle), emit });
       if (text(o.to) === '')
-        throw new ReproError(
+        throw new ValidationError(
           'no target version given — use `--to 8.6.1` (or `--rollback` to undo)',
         );
       const plan = await upgrade.plan(text(o.name), text(o.to), { offline: bool(o.offline) });
@@ -1228,7 +1367,7 @@ async function dispatch(
           renderLoadtest(view, io);
         },
       );
-      return commandOutcome(result.data, result.exitCode);
+      return commandOutcome(result.data, result.exitCode, sloMissed(result.data));
     }
     case 'capacity': {
       const result = await runCapacityCli(
@@ -2081,7 +2220,7 @@ function renderUpgradePlan(plan: Bag, io: CliIo): void {
       'MongoDB',
       fromMongo + (plan.from_mongo === plan.to_mongo ? '' : `  ->  ${toTextAny(plan.to_mongo)}`),
     ],
-    ['image', `${toTextAny(plan.rc_image)}:${toTextAny(plan.to_version)}`],
+    ['image', imageRef(toTextAny(plan.rc_image), toTextAny(plan.to_version))],
     ['source', toTextAny(plan.source)],
   ]);
   for (const line of Array.isArray(plan.warnings) ? plan.warnings : [])
@@ -2179,6 +2318,7 @@ function summaryPanel(
   extraRows: readonly (readonly [string, string])[] = [],
 ): void {
   const record = require('../core/runner/record') as typeof RecordNS;
+  const topology = require('../core/topology') as typeof TopologyNS;
   const managedBy = meta.extra.mongo_managed_by ?? '';
   const mongo = isTruthy(managedBy)
     ? `${meta.mongoTag} (via the ${toTextAny(managedBy)})`
@@ -2186,7 +2326,8 @@ function summaryPanel(
   const rows: (readonly [string, string])[] = [
     ['Rocket.Chat', meta.rcVersion],
     ['MongoDB', mongo],
-    ['Preset', meta.preset],
+    // The presets without the deployment: multi-instance has its own instances line below.
+    ['Preset', String(topology.axesOfMeta(meta).preset ?? meta.preset)],
     // externalUrl, not rootUrl: with --https the browser wants the https URL.
     ['URL', record.externalUrl(meta)],
     ['Login', `admin / ${record.adminPass(meta)}`],
@@ -2230,10 +2371,10 @@ function noteLines(line: string, width: number): string[] {
  * code points -- prose wrapped to `min(consoleColumns(90), 88) - 6`, and commands set off and
  * never wrapped.
  */
-export function printNotes(meta: RecordNS.Metadata, io: CliIo): void {
+export async function printNotes(meta: RecordNS.Metadata, io: CliIo): Promise<void> {
   const notes = require('../core/lifecycle/notes') as typeof NotesNS;
   let groups: { title: unknown; rows: unknown; body: unknown; commands: unknown }[] =
-    notes.noteGroupsOf(meta);
+    await notes.noteGroupsOf(meta);
   if (groups.length === 0) {
     const flat = Array.isArray(meta.extra.notes) ? meta.extra.notes : [];
     if (flat.length === 0) return;
@@ -2721,7 +2862,11 @@ function renderImportPlan(io: CliIo, plan: Bag, dryRun: boolean): void {
 }
 
 /** Human output is an explicit part of every command, never a generic object dump. */
-export function renderHuman(invocation: Invocation, value: unknown, io: CliIo): void {
+export async function renderHuman(
+  invocation: Invocation,
+  value: unknown,
+  io: CliIo,
+): Promise<void> {
   const path = invocation.spec.path;
   const result = bag(value);
   const action = display(invocation.arguments.action);
@@ -2747,7 +2892,7 @@ export function renderHuman(invocation: Invocation, value: unknown, io: CliIo): 
         io.writeOut(`  ready when serving : houston ready --name ${meta.name}\n`);
         io.writeOut(`  follow logs        : houston logs --name ${meta.name} -f\n`);
       }
-      printNotes(meta, io);
+      await printNotes(meta, io);
       return;
     }
     case 'ready': {
@@ -2755,7 +2900,7 @@ export function renderHuman(invocation: Invocation, value: unknown, io: CliIo): 
       io.writeOut('✓ ready\n');
       summaryPanel(meta, io, [['Booted in', fmtDuration(Number(result.booted_s))]]);
       io.writeOut(`  next: houston logs --name ${meta.name} -f\n`);
-      printNotes(meta, io);
+      await printNotes(meta, io);
       return;
     }
     case 'down': {
@@ -2890,7 +3035,7 @@ export function renderHuman(invocation: Invocation, value: unknown, io: CliIo): 
       summaryPanel(meta, io);
       io.writeOut(`  api  : houston api --name ${meta.name} GET /api/v1/me\n`);
       io.writeOut(`  curl : ${meta.rootUrl}/api/info\n`);
-      printNotes(meta, io);
+      await printNotes(meta, io);
       return;
     }
     case 'users':
@@ -3158,7 +3303,9 @@ export function renderHuman(invocation: Invocation, value: unknown, io: CliIo): 
       return;
     case 'versions':
       io.writeOut(`Rocket.Chat ${display(result.rc_version)}\n`);
-      io.writeOut(`  image        : ${display(result.rc_image)}:${display(result.rc_version)}\n`);
+      io.writeOut(
+        `  image        : ${imageRef(display(result.rc_image), display(result.rc_version))}\n`,
+      );
       io.writeOut(
         `  mongo        : ${display(result.mongo_tag)}  (flavor: ${display(result.mongo_flavor)}, shell: ${display(result.mongo_shell)})\n`,
       );
@@ -3477,7 +3624,7 @@ export function createExecutor(io: CliIo, dependencies: HandlerDependencies = {}
       (result as { commandOutcome?: boolean }).commandOutcome === true
         ? (result as { data: unknown }).data
         : result;
-    if (!active()) renderHuman(invocation, data, io);
+    if (!active()) await renderHuman(invocation, data, io);
     return result;
   }
 }
@@ -3701,7 +3848,7 @@ export async function runMain(argv: readonly string[]): Promise<number> {
   try {
     unregister = eventlog.installEventlogSink();
     eventlog.configure({ via });
-    eventlog.started(argv.join(' '), cliActorAndOrigin()[0]);
+    eventlog.started(redactArgv(argv).join(' '), cliActorAndOrigin()[0]);
     recorded = true;
   } catch {
     /* logging must never stop the command */

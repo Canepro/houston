@@ -48,12 +48,15 @@ function inThisHome(printed: Printed | undefined): Printed | undefined {
   };
 }
 
-function captured(
-  write: (io: { writeOut: (t: string) => void; writeErr: (t: string) => void }) => void,
+async function captured(
+  write: (io: {
+    writeOut: (t: string) => void;
+    writeErr: (t: string) => void;
+  }) => void | Promise<void>,
 ) {
   let stdout = '';
   let stderr = '';
-  write({
+  await write({
     writeOut: (text) => {
       stdout += text;
     },
@@ -73,7 +76,7 @@ afterEach(() => {
   process.env.COLUMNS = columns;
 });
 
-it('prints progress events exactly as earlier releases did', () => {
+it('prints progress events exactly as earlier releases did', async () => {
   const events = [
     { message: 'pulling images', phase: 'pull', level: 'info', terminal: false },
     { message: 'info-done', phase: 'done', level: 'info', terminal: false },
@@ -84,14 +87,14 @@ it('prints progress events exactly as earlier releases did', () => {
   const recorded = RECORDED.events;
   const spec = COMMAND_SPECS.find((one) => one.path === 'ready');
   const invocation = { spec, arguments: {}, options: {}, events: null } as unknown as Invocation;
-  const ours = captured((io) => {
+  const ours = await captured((io) => {
     const emit = emitOf(invocation, io);
     for (const event of events) emit(event as Parameters<typeof emit>[0]);
   });
   expect(ours).toEqual(recorded);
 });
 
-it('prints resource rows exactly as earlier releases did', () => {
+it('prints resource rows exactly as earlier releases did', async () => {
   const rows = {
     'houston-x-rocketchat-1': { idle_cpu: 1.5, peak_cpu: 88.5, idle_mem: 400e6, peak_mem: 812.4e6 },
     'houston-x-rocketchat-2': { idle_cpu: 2, peak_cpu: 40, idle_mem: 380e6, peak_mem: 700e6 },
@@ -99,7 +102,7 @@ it('prints resource rows exactly as earlier releases did', () => {
     'houston-x-nats-1': { idle_cpu: 0, peak_cpu: 1, idle_mem: 10e6, peak_mem: 12e6 },
   };
   const recorded = RECORDED.resources;
-  const ours = captured((io) => {
+  const ours = await captured((io) => {
     renderResources(rows, io, 'x');
   });
   expect(ours).toEqual(recorded);
@@ -139,7 +142,7 @@ describe('workspace notes', () => {
     ['a scenario preset', { preset: 'oidc', extra: {} }],
   ];
 
-  it.each(records)('renders %s exactly as earlier releases did', (label, values) => {
+  it.each(records)('renders %s exactly as earlier releases did', async (label, values) => {
     // Earlier releases printed the recorded notes from this same record, as its repro.json
     // spells it: `old`, 8.5.1 on MongoDB 8.0, at http://localhost:3000, plus `values`.
     const recorded = inThisHome(RECORDED.notes[label]);
@@ -156,8 +159,8 @@ describe('workspace notes', () => {
       versionSource: 'map',
       extra: values.extra as Record<string, unknown>,
     });
-    const ours = captured((io) => {
-      printNotes(meta, io);
+    const ours = await captured(async (io) => {
+      await printNotes(meta, io);
     });
     expect(ours).toEqual(recorded);
   });

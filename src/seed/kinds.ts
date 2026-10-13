@@ -54,6 +54,11 @@ export const TEAM_CHANNEL_PRIVATE = 'team-channel-private';
 /** a child room of a parent room */
 export const DISCUSSION = 'discussion';
 export const DM = 'dm';
+export const GROUP_DM = 'group-dm';
+export const READ_ONLY = 'scenario-read-only';
+export const BROADCAST = 'scenario-broadcast';
+export const ARCHIVED = 'scenario-archived';
+export const PERMISSIONS = 'scenario-permissions';
 /** the room every workspace ships */
 export const GENERAL = 'general';
 
@@ -80,6 +85,7 @@ export const PRIVATE_KINDS: readonly string[] = Object.freeze([
   PRIVATE,
   TEAM_PRIVATE,
   TEAM_CHANNEL_PRIVATE,
+  PERMISSIONS,
 ]);
 
 /**

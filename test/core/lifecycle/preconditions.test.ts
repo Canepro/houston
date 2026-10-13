@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
+import { ValidationError } from '../../../src/lib/errors';
 import * as presets from '../../../src/lib/presets/index';
 import type { Resolved } from '../../../src/lib/versions';
 import type * as PolicyNS from '../../testsetup-policy';
@@ -288,8 +289,9 @@ describe('what Kubernetes refuses', () => {
         req({ version: '8.5.1', preset: 'ldap', params: { users: '3' } }),
       ),
     ).not.toThrow();
-    // Every preset is honest about it. `multi-instance` is a DEPLOYMENT on this runtime,
-    // so its legacy YAML correctly refuses here.
+    // Every listed preset is honest about it and works here. `multi-instance` is a
+    // DEPLOYMENT on this runtime -- no longer listed as a preset -- and its legacy spelling
+    // still refuses here.
     const verdicts = presets.listPresets().map((preset) => {
       try {
         refuseUnsupportedOnKubernetes(req({ version: '8.5.1', preset: preset.name }));
@@ -298,10 +300,32 @@ describe('what Kubernetes refuses', () => {
         return [preset.name, (error as Error).constructor.name];
       }
     });
-    expect(verdicts.filter(([, verdict]) => verdict !== 'ok')).toEqual([
-      ['multi-instance', 'ValidationError'],
-    ]);
+    expect(verdicts.filter(([, verdict]) => verdict !== 'ok')).toEqual([]);
+    expect(() =>
+      refuseUnsupportedOnKubernetes(req({ version: '8.5.1', preset: 'multi-instance' })),
+    ).toThrow("preset 'multi-instance'");
   });
+
+  it.each([
+    [{ policy: 'strict' }, "--set policy='strict' expects one of: optional, default, enforced"],
+    [
+      { colour: 'red' },
+      "unknown --set param(s) for preset 'e2ee': colour - valid: allow_unencrypted, files, policy, users",
+    ],
+  ])(
+    "refuses a single preset's bad --set %j in Docker's words, not as a missing adapter",
+    (params, said) => {
+      const req = createReq({ version: '8.5.1', runtime: 'kubernetes', preset: 'e2ee', params });
+      let caught: unknown;
+      try {
+        refuseUnsupportedOnKubernetes(req);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(ValidationError);
+      expect((caught as Error).message).toBe(said);
+    },
+  );
 
   it('still refuses a preset whose backing services have no adapter, naming them', () => {
     // The guard is what keeps a future preset from being recorded and never applied.
@@ -383,5 +407,60 @@ describe('the engine preflight', () => {
     expect((await outcome('1.29.2'))?.message).toContain('1.29.2');
     // And v2 passes, which is every working box.
     expect(await outcome('2.29.1')).toBeNull();
+  });
+});
+
+describe('an engine that runs no healthchecks', () => {
+  afterEach(() => {
+    jest.doMock('../../../src/core/runner/host', () =>
+      (require('../../testsetup-policy') as typeof PolicyNS).healthyHost(),
+    );
+    jest.resetModules();
+  });
+
+  /** preconditions, over a host whose engine is the one given. */
+  function withEngine(found: Record<string, unknown> | null, compose = '2.32.4') {
+    jest.resetModules();
+    jest.doMock('../../../src/core/runner/host', () => ({
+      ...(require('../../testsetup-policy') as typeof PolicyNS).healthyHost(),
+      engine: async () => found,
+      composeVersion: async () => compose,
+    }));
+    return require('../../../src/core/lifecycle/preconditions') as typeof PreconditionsNS;
+  }
+
+  const podman = { kind: 'podman', cgroupDriver: 'cgroupfs', healthchecks: false };
+  const waits = { services: { a: {}, b: { depends_on: { a: { condition: 'service_healthy' } } } } };
+  const plain = { services: { a: {}, b: { depends_on: ['a'] } } };
+
+  it('refuses a document that waits on health, says why and how, and lets --force try', async () => {
+    const pre = withEngine(podman);
+    await expect(pre.refuseHealthWaitsTheEngineCannotRun(waits, false, () => {})).rejects.toThrow(
+      /Podman here runs no container healthchecks \(cgroup manager 'cgroupfs'.*cgroup_manager = "systemd"/su,
+    );
+    const said: string[] = [];
+    await pre.refuseHealthWaitsTheEngineCannotRun(waits, true, (event) => said.push(event.message));
+    expect(said.join('\n')).toContain('--force: trying anyway');
+  });
+
+  it('lets a document that waits on nothing through, and every document on Docker', async () => {
+    await expect(
+      withEngine(podman).refuseHealthWaitsTheEngineCannotRun(plain, false, () => {}),
+    ).resolves.toBeUndefined();
+    await expect(
+      withEngine({ kind: 'docker', healthchecks: true }).refuseHealthWaitsTheEngineCannotRun(
+        waits,
+        false,
+        () => {},
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it('names podman-compose, which is not Compose v2', async () => {
+    await expect(
+      withEngine(null, 'podman-compose version 1.2.0').requireTheComposePlugin(),
+    ).rejects.toThrow(
+      '`docker compose` is podman-compose (podman-compose version 1.2.0), which houston does not support',
+    );
   });
 });

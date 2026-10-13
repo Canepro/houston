@@ -7,6 +7,7 @@ import * as path from 'node:path';
 import * as config from '../../src/lib/config';
 
 import { K6_IMAGE, PROM_RW_URL, SCENARIOS, k6Command, stageScenario } from '../../src/perf/k6';
+import type * as PolicyNS from '../testsetup-policy';
 
 /**
  * What earlier releases built for the shape tables below, recorded: the k6 environment for
@@ -150,6 +151,32 @@ describe('k6Command', () => {
     ]);
     expect(cmd[6]).toBe(`${dest}:/k6`);
     expect(cmd[cmd.length - 1]).toBe('/k6/messages.js');
+  });
+
+  it('runs as container root and a qualified image on rootless Podman, the host user on Docker', async () => {
+    makeWorkspace('ws');
+    const { dest, env } = stageScenario(BASE);
+    const [docker] = await k6Command(dest, env, false, 'ws', 'messages', false);
+    expect(docker).toContain(K6_IMAGE);
+    expect(docker[docker.indexOf('--user') + 1]).toBe(
+      `${String(process.getuid?.())}:${String(process.getgid?.())}`,
+    );
+    jest.resetModules();
+    jest.doMock('../../src/core/runner/host', () => ({
+      ...jest.requireActual<object>('../../src/core/runner/host'),
+      engine: async () => ({ kind: 'podman', rootless: true }),
+    }));
+    try {
+      const fresh = require('../../src/perf/k6') as { k6Command: typeof k6Command };
+      const [podman] = await fresh.k6Command(dest, env, false, 'ws', 'messages', false);
+      expect(podman[podman.indexOf('--user') + 1]).toBe('0:0');
+      expect(podman).toContain(`docker.io/${K6_IMAGE}`);
+    } finally {
+      jest.doMock('../../src/core/runner/host', () =>
+        (require('../testsetup-policy') as typeof PolicyNS).healthyHost(),
+      );
+      jest.resetModules();
+    }
   });
 
   it('keeps the PAT and the password OUT of the argv', async () => {

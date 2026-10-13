@@ -55,6 +55,10 @@ import { edge, resolveEdge, startResult, type StartResult } from './types';
  * workspaces is now twenty seconds.
  */
 export async function adopt(name: string): Promise<{ name: string; host: string }> {
+  return await paths.edgeLock(async () => await adoptLocked(name));
+}
+
+async function adoptLocked(name: string): Promise<{ name: string; host: string }> {
   const meta = await readMeta(name);
   // `orderedDict(extra)`: a copy that writes back in the record's key order and spelling, where a
   // spread is a new object in JavaScript's order.
@@ -91,6 +95,15 @@ export async function adopt(name: string): Promise<{ name: string; host: string 
   return { name, host };
 }
 
+/** What `systemdUnit` copies from the shell that printed it, in this order. */
+const SERVICE_ENVIRONMENT = [
+  'PATH',
+  'HOUSTON_HOME',
+  'AWS_PROFILE',
+  'AWS_REGION',
+  'AWS_DEFAULT_REGION',
+] as const;
+
 /**
  * The unit that keeps `houston serve` up.
  *
@@ -101,8 +114,27 @@ export async function adopt(name: string): Promise<{ name: string; host: string 
  *
  * `Restart=always` is only safe BECAUSE named accounts exist: with the old session token
  * every restart minted a new one and killed every bookmark.
+ *
+ * It carries the PATH of the shell that printed it. systemd starts a unit with its own
+ * bare PATH, so under nvm `bin/houston`'s `exec node` failed with "node: not found"
+ * (status 127) and the unit restarted forever; docker, aws and kubectl are found the same
+ * way. AWS_PROFILE and the region go with it when set, or the GUI's EKS pages ask AWS
+ * with the default profile rather than the one the operator signed in with.
  */
-export function systemdUnit(execStart: string, user: string): string {
+export function systemdUnit(
+  execStart: string,
+  user: string,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): string {
+  const lines = SERVICE_ENVIRONMENT.flatMap((key) => {
+    // HOUSTON_HOME too, ABSOLUTE: a unit printed from a non-default home served `User=`'s
+    // `~/.houston` -- other accounts, other workspaces -- and systemd starts it from `/`.
+    const given = environment[key] ?? '';
+    const value = key === 'HOUSTON_HOME' && given !== '' ? path.resolve(given) : given;
+    // Inside quotes systemd reads C escapes, and `%` starts a specifier.
+    const quoted = value.replace(/[\\"]/gu, '\\$&').replaceAll('%', '%%');
+    return value === '' ? [] : [`Environment="${key}=${quoted}"\n`];
+  });
   return (
     '[Unit]\n' +
     'Description=houston GUI\n' +
@@ -111,6 +143,7 @@ export function systemdUnit(execStart: string, user: string): string {
     '\n' +
     '[Service]\n' +
     `User=${user}\n` +
+    lines.join('') +
     `ExecStart=${execStart}\n` +
     'Restart=always\n' +
     '\n' +
@@ -139,7 +172,10 @@ async function prepareEdge(acmeEmail: string, acmeStaging: boolean): Promise<voi
 
   const wantAcme = acmeEmail !== '';
   if (!edgeSpec.installed()) {
-    await edgeSpec.write(wantAcme ? edge({ acmeEmail, acmeStaging }) : edge());
+    // Through `resolveEdge`, as the upgrade below and `serve` go: a bare `edge(...)` took the
+    // default challenge, so the first edge `up` wrote ignored `acme.challenge` and the dns-01
+    // credentials, and behind a tunnel asked for TLS-ALPN, which never validated.
+    await edgeSpec.write(wantAcme ? resolveEdge('', acmeEmail, { acmeStaging }) : edge());
   } else if (wantAcme && !hasAcme()) {
     // Upgrade in place: keep whatever domain `serve` gave it, add the resolver.
     await edgeSpec.write(resolveEdge(edgeSpec.servedDomain(), acmeEmail, { acmeStaging }));
@@ -179,7 +215,11 @@ async function adoptLegacyPortHolders(): Promise<void> {
  * Returns the whole result rather than its return code, because the return code was all
  * the callers ever got and a failed start is precisely the moment the output matters.
  */
-export async function up({ pull = true }: { pull?: boolean } = {}): Promise<DockerResult> {
+export async function up(options: { pull?: boolean } = {}): Promise<DockerResult> {
+  return await paths.edgeLock(async () => await upLocked(options));
+}
+
+async function upLocked({ pull = true }: { pull?: boolean } = {}): Promise<DockerResult> {
   const other = await foreignEdge();
   if (other !== '') {
     // Refuse rather than replace. `compose up` would happily take the other home's
@@ -209,7 +249,15 @@ export async function up({ pull = true }: { pull?: boolean } = {}): Promise<Dock
  * Never at install and never on plain `serve`: a laptop that never asks for a name never
  * learns this exists. Workspace and GUI HTTPS remain unrelated.
  */
-export async function ensureRunning({
+export async function ensureRunning(
+  options: { acmeEmail?: string; acmeStaging?: boolean } = {},
+): Promise<StartResult> {
+  // Preparation and compose must see one generation. Locking only the final `up`
+  // still lets a concurrent bare start replace a newly written ACME resolver.
+  return await paths.edgeLock(async () => await ensureRunningLocked(options));
+}
+
+async function ensureRunningLocked({
   acmeEmail = '',
   acmeStaging = false,
 }: { acmeEmail?: string; acmeStaging?: boolean } = {}): Promise<StartResult> {
@@ -348,6 +396,13 @@ export interface HostDeletion {
  * property is why a restart is affordable here.
  */
 export async function deleteHost(
+  host: string,
+  options: { confirm?: boolean; restart?: boolean } = {},
+): Promise<HostDeletion> {
+  return await paths.edgeLock(async () => await deleteHostLocked(host, options));
+}
+
+async function deleteHostLocked(
   host: string,
   { confirm = false, restart = true }: { confirm?: boolean; restart?: boolean } = {},
 ): Promise<HostDeletion> {

@@ -15,14 +15,16 @@ import type * as ReachabilityNS from '../../../src/core/kube/reachability';
 import type * as ToolsNS from '../../../src/core/kube/tools';
 import type * as WorkspaceNS from '../../../src/core/kube/workspace';
 import type * as PortsNS from '../../../src/core/lifecycle/ports';
+import type * as RunnerPortsNS from '../../../src/core/runner/ports';
 import type * as ReadyNS from '../../../src/core/lifecycle/ready';
 import type * as SeedingNS from '../../../src/core/lifecycle/seeding';
 import type * as SizingNS from '../../../src/core/lifecycle/sizing';
 import type * as TlsplanNS from '../../../src/core/lifecycle/tlsplan';
 import type * as RoutesNS from '../../../src/core/edge/routes';
 
-import { PreflightError, ValidationError } from '../../../src/lib/errors';
-import { nullEmit } from '../../../src/lib/events';
+import * as config from '../../../src/lib/config';
+import { ConflictError, PreflightError, ValidationError } from '../../../src/lib/errors';
+import { NOTHING_LEFT, nullEmit } from '../../../src/lib/events';
 import type { KubectlResult } from '../../../src/seams/kubectl';
 import { createRepro } from '../../../src/core/lifecycle/create-docker';
 import { createKubernetes } from '../../../src/core/lifecycle/create-k8s';
@@ -47,6 +49,8 @@ const mockCalls: string[] = [];
 const mockCreated: Record<string, unknown>[] = [];
 /** A name the cluster serves over HTTPS, through the edge; null for none. */
 let mockKtls: { host: string } | null = null;
+/** What the edge step does instead of registering the route; null registers it. */
+let mockRoute: (() => Promise<void>) | null = null;
 
 jest.mock('../../../src/core/lifecycle/tlsplan', () => {
   const actual = jest.requireActual<typeof TlsplanNS>('../../../src/core/lifecycle/tlsplan');
@@ -61,6 +65,7 @@ jest.mock('../../../src/core/lifecycle/tlsplan', () => {
         : actual.resolveTls(...args),
     kubernetesTlsPlan: () => Promise.resolve(mockKtls as never),
     routeKubernetesName: async (name: string, ktls: { host: string }) => {
+      if (mockRoute !== null) return await mockRoute();
       await routes.register(name, ktls.host, { passthrough: '10.0.0.1:30734' });
     },
   };
@@ -69,6 +74,11 @@ jest.mock('../../../src/core/lifecycle/sizing', () => ({
   ...jest.requireActual<typeof SizingNS>('../../../src/core/lifecycle/sizing'),
   // The host's free memory is not what any of these is about.
   checkCapacity: () => Promise.resolve(),
+}));
+jest.mock('../../../src/core/runner/ports', () => ({
+  ...jest.requireActual<typeof RunnerPortsNS>('../../../src/core/runner/ports'),
+  // Whether this machine happens to hold 8025 is not what any of these is about.
+  portFree: () => Promise.resolve(true),
 }));
 jest.mock('../../../src/core/lifecycle/ports', () => ({
   ...jest.requireActual<typeof PortsNS>('../../../src/core/lifecycle/ports'),
@@ -160,6 +170,7 @@ beforeEach(() => {
   mockHelm = '';
   mockCreate = null;
   mockKtls = null;
+  mockRoute = null;
   mockCalls.length = 0;
   mockCreated.length = 0;
 });
@@ -194,6 +205,260 @@ describe('a Kubernetes create', () => {
       createReq({ version: '8.5.1', name: 'kseed', runtime: 'kubernetes', offline: true }),
     );
     expect(mockCalls.filter((call) => call === 'wait' || call === 'seed')).toEqual([]);
+  });
+
+  it('honours up --env and --setting, records them, and carries them into a re-up', async () => {
+    // Both were accepted and silently dropped on Kubernetes: nothing read `req.env`, so the
+    // chart never saw them, the record never held them and a backup could not carry them.
+    await createKubernetes(
+      createReq({
+        version: '8.5.1',
+        name: 'kenv',
+        runtime: 'kubernetes',
+        offline: true,
+        env: { OVERWRITE_SETTING_Site_Name: 'Ticket', FEATURE: 'on' },
+      }),
+    );
+    expect(mockCreated[0]?.envOverrides).toEqual({
+      OVERWRITE_SETTING_Site_Name: 'Ticket',
+      FEATURE: 'on',
+    });
+    expect((await readMeta('kenv')).extra.env).toEqual({
+      OVERWRITE_SETTING_Site_Name: 'Ticket',
+      FEATURE: 'on',
+    });
+    // A re-up with no --env keeps them; one that names a key changes only that key.
+    await createKubernetes(
+      createReq({
+        version: '8.5.1',
+        name: 'kenv',
+        runtime: 'kubernetes',
+        offline: true,
+        env: { FEATURE: 'off' },
+      }),
+    );
+    expect(mockCreated[1]?.envOverrides).toEqual({
+      OVERWRITE_SETTING_Site_Name: 'Ticket',
+      FEATURE: 'off',
+    });
+    expect((await readMeta('kenv')).extra.env).toEqual(mockCreated[1]?.envOverrides);
+  });
+
+  it("records the preset's own fields and side ports, as Compose does", async () => {
+    // `mailpit_url` is what `admin.login` reads to fetch an email-2FA code, and this runtime
+    // never recorded it: every `api`, `seed` and readiness login to an email workspace here
+    // stopped at 2FA. `sidecar_ports` is what makes a second workspace's claim visible.
+    await createKubernetes(
+      createReq({
+        version: '8.5.1',
+        name: 'kmail',
+        preset: 'email',
+        runtime: 'kubernetes',
+        offline: true,
+      }),
+    );
+    const extra = (await readMeta('kmail')).extra;
+    expect(extra.mailpit_url).toBe('http://localhost:8025');
+    expect(extra.sidecar_ports).toEqual([8025]);
+    expect(extra.runtime).toBe('kubernetes');
+  });
+
+  it('refuses a second workspace that wants the same side port, naming the holder', async () => {
+    const req = (name: string) =>
+      createReq({ version: '8.5.1', name, preset: 'ldap', runtime: 'kubernetes', offline: true });
+    await createKubernetes(req('kldap-one'));
+    const refusal = createKubernetes(req('kldap-two'));
+    await expect(refusal).rejects.toBeInstanceOf(ConflictError);
+    await expect(createKubernetes(req('kldap-two'))).rejects.toThrow(/kldap-one/u);
+    expect(await exists('kldap-two')).toBe(false);
+    // Its own re-up is not a second claim.
+    await createKubernetes(req('kldap-one'));
+  });
+
+  it('refuses a --set the preset does not take, as Compose does', async () => {
+    await expect(
+      createKubernetes(
+        createReq({
+          version: '8.5.1',
+          name: 'ktypo',
+          preset: 'email',
+          runtime: 'kubernetes',
+          offline: true,
+          params: { verificaton: 'true' },
+        }),
+      ),
+    ).rejects.toThrow(
+      "unknown --set param(s) for preset 'email': verificaton - valid: verification",
+    );
+    expect(await exists('ktypo')).toBe(false);
+  });
+
+  it('installs a licence as a Secret, records only that it has one, and keeps it on a re-up', async () => {
+    const LICENSE = 'RCV3_bGljZW5jZQ==';
+    const req = (license: string) =>
+      createReq({ version: '8.5.1', name: 'klic', runtime: 'kubernetes', offline: true, license });
+    await createKubernetes(req(LICENSE));
+    expect([mockCreated[0]?.license, mockCreated[0]?.licensed]).toEqual([LICENSE, true]);
+    const meta = await readMeta('klic');
+    expect(meta.extra.licensed).toBe(true);
+    expect(JSON.stringify(meta)).not.toContain(LICENSE);
+    await createKubernetes(req(''));
+    expect([mockCreated[1]?.license, mockCreated[1]?.licensed]).toEqual(['', true]);
+  });
+
+  it('retires its own forwards on a re-up, and keeps them findable while it runs', async () => {
+    // The write-ahead record replaced the one holding the forwards, and the re-up then read
+    // them back from it: pid 0. Measured on k3s, on the release before this: the old forward
+    // kept the port, the readiness wait failed with exit 5, and `down --volumes` left both
+    // kubectl forwards running, holding 3505 and Mailpit's 8025.
+    mockPort = 3505;
+    mockCreate = (options) =>
+      Promise.resolve({
+        context: CONTEXT,
+        namespace: `houston-${String(options.name)}`,
+        release: 'rocketchat',
+        port_forward_pid: 4242,
+        scenario_forwards: { '8025': 4343 },
+      });
+    const req = () =>
+      createReq({ version: '8.5.1', name: 'kfw', runtime: 'kubernetes', offline: true });
+    await createKubernetes(req());
+    let duringReup: Record<string, unknown> = {};
+    mockCreate = async (options) => {
+      duringReup = (await readMeta('kfw')).extra;
+      return {
+        context: CONTEXT,
+        namespace: `houston-${String(options.name)}`,
+        port_forward_pid: 5252,
+      };
+    };
+    await createKubernetes(req());
+    expect([mockCreated[1]?.previousPid, mockCreated[1]?.previousPort]).toEqual([4242, 3505]);
+    expect([duringReup.port_forward_pid, duringReup.scenario_forwards]).toEqual([
+      4242,
+      { '8025': 4343 },
+    ]);
+    expect((await readMeta('kfw')).extra.port_forward_pid).toBe(5252);
+  });
+
+  it('warns that Rocket.Chat 9 may refuse an unlicensed LDAP login', async () => {
+    const said: string[] = [];
+    // Said while the request is settled, before the side ports: a workspace earlier in this
+    // file holds ldap's 8082, and this one's refusal for it is not what is under test.
+    await createKubernetes(
+      createReq({
+        version: '9.0.0',
+        name: 'k9',
+        preset: 'ldap',
+        runtime: 'kubernetes',
+        offline: true,
+      }),
+      (event) => said.push(event.message),
+    ).catch((error: unknown) => {
+      if (!(error instanceof ConflictError)) throw error;
+    });
+    expect(said.filter((line) => line.includes('Premium plan for LDAP login'))).toHaveLength(1);
+  });
+
+  it('composes several presets as one, and records the set as Compose does', async () => {
+    // Side ports earlier cases in this file do not hold.
+    await createRepro(
+      createReq({
+        version: '8.5.1',
+        name: 'kcombo',
+        preset: 'livechat+s3_minio',
+        params: { 'livechat.agents': '2' },
+        runtime: 'kubernetes',
+        offline: true,
+      }),
+    );
+    const handed = mockCreated.at(-1)?.preset as { name: string; kubernetesManifests: string[] };
+    expect(handed.name).toBe('livechat+s3_minio');
+    expect(handed.kubernetesManifests.length).toBeGreaterThan(1);
+    const meta = await readMeta('kcombo');
+    expect([
+      meta.preset,
+      meta.extra.presets,
+      meta.extra.preset_params,
+      'params' in meta.extra,
+    ]).toEqual([
+      'livechat+s3_minio',
+      ['livechat', 's3_minio'],
+      { livechat: { agents: '2' }, s3_minio: {} },
+      false,
+    ]);
+  });
+
+  it('refuses to swap presets in place, and brings one back as it was with no --preset', async () => {
+    await createRepro(
+      createReq({
+        version: '8.5.1',
+        name: 'kswap',
+        preset: 'saml',
+        runtime: 'kubernetes',
+        offline: true,
+      }),
+    );
+    // No --preset: brought back as it was, not re-installed without its settings.
+    await createRepro(createReq({ version: '8.5.1', name: 'kswap', preset: '', offline: true }));
+    expect((mockCreated.at(-1)?.preset as { name: string }).name).toBe('saml');
+    // A different set would leave the old presets' objects behind: refused, by name.
+    await expect(
+      createRepro(
+        createReq({
+          version: '8.5.1',
+          name: 'kswap',
+          preset: 'livechat',
+          runtime: 'kubernetes',
+          offline: true,
+        }),
+      ),
+    ).rejects.toThrow("'kswap' runs the saml preset and this asks for livechat");
+  });
+
+  it('refuses a variable the chart writes itself before anything exists', async () => {
+    await expect(
+      createKubernetes(
+        createReq({
+          version: '8.5.1',
+          name: 'kowned',
+          runtime: 'kubernetes',
+          offline: true,
+          env: { ROOT_URL: 'http://elsewhere' },
+        }),
+      ),
+    ).rejects.toThrow(ValidationError);
+    expect(await exists('kowned')).toBe(false);
+    expect(mockCreated).toEqual([]);
+  });
+
+  it('pulls from the box-wide rc_image, as Compose does, and the flag still wins', async () => {
+    // Only `--rc-image` was read here, so a box pointed at a mirror with `config set
+    // rc_image` pulled every Kubernetes workspace from Docker Hub.
+    config.updateConfig((cfg) => {
+      cfg.rc_image = 'mirror.example/rocketchat';
+    });
+    try {
+      await createKubernetes(
+        createReq({ version: '8.5.1', name: 'kmirror', runtime: 'kubernetes', offline: true }),
+      );
+      await createKubernetes(
+        createReq({
+          version: '8.5.1',
+          name: 'kflag',
+          runtime: 'kubernetes',
+          offline: true,
+          rcImage: 'flag.example/rc',
+        }),
+      );
+    } finally {
+      config.updateConfig((cfg) => {
+        delete cfg.rc_image;
+      });
+    }
+    const images = mockCreated.map((options) => (options.resolved as { rcImage: string }).rcImage);
+    expect(images).toEqual(['mirror.example/rocketchat', 'flag.example/rc']);
+    expect((await readMeta('kmirror')).rcImage).toBe('mirror.example/rocketchat');
   });
 
   it('passes the workspace the URL it just computed', async () => {
@@ -318,5 +583,87 @@ describe('a Kubernetes create', () => {
     // Anything that would BUILD is a failure of the gate, not of the stub.
     expect(mockCalls.filter((call) => call.startsWith('assertNamespaceAvailable'))).toEqual([]);
     expect(mockCreated).toEqual([]);
+  });
+});
+
+describe('a fresh Kubernetes create that failed', () => {
+  it('leaves no record when the edge refuses before anything exists', async () => {
+    // The route step ran outside the rollback: another home's edge holding :443 refused it,
+    // exit 8, and the write-ahead record of a workspace that never existed stayed behind.
+    mockKtls = { host: 'kedge.example.test' };
+    mockRoute = () =>
+      Promise.reject(new ConflictError('another houston edge is already running on this machine'));
+    kube.run = (argv) =>
+      Promise.resolve({
+        argv,
+        returncode: 1,
+        stdout: '',
+        stderr: 'Error from server (NotFound): namespaces "houston-kedge" not found',
+      });
+    const said: string[] = [];
+    await expect(
+      createKubernetes(
+        createReq({ version: '8.5.1', name: 'kedge', runtime: 'kubernetes', offline: true }),
+        (event) => said.push(event.message),
+      ),
+    ).rejects.toThrow('another houston edge');
+    expect(await exists('kedge')).toBe(false);
+    // No route was registered, so none is said to be removed.
+    expect(said.some((line) => line.includes('removing the edge route'))).toBe(false);
+  });
+
+  it('leaves no record when nothing of it is left in the cluster', async () => {
+    // The rollback removed the namespace and the write-ahead record stayed: a "down"
+    // workspace that claimed its ports (the next email create was refused for 8025) and
+    // whose panel said its data volume was still there.
+    mockCreate = () => Promise.reject(new Error('stopped by admin before it finished'));
+    kube.run = (argv) =>
+      Promise.resolve({
+        argv,
+        returncode: 1,
+        stdout: '',
+        stderr: argv.includes('namespace')
+          ? 'Error from server (NotFound): namespaces "houston-kgone" not found'
+          : '',
+      });
+    const codes: string[] = [];
+    await expect(
+      createKubernetes(
+        createReq({
+          version: '8.5.1',
+          name: 'kgone',
+          runtime: 'kubernetes',
+          offline: true,
+        }),
+        (event) => codes.push(event.code),
+      ),
+    ).rejects.toThrow('stopped by admin');
+    expect(await exists('kgone')).toBe(false);
+    // Said with a code, so a stopped job's last line does not go on to say "what it had done
+    // stays" right under it.
+    expect(codes).toContain(NOTHING_LEFT);
+
+    // One whose namespace survived keeps its record: there is something to point at.
+    kube.run = (argv) =>
+      Promise.resolve({
+        argv,
+        returncode: 0,
+        stdout: JSON.stringify({
+          metadata: {
+            name: 'houston-kkept',
+            labels: { 'app.kubernetes.io/managed-by': 'houston' },
+          },
+        }),
+        stderr: '',
+      });
+    codes.length = 0;
+    await expect(
+      createKubernetes(
+        createReq({ version: '8.5.1', name: 'kkept', runtime: 'kubernetes', offline: true }),
+        (event) => codes.push(event.code),
+      ),
+    ).rejects.toThrow('stopped by admin');
+    expect(await exists('kkept')).toBe(true);
+    expect(codes).not.toContain(NOTHING_LEFT);
   });
 });

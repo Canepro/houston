@@ -6,6 +6,7 @@
  * `composeExec*` signatures rather than inventing a shape.
  */
 import * as fs from 'node:fs';
+import { Readable } from 'node:stream';
 
 import { capture, stream } from '../../seams/exec';
 
@@ -17,11 +18,14 @@ import { namespaceFor } from './namespace';
 /**
  * Run a command in the MongoDB pod, capturing stdout. Mirrors `composeExecCapture`,
  * including its `[1, '']` on failure.
+ *
+ * `input`, in all three, goes on the command's stdin first: it is how a password reaches a
+ * database tool without being an argument (`toolAuthenticated`).
  */
 export async function execCapture(
   name: string,
   argv: readonly string[],
-  { context, timeout }: { context: string; timeout?: number },
+  { context, timeout, input = '' }: { context: string; timeout?: number; input?: string },
 ): Promise<[number, string]> {
   const res = await kube.run(
     [
@@ -31,13 +35,14 @@ export async function execCapture(
       '-n',
       await namespaceFor(name),
       'exec',
+      ...(input !== '' ? ['-i'] : []),
       `${MONGO_SERVICE}-0`,
       '-c',
       'mongod',
       '--',
       ...argv,
     ],
-    { timeout: timeout ?? APPLY_TIMEOUT, own: isOurs(context) },
+    { timeout: timeout ?? APPLY_TIMEOUT, own: isOurs(context), ...(input !== '' ? { input } : {}) },
   );
   return [res.returncode, res.stdout];
 }
@@ -60,7 +65,7 @@ export async function execToFile(
   name: string,
   argv: readonly string[],
   destination: string,
-  { context, timeout }: { context: string; timeout?: number },
+  { context, timeout, input = '' }: { context: string; timeout?: number; input?: string },
 ): Promise<[number, string]> {
   const full: [string, ...string[]] = [
     'kubectl',
@@ -69,6 +74,7 @@ export async function execToFile(
     '-n',
     await namespaceFor(name),
     'exec',
+    ...(input !== '' ? ['-i'] : []),
     `${MONGO_SERVICE}-0`,
     '-c',
     'mongod',
@@ -82,6 +88,7 @@ export async function execToFile(
     const result = await stream(full, {
       encoding: null,
       stdoutSink: sink,
+      ...(input !== '' ? { input } : {}),
       timeoutMs: (timeout ?? INSTALL_TIMEOUT) * 1000,
       ...(env !== undefined ? { env } : {}),
       onStderr: (chunk) => {
@@ -107,7 +114,7 @@ export async function execFromFile(
   name: string,
   argv: readonly string[],
   source: string,
-  { context, timeout }: { context: string; timeout?: number },
+  { context, timeout, input = '' }: { context: string; timeout?: number; input?: string },
 ): Promise<[number, string]> {
   const full: [string, ...string[]] = [
     'kubectl',
@@ -128,7 +135,13 @@ export async function execFromFile(
     const result = await capture(full, {
       encoding: null,
       mergeStderr: true,
-      stdin: fs.createReadStream(source),
+      stdin: Readable.from(
+        (async function* () {
+          if (input !== '') yield Buffer.from(input);
+          yield* fs.createReadStream(source);
+        })(),
+        { objectMode: false },
+      ),
       timeoutMs: (timeout ?? INSTALL_TIMEOUT) * 1000,
       ...(env !== undefined ? { env } : {}),
     });

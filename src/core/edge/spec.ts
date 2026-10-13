@@ -63,21 +63,33 @@ export function traefikCommand(value: Edge): string[] {
     // the host side, in `ports` below.
     '--entryPoints.websecure.address=:443',
     '--entryPoints.web.address=:80',
+    // This edge can solve Docker HTTP-01 while passing a Kubernetes name's challenge
+    // to cert-manager. Traefik otherwise gives its own solver reserved MaxInt priority
+    // and answers 404 for a token it does not own. Bypass lowers that router's priority;
+    // the host-scoped cluster route wins, while Docker challenges still reach the
+    // internal solver (our terminating routers listen only on websecure). Do not apply
+    // it to websecure: this change does not alter the edge's TLS-ALPN handling.
+    '--entryPoints.web.allowACMEByPass=true',
     // Typing the bare hostname reaches nothing otherwise: browsers try http first. Same
     // redirect the official rocketchat-compose Traefik files use.
     //
-    // ...and :80 redirected to it, EXCEPT under http-01. An entryPoint redirection is a
-    // middleware on the entrypoint applied to every router on it -- measured: an explicit
-    // router for `/.well-known/acme-challenge/` on `web` still answered 301 -- so leaving
-    // it on would redirect Let's Encrypt away from the challenge it came to fetch. The
-    // cost is stated rather than hidden: while http-01 is in use, an `http://` URL does
-    // not upgrade itself.
+    // ...and :80 redirected to it, EXCEPT under http-01. The cost is stated rather than
+    // hidden: while http-01 is in use, an `http://` URL does not upgrade itself.
+    //
+    // PRIORITY 1. The redirection is a router Traefik generates, at MaxInt32-1 unless told
+    // otherwise -- which is why an explicit router for `/.well-known/acme-challenge/` on
+    // `web` was measured answering 301: it lost on priority. At 1 the redirect is the
+    // catch-all it is meant to be, and the one route this edge puts on :80 -- a Kubernetes
+    // name's http-01 challenge, passed to its cluster (`passthroughRouteYml`) -- wins.
+    // Without that cert-manager's challenge was redirected to HTTPS, where the cluster has
+    // no solver, and a `--domain` workspace on a local cluster never got a certificate.
     ...(value.acmeChallenge === 'http'
       ? []
       : [
           '--entryPoints.web.http.redirections.entryPoint.to=websecure',
           '--entryPoints.web.http.redirections.entryPoint.scheme=https',
           '--entryPoints.web.http.redirections.entryPoint.permanent=true',
+          '--entryPoints.web.http.redirections.entryPoint.priority=1',
         ]),
     // Only with an email to register the ACME account against. Without one the edge still
     // serves every LOCAL-CA name perfectly well -- which is what lets `up --https` start it
@@ -129,6 +141,10 @@ export function composeDoc(value: Edge): ComposeDoc {
 
 /** Materialise `<home>/edge/` -- compose file and the watched directory. */
 export async function write(value: Edge): Promise<void> {
+  await paths.edgeLock(async () => await writeSpec(value));
+}
+
+async function writeSpec(value: Edge): Promise<void> {
   fs.mkdirSync(paths.dynamicDir(), { recursive: true });
   // Before compose mounts it: a bind-mount source that does not exist is created by
   // Docker, owned by root, and then houston cannot write certificates into it.
@@ -173,6 +189,14 @@ export async function write(value: Edge): Promise<void> {
  */
 export function current(): Edge | null {
   if (!installed()) return null;
+  const recorded = recordedSpec();
+  if (recorded !== null) return recorded;
+  const domain = servedDomain();
+  return edge({ domain, wildcard: domain !== '' && dnsEnvVars().length > 0 });
+}
+
+/** The spec `write()` recorded, or null when there is none to rebuild from faithfully. */
+function recordedSpec(): Edge | null {
   try {
     // `jsonLoads`, which keeps a float a float: 8080.0 is rebuilt as 8080.0, not 8080.
     const parsed: unknown = jsonLoads(
@@ -184,8 +208,22 @@ export function current(): Edge | null {
   } catch {
     // Fall through rather than fail a start.
   }
-  const domain = servedDomain();
-  return edge({ domain, wildcard: domain !== '' && dnsEnvVars().length > 0 });
+  return null;
+}
+
+/**
+ * Regenerate the compose file from the RECORDED spec, so a flag a newer houston gives the
+ * edge reaches one an earlier houston wrote; `ensureRunning` then recreates the container
+ * only if its command changed. Never from `current()`'s fallback, which loses the email and
+ * the GUI's address. False when there is nothing recorded to rebuild from.
+ */
+export async function rewrite(): Promise<boolean> {
+  return await paths.edgeLock(async () => {
+    const recorded = installed() ? recordedSpec() : null;
+    if (recorded === null) return false;
+    await write(recorded);
+    return true;
+  });
 }
 
 /**

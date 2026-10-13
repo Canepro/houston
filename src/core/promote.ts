@@ -46,6 +46,7 @@ import type * as RecordNS from './runner/record';
 import type * as SessionsNS from './sessions';
 import type * as UsersNS from './users';
 import type * as EdgeSpecNS from './edge/spec';
+import { PROJECT as EDGE_PROJECT } from './edge/paths';
 import type * as FirstrunNS from './firstrun';
 import type * as TlsNS from './tls';
 import type * as ConfigNS from '../lib/config';
@@ -137,7 +138,7 @@ function workspaceLockNames(home: string): string[] {
 }
 
 /**
- * The five state locks for this home, expanded and in the fixed order.
+ * The established state locks, expanded in order, followed by the shared edge lock.
  *
  * Relative to the home so the two implementations' answers can be compared as strings:
  * "the same order" is only checkable if each can say what its order IS.
@@ -148,11 +149,14 @@ export function lockPaths(home: string): string[] {
     if (entry === 'locks/<workspace>.lock') out.push(...workspaceLockNames(home));
     else out.push(entry);
   }
+  // Shared edge mutations run after their caller's workspace lock. Promotion must
+  // wait for edge-only operations too, without changing the established peer order.
+  out.push(`locks/${EDGE_PROJECT}.lock`);
   return out;
 }
 
 /**
- * Hold all five state locks, taken in `lock.LOCK_ORDER`, released in reverse.
+ * Hold the established state locks and then the shared edge lock, released in reverse.
  *
  * Recursive rather than a loop, because `withFileLock` is scoped: each lock has to stay
  * held for the duration of the next one's acquisition and of the body, and unwinding has

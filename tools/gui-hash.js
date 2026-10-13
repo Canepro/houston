@@ -5,7 +5,27 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const EXPECTED = '8139ae2bed742b622631707c76da3dd1ec3cc739f69f15d5a34187f6b5f13603';
+const EXPECTED = '523f8658407b6806a0bac865dc76c58c69c02cebf278953e005f991bf81d6864';
+// Re-recorded for a create's toasts naming the workspace, as Activity does, not the version.
+// Re-recorded for the create dialog's footer cleared once its job has stopped or failed.
+// Re-recorded for Okta sign-in: the account chip's Okta name, the People page's Okta email,
+// "houston password" in the menu and dialog, the sign-in page's Okta button style, and the
+// linked email in its own uncoloured class, its whole address in the title.
+// Re-recorded for a GUI request given up after API_TIMEOUT_MS, so a read that never answers
+// cannot freeze the list.
+// Re-recorded for the e2ee preset's four options, a refused live chart asked once per
+// selection, a create still running after a reload shown on the rail, and a page restored
+// after sign-out sent to sign-in.
+// Re-recorded for retained job output reopening and truthful acceptance/terminal audit.
+// Re-recorded for the pending Logs batch capped while rendering frames are delayed.
+// Re-recorded for releasing obsolete Logs views and streams on tab and top-bar navigation.
+// Re-recorded for owner-only detail refresh after handover and tablet navigation fit.
+// Re-recorded for persisted navigation, stable rail focus, readonly backup controls,
+// Docker log reconnection and explicit unavailable status after a failed poll.
+// Re-recorded for shared seed scenarios/history controls, complete-verification colours,
+// planned/read feature counts, date ranges, and personal-star account locations.
+// Re-recorded for the footer naming an unreadable kubeconfig ("k8s: kubeconfig unreadable")
+// where it said "not set up" beside a Clusters page giving the reason (acceptance L6-07).
 // First recorded, when the GUI was frozen, from:
 //   find houston/data/webui -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum
 // Re-recorded once, deliberately, for six comment-only edits that name the TypeScript
@@ -75,6 +95,36 @@ const EXPECTED = '8139ae2bed742b622631707c76da3dd1ec3cc739f69f15d5a34187f6b5f136
 // drawn before its own read, and one workspace-list read at a time. Then the review's
 // three: a build hides only its own name in its own region, Create promises <name>.<zone>
 // only where the server will make it, and "Off" comes back chosen after a zoned cluster.
+// Re-recorded for the EKS setup's Re-check: it says it is checking and when it last
+// checked, and a server started without AWS_PROFILE names the profiles it could use.
+// Re-recorded for Stop on a running job's output dialog, which ends a stuck job and says
+// it was stopped, and for the cluster delete dialog saying what --force does and does not skip.
+// Re-recorded for Stop offered only on a job the server says may be stopped.
+// Re-recorded for the workspace panel's "About this scenario" link back at its small size: the
+// wizard's `.linkbtn { font: inherit }` reset it everywhere.
+// Re-recorded for the create dialog's options (js/options.js, approved prototype 2026-10-08):
+// presets ticked from a list with each one's settings, the license (masked), the version's
+// kind and a CI build's base release, the 9.0 notice; privileged fields shown to members
+// and disabled when the policy keeps them to admins; preset chips, CI build and Licensed in
+// the workspace panel.
+// Re-recorded for the create dialog titling its progress with the name the server settled
+// on (the job's `workspace-name` event), where it guessed `rc-<version>`.
+// Re-recorded for the Clusters page's This-machine Kubernetes row saying "Reading…" before its
+// list arrives and "Not answering" when it could not be read, where it said there was no
+// cluster on this machine.
+// Re-recorded for the cluster rows following every read of the list, so the page drawn
+// after the page load's read shows the local cluster rather than "no cluster on this machine".
+// Re-recorded for the 2026-10-09 acceptance fixes: a refusal toast drawn above an open dialog,
+// a create dialog that opens empty, no bare refresh() after a restore or upgrade, wrapping
+// note rows, an Overview that follows a starting workspace, "k8s: ?" and "Reading…" while the
+// probe is pending, an unreadable kubeconfig said with its reason, readable "down" words,
+// a 390 px rail and tab cue, a member told a CI build is admin-only, a Kubernetes log stream
+// that follows a restarted pod, Stop inside the create dialog, and "stopped" for a stopped job.
+// Re-recorded for three GUI gaps the same run found: "Hand over…" in a workspace's pane and
+// its dialog, a delete confirm that names that way instead of a shell command, a Backups page
+// listing every bundle on the box with restore as new from it, a restore-as-new dialog that
+// says a held side port before anything starts, and "Roll back to <version>" behind a red
+// confirm.
 const ASSET_ROOT = 'data/webui';
 const RECORDED_LABEL = 'houston/data/webui';
 const ASSETS = [
@@ -89,6 +139,7 @@ const ASSETS = [
   'js/jobs.js',
   'js/logs.js',
   'js/main.js',
+  'js/options.js',
   'js/people.js',
   'js/perf.js',
   'js/render.js',

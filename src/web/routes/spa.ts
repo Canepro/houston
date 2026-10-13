@@ -84,6 +84,10 @@ function sendSpa(request: FastifyRequest, reply: FastifyReply): FastifyReply {
     stat = fs.statSync(candidate);
   }
   if (!stat.isFile()) return reply.code(404).send({ detail: 'Not Found' });
+  // The page itself is never stored. Back after signing out showed a cached shell whose
+  // modules were then sent to sign-in, so nothing ran; unstored, Back asks the server, and a
+  // signed-out browser is redirected to sign-in. The modules keep `no-cache` and their ETag.
+  if (contentType(candidate).startsWith('text/html')) reply.header('Cache-Control', 'no-store');
   const etagBase = `${String(stat.mtimeMs / 1000)}-${String(stat.size)}`;
   const etag = `"${createHash('md5').update(etagBase).digest('hex')}"`;
   const lastModified = stat.mtime.toUTCString();

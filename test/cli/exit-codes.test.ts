@@ -131,24 +131,71 @@ describe("earlier releases' exit codes and stable errors, through actual argv", 
     jest.doMock('../../src/seed/plan', () => ({ planFrom: jest.fn(() => ({})) }));
     jest.doMock('../../src/seed/apply', () => ({ seed: jest.fn(async () => ({ users: 1 })) }));
     jest.doMock('../../src/core/lifecycle/seeding', () => ({
-      checkSeed: jest.fn(async () => ({ ok: false, faults: ['missing alice'] })),
+      seedPrepared: jest.fn(async () => ({
+        users: 1,
+        verification: { ok: false, faults: ['missing alice'] },
+      })),
     }));
     const result = await command(['seed', '--name', 'sample', '--verify-seed']);
     expect(result.code).toBe(7);
     expect(result.stderr).toContain('seed verification failed: 1 mismatch(es)');
   });
 
+  test('an unproven seed prints the unreadable rooms and their actual API reasons', async () => {
+    jest.doMock('../../src/core/lifecycle/naming', () => ({
+      resolveName: jest.fn(async (name: string) => name),
+    }));
+    jest.doMock('../../src/core/runner/record', () => ({
+      readMeta: jest.fn(async () => ({ name: 'sample', rootUrl: 'http://127.0.0.1:3000' })),
+      adminPass: jest.fn(() => 'admin123'),
+    }));
+    jest.doMock('../../src/core/lifecycle/admin', () => ({
+      login: jest.fn(async () => ({ token: 'token', userId: 'admin' })),
+    }));
+    jest.doMock('../../src/core/runner/locks', () => ({
+      reproLock: jest.fn(async (_name: string, fn: () => Promise<unknown>) => await fn()),
+    }));
+    jest.doMock('../../src/seed/plan', () => ({ planFrom: jest.fn(() => ({})) }));
+    jest.doMock('../../src/core/lifecycle/seeding', () => ({
+      seedPrepared: jest.fn(async () => ({
+        users: 1,
+        verification: {
+          ok: null,
+          faults: [],
+          unreadable: [
+            {
+              what: 'dm-alice-bob',
+              why: 'seed request /api/v1/chat.getMessage was refused (HTTP 429, error-too-many-requests)',
+            },
+            { what: 'private-room', why: 'seed readback ended before its total' },
+          ],
+        },
+      })),
+    }));
+    const result = await command(['seed', '--name', 'sample', '--verify-seed']);
+    expect(result.code).toBe(7);
+    expect(result.stdout).toContain('dm-alice-bob: seed request /api/v1/chat.getMessage');
+    expect(result.stdout).toContain('HTTP 429, error-too-many-requests');
+    expect(result.stdout).toContain('private-room: seed readback ended before its total');
+    expect(result.stdout).not.toContain('no reason recorded');
+    expect(result.stderr).toContain('seed verification could not run');
+  });
+
   // `api ... --data '{'` is not here any more. With no workspace named it is earlier
   // releases' exit 2 ("no name given"), because `api` reads the body only after the name,
   // the engine and the login; this row held this build's earlier order, which refused the
   // body first.
+  // These three exited 1, earlier releases' generic code, and were pinned at it. Moved on
+  // purpose (L7-07): 1.x parity no longer binds the exit codes, and the contract
+  // (automation.md) says 2 for a call that is wrong and 4 for a named thing that is not
+  // there -- what `up --set users=abc` and `restore <missing bundle>` already answered.
   test.each([
-    [['config', 'get', 'not.a.key'], 'unknown key'],
-    [['upgrade'], 'no target version given'],
-    [['config-import', '/definitely/missing/settings.json'], 'no such file'],
-  ])('%j retains the generic exit 1 of earlier releases', async (argv, message) => {
+    [['config', 'get', 'not.a.key'], 2, 'unknown key'],
+    [['upgrade'], 2, 'no target version given'],
+    [['config-import', '/definitely/missing/settings.json'], 4, 'no such file'],
+  ])('%j exits %i', async (argv, code, message) => {
     const result = await command(argv);
-    expect(result.code).toBe(1);
+    expect(result.code).toBe(code);
     expect(result.stderr).toContain(message);
   });
 });

@@ -59,6 +59,13 @@ function recordedListing(
   return answer[0] === 'ok' ? ['ok', answer[1].map(recordedPreset)] : answer;
 }
 
+/** Keep every old row byte-exact; the new preset has its own complete contract spec. */
+function legacyCatalogue(): Preset[] {
+  const rows = listPresets();
+  expect(rows.filter((preset) => preset.name === 'e2ee')).toHaveLength(1);
+  return rows.filter((preset) => preset.name !== 'e2ee');
+}
+
 /** Every field a Preset carries, paired with the snake_case name earlier releases dump. */
 const FIELDS: readonly (readonly [keyof Preset, string])[] = [
   ['name', 'name'],
@@ -104,8 +111,8 @@ function expectSame(ours: Preset, expected: Record<string, unknown>): void {
 }
 
 describe('the shipped catalogue', () => {
-  it('lists the same scenario names earlier releases derive', () => {
-    expect(scenarioNames()).toEqual(recorded('scenario_names'));
+  it('preserves the recorded names and adds the E2EE scenario in sorted order', () => {
+    expect(scenarioNames()).toEqual([...(recorded('scenario_names') as string[]), 'e2ee'].sort());
   });
 
   it.each([
@@ -237,7 +244,7 @@ describe('a user file', () => {
   it('gives the same catalogue earlier releases give, in the same order', () => {
     writeUserPreset('zzz', 'name: zzz\ndescription: last\n');
     const expected = (recorded('catalogue with zzz') as string[]).map(recordedPreset);
-    const ours = listPresets();
+    const ours = legacyCatalogue();
     expect(ours.map((p) => p.name)).toEqual(expected.map((p) => p.name));
     for (let i = 0; i < ours.length; i += 1) {
       expectSame(ours[i] as Preset, expected[i] as Record<string, unknown>);
@@ -290,7 +297,7 @@ describe('the catalogue, as earlier releases order and sort it', () => {
       const expected = (recorded('catalogue with the sorting files') as string[]).map(
         recordedPreset,
       );
-      const ours = listPresets();
+      const ours = legacyCatalogue();
       expect(ours.map((p) => p.name)).toEqual(expected.map((p) => p.name));
       ours.forEach((preset, at) => expectSame(preset, expected[at] as Record<string, unknown>));
       // Named, so a failure says which of them regressed.
@@ -329,7 +336,7 @@ describe('a user presets directory earlier releases read their own way', () => {
     const expected = recordedListing(key);
     let ours: Preset[];
     try {
-      ours = listPresets();
+      ours = legacyCatalogue();
     } catch (error) {
       expect(['raised', (error as Error).constructor.name, (error as Error).message]).toEqual(
         expected,

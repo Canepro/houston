@@ -371,9 +371,23 @@ export async function releaseValues(
   release: string,
   namespace: string,
   context: string,
+  { all = false }: { all?: boolean } = {},
 ): Promise<Record<string, unknown>> {
   const res = await kube.run(
-    ['helm', 'get', 'values', release, '--kube-context', context, '-n', namespace, '-o', 'json'],
+    [
+      'helm',
+      'get',
+      'values',
+      release,
+      '--kube-context',
+      context,
+      '-n',
+      namespace,
+      // `--all`: the chart's defaults as well, merged as the release was rendered with them.
+      ...(all ? ['--all'] : []),
+      '-o',
+      'json',
+    ],
     { timeout: APPLY_TIMEOUT, own: isOurs(context) },
   );
   if (res.returncode !== 0) {
@@ -420,6 +434,40 @@ async function runImageUpgrade(
     { input: dumps(values), timeout: INSTALL_TIMEOUT, env: helmEnv(context) },
   );
   if (res.returncode !== 0) throw new DockerError(`helm upgrade failed: ${why(res)}`);
+}
+
+/**
+ * Render the Rocket.Chat release again, from the chart version and the values it is deployed
+ * with, so the only thing that can change is what the cluster now lets the chart render.
+ *
+ * A chart's templates read the cluster as well as their values: Rocket.Chat's renders its
+ * PodMonitor only where the cluster serves that kind (see `monitoring.ensurePodMonitor`).
+ */
+export async function rerenderRelease(namespace: string, context: string): Promise<void> {
+  const res = await kube.run(
+    ['helm', 'list', '--kube-context', context, '-n', namespace, '-o', 'json'],
+    { timeout: APPLY_TIMEOUT, own: isOurs(context) },
+  );
+  let rows: Record<string, unknown>[] = [];
+  try {
+    rows = listOf(JSON.parse(res.stdout || '[]'));
+  } catch {
+    // Unreadable is refused below, with whatever helm said.
+  }
+  // `helm list` names the chart with its version: `rocketchat-7.0.2`.
+  const chart = String(rows.find((row) => row.name === RELEASE)?.chart ?? '');
+  const prefix = `${CHART.slice(CHART.lastIndexOf('/') + 1)}-`;
+  if (res.returncode !== 0 || !chart.startsWith(prefix)) {
+    throw new DockerError(
+      `could not read which chart '${RELEASE}' in ${namespace} runs: ${why(res)}`,
+    );
+  }
+  await runImageUpgrade(
+    namespace,
+    context,
+    chart.slice(prefix.length),
+    await releaseValues(RELEASE, namespace, context),
+  );
 }
 
 /**

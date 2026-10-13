@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import * as YAML from 'yaml';
 
 import * as config from '../../../src/lib/config';
+import { resolve as resolvePreset } from '../../../src/lib/presets/index';
 
 import { acmeIssuerManifest, caIssuerManifest } from '../../../src/core/kube/certmanager';
 import { kube } from '../../../src/core/kube/exec';
@@ -410,6 +411,17 @@ describe('the chart’s image and values', () => {
     expect(renderScenarioManifest('label: __HOUSTON_NAME__\nother: __HOUSTON_NAME__', 'tk')).toBe(
       'label: tk\nother: tk',
     );
+  });
+
+  it("gives the livechat demo page the workspace's address, not the placeholder", () => {
+    // Compose's file writer fills `{{ROOT_URL}}`; on Kubernetes the page went into its
+    // ConfigMap as written, so the widget was asked for at `{{ROOT_URL}}/livechat` and 404'd:
+    // the demo page never loaded the widget on this runtime.
+    const manifest = resolvePreset('livechat', 'kubernetes', {}).kubernetesManifests[0] as string;
+    expect(manifest).toContain('{{ROOT_URL}}');
+    const body = renderScenarioManifest(manifest, 'tk', 'https://tk.houston.localhost');
+    expect(body).not.toContain('{{ROOT_URL}}');
+    expect(body).toContain("'https://tk.houston.localhost/livechat'");
   });
 });
 

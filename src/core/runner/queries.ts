@@ -6,6 +6,7 @@
  * decided those are the same. Which is which is load-bearing -- `prune` DELETES based on
  * absence, so it must never read a failed query as "no projects".
  */
+import { DockerError } from '../../lib/errors';
 import { setItemChecked, splitTextLines, expectedText, keyRefusal } from '../../lib/format';
 import { JsonSyntaxError, loads } from '../../lib/json-text';
 import { stripText } from '../../lib/float-text';
@@ -14,6 +15,60 @@ import { Interrupted } from '../../seams/exec';
 
 import * as engine from './engine';
 import { projectName } from './record';
+
+/** A strict writer query: failed or malformed discovery must never authorize a dump/drop. */
+export async function runningWriterServices(
+  name: string,
+  services: readonly string[],
+): Promise<string[]> {
+  if (services.length === 0) throw new DockerError(`'${name}' has no Rocket.Chat services`);
+  const result = await engine.compose(name, ['ps', '--all', '--format', 'json', ...services], {
+    capture: true,
+    timeoutMs: 30_000,
+  });
+  if (result.exitCode !== 0) {
+    throw new DockerError(
+      `could not inspect Rocket.Chat writers for '${name}': ${String(result.stderr ?? '').trim()}`,
+    );
+  }
+  const raw = String(result.stdout ?? '').trim();
+  let rows: unknown[];
+  try {
+    let parsed: unknown;
+    try {
+      parsed = raw === '' ? [] : JSON.parse(raw);
+    } catch {
+      parsed = raw.split('\n').map((line) => JSON.parse(line) as unknown);
+    }
+    rows = Array.isArray(parsed) ? (parsed as unknown[]) : [parsed];
+  } catch {
+    throw new DockerError(
+      `could not inspect Rocket.Chat writers for '${name}': invalid container list`,
+    );
+  }
+  const running = new Set<string>();
+  for (const row of rows) {
+    if (typeof row !== 'object' || row === null || Array.isArray(row)) {
+      throw new DockerError(
+        `could not inspect Rocket.Chat writers for '${name}': invalid container row`,
+      );
+    }
+    const item = row as Record<string, unknown>;
+    if (typeof item.Service !== 'string' || typeof item.State !== 'string') {
+      throw new DockerError(
+        `could not inspect Rocket.Chat writers for '${name}': missing container state`,
+      );
+    }
+    if (!services.includes(item.Service)) continue;
+    if (item.State === 'running' || item.State === 'restarting') running.add(item.Service);
+    else if (!['exited', 'dead', 'created'].includes(item.State)) {
+      throw new DockerError(
+        `could not inspect Rocket.Chat writers for '${name}': unsupported state '${item.State}'`,
+      );
+    }
+  }
+  return services.filter((service) => running.has(service));
+}
 
 /**
  * Delete named volumes belonging to a repro's compose project.
@@ -39,7 +94,8 @@ export async function removeVolumes(name: string, volumes: readonly string[]): P
       ) {
         failed.push(full);
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof Interrupted) throw error; // Ctrl-C or a stopped job: unwind
       failed.push(full);
     }
   }
@@ -175,7 +231,8 @@ export async function composeLs(): Promise<unknown> {
     });
     if (result.exitCode !== 0) return null;
     return parseJsonOrNdjson(String(result.stdout ?? ''));
-  } catch {
+  } catch (error) {
+    if (error instanceof Interrupted) throw error; // Ctrl-C or a stopped job: unwind
     return null;
   }
 }
@@ -250,7 +307,8 @@ export async function rcContainerEnv(name: string): Promise<Record<string, strin
     });
     if (result.exitCode !== 0) return null;
     rows = JSON.parse(String(result.stdout ?? 'null'));
-  } catch {
+  } catch (error) {
+    if (error instanceof Interrupted) throw error; // Ctrl-C or a stopped job: unwind
     return null;
   }
   if (!Array.isArray(rows)) return null;
@@ -264,6 +322,125 @@ export async function rcContainerEnv(name: string): Promise<Record<string, strin
     if (at > 0) setItemChecked(out, text.slice(0, at), text.slice(at + 1));
   }
   return out;
+}
+
+/**
+ * The running containers that have no network at all.
+ *
+ * A start that fails at its port binding leaves the container attached to nothing, and the
+ * next `compose start` "succeeds" with it so: Rocket.Chat up with only `lo`, no published
+ * port, and `getaddrinfo EAI_AGAIN mongodb`. Nothing short of recreating it gives it back.
+ */
+export async function networklessContainers(name: string): Promise<string[]> {
+  try {
+    const listed = await engine.compose(name, ['ps', '-q'], { capture: true });
+    const ids = String(listed.stdout ?? '')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line !== '');
+    if (listed.exitCode !== 0 || ids.length === 0) return [];
+    const result = await docker(
+      ['inspect', '--format', '{{.Name}}\t{{len .NetworkSettings.Networks}}', ...ids],
+      { capture: true, timeoutMs: 15_000 },
+    );
+    if (result.exitCode !== 0) return [];
+    return String(result.stdout ?? '')
+      .split('\n')
+      .map((line) => line.split('\t'))
+      .filter(([, count]) => (count ?? '').trim() === '0')
+      .map(([container]) => (container ?? '').replace(/^\//u, ''));
+  } catch (error) {
+    if (error instanceof Interrupted) throw error;
+    return [];
+  }
+}
+
+/**
+ * What Docker recorded as each container's start error, `service: error`, for those that
+ * have one.
+ *
+ * `compose start` prints the reason (a port somebody else holds) on its own output and
+ * exits 1. In the GUI that went to serve's terminal, and the job said only "`docker compose
+ * start` failed" -- a port clash and a broken image read the same. Docker keeps the reason
+ * on the container, so it is asked afterwards rather than parsed out of the stream.
+ */
+export async function startErrors(name: string): Promise<string[]> {
+  try {
+    const listed = await engine.compose(name, ['ps', '--all', '-q'], { capture: true });
+    const ids = String(listed.stdout ?? '')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line !== '');
+    if (listed.exitCode !== 0 || ids.length === 0) return [];
+    const result = await docker(
+      [
+        'inspect',
+        '--format',
+        '{{index .Config.Labels "com.docker.compose.service"}}\t{{.State.Error}}',
+        ...ids,
+      ],
+      { capture: true, timeoutMs: 15_000 },
+    );
+    if (result.exitCode !== 0) return [];
+    return String(result.stdout ?? '')
+      .split('\n')
+      .map((line) => line.split('\t'))
+      .filter(([, error]) => (error ?? '').trim() !== '')
+      .map(([service, error]) => `${service ?? '?'}: ${(error ?? '').trim()}`);
+  } catch (error) {
+    if (error instanceof Interrupted) throw error;
+    return [];
+  }
+}
+
+/** A one-shot setup container: its compose service, state and exit code. */
+export interface OneShot {
+  service: string;
+  status: string;
+  exitCode: number;
+}
+
+/**
+ * The workspace's one-shot setup containers -- `mongo-init`, `minio-init` -- as they stand.
+ *
+ * By name and by policy: a `-init` service with no restart policy runs once and exits. An
+ * unreadable answer is none, so a box that cannot be asked waits for nothing extra.
+ */
+export async function oneShotSetups(name: string): Promise<OneShot[]> {
+  try {
+    const listed = await engine.compose(name, ['ps', '--all', '-q'], { capture: true });
+    const ids = String(listed.stdout ?? '')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line !== '');
+    if (listed.exitCode !== 0 || ids.length === 0) return [];
+    const result = await docker(
+      [
+        'inspect',
+        '--format',
+        '{{index .Config.Labels "com.docker.compose.service"}}\t' +
+          '{{.HostConfig.RestartPolicy.Name}}\t{{.State.Status}}\t{{.State.ExitCode}}',
+        ...ids,
+      ],
+      { capture: true, timeoutMs: 15_000 },
+    );
+    if (result.exitCode !== 0) return [];
+    return String(result.stdout ?? '')
+      .split('\n')
+      .map((line) => line.trim().split('\t'))
+      .filter(
+        ([service, policy]) =>
+          (service ?? '').endsWith('-init') && ['no', ''].includes(policy ?? ''),
+      )
+      .map(([service, , status, code]) => ({
+        service: service ?? '',
+        status: status ?? '',
+        exitCode: Number(code) || 0,
+      }));
+  } catch (error) {
+    if (error instanceof Interrupted) throw error;
+    return [];
+  }
 }
 
 /**
@@ -319,7 +496,8 @@ export async function servicesByProjectUncached(): Promise<Record<string, Record
     // Same 4 s poll bound as composeLs; {} = "could not ask".
     if (result.exitCode !== 0) return {};
     stdout = String(result.stdout ?? '');
-  } catch {
+  } catch (error) {
+    if (error instanceof Interrupted) throw error; // Ctrl-C or a stopped job: unwind
     return {};
   }
   const out: Record<string, Record<string, string>> = {};
@@ -338,10 +516,12 @@ export async function servicesByProjectUncached(): Promise<Record<string, Record
  * (healthy)"), in ONE `docker ps` call. Used to show uptime and health per repro without
  * an N-call fan-out.
  */
-export async function rcStatusByProject(): Promise<Record<string, string>> {
-  const byProject = await servicesByProject();
+export async function rcStatusByProject(
+  byProject?: Record<string, Record<string, string>>,
+): Promise<Record<string, string>> {
+  const servicesByName = byProject ?? (await servicesByProject());
   const out: Record<string, string> = {};
-  for (const [project, services] of Object.entries(byProject)) {
+  for (const [project, services] of Object.entries(servicesByName)) {
     out[project] = services.rocketchat ?? services['rocketchat-1'] ?? '';
   }
   return out;

@@ -219,7 +219,7 @@ describe('restoreSwap', () => {
 });
 
 describe('apply and restore against a stubbed docker', () => {
-  function mockDocker(inspect: string, updateFails = false) {
+  function mockDocker(inspect: string, updateFails = false, stats = '') {
     jest.resetModules();
     const seen: string[][] = [];
     jest.doMock('../../src/seams/docker-cli', () => ({
@@ -227,6 +227,9 @@ describe('apply and restore against a stubbed docker', () => {
         seen.push(argv);
         if (argv[0] === 'inspect') {
           return Promise.resolve({ exitCode: 0, stdout: inspect, stderr: '' });
+        }
+        if (argv[0] === 'stats') {
+          return Promise.resolve({ exitCode: 0, stdout: stats, stderr: '' });
         }
         return Promise.resolve(
           updateFails
@@ -266,6 +269,19 @@ describe('apply and restore against a stubbed docker', () => {
       '2',
       'cid-rocketchat',
     ]);
+  });
+
+  it('refuses a memory cap below what the container already uses, before capping it', async () => {
+    // Applied at once, the kernel killed Rocket.Chat as the test began: `rc=1cpu/1g` on one
+    // using 1.4 GiB reported 100% errors as a load result, exit 0, with nothing said.
+    const seen = mockDocker('0 0 0', false, '1.417GiB / 9.79GiB');
+    const mod = require('../../src/perf/constrain') as typeof ModNS;
+    await expect(mod.apply('ws', { rocketchat: { cpus: 1, mem: '1g' } })).rejects.toThrow(
+      /rocketchat=1g is below the 1\.42 GiB it uses now/u,
+    );
+    expect(seen.filter((c) => c[0] === 'update')).toEqual([]);
+    // A cap it fits under is applied.
+    await expect(mod.apply('ws', { rocketchat: { cpus: 1, mem: '2g' } })).resolves.toHaveLength(1);
   });
 
   it('ROLLS BACK what it already applied when a later service fails', async () => {

@@ -15,6 +15,7 @@ import type * as ForwardNS from '../../../src/core/kube/forward';
 import type * as ScaleNS from '../../../src/core/kube/scale';
 
 import { nullEmit } from '../../../src/lib/events';
+import { APPLICATION_SELECTOR } from '../../../src/core/kube/names';
 
 /** Record every argv the package sends, and answer each call harmlessly. */
 function recordKubeCalls(
@@ -110,18 +111,35 @@ describe('the shared monitoring stack', () => {
 describe('quiescing a Kubernetes workspace for a dump', () => {
   it('scales Rocket.Chat down by label and leaves MongoDB running', async () => {
     const scale = require('../../../src/core/kube/scale') as typeof ScaleNS;
-    const seen = recordKubeCalls(() => ({ stdout: '' }));
+    const targets = [
+      'deployment.apps/rocketchat-rocketchat',
+      'deployment.apps/rocketchat-account',
+      'deployment.apps/rocketchat-presence',
+    ];
+    const seen = recordKubeCalls((argv) => {
+      if (
+        argv.includes('get') &&
+        argv.includes('deployment') &&
+        argv.includes(APPLICATION_SELECTOR)
+      ) {
+        return { stdout: `${targets.join('\n')}\n` };
+      }
+      return { stdout: '' };
+    });
     try {
-      await scale.scaleRocketchat('w', { replicas: 0, context: 'ctx' });
-    } catch {
-      // The scale cannot land here; the selector it used is the claim.
+      expect(await scale.scaleRocketchat('w', { replicas: 0, context: 'ctx' })).toBe(0);
     } finally {
       seen.restore();
     }
     const asked = seen.argvs.flat().join(' ');
     // A dump needs the database UP and only its writers quiesced. Selecting everything
     // would take MongoDB down with Rocket.Chat and there would be nothing to dump.
-    expect(asked).toContain('app.kubernetes.io/name=rocketchat');
+    expect(APPLICATION_SELECTOR).toBe(
+      'app.kubernetes.io/instance=rocketchat,app.kubernetes.io/name!=nats',
+    );
+    expect(asked).toContain(APPLICATION_SELECTOR);
+    const scaled = seen.argvs.find((argv) => argv.includes('scale')) ?? [];
+    expect(scaled.slice(scaled.indexOf('scale') + 1)).toEqual(['--replicas=0', ...targets]);
     expect(asked.toLowerCase()).not.toContain('statefulset');
   });
 });

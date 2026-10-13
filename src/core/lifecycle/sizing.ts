@@ -5,6 +5,7 @@
  * already running other stacks, and a create that starts and then cannot finish leaves a
  * half-made workspace behind.
  */
+import { namesOf } from '../../lib/presets/composite';
 import { PreflightError } from '../../lib/errors';
 import { formatFixed } from '../../lib/format';
 import { type Emit, nullEmit, warn } from '../../lib/events';
@@ -33,6 +34,23 @@ export const PRESET_MB: Readonly<Record<string, number>> = Object.freeze({
   'multi-instance': 400,
   email: 40,
 });
+
+/**
+ * What the ldap preset's params add to its charge. `directory=ad`: Samba held 56 MB with
+ * 1,600 users and 103 MB with 20,000 (measured), where OpenLDAP's share of `PRESET_MB.ldap`
+ * is small, so it is charged by size. `idp`: a Keycloak, as the saml and oidc presets charge
+ * for theirs. A composed workspace names the params `ldap.*`.
+ */
+export function ldapParamsMb(params: Record<string, unknown>): number {
+  const param = (key: string): unknown => params[`ldap.${key}`] ?? params[key];
+  let need = 0;
+  if (param('directory') === 'ad') {
+    const users = Number.parseInt(String(param('users') ?? '5'), 10);
+    need += 60 + 3 * Math.ceil((Number.isNaN(users) ? 5 : users) / 1000);
+  }
+  if (param('idp') === 'saml' || param('idp') === 'oidc') need += PRESET_MB.saml ?? 0;
+  return need;
+}
 
 /** Prometheus + Grafana + Loki + the OTel collector + two exporters. */
 export const MONITORING_MB = 280;
@@ -313,7 +331,11 @@ export function sayWhatIsLeft(emit: Emit, headroom: number, need: number): void 
  * different label.
  */
 export function neededMb(presetName: string, provisioning: boolean, req: CreateReq): number {
-  let need = WORKSPACE_MB + (PRESET_MB[presetName] ?? 0);
+  // A composed workspace pays for every preset's sidecars: its combined name is in no table,
+  // and charging nothing for it would permit exactly the create this exists to refuse.
+  let need = WORKSPACE_MB;
+  for (const name of namesOf(presetName)) need += PRESET_MB[name] ?? 0;
+  if (namesOf(presetName).includes('ldap')) need += ldapParamsMb(req.params);
   if (req.monitor) need += MONITORING_MB;
   need += kubeOverheadMb(req, provisioning);
   return need;

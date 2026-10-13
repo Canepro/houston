@@ -7,7 +7,8 @@
  * touches a cluster is replaced; every pure function stays real, so a manifest asserted on
  * here is the manifest that would be applied.
  */
-import { CreateFailedError } from '../../../src/lib/errors';
+import { CreateFailedError, PreflightError } from '../../../src/lib/errors';
+import { Interrupted, sleep, stoppable } from '../../../src/seams/exec';
 import type { Event } from '../../../src/lib/events';
 import type { Resolved } from '../../../src/lib/versions';
 
@@ -30,6 +31,8 @@ import type * as tools from '../../../src/core/kube/tools';
 import type * as presetTypes from '../../../src/lib/presets/types';
 
 import { createWorkspace, type CreateWorkspaceOptions } from '../../../src/core/kube/workspace';
+import { metadata, readMeta, writeRecord } from '../../../src/core/runner/record';
+import * as paths from '../../../src/core/runner/paths';
 
 // Only the calls that reach a cluster are replaced. `mongoRbacManifest`, `mongoManifest`,
 // `operatorMongoUrl`, `valuesFor` and `mongoImage` all stay real.
@@ -90,6 +93,10 @@ jest.mock('../../../src/core/kube/forward', () => ({
   forwardAlive: jest.fn(),
   scenarioUiForwards: jest.fn(),
 }));
+jest.mock('../../../src/core/runner/paths', () => {
+  const actual = jest.requireActual<typeof paths>('../../../src/core/runner/paths');
+  return { ...actual, atomicWrite: jest.fn(actual.atomicWrite) };
+});
 
 const mocked = <T extends (...args: never[]) => unknown>(fn: T) => fn as unknown as jest.Mock;
 
@@ -108,6 +115,8 @@ const realRun = kube.run;
 
 /** Every argv the orchestrator's own `kube.run` saw -- the rollback is the only one. */
 let ran: string[][] = [];
+let namespaceUid = 'namespace-tk-original';
+let namespacePresent = true;
 
 function harness({
   plan = { context: 'prod', distribution: 'k3s', create: false },
@@ -123,8 +132,43 @@ function harness({
   // asserts about the wrong create.
   jest.clearAllMocks();
   ran = [];
-  kube.run = (argv) => {
+  namespaceUid = 'namespace-tk-original';
+  namespacePresent = true;
+  let namespaceOwner = '';
+  kube.run = (argv, options) => {
     ran.push([...argv]);
+    if (argv.includes('get') && argv.includes('namespace')) {
+      return Promise.resolve({
+        argv,
+        returncode: 0,
+        stdout: namespacePresent
+          ? JSON.stringify({
+              metadata: {
+                name: 'houston-tk',
+                uid: namespaceUid,
+                resourceVersion: '1',
+                labels: namespace.labelsFor('tk', namespaceOwner),
+              },
+            })
+          : '',
+        stderr: '',
+      });
+    }
+    if (argv.includes('delete')) {
+      const preconditions =
+        options?.input === undefined
+          ? null
+          : (JSON.parse(options.input).preconditions as { uid?: string });
+      if (preconditions !== null && preconditions.uid !== namespaceUid) {
+        return Promise.resolve({
+          argv,
+          returncode: 1,
+          stdout: '',
+          stderr: 'UID precondition failed',
+        });
+      }
+      namespacePresent = false;
+    }
     return Promise.resolve({ argv, returncode: 0, stdout: '', stderr: '' });
   };
   mocked(context.planCluster).mockResolvedValue(plan);
@@ -142,7 +186,17 @@ function harness({
   });
   mocked(capabilities.workspaceNamespaces).mockResolvedValue(held);
   mocked(namespace.namespaceFor).mockResolvedValue('houston-tk');
-  mocked(namespace.ensureNamespace).mockResolvedValue('houston-tk');
+  mocked(namespace.ensureNamespace).mockImplementation(async (_name, options) => {
+    namespaceOwner = options.owner ?? '';
+    if (options.receipt !== undefined) {
+      Object.assign(options.receipt, {
+        uid: namespaceUid,
+        owner: namespaceOwner,
+        createdUid: held === null || held.includes('houston-tk') ? '' : namespaceUid,
+      });
+    }
+    return 'houston-tk';
+  });
   mocked(operator.ensureOperator).mockResolvedValue(undefined);
   mocked(operator.waitForMongodb).mockResolvedValue(undefined);
   mocked(release.apply).mockResolvedValue(undefined);
@@ -153,7 +207,7 @@ function harness({
   mocked(certmanager.ensureIssuer).mockResolvedValue(undefined);
   mocked(certmanager.waitForCertificate).mockResolvedValue(true);
   mocked(forward.portForward).mockResolvedValue(4242);
-  mocked(forward.forwardAlive).mockReturnValue(alive);
+  mocked(forward.forwardAlive).mockResolvedValue(alive);
   mocked(forward.scenarioUiForwards).mockResolvedValue({ 8081: 5151 });
 }
 
@@ -207,6 +261,35 @@ describe('the order a create happens in', () => {
     expect(order).toEqual(['replicaset', 'install']);
   });
 
+  it('keeps scenario-create progress monotonic after initiating the replica set', async () => {
+    harness();
+    mocked(replicaset.initReplicaSet).mockImplementation(
+      (jest.requireActual('../../../src/core/kube/replicaset') as typeof replicaset).initReplicaSet,
+    );
+    kube.run = async (argv) => ({
+      argv,
+      returncode: 0,
+      stdout:
+        argv.some((arg) => arg.includes('containerStatuses[0].started')) ||
+        argv.includes('db.hello().isWritablePrimary')
+          ? 'true'
+          : '',
+      stderr: '',
+    });
+    const { resolve } = require('../../../src/lib/presets/index') as {
+      resolve: (name: string, runtime: string, params: Record<string, unknown>) => unknown;
+    };
+    const percentages: number[] = [];
+    await create({
+      preset: resolve('email', 'kubernetes', {}) as never,
+      emit: (event) => {
+        if (typeof event.pct === 'number') percentages.push(event.pct);
+      },
+    });
+    expect(percentages).toContain(25);
+    expect(percentages).toEqual([...percentages].sort((a, b) => a - b));
+  });
+
   it('waits for the certificate AFTER the create can no longer be rolled back', async () => {
     // cert-manager issues asynchronously from the Ingress annotation, so a certificate that
     // has not arrived is the difference between "the name works" and "the name will work in
@@ -228,8 +311,8 @@ describe('what a failed create is entitled to destroy', () => {
       CreateFailedError,
     );
     const deleted = ran.find((argv) => argv.includes('delete'));
-    expect(deleted).toContain('houston-tk');
-    expect(deleted).toContain('--wait=false');
+    expect(deleted).toContain('/api/v1/namespaces/houston-tk');
+    expect(namespacePresent).toBe(false);
   });
 
   it('leaves a namespace that was already there, and its volume with it', async () => {
@@ -245,10 +328,7 @@ describe('what a failed create is entitled to destroy', () => {
     expect(events.map((event) => event.message).join(' ')).toContain('left as they were');
   });
 
-  it('treats a namespace list it could not read as "it was already there"', async () => {
-    // REFUSED READS COUNT AS PRE-EXISTING: never destroy data we could not prove was ours to
-    // destroy. `workspaceNamespaces` answers null for a read nobody could perform, and the
-    // direction of that mistake is the whole reason it does.
+  it('does not remove a namespace without proof this create introduced it', async () => {
     harness({ held: null });
     mocked(release.install).mockRejectedValue(new CreateFailedError('helm said no'));
     await expect(create()).rejects.toBeInstanceOf(CreateFailedError);
@@ -267,6 +347,30 @@ describe('what a failed create is entitled to destroy', () => {
     expect(mocked(cluster.deleteCluster)).not.toHaveBeenCalled();
   });
 
+  it('rolls a stopped create back to the end, so no namespace is left without a record', async () => {
+    // A Stop pressed during the install refuses every wait after it -- and the rollback is
+    // waits. Refused, it left a namespace that no repro.json pointed at: invisible to `list`
+    // and to `down`, and on EKS a volume billing on.
+    harness({ held: [] });
+    const stop = new AbortController();
+    mocked(release.install).mockImplementation(async () => {
+      stop.abort();
+      await sleep(10);
+      return undefined as never;
+    });
+    const recorded = kube.run;
+    kube.run = async (...args: Parameters<typeof kube.run>) => {
+      await sleep(0.01); // a wait, as the real seam's kubectl is
+      return await recorded(...args);
+    };
+    await expect(stoppable(stop.signal, async () => await create())).rejects.toBeInstanceOf(
+      Interrupted,
+    );
+    const deleted = ran.find((argv) => argv.includes('delete'));
+    expect(deleted).toContain('/api/v1/namespaces/houston-tk');
+    expect(namespacePresent).toBe(false);
+  });
+
   it('does not let the rollback replace the failure that caused it', async () => {
     // The ORIGINAL failure is what the caller needs. A delete that throws -- an unreachable
     // cluster, most likely, which is also the likeliest reason the create failed -- must not
@@ -275,6 +379,51 @@ describe('what a failed create is entitled to destroy', () => {
     mocked(release.install).mockRejectedValue(new CreateFailedError('helm said no'));
     kube.run = () => Promise.reject(new Error('the cluster is gone'));
     await expect(create()).rejects.toThrow(/helm said no/u);
+  });
+
+  it('F1 leaves an adopted namespace missed by the separate discovery list', async () => {
+    harness({ held: [] });
+    mocked(namespace.ensureNamespace).mockImplementation(async (_name, options) => {
+      if (options.receipt !== undefined) {
+        Object.assign(options.receipt, { uid: namespaceUid, owner: '', createdUid: '' });
+      }
+      return 'houston-tk';
+    });
+    mocked(release.install).mockRejectedValue(new CreateFailedError('helm said no'));
+    await expect(create()).rejects.toThrow(/helm said no/u);
+    expect(namespacePresent).toBe(true);
+    expect(ran.some((argv) => argv.includes('delete'))).toBe(false);
+  });
+
+  it('F1 leaves a replacement namespace when an introduced namespace disappears before rollback', async () => {
+    harness({ held: [] });
+    mocked(release.install).mockImplementation(async () => {
+      namespaceUid = 'namespace-tk-replacement';
+      throw new CreateFailedError('helm said no');
+    });
+    await expect(create()).rejects.toThrow(/helm said no/u);
+    expect(namespacePresent).toBe(true);
+    expect(ran.some((argv) => argv.includes('delete'))).toBe(false);
+    expect(mocked(cluster.deleteCluster)).not.toHaveBeenCalled();
+  });
+
+  it('F1 refuses installation when the namespace identity cannot be saved in its existing record', async () => {
+    harness();
+    await writeRecord('tk', metadata({ name: 'tk', extra: { incomplete: true } }));
+    const write = mocked(paths.atomicWrite).mockRejectedValueOnce(
+      new PreflightError('namespace identity write refused'),
+    );
+    try {
+      await expect(create()).rejects.toThrow(/namespace identity write refused/u);
+      expect(mocked(release.install)).not.toHaveBeenCalled();
+      expect(namespacePresent).toBe(false);
+      expect((await readMeta('tk')).extra.namespace_uid).toBeUndefined();
+    } finally {
+      write.mockReset();
+      write.mockImplementation(
+        jest.requireActual<typeof paths>('../../../src/core/runner/paths').atomicWrite,
+      );
+    }
   });
 });
 
@@ -309,6 +458,25 @@ describe('what the record says', () => {
     expect(said).toContain('houston ready --name tk');
   });
 
+  it('writes each forward into the write-ahead record the moment it exists', async () => {
+    // They reached the record only when the whole create finished, so a create killed after
+    // "port-forward established" left a kubectl holding the port that no record named:
+    // `down --volumes` said everything was removed, and the listener outlived the namespace.
+    harness();
+    await writeRecord(
+      'tk',
+      metadata({ name: 'tk', project: 'houston-tk', extra: { incomplete: true } }),
+    );
+    let atTheScenarioStep: unknown = null;
+    mocked(forward.scenarioUiForwards).mockImplementation(async () => {
+      atTheScenarioStep = (await readMeta('tk')).extra.port_forward_pid;
+      return { 8081: 5151 };
+    });
+    await create();
+    expect(atTheScenarioStep).toBe(4242);
+    expect((await readMeta('tk')).extra.scenario_forwards).toEqual({ 8081: 5151 });
+  });
+
   it('carries the scenario forwards back with string keys, as repro.json holds them', async () => {
     harness();
     expect((await create()).scenario_forwards).toEqual({ 8081: 5151 });
@@ -336,6 +504,34 @@ describe('the values the release is installed with', () => {
     expect((valuesOf().extraEnv as { name: string }[]).map((entry) => entry.name)).toContain(
       'ROOT_URL',
     );
+  });
+
+  it('hands --env and --setting to the chart once each, from the create to the release', async () => {
+    // `chartEnv` and the create's carry were each tested, and the hop between them was not:
+    // dropping `envOverrides` anywhere from createWorkspace to the chart's values left the
+    // suite green and the workspace without the variable.
+    harness();
+    await create({ envOverrides: { OVERWRITE_SETTING_Site_Name: 'Hop', GONE: null } });
+    const env = valuesOf().extraEnv as { name: string; value?: string }[];
+    expect(env.filter((entry) => entry.name === 'OVERWRITE_SETTING_Site_Name')).toEqual([
+      { name: 'OVERWRITE_SETTING_Site_Name', value: 'Hop' },
+    ]);
+  });
+
+  it("gives the livechat demo page the workspace's address, not the placeholder", async () => {
+    // Only `renderScenarioManifest` was tested; that createWorkspace hands it the advertised
+    // URL had no test, and the demo page's widget then pointed at `{{ROOT_URL}}`.
+    harness();
+    const { resolve } = require('../../../src/lib/presets/index') as {
+      resolve: (name: string, runtime: string, params: Record<string, unknown>) => unknown;
+    };
+    await create({
+      rootUrl: 'http://localhost:3412',
+      preset: resolve('livechat', 'kubernetes', {}) as never,
+    });
+    const scenario = applied().join('\n');
+    expect(scenario).toContain('http://localhost:3412');
+    expect(scenario).not.toContain('{{ROOT_URL}}');
   });
 
   it('passes the MongoDB URL by Secret reference, never in the values', async () => {
@@ -378,5 +574,23 @@ describe('the values the release is installed with', () => {
       name: 'OAUTH_ISSUER',
       value: 'https://keycloak.test',
     });
+  });
+
+  it('names every preset of a set when it applies their resources', async () => {
+    // A set's `scenario` joins only the presets that ARE scenarios, so five presets were
+    // announced as "applying the e2ee+ldap scenario — 6 resources".
+    harness();
+    const said: string[] = [];
+    await create({
+      preset: {
+        ...(jest.requireActual('../../../src/lib/presets/types') as typeof presetTypes).emptyPreset(
+          'e2ee+ldap+livechat',
+        ),
+        scenario: 'e2ee+ldap',
+        kubernetesManifests: ['kind: Service\nmetadata:\n  name: __HOUSTON_NAME__-ldap\n'],
+      },
+      emit: (event) => said.push(event.message),
+    });
+    expect(said).toContain('applying the e2ee+ldap+livechat scenario — 1 resource');
   });
 });

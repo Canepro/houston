@@ -12,6 +12,7 @@ import * as path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 
 import * as backup from '../../../src/core/backup';
+import type * as RecordNS from '../../../src/core/runner/record';
 import type * as BackupNS from '../../../src/core/backup';
 import * as compat from '../../../src/core/backup-compat';
 import * as upgrade from '../../../src/core/upgrade';
@@ -199,6 +200,24 @@ describe('compatibility', () => {
     const bare = await post('/api/backups/compatibility', { bundle: inside('a.rcbak') });
     expect(bare.statusCode).toBe(200);
     expect(bare.json().compatibility).toBeNull();
+  });
+
+  it('names who holds the side ports a restore as new would need, before anything starts', async () => {
+    // The as-new create was refused from a job that had already started, while the source
+    // still held its scenario's fixed ports. Asked without a target, the answer says so.
+    const real = jest.requireActual<typeof RecordNS>('../../../src/core/runner/record');
+    await real.write(
+      'mail-src',
+      'services: {}\n',
+      real.metadata({ name: 'mail-src', extra: { sidecar_ports: [8025, 8082] } }),
+    );
+    jest.mocked(backup.readManifest).mockResolvedValueOnce({ preset: 'email+ldap' });
+    const held = await post('/api/backups/compatibility', { bundle: inside('a.rcbak') });
+    expect(held.statusCode).toBe(200);
+    expect(held.json().held).toEqual({ name: 'mail-src', ports: [8025, 8082] });
+    jest.mocked(backup.readManifest).mockResolvedValueOnce({ preset: 'saml' });
+    const free = await post('/api/backups/compatibility', { bundle: inside('b.rcbak') });
+    expect(free.json().held).toBeNull();
   });
 
   it('and restore both need a bundle', async () => {

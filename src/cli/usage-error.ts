@@ -268,7 +268,8 @@ export type Verdict =
   | { readonly kind: 'help'; readonly target: HelpTarget; readonly exit: 0 | 2 }
   | { readonly kind: 'version' }
   /** A usage error: these bytes on stderr, exit 2, nothing on stdout. */
-  | { readonly kind: 'usage'; readonly stderr: string };
+  /** The panel for stderr, and the bare message, for the `--json` envelope. */
+  | { readonly kind: 'usage'; readonly stderr: string; readonly message: string };
 
 // --------------------------------------------------------------------------- parsing
 
@@ -583,7 +584,9 @@ export function judgeArgv(
         ? { kind: 'version' }
         : { kind: 'help', target: outcome.command.target, exit: 0 };
     }
-    if (outcome instanceof UsageProblem) return { kind: 'usage', stderr: render(outcome, host) };
+    if (outcome instanceof UsageProblem) {
+      return { kind: 'usage', stderr: render(outcome, host), message: outcome.formatted() };
+    }
     throw outcome;
   }
 }

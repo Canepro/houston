@@ -355,14 +355,15 @@ describe('the capabilities document', () => {
     fs.mkdirSync(path.join(home, 'presets'));
     fs.writeFileSync(path.join(home, 'presets', 'a.yaml'), 'name: 😀-emoji\n');
     fs.writeFileSync(path.join(home, 'presets', 'b.yaml'), 'name: Ａ-fullwidth\n');
-    // What earlier releases' capabilities listed for this home, recorded.
+    // What earlier releases' capabilities listed for this home, recorded, less
+    // `multi-instance`: since 2026-10-08 it is listed only as the deployment shape.
     const recorded = [
       'airgapped',
       'default',
+      'e2ee',
       'email',
       'ldap',
       'livechat',
-      'multi-instance',
       'oidc',
       's3_minio',
       'saml',

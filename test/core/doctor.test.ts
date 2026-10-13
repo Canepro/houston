@@ -448,6 +448,43 @@ describe('the simple engine rows', () => {
     },
   );
 });
+describe('Podman answering as docker', () => {
+  afterEach(() => {
+    jest.doMock('../../src/core/runner/host', () =>
+      (require('../testsetup-policy') as typeof PolicyNS).healthyHost(),
+    );
+    jest.resetModules();
+  });
+
+  it('is named as itself, under the docker id, and warns when it runs no healthchecks', async () => {
+    jest.resetModules();
+    jest.doMock('../../src/core/runner/host', () => ({
+      ...jest.requireActual('../../src/core/runner/host'),
+      dockerAvailable: async () => true,
+      composeVersion: async () => 'podman-compose version 1.2.0',
+      engine: async () => ({
+        kind: 'podman',
+        version: '6.1.3',
+        rootless: true,
+        cgroupDriver: 'cgroupfs',
+        healthchecks: false,
+        shim: false,
+      }),
+    }));
+    const doctor = require('../../src/core/doctor') as typeof DoctorNS;
+    const rows = [...(await doctor.checkDocker(CTX)), ...(await doctor.checkCompose(CTX))];
+    expect(rows.map((row) => [row.check, row.status])).toEqual([
+      ['docker', 'ok'],
+      ['docker', 'warn'],
+      ['compose', 'fail'],
+    ]);
+    expect(String(rows[0]?.message)).toBe('Podman 6.1.3 answering as docker, rootless');
+    expect(String(rows[1]?.message)).toContain(
+      "Podman runs no container healthchecks here (cgroup manager 'cgroupfs')",
+    );
+  });
+});
+
 describe('a state directory that is not writable', () => {
   afterEach(() => {
     const repros = path.join(process.env.HOUSTON_HOME as string, 'repros');
@@ -525,6 +562,46 @@ describe('the preset-browser-host check', () => {
           "'remote-saml' is bound to 0.0.0.0 but its 'saml' preset still points the browser at this machine. From anywhere else that address is the visitor's own laptop and login fails silently. Re-create with `--set idp_host=<the host people type>`",
       },
     ]);
+  });
+});
+
+describe('the preset-browser-host check on a composed workspace', () => {
+  it('checks each preset, reads its own params, and names the qualified key', async () => {
+    jest.resetModules();
+    const record = require('../../src/core/runner/record') as typeof RecordNS;
+    await record.writeRecord(
+      'combo-remote',
+      record.metadata({
+        name: 'combo-remote',
+        project: 'houston-combo-remote',
+        preset: 'email+saml',
+        extra: { bind_host: '0.0.0.0', presets: ['email', 'saml'], preset_params: { saml: {} } },
+      }),
+    );
+    await record.writeRecord(
+      'combo-told',
+      record.metadata({
+        name: 'combo-told',
+        project: 'houston-combo-told',
+        preset: 'email+saml',
+        extra: { bind_host: '0.0.0.0', preset_params: { saml: { idp_host: 'box' } } },
+      }),
+    );
+    const doctor = require('../../src/core/doctor') as typeof DoctorNS;
+    const rows = await doctor.checkPresets({
+      context: '',
+      dockerUp: false,
+      cloud: null,
+      owned: null,
+    });
+    // The home is shared with the case above, whose workspaces are still listed.
+    const mine = rows
+      .map((row) => String((row as Record<string, unknown>).message))
+      .filter((message) => message.startsWith("'combo-"));
+    expect(mine).toEqual([
+      "'combo-remote' is bound to 0.0.0.0 but its 'saml' preset still points the browser at this machine. From anywhere else that address is the visitor's own laptop and login fails silently. Re-create with `--set saml.idp_host=<the host people type>`",
+    ]);
+    jest.resetModules();
   });
 });
 
@@ -1423,6 +1500,72 @@ describe('a Kubernetes record whose cluster is gone', () => {
     // Actionable: it names the record and the command that clears it.
     expect(row?.message).toContain('ghost');
     expect(row?.message).toContain('houston down');
+  });
+});
+
+describe('doctor --context naming a context that does not exist', () => {
+  afterEach(() => {
+    for (const id of [
+      '../../src/core/kube/probe',
+      '../../src/core/kube/context',
+      '../../src/core/kube/endpoints',
+      '../../src/core/kube/reachability',
+      '../../src/core/eks',
+    ]) {
+      jest.dontMock(id);
+    }
+    jest.resetModules();
+  });
+
+  it('fails it, naming the contexts there are, instead of "configured but not answering"', async () => {
+    // It exited 0 and described a context the kubeconfig does not hold as "configured but
+    // its API server is not answering"; `cluster status` said the true thing.
+    jest.resetModules();
+    const tools = require('../../src/core/kube/tools') as typeof KubeToolsNS;
+    jest.doMock('../../src/core/kube/probe', () => ({
+      ...jest.requireActual('../../src/core/kube/probe'),
+      preflight: async () =>
+        tools.preflight({
+          clusterExists: false,
+          clusterReachable: false,
+          context: 'no-such-context',
+        }),
+      skew: async () => null,
+    }));
+    jest.doMock('../../src/core/kube/context', () => ({
+      ...jest.requireActual('../../src/core/kube/context'),
+      contexts: async () => [['k3s-lane'], ''],
+      activeContext: async () => '',
+      distribution: async () => '',
+    }));
+    jest.doMock('../../src/core/kube/endpoints', () => ({
+      ...jest.requireActual('../../src/core/kube/endpoints'),
+      portClaimingCluster: async () => null,
+      ingressEndpoint: async () => null,
+      endpointString: () => '',
+    }));
+    jest.doMock('../../src/core/kube/reachability', () => ({
+      ...jest.requireActual('../../src/core/kube/reachability'),
+      reachable: async () => false,
+    }));
+    jest.doMock('../../src/core/eks', () => ({
+      ...jest.requireActual('../../src/core/eks'),
+      cloudReady: () => false,
+      identityPretty: () => 'nobody',
+      blockers: () => [],
+    }));
+    const doctor = require('../../src/core/doctor') as typeof DoctorNS;
+    const rows = await doctor.checkKubernetes({
+      context: 'no-such-context',
+      dockerUp: false,
+      cloud: Promise.resolve({ tools: {}, identity: null, region: '', ready: false, blockers: [] }),
+      owned: Promise.resolve([]),
+    } as never);
+    const row = rows.find((one) => one.check === 'kubernetes-cluster');
+    expect(row?.status).toBe('fail');
+    expect(row?.message).toBe(
+      "No kubeconfig context named 'no-such-context'. This machine can see: 'k3s-lane'",
+    );
   });
 });
 

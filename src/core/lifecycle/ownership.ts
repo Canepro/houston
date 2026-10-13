@@ -17,11 +17,12 @@ import {
   storedText,
 } from '../../lib/format';
 import { actor as auditActor, record as auditRecord } from '../audit';
+import * as paths from '../runner/paths';
 import { type Metadata, readMeta, updateMeta } from '../runner/record';
 import { anyUsers, atLeast, roleOf } from '../users';
 
 import * as naming from './naming';
-import { CREATE_POLICY_KEY, DESTROY_POLICY_KEY } from './types';
+import { CREATE_POLICY_KEY, type CreateReq, DESTROY_POLICY_KEY } from './types';
 
 /** The current UTC time in ISO 8601, to the second, with a `+00:00` offset. */
 function isoSeconds(): string {
@@ -69,6 +70,40 @@ function listChecked(value: unknown): unknown[] {
  * "123" and the gate let a member take a workspace they have always been refused, and the
  * history's `from` became "123" for 123 and "" for a `created_by` of 0 or null.
  */
+/**
+ * A rebuilt record keeps who owns it. Kubernetes rewrites the record on every `up` and Docker on
+ * `--force`; both started from scratch and dropped `owner`/`owner_history`, so whoever brought a
+ * handed-over workspace back up became its owner again. A chown is the only thing that moves
+ * ownership.
+ *
+ * `created_by` too, absent included: since `up` acts on a workspace the actor may act on
+ * (`claimTypedName`), an admin's rebuild stamped the admin as its creator, and so its owner.
+ */
+export function carryOwnership(previous: Metadata | null, next: Metadata): void {
+  if (previous === null) return;
+  const was = bagOf(previous.extra);
+  if (was.created_by === undefined) delete next.extra.created_by;
+  for (const key of ['created_by', 'owner', 'owner_history'] as const) {
+    if (was[key] !== undefined) next.extra[key] = structuredClone(was[key]);
+  }
+}
+
+/**
+ * Let `up --name X` mean the workspace X, when there is one this actor may act on.
+ *
+ * `deriveFor` put the actor's prefix on every typed name, while every other command tries
+ * the exact name first: an admin's `up -n k1`, a member's `--force` on a workspace handed to
+ * them, and the GUI's Bring it up on a workspace made from the CLI all made `<actor>-k1`
+ * beside it, or failed on the ports it holds. Somebody else's workspace still gets the
+ * actor's own, so two people typing `--name test` stay apart.
+ */
+export async function claimTypedName(req: CreateReq): Promise<void> {
+  const name = naming.sanitize(req.name);
+  if (req.exactName || req.actor === '' || name === '' || name.length > naming.NAME_MAX) return;
+  if (!(await paths.exists(name))) return;
+  [req.exactName] = await ownerGate(name, req.actor);
+}
+
 export async function ownerOf(name: string): Promise<unknown> {
   let meta: Metadata;
   try {
@@ -115,8 +150,8 @@ export async function setOwner(
   // unescaped.
   if (anyUsers() && !roleOf(owner)) {
     throw new NotFoundError(
-      `no account named ${quotedText(owner)} (see \`houston users list\`) — a workspace ` +
-        'cannot be handed to somebody who cannot sign in',
+      `no account named ${quotedText(owner)} (People lists them; \`houston users list\` ` +
+        'from a shell) — a workspace cannot be handed to somebody who cannot sign in',
     );
   }
   const was = await ownerOf(target);
@@ -175,10 +210,11 @@ export async function mayDestroy(name: string, actor: string): Promise<[boolean,
   // command. It is gated now, so the advice names who can actually run it.
   return [
     false,
+    // BOTH front ends' way, since both show this: a GUI-only user was sent to a shell
+    // command, and the GUI now has the control.
     `${name} belongs to ${owner} — ask ${owner}, or an admin can ` +
-      `force it. (${owner} or an admin can run ` +
-      `\`houston chown -n ${name} --to ${actor}\` to hand it over ` +
-      'for good.)',
+      `force it. (${owner} or an admin can hand it over to ${actor} for good: ` +
+      `Hand over… in its panel, or \`houston chown -n ${name} --to ${actor}\`.)`,
   ];
 }
 

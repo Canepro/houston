@@ -44,10 +44,14 @@ function invocation(path: string, action = ''): Invocation {
   };
 }
 
-function render(path: string, value: unknown, action = ''): { out: string; err: string } {
+async function render(
+  path: string,
+  value: unknown,
+  action = '',
+): Promise<{ out: string; err: string }> {
   let out = '';
   let err = '';
-  renderHuman(invocation(path, action), value, {
+  await renderHuman(invocation(path, action), value, {
     writeOut: (text) => {
       out += text;
     },
@@ -59,34 +63,36 @@ function render(path: string, value: unknown, action = ''): { out: string; err: 
 }
 
 describe('explicit human command renderers', () => {
-  test('all 40 routable paths have a renderer and none falls back to object JSON', () => {
+  test('all 40 routable paths have a renderer and none falls back to object JSON', async () => {
     expect(COMMAND_SPECS).toHaveLength(40);
     for (const spec of COMMAND_SPECS) {
       const action = ['users', 'edge', 'config', 'cluster'].includes(spec.path) ? 'status' : '';
-      const result = render(spec.path, { sentinel: 'must-not-be-a-json-dump' }, action);
+      const result = await render(spec.path, { sentinel: 'must-not-be-a-json-dump' }, action);
       expect(result.out).not.toContain('"sentinel"');
       expect(result.out).not.toContain('{\n');
     }
   });
 
-  test('list preserves the empty guidance and the stable human columns', () => {
-    expect(render('list', { repros: [], count: 0 }).out).toBe(
+  test('list preserves the empty guidance and the stable human columns', async () => {
+    expect((await render('list', { repros: [], count: 0 })).out).toBe(
       'No repros yet. Create one with `houston up --version <X.Y.Z>`.\n',
     );
-    const shown = render('list', {
-      repros: [
-        {
-          name: 'ticket-1',
-          rc_version: '8.5.1',
-          mongo_tag: '8.0',
-          runtime: 'docker',
-          host_port: 3000,
-          state: 'running',
-          root_url: 'http://127.0.0.1:3000',
-          default: true,
-        },
-      ],
-    }).out;
+    const shown = (
+      await render('list', {
+        repros: [
+          {
+            name: 'ticket-1',
+            rc_version: '8.5.1',
+            mongo_tag: '8.0',
+            runtime: 'docker',
+            host_port: 3000,
+            state: 'running',
+            root_url: 'http://127.0.0.1:3000',
+            default: true,
+          },
+        ],
+      })
+    ).out;
     expect(shown).toContain('NAME');
     expect(shown).toContain('RC');
     expect(shown).toContain('*ticket-1');
@@ -94,29 +100,32 @@ describe('explicit human command renderers', () => {
     expect(shown).not.toContain('"repros"');
   });
 
-  test('token, PAT and API produce pasteable/raw output rather than serialized objects', () => {
-    expect(render('token', { token: 'secret', user_id: 'uid' }).out).toBe(
+  test('token, PAT and API produce pasteable/raw output rather than serialized objects', async () => {
+    expect((await render('token', { token: 'secret', user_id: 'uid' })).out).toBe(
       '-H "X-Auth-Token: secret" -H "X-User-Id: uid"\n',
     );
-    expect(render('pat', { token: 'pat', user_id: 'uid', bypass_2fa: true }).out).toContain(
+    expect((await render('pat', { token: 'pat', user_id: 'uid', bypass_2fa: true })).out).toContain(
       '-H "X-Auth-Token: pat" -H "X-User-Id: uid"',
     );
-    const api = render('api', {
-      status: 404,
-      auth: 'PAT',
-      elapsed_ms: 12,
-      text: '{"success":false}',
-    }).out;
+    const api = (
+      await render('api', {
+        status: 404,
+        auth: 'PAT',
+        elapsed_ms: 12,
+        text: '{"success":false}',
+      })
+    ).out;
     expect(api).toBe('HTTP 404  [PAT]  in 12ms\n{"success":false}\n');
     // Earlier releases add a newline to one the body already has, and the elapsed time
     // turns to seconds at a second.
     expect(
-      render('api', { status: 200, auth: 'admin', elapsed_ms: 1302.4, text: 'hello\n' }).out,
+      (await render('api', { status: 200, auth: 'admin', elapsed_ms: 1302.4, text: 'hello\n' }))
+        .out,
     ).toBe('HTTP 200  [admin]  in 1.30s\nhello\n\n');
   });
 
-  test('loadtest draws nothing after the run, and says no warning again', () => {
-    const result = render('loadtest', {
+  test('loadtest draws nothing after the run, and says no warning again', async () => {
+    const result = await render('loadtest', {
       ctx: { name: 'one', label: 'journey', vus: 10, duration: '30s' },
       summary: { count: 100, rps: 3.3, p95: 30, error_rate: 0.01 },
       slo: [{ ok: false, key: 'p95', op: '<=', raw: '20ms', actual: 30 }],
@@ -131,97 +140,109 @@ describe('explicit human command renderers', () => {
     expect(result).toEqual({ out: '', err: '' });
   });
 
-  test('versions includes the pairing provenance and unknown-version note', () => {
-    const result = render('versions', {
-      rc_version: '8.5.999',
-      rc_image: 'registry.example/rc',
-      mongo_tag: '8.0',
-      mongo_flavor: 'mongodb',
-      mongo_shell: 'mongosh',
-      oplog: false,
-      source: 'map (no such release)',
-      note: 'releases.rocket.chat has no 8.5.999',
-    }).out;
+  test('versions includes the pairing provenance and unknown-version note', async () => {
+    const result = (
+      await render('versions', {
+        rc_version: '8.5.999',
+        rc_image: 'registry.example/rc',
+        mongo_tag: '8.0',
+        mongo_flavor: 'mongodb',
+        mongo_shell: 'mongosh',
+        oplog: false,
+        source: 'map (no such release)',
+        note: 'releases.rocket.chat has no 8.5.999',
+      })
+    ).out;
     expect(result).toContain('shell: mongosh');
     expect(result).toContain('oplog url');
     expect(result).toContain('resolved via : map (no such release)');
     expect(result).toContain('note         : releases.rocket.chat has no 8.5.999');
   });
 
-  test('cluster documents remain raw while status is human prose', () => {
-    const guide = render('cluster', { body: '# Guide\nDo this.' }, 'guide').out;
+  test('cluster documents remain raw while status is human prose', async () => {
+    const guide = (await render('cluster', { body: '# Guide\nDo this.' }, 'guide')).out;
     expect(guide).toBe('# Guide\nDo this.\n');
-    const policy = render(
-      'cluster',
-      { documents: [{ name: 'operator', body: '{"Version":"2012-10-17"}' }] },
-      'iam-policy',
+    const policy = (
+      await render(
+        'cluster',
+        { documents: [{ name: 'operator', body: '{"Version":"2012-10-17"}' }] },
+        'iam-policy',
+      )
     ).out;
     // An omitted document name is the menu, never an accidental object dump.
     expect(policy).toContain('operator');
     expect(policy).not.toContain('"documents"');
-    const status = render(
-      'cluster',
-      {
-        context: 'support',
-        reachable: true,
-        distribution: 'EKS',
-        ours: true,
-        nodes: 3,
-        workspaces: [],
-        pvcs: 0,
-      },
-      'status',
+    const status = (
+      await render(
+        'cluster',
+        {
+          context: 'support',
+          reachable: true,
+          distribution: 'EKS',
+          ours: true,
+          nodes: 3,
+          workspaces: [],
+          pvcs: 0,
+        },
+        'status',
+      )
     ).out;
     expect(status).toContain('cluster   support');
     expect(status).toContain("EKS · houston's own · 3 node(s)");
     // `ours` is the kind-cluster switch and is never true for EKS, so every EKS cluster
     // read "yours", the ones houston built included. The tag decides now; `ours` still
     // wins for the kind cluster.
-    const shape = (ours: boolean, made: boolean | null): string =>
-      render(
-        'cluster',
-        {
-          context: 'support',
-          reachable: true,
-          distribution: 'EKS',
-          ours,
-          made_by_houston: made,
-          nodes: 3,
-          workspaces: [],
-          pvcs: 0,
-        },
-        'status',
+    const shape = async (ours: boolean, made: boolean | null): Promise<string> =>
+      (
+        await render(
+          'cluster',
+          {
+            context: 'support',
+            reachable: true,
+            distribution: 'EKS',
+            ours,
+            made_by_houston: made,
+            nodes: 3,
+            workspaces: [],
+            pvcs: 0,
+          },
+          'status',
+        )
       ).out;
-    expect(shape(false, true)).toContain("EKS · houston's own");
-    expect(shape(false, false)).toContain('EKS · yours');
-    expect(shape(false, null)).toContain('EKS · yours');
+    expect(await shape(false, true)).toContain("EKS · houston's own");
+    expect(await shape(false, false)).toContain('EKS · yours');
+    expect(await shape(false, null)).toContain('EKS · yours');
   });
 
-  test('down on a cloud cluster without --volumes says the disk keeps billing', () => {
+  test('down on a cloud cluster without --volumes says the disk keeps billing', async () => {
     // The guide's per-ticket section said "Always pass --volumes on a cluster" because the
     // disk keeps billing and cluster delete refuses while it exists; the command said
     // only that the claim was kept.
-    const cloud = render('down', {
-      name: 't1',
-      runtime: 'kubernetes',
-      context: 'arn:aws:eks:us-east-1:1:cluster/support',
-      removed: false,
-      found: true,
-    }).out;
+    const cloud = (
+      await render('down', {
+        name: 't1',
+        runtime: 'kubernetes',
+        context: 'arn:aws:eks:us-east-1:1:cluster/support',
+        removed: false,
+        found: true,
+      })
+    ).out;
     expect(cloud).toContain('keeps billing');
     expect(cloud).toContain('cluster delete');
     expect(cloud).toContain('houston down --name t1 --volumes');
-    const local = render('down', {
-      name: 't1',
-      runtime: 'kubernetes',
-      context: 'kind-houston-local',
-      removed: false,
-      found: true,
-    }).out;
+    const local = (
+      await render('down', {
+        name: 't1',
+        runtime: 'kubernetes',
+        context: 'kind-houston-local',
+        removed: false,
+        found: true,
+      })
+    ).out;
     expect(local).not.toContain('keeps billing');
   });
 
-  test('list names the cluster kind in WHERE, not a bare k8s', () => {
+  test('list names the cluster kind in WHERE, not a bare k8s', async () => {
     const row = (name: string, context: string) => ({
       name,
       rc_version: '8.5.1',
@@ -236,14 +257,16 @@ describe('explicit human command renderers', () => {
       default: false,
       pinned: false,
     });
-    const out = render('list', {
-      repros: [
-        row('a', 'arn:aws:eks:us-east-1:1:cluster/support'),
-        row('b', 'kind-houston-local'),
-        row('c', 'default'),
-      ],
-      count: 3,
-    }).out;
+    const out = (
+      await render('list', {
+        repros: [
+          row('a', 'arn:aws:eks:us-east-1:1:cluster/support'),
+          row('b', 'kind-houston-local'),
+          row('c', 'default'),
+        ],
+        count: 3,
+      })
+    ).out;
     // NAME is 20 cells and a mark, RC 10, MONGO 8: WHERE starts at cell 39.
     const where = out
       .split('\n')
@@ -252,43 +275,45 @@ describe('explicit human command renderers', () => {
     expect(where).toEqual(['eks', 'kind', 'k8s']);
   });
 
-  test('cluster status opens with where the cluster is and who built it, and ends with the next step', () => {
-    const out = render(
-      'cluster',
-      {
-        context: 'arn:aws:eks:us-east-1:1:cluster/support',
-        name: 'support',
-        region: 'us-east-1',
-        reachable: true,
-        distribution: 'eks',
-        ours: false,
-        made_by_houston: true,
-        created_at: '2026-09-28T09:00:00Z',
-        expires: '2026-10-05',
-        expires_in_days: 5,
-        spend_usd: 23.41,
-        zone: 'rc.example.com',
-        ready: {
-          storage_class: 'gp3',
-          ingress_class: 'traefik',
-          cert_manager: true,
-          cname_target: 'a1b2.elb.amazonaws.com',
-          dns_answers: false,
+  test('cluster status opens with where the cluster is and who built it, and ends with the next step', async () => {
+    const out = (
+      await render(
+        'cluster',
+        {
+          context: 'arn:aws:eks:us-east-1:1:cluster/support',
+          name: 'support',
+          region: 'us-east-1',
+          reachable: true,
+          distribution: 'eks',
+          ours: false,
+          made_by_houston: true,
+          created_at: '2026-09-28T09:00:00Z',
+          expires: '2026-10-05',
+          expires_in_days: 5,
+          spend_usd: 23.41,
+          zone: 'rc.example.com',
+          ready: {
+            storage_class: 'gp3',
+            ingress_class: 'traefik',
+            cert_manager: true,
+            cname_target: 'a1b2.elb.amazonaws.com',
+            dns_answers: false,
+          },
+          nodes: 3,
+          instance_types: { 't3.large': 3 },
+          workspaces: [],
+          pvcs: 0,
+          loadbalancers: 1,
+          cost: {
+            usd_hr: 0.4443,
+            basis: 'us-east-1 on-demand',
+            estimate: true,
+            unpriced: {},
+            incomplete: [],
+          },
         },
-        nodes: 3,
-        instance_types: { 't3.large': 3 },
-        workspaces: [],
-        pvcs: 0,
-        loadbalancers: 1,
-        cost: {
-          usd_hr: 0.4443,
-          basis: 'us-east-1 on-demand',
-          estimate: true,
-          unpriced: {},
-          incomplete: [],
-        },
-      },
-      'status',
+        'status',
+      )
     ).out;
     // The established lines stay; the new ones sit around them.
     expect(out).toContain('cluster   arn:aws:eks:us-east-1:1:cluster/support');
@@ -302,101 +327,117 @@ describe('explicit human command renderers', () => {
     expect(out).toContain('next      Point *.rc.example.com at a1b2.elb.amazonaws.com, once');
   });
 
-  test('every cluster action ends with what to do next', () => {
-    const create = render(
-      'cluster',
-      {
-        region: 'eu-west-1',
-        expires: '2026-10-07',
-        prepared: { cname_target: 'a1b2.elb.amazonaws.com', zone: 'rc.example.com' },
-      },
-      'create',
+  test('every cluster action ends with what to do next', async () => {
+    const create = (
+      await render(
+        'cluster',
+        {
+          region: 'eu-west-1',
+          expires: '2026-10-07',
+          prepared: { cname_target: 'a1b2.elb.amazonaws.com', zone: 'rc.example.com' },
+        },
+        'create',
+      )
     ).out;
     expect(create).toContain('next  point *.rc.example.com at a1b2.elb.amazonaws.com');
-    const prepare = render(
-      'cluster',
-      {
-        context: 'arn:aws:eks:eu-west-1:1:cluster/support',
-        storage_class: 'gp3',
-        ingress_class: 'traefik',
-        cert_manager: true,
-        cname_target: '',
-        cname_pending: false,
-        already: [],
-        kept: '',
-        zone: '',
-        metrics_server: true,
-      },
-      'prepare',
+    const prepare = (
+      await render(
+        'cluster',
+        {
+          context: 'arn:aws:eks:eu-west-1:1:cluster/support',
+          storage_class: 'gp3',
+          ingress_class: 'traefik',
+          cert_manager: true,
+          cname_target: '',
+          cname_pending: false,
+          already: [],
+          kept: '',
+          zone: '',
+          metrics_server: true,
+        },
+        'prepare',
+      )
     ).out;
     expect(prepare).toContain(
       'next  houston up --version <version> --name <ticket> --context support',
     );
-    const forget = render(
-      'cluster',
-      { context: 'arn:aws:eks:eu-west-1:1:cluster/old', forgotten: true },
-      'forget',
+    const forget = (
+      await render(
+        'cluster',
+        { context: 'arn:aws:eks:eu-west-1:1:cluster/old', forgotten: true },
+        'forget',
+      )
     ).out;
     expect(forget).toContain('next  houston cluster overview');
-    const keep = render(
-      'cluster',
-      { name: 'support', region: 'eu-west-1', expires: '2026-10-14', days: 7 },
-      'keep',
+    const keep = (
+      await render(
+        'cluster',
+        { name: 'support', region: 'eu-west-1', expires: '2026-10-14', days: 7 },
+        'keep',
+      )
     ).out;
     expect(keep).toContain('next  houston cluster overview');
-    const list = render(
-      'cluster',
-      {
-        clusters: [
-          {
-            name: 'support',
-            region: 'eu-west-1',
-            status: 'ACTIVE',
-            ours: true,
-            created: '2026-10-01',
-            expires: '',
-          },
-        ],
-        regions: ['eu-west-1'],
-        unreadable: [],
-        fallback: '',
-      },
-      'list',
+    const list = (
+      await render(
+        'cluster',
+        {
+          clusters: [
+            {
+              name: 'support',
+              region: 'eu-west-1',
+              status: 'ACTIVE',
+              ours: true,
+              created: '2026-10-01',
+              expires: '',
+            },
+          ],
+          regions: ['eu-west-1'],
+          unreadable: [],
+          fallback: '',
+        },
+        'list',
+      )
     ).out;
     expect(list).toContain('next  houston cluster status --context support');
-    const none = render(
-      'cluster',
-      { clusters: [], regions: ['eu-west-1'], unreadable: [], fallback: '' },
-      'list',
+    const none = (
+      await render(
+        'cluster',
+        { clusters: [], regions: ['eu-west-1'], unreadable: [], fallback: '' },
+        'list',
+      )
     ).out;
     expect(none).toContain('next  houston cluster guide');
-    const share = render(
-      'cluster',
-      {
-        name: 'support',
-        region: 'eu-west-1',
-        user: 'bob',
-        principal: 'arn:aws:iam::1:user/bob',
-        already: false,
-        lines: [],
-      },
-      'share',
+    const share = (
+      await render(
+        'cluster',
+        {
+          name: 'support',
+          region: 'eu-west-1',
+          user: 'bob',
+          principal: 'arn:aws:iam::1:user/bob',
+          already: false,
+          lines: [],
+        },
+        'share',
+      )
     ).out;
     expect(share).toContain('next  houston cluster overview');
-    const deleted = render(
-      'cluster',
-      {
-        name: 'support',
-        deleted: true,
-        region: 'eu-west-1',
-        leftovers: { found: [], unreadable: [] },
-      },
-      'delete',
+    const deleted = (
+      await render(
+        'cluster',
+        {
+          name: 'support',
+          deleted: true,
+          region: 'eu-west-1',
+          leftovers: { found: [], unreadable: [] },
+        },
+        'delete',
+      )
     ).out;
     expect(deleted).toContain('next  houston cluster list');
   });
 
-  test('cluster overview is a table, a totals line and the next step', () => {
+  test('cluster overview is a table, a totals line and the next step', async () => {
     const ledger = (over: Record<string, unknown>) => ({
       context: 'arn:aws:eks:us-east-1:1:cluster/support',
       name: 'support',
@@ -421,41 +462,43 @@ describe('explicit human command renderers', () => {
       spend_usd: 23.41,
       ...over,
     });
-    const out = render(
-      'cluster',
-      {
-        clusters: [
-          ledger({}),
-          ledger({
-            context: 'arn:aws:eks:eu-west-1:1:cluster/perf',
-            name: 'perf',
-            region: 'eu-west-1',
-            gone: true,
-            reachable: false,
-            reach_status: 'down',
-            nodes: null,
-            instance_types: null,
-            workspaces: null,
-            cost: null,
-            expires: '',
-            expires_in_days: null,
-            made_by_houston: false,
-            spend_usd: null,
-          }),
-        ],
-        failed: [],
-        totals: { clusters: 2, billable: 1, usd_day: 10.66, spend_usd: 23.41, workspaces: 2 },
-        next: {
-          stage: 5,
-          cluster: 'support',
-          title: 'Run a workspace on support',
-          why: 'In the GUI: click New workspace and pick support under Where it runs.',
-          command: 'houston up --version <version> --name <ticket> --context support',
+    const out = (
+      await render(
+        'cluster',
+        {
+          clusters: [
+            ledger({}),
+            ledger({
+              context: 'arn:aws:eks:eu-west-1:1:cluster/perf',
+              name: 'perf',
+              region: 'eu-west-1',
+              gone: true,
+              reachable: false,
+              reach_status: 'down',
+              nodes: null,
+              instance_types: null,
+              workspaces: null,
+              cost: null,
+              expires: '',
+              expires_in_days: null,
+              made_by_houston: false,
+              spend_usd: null,
+            }),
+          ],
+          failed: [],
+          totals: { clusters: 2, billable: 1, usd_day: 10.66, spend_usd: 23.41, workspaces: 2 },
+          next: {
+            stage: 5,
+            cluster: 'support',
+            title: 'Run a workspace on support',
+            why: 'In the GUI: click New workspace and pick support under Where it runs.',
+            command: 'houston up --version <version> --name <ticket> --context support',
+          },
+          default: 'arn:aws:eks:us-east-1:1:cluster/support',
+          unreadable: '',
         },
-        default: 'arn:aws:eks:us-east-1:1:cluster/support',
-        unreadable: '',
-      },
-      'overview',
+        'overview',
+      )
     ).out;
     const lines = out.split('\n');
     expect(lines[0]).toBe('IN AWS');
@@ -477,7 +520,7 @@ describe('explicit human command renderers', () => {
     expect(out).not.toContain('\u001b[');
   });
 
-  test('cluster overview puts a local cluster on this machine, free, apart from the aws table', () => {
+  test('cluster overview puts a local cluster on this machine, free, apart from the aws table', async () => {
     // A k3s on this machine sat in the EKS table with "?" for its cost and its builder,
     // under totals and a next step that were about AWS.
     const plain = (over: Record<string, unknown>) => ({
@@ -492,39 +535,41 @@ describe('explicit human command renderers', () => {
       made_by_houston: null,
       ...over,
     });
-    const out = render(
-      'cluster',
-      {
-        clusters: [
-          plain({ context: 'default', name: 'default', where: 'local' }),
-          plain({
-            context: 'lab',
-            name: 'lab',
-            where: 'elsewhere',
-            workspaces: [{ name: 't1' }, { name: 't2' }],
-          }),
-        ],
-        failed: [],
-        totals: {
-          clusters: 0,
-          billable: 0,
-          usd_day: null,
-          spend_usd: null,
-          workspaces: 0,
-          unpriced: 0,
-          unread: 0,
+    const out = (
+      await render(
+        'cluster',
+        {
+          clusters: [
+            plain({ context: 'default', name: 'default', where: 'local' }),
+            plain({
+              context: 'lab',
+              name: 'lab',
+              where: 'elsewhere',
+              workspaces: [{ name: 't1' }, { name: 't2' }],
+            }),
+          ],
+          failed: [],
+          totals: {
+            clusters: 0,
+            billable: 0,
+            usd_day: null,
+            spend_usd: null,
+            workspaces: 0,
+            unpriced: 0,
+            unread: 0,
+          },
+          next: {
+            stage: 2,
+            cluster: '',
+            title: 'Approve AWS account 1 for spending on this box',
+            why: 'w',
+            command: 'houston config set cluster.approved_accounts 1',
+          },
+          default: '',
+          unreadable: '',
         },
-        next: {
-          stage: 2,
-          cluster: '',
-          title: 'Approve AWS account 1 for spending on this box',
-          why: 'w',
-          command: 'houston config set cluster.approved_accounts 1',
-        },
-        default: '',
-        unreadable: '',
-      },
-      'overview',
+        'overview',
+      )
     ).out;
     const lines = out.split('\n');
     expect(lines.slice(0, 3)).toEqual([
@@ -541,37 +586,39 @@ describe('explicit human command renderers', () => {
     expect(out).toContain('next  Approve AWS account 1 for spending on this box');
   });
 
-  test('cluster status on a local cluster says this machine and what it uses', () => {
-    const out = render(
-      'cluster',
-      {
-        context: 'default',
-        name: 'default',
-        region: '',
-        where: 'local',
-        reachable: true,
-        distribution: 'k3s',
-        ours: false,
-        made_by_houston: null,
-        created_at: '',
-        expires: '',
-        expires_in_days: null,
-        spend_usd: null,
-        zone: '',
-        ready: {
-          storage_class: 'local-path',
-          ingress_class: 'traefik',
-          cert_manager: true,
-          cname_target: '',
-          dns_answers: null,
+  test('cluster status on a local cluster says this machine and what it uses', async () => {
+    const out = (
+      await render(
+        'cluster',
+        {
+          context: 'default',
+          name: 'default',
+          region: '',
+          where: 'local',
+          reachable: true,
+          distribution: 'k3s',
+          ours: false,
+          made_by_houston: null,
+          created_at: '',
+          expires: '',
+          expires_in_days: null,
+          spend_usd: null,
+          zone: '',
+          ready: {
+            storage_class: 'local-path',
+            ingress_class: 'traefik',
+            cert_manager: true,
+            cname_target: '',
+            dns_answers: null,
+          },
+          nodes: 1,
+          workspaces: [],
+          pvcs: 0,
+          loadbalancers: 0,
+          cost: null,
         },
-        nodes: 1,
-        workspaces: [],
-        pvcs: 0,
-        loadbalancers: 0,
-        cost: null,
-      },
-      'status',
+        'status',
+      )
     ).out;
     expect(out).toContain('about     default · this machine · k3s');
     expect(out).toContain('uses      storage class local-path · ingress traefik · cert-manager');
@@ -579,97 +626,101 @@ describe('explicit human command renderers', () => {
     expect(out).toContain('next      Run a workspace on default');
   });
 
-  test('cluster overview says when its totals leave something out', () => {
+  test('cluster overview says when its totals leave something out', async () => {
     // Two billing clusters, one of which could not be read: "~$10.66/day" alone read as
     // the whole bill, and "0 workspaces" as none.
-    const out = render(
-      'cluster',
-      {
-        clusters: [
-          {
-            context: 'arn:aws:eks:us-east-1:1:cluster/perf',
-            name: 'perf',
-            region: 'us-east-1',
-            reachable: false,
-            reach_status: 'denied',
-            gone: false,
-            nodes: null,
-            workspaces: null,
-            cost: null,
-            made_by_houston: null,
-          },
-        ],
-        failed: [],
-        totals: {
-          clusters: 2,
-          billable: 2,
-          usd_day: 10.66,
-          spend_usd: null,
-          workspaces: 0,
-          unpriced: 1,
-          unread: 1,
-        },
-        next: {
-          stage: 5,
-          cluster: 'perf',
-          title: 'perf is not answering',
-          why: 'w',
-          command: 'houston cluster status perf',
-        },
-        default: '',
-        unreadable: '',
-      },
-      'overview',
-    ).out;
-    expect(out).toContain('~$10.66/day + 1 not priced');
-    expect(out).toContain('0+ workspaces');
-  });
-
-  test('an expired cluster is amber on a terminal, never the red kept for destroying', () => {
-    const saved = process.env.FORCE_COLOR;
-    const savedNoColor = process.env.NO_COLOR;
-    delete process.env.NO_COLOR;
-    process.env.FORCE_COLOR = '1';
-    try {
-      const out = render(
+    const out = (
+      await render(
         'cluster',
         {
           clusters: [
             {
-              context: 'arn:aws:eks:us-east-1:1:cluster/old',
-              name: 'old',
+              context: 'arn:aws:eks:us-east-1:1:cluster/perf',
+              name: 'perf',
               region: 'us-east-1',
-              reachable: true,
+              reachable: false,
+              reach_status: 'denied',
               gone: false,
-              nodes: 3,
-              workspaces: [],
+              nodes: null,
+              workspaces: null,
               cost: null,
-              expires: '2026-09-20',
-              expires_in_days: -3,
-              made_by_houston: true,
+              made_by_houston: null,
             },
           ],
           failed: [],
           totals: {
-            clusters: 1,
-            billable: 1,
-            usd_day: null,
+            clusters: 2,
+            billable: 2,
+            usd_day: 10.66,
             spend_usd: null,
             workspaces: 0,
             unpriced: 1,
-            unread: 0,
+            unread: 1,
           },
           next: {
-            stage: 6,
-            cluster: 'old',
-            title: 't',
+            stage: 5,
+            cluster: 'perf',
+            title: 'perf is not answering',
             why: 'w',
-            command: 'houston cluster keep old --days 7',
+            command: 'houston cluster status perf',
           },
           default: '',
           unreadable: '',
         },
         'overview',
+      )
+    ).out;
+    expect(out).toContain('~$10.66/day + 1 not priced');
+    expect(out).toContain('0+ workspaces');
+  });
+
+  test('an expired cluster is amber on a terminal, never the red kept for destroying', async () => {
+    const saved = process.env.FORCE_COLOR;
+    const savedNoColor = process.env.NO_COLOR;
+    delete process.env.NO_COLOR;
+    process.env.FORCE_COLOR = '1';
+    try {
+      const out = (
+        await render(
+          'cluster',
+          {
+            clusters: [
+              {
+                context: 'arn:aws:eks:us-east-1:1:cluster/old',
+                name: 'old',
+                region: 'us-east-1',
+                reachable: true,
+                gone: false,
+                nodes: 3,
+                workspaces: [],
+                cost: null,
+                expires: '2026-09-20',
+                expires_in_days: -3,
+                made_by_houston: true,
+              },
+            ],
+            failed: [],
+            totals: {
+              clusters: 1,
+              billable: 1,
+              usd_day: null,
+              spend_usd: null,
+              workspaces: 0,
+              unpriced: 1,
+              unread: 0,
+            },
+            next: {
+              stage: 6,
+              cluster: 'old',
+              title: 't',
+              why: 'w',
+              command: 'houston cluster keep old --days 7',
+            },
+            default: '',
+            unreadable: '',
+          },
+          'overview',
+        )
       ).out;
       expect(out).toContain('\u001b[33m3 d ago\u001b[0m');
       expect(out).not.toContain('\u001b[31m');
@@ -681,101 +732,111 @@ describe('explicit human command renderers', () => {
     }
   });
 
-  test('cluster overview with nothing known still says what to do', () => {
-    const out = render(
-      'cluster',
-      {
-        clusters: [],
-        failed: [],
-        totals: { clusters: 0, billable: 0, usd_day: null, spend_usd: null, workspaces: 0 },
-        next: {
-          stage: 3,
-          cluster: '',
-          title: 'Build a cluster',
-          why: 'About twenty minutes.',
-          command: 'houston cluster create support --region us-east-1 --zone <your zone>',
+  test('cluster overview with nothing known still says what to do', async () => {
+    const out = (
+      await render(
+        'cluster',
+        {
+          clusters: [],
+          failed: [],
+          totals: { clusters: 0, billable: 0, usd_day: null, spend_usd: null, workspaces: 0 },
+          next: {
+            stage: 3,
+            cluster: '',
+            title: 'Build a cluster',
+            why: 'About twenty minutes.',
+            command: 'houston cluster create support --region us-east-1 --zone <your zone>',
+          },
+          default: '',
+          unreadable: '',
         },
-        default: '',
-        unreadable: '',
-      },
-      'overview',
+        'overview',
+      )
     ).out;
     expect(out).toContain('no cluster known on this box');
     expect(out).toContain('next  Build a cluster');
   });
 
-  test('cluster share prints the two lines the colleague runs', () => {
-    const out = render(
-      'cluster',
-      {
-        name: 'support',
-        region: 'eu-west-1',
-        user: 'bob',
-        principal: 'arn:aws:iam::1:user/bob',
-        already: false,
-        lines: [
-          'aws eks update-kubeconfig --name support --region eu-west-1',
-          'houston up --version 8.5.1 --name TICKET-5678 --context support',
-        ],
-      },
-      'share',
+  test('cluster share prints the two lines the colleague runs', async () => {
+    const out = (
+      await render(
+        'cluster',
+        {
+          name: 'support',
+          region: 'eu-west-1',
+          user: 'bob',
+          principal: 'arn:aws:iam::1:user/bob',
+          already: false,
+          lines: [
+            'aws eks update-kubeconfig --name support --region eu-west-1',
+            'houston up --version 8.5.1 --name TICKET-5678 --context support',
+          ],
+        },
+        'share',
+      )
     ).out;
     expect(out).toContain('arn:aws:iam::1:user/bob');
     expect(out).toContain('aws eks update-kubeconfig --name support --region eu-west-1');
     expect(out).toContain('houston up');
   });
 
-  test('cluster keep says the new date and what reads it', () => {
-    const out = render(
-      'cluster',
-      { name: 'support', region: 'eu-west-1', expires: '2026-10-14', days: 7 },
-      'keep',
+  test('cluster keep says the new date and what reads it', async () => {
+    const out = (
+      await render(
+        'cluster',
+        { name: 'support', region: 'eu-west-1', expires: '2026-10-14', days: 7 },
+        'keep',
+      )
     ).out;
     expect(out).toContain("kept 'support' until 2026-10-14");
     expect(out).toContain('reminder');
   });
 
-  test('cluster delete ends with what AWS still holds, or with nothing billing', () => {
+  test('cluster delete ends with what AWS still holds, or with nothing billing', async () => {
     // The guide had seven aws commands to run after a delete, because "the command
     // returned" is not "nothing is billing". The delete asks AWS itself now.
-    const clean = render(
-      'cluster',
-      {
-        name: 'support',
-        deleted: true,
-        region: 'eu-west-1',
-        leftovers: { found: [], unreadable: [] },
-      },
-      'delete',
+    const clean = (
+      await render(
+        'cluster',
+        {
+          name: 'support',
+          deleted: true,
+          region: 'eu-west-1',
+          leftovers: { found: [], unreadable: [] },
+        },
+        'delete',
+      )
     ).out;
     expect(clean).toContain('nothing in eu-west-1 is billing');
-    const dirty = render(
-      'cluster',
-      {
-        name: 'support',
-        deleted: true,
-        region: 'eu-west-1',
-        leftovers: {
-          found: [
-            {
-              kind: 'volume',
-              id: 'vol-0abc',
-              detail: '8 GB',
-              fix: 'aws ec2 delete-volume --region eu-west-1 --volume-id vol-0abc',
-              certain: true,
-            },
-            {
-              kind: 'volume',
-              id: 'vol-9zz',
-              detail: '8 GB — not tagged with any cluster',
-              fix: '',
-              certain: false,
-            },
-          ],
-          unreadable: [{ kind: 'stack', why: 'AccessDenied' }],
+    const dirty = (
+      await render(
+        'cluster',
+        {
+          name: 'support',
+          deleted: true,
+          region: 'eu-west-1',
+          leftovers: {
+            found: [
+              {
+                kind: 'volume',
+                id: 'vol-0abc',
+                detail: '8 GB',
+                fix: 'aws ec2 delete-volume --region eu-west-1 --volume-id vol-0abc',
+                certain: true,
+              },
+              {
+                kind: 'volume',
+                id: 'vol-9zz',
+                detail: '8 GB — not tagged with any cluster',
+                fix: '',
+                certain: false,
+              },
+            ],
+            unreadable: [{ kind: 'stack', why: 'AccessDenied' }],
+          },
         },
-      },
-      'delete',
+        'delete',
+      )
     ).out;
     expect(dirty).toContain('left behind');
     expect(dirty).toContain('vol-0abc');
@@ -789,15 +850,17 @@ describe('explicit human command renderers', () => {
     expect(dirty).not.toContain('--volume-id vol-9zz');
   });
 
-  test('cluster create prints its summary once: the event already said the cluster is up', () => {
-    const out = render(
-      'cluster',
-      {
-        region: 'eu-west-1',
-        expires: '2026-10-07',
-        context: 'arn:aws:eks:eu-west-1:1:cluster/support',
-      },
-      'create',
+  test('cluster create prints its summary once: the event already said the cluster is up', async () => {
+    const out = (
+      await render(
+        'cluster',
+        {
+          region: 'eu-west-1',
+          expires: '2026-10-07',
+          context: 'arn:aws:eks:eu-west-1:1:cluster/support',
+        },
+        'create',
+      )
     ).out;
     // `cluster 'X' is up in R` is an event createCluster emits, and emitOf prints every
     // event; the summary printed it a second time, one line under the first.
@@ -893,21 +956,28 @@ describe('presets', () => {
     });
   });
 
-  test('the shipped catalogue, through renderHuman, reads the width from COLUMNS', () => {
+  test('the shipped catalogue, through renderHuman, reads the width from COLUMNS', async () => {
     const widths = ['100', '60', '40'];
     const recorded = [null, ...widths].map(
       (columns) => RECORDED.presets.catalogue[columns ?? 'unset'],
     );
     // Unset needs a host with no terminal, which the real process may not be.
-    expect(ours(listPresets(), null)).toEqual(recorded[0]);
+    expect(
+      ours(
+        listPresets().filter((preset) => preset.name !== 'e2ee'),
+        null,
+      ),
+    ).toEqual(recorded[0]);
     const saved = process.env.COLUMNS;
     try {
-      widths.forEach((columns, at) => {
+      for (const [at, columns] of widths.entries()) {
         process.env.COLUMNS = columns;
-        const shown = render('presets', { presets: listPresets() });
+        const shown = await render('presets', {
+          presets: listPresets().filter((preset) => preset.name !== 'e2ee'),
+        });
         expect([columns, { out: shown.out, error: null }]).toEqual([columns, recorded[at + 1]]);
         expect(shown.err).toBe('');
-      });
+      }
     } finally {
       if (saved === undefined) delete process.env.COLUMNS;
       else process.env.COLUMNS = saved;
@@ -916,7 +986,7 @@ describe('presets', () => {
     expect(recorded[1]?.out).toContain('| --set verification   require email verification');
   });
 
-  test("a user file's --set lines come in the file's order, and its box where a code-point sort puts it", () => {
+  test("a user file's --set lines come in the file's order, and its box where a code-point sort puts it", async () => {
     // A JavaScript object lists `"10"` and `"0"` before `users`; earlier releases keep the
     // order written. And UTF-16 sorts the astral emoji below U+FF21, where code points sort
     // it above.
@@ -934,7 +1004,12 @@ describe('presets', () => {
     try {
       for (const [file, text] of files) fs.writeFileSync(path.join(dir, file), text, 'utf8');
       const recorded = RECORDED.presets.userFiles;
-      expect(ours(listPresets(), null)).toEqual(recorded);
+      expect(
+        ours(
+          listPresets().filter((preset) => preset.name !== 'e2ee'),
+          null,
+        ),
+      ).toEqual(recorded);
       const out = recorded.out;
       const box = out.slice(out.indexOf('+- ordered '));
       const keys = box
@@ -1016,11 +1091,11 @@ describe('env', () => {
     ],
   ];
 
-  function ours(typed: string, sets: string[] | null, result: Bag): string {
+  async function ours(typed: string, sets: string[] | null, result: Bag): Promise<string> {
     const spec = (COMMAND_SPECS as readonly CommandSpec[]).find((item) => item.path === 'env');
     if (spec === undefined) throw new Error('no env command');
     let out = '';
-    renderHuman(
+    await renderHuman(
       { spec, arguments: {}, options: { name: typed, set_: sets ?? [] }, events: null },
       result,
       { writeOut: (text) => (out += text), writeErr: () => {} },
@@ -1028,10 +1103,12 @@ describe('env', () => {
     return out;
   }
 
-  test('the panel, the drift warnings and every hint line are those of earlier releases', () => {
+  test('the panel, the drift warnings and every hint line are those of earlier releases', async () => {
     const recorded = RECORDED.env;
     // All at once, so a failure shows every case that differs rather than the first.
-    expect(CASES.map(([typed, sets, result]) => ours(typed, sets, result))).toEqual(recorded);
+    const shown: string[] = [];
+    for (const [typed, sets, result] of CASES) shown.push(await ours(typed, sets, result));
+    expect(shown).toEqual(recorded);
     // What an earlier version never printed, named so a failure says which half regressed.
     expect(recorded[0]).toContain(
       '|  FOO         bar   <- yours   !! NOT IN THE RUNNING CONTAINER  |',
@@ -1060,9 +1137,11 @@ describe('pat', () => {
     { name: 123, root_url: null, bypass_2fa: true },
   ].map((row) => ({ ...row, token: 'pat-1', user_id: 'uid', label: 'houston' }));
 
-  test('the header and the headers line are those of earlier releases, the flag as true or false', () => {
+  test('the header and the headers line are those of earlier releases, the flag as true or false', async () => {
     const recorded = RECORDED.pat;
-    expect(ROWS.map((row) => render('pat', row).out)).toEqual(recorded);
+    const shown: string[] = [];
+    for (const row of ROWS) shown.push((await render('pat', row)).out);
+    expect(shown).toEqual(recorded);
     expect(recorded[1]).toContain('(http://localhost:3100) — bypass_2fa=false\n');
   });
 });
@@ -1103,21 +1182,27 @@ describe('monitor', () => {
     [true, { name: 'alpha', monitoring: false, rc_setting_reset: false, stack_removed: true }],
   ];
 
-  function ours(off: boolean, result: Record<string, unknown>): string {
+  async function ours(off: boolean, result: Record<string, unknown>): Promise<string> {
     const spec = (COMMAND_SPECS as readonly CommandSpec[]).find((item) => item.path === 'monitor');
     if (spec === undefined) throw new Error('no monitor command');
     let out = '';
-    renderHuman({ spec, arguments: {}, options: { name: 'alpha', off }, events: null }, result, {
-      writeOut: (text) => (out += text),
-      writeErr: () => {},
-    });
+    await renderHuman(
+      { spec, arguments: {}, options: { name: 'alpha', off }, events: null },
+      result,
+      {
+        writeOut: (text) => (out += text),
+        writeErr: () => {},
+      },
+    );
     return out;
   }
 
-  test('the attach and detach lines, and the notes after them, are those of earlier releases', () => {
+  test('the attach and detach lines, and the notes after them, are those of earlier releases', async () => {
     const recorded = RECORDED.monitor;
     // All at once, so a failure shows every case that differs rather than the first.
-    expect(CASES.map(([off, result]) => ours(off, result))).toEqual(recorded);
+    const shown: string[] = [];
+    for (const [off, result] of CASES) shown.push(await ours(off, result));
+    expect(shown).toEqual(recorded);
     expect(recorded[0]).toMatch(/^✓ monitoring attached to 'alpha'\n\nGrafana: /u);
     expect(recorded[3]).toBe(
       "✓ monitoring detached from 'alpha' (metrics setting left as-is — repro not reachable)\n",

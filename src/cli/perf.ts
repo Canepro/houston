@@ -10,7 +10,7 @@ import * as lifecyclePreconditions from '../core/lifecycle/preconditions';
 import * as rcapi from '../core/rcapi';
 import * as runnerHost from '../core/runner/host';
 import * as runnerRecord from '../core/runner/record';
-import { NotReadyError, ReproError, errorText } from '../lib/errors';
+import { NotReadyError, ReproError, ValidationError, errorText } from '../lib/errors';
 import { nullEmit } from '../lib/events';
 import { JsonFloat } from '../lib/jsonout';
 import { formatFixed, shownValue, isTruthy } from '../lib/format';
@@ -287,16 +287,17 @@ async function performanceIdentity(
 }
 
 /*
- * EVERY REFUSAL IN THIS FILE IS A PLAIN ReproError, which is the CLI's contract for the paths
- * that predate jsonout -- REPRO_ERROR, exit 1 -- in the option checks, the capacity checks,
- * the live-monitoring check, the constraints, the baseline and the webhook environment alike.
- * They were ValidationErrors, VALIDATION_FAILED and exit 2, which is what the GUI's own
- * preflight in core/loadtest.ts raises and keeps raising, since the web layer maps it to an
- * HTTP status.
+ * A FLAG THAT IS WRONG IS A ValidationError -- VALIDATION_FAILED, exit 2 -- in the option
+ * checks, the capacity checks, the live-monitoring check and the constraints alike: the class
+ * the GUI's own preflight in core/loadtest.ts raises for the same refusals. They were plain
+ * ReproErrors, exit 1, so `loadtest --scenario frob` exited 1 where `--duration forever` and
+ * every other command's bad flag exit 2. A `--compare` naming no saved baseline is the
+ * baseline's own NotFoundError, exit 4. What is left as a plain ReproError, exit 1, is a
+ * refusal of no more specific kind: Rocket.Chat refusing the webhook, or the API call.
  */
 export function parseEndpoint(endpoint: string): [string, string] {
   const value = endpoint.trim();
-  if (value === '') throw new ReproError('bad --endpoint: empty endpoint');
+  if (value === '') throw new ValidationError('bad --endpoint: empty endpoint');
   const parts = value.split(/\s+/u, 2);
   let method = 'GET';
   let target = value;
@@ -304,14 +305,14 @@ export function parseEndpoint(endpoint: string): [string, string] {
     method = (parts[0] as string).toUpperCase();
     const allowed = ['DELETE', 'GET', 'PATCH', 'POST', 'PUT'];
     if (!allowed.includes(method)) {
-      throw new ReproError(
+      throw new ValidationError(
         `bad --endpoint: unsupported method '${parts[0] as string}' (use ${allowed.join(', ')})`,
       );
     }
     target = value.slice((parts[0] as string).length).trim();
   }
   if (!target.startsWith('/')) {
-    throw new ReproError(`bad --endpoint: path must start with '/': '${target}'`);
+    throw new ValidationError(`bad --endpoint: path must start with '/': '${target}'`);
   }
   return [method, target];
 }
@@ -319,18 +320,18 @@ export function parseEndpoint(endpoint: string): [string, string] {
 export function parseRamp(value: string, flag: '--ramp' | '--spike'): [number, number] {
   const cells = value.split(':');
   if (cells.length !== 2) {
-    throw new ReproError(`bad ${flag}: ramp must be START:END, e.g. 10:200`);
+    throw new ValidationError(`bad ${flag}: ramp must be START:END, e.g. 10:200`);
   }
   if (!cells.every((cell) => /^-?\d+$/u.test(cell))) {
-    throw new ReproError(`bad ${flag}: ramp START and END must be integers, e.g. 10:200`);
+    throw new ValidationError(`bad ${flag}: ramp START and END must be integers, e.g. 10:200`);
   }
   const start = Number(cells[0]);
   const end = Number(cells[1]);
   if (start < 0 || end < 1) {
-    throw new ReproError(`bad ${flag}: ramp needs START >= 0 and END >= 1, e.g. 10:200`);
+    throw new ValidationError(`bad ${flag}: ramp needs START >= 0 and END >= 1, e.g. 10:200`);
   }
   if (flag === '--spike' && end <= start) {
-    throw new ReproError(`--spike peak must exceed base ('${value}')`);
+    throw new ValidationError(`--spike peak must exceed base ('${value}')`);
   }
   return [start, end];
 }
@@ -342,18 +343,18 @@ function customEnvironment(options: LoadtestCliOptions): {
 } {
   if (options.scenario !== 'custom') {
     if (options.endpoint !== '' || options.body !== '') {
-      throw new ReproError('--endpoint/--body only apply to --scenario custom');
+      throw new ValidationError('--endpoint/--body only apply to --scenario custom');
     }
     return { extraEnv: null, method: '', path: '' };
   }
   if (options.endpoint === '') {
-    throw new ReproError(
+    throw new ValidationError(
       '--scenario custom needs --endpoint, e.g. --endpoint "GET /api/v1/channels.list"',
     );
   }
   const [method, path] = parseEndpoint(options.endpoint);
   if (options.body !== '' && ['GET', 'DELETE'].includes(method)) {
-    throw new ReproError(`--body is not sent with a ${method} request`);
+    throw new ValidationError(`--body is not sent with a ${method} request`);
   }
   return {
     extraEnv: { RC_METHOD: method, RC_PATH: path, RC_BODY: options.body || null },
@@ -374,15 +375,16 @@ function validateLoadtest(
   rules: Rule[];
 } {
   if (!deps.core.DEFAULT_DEPS.k6.SCENARIOS.includes(options.scenario)) {
-    throw new ReproError(
+    throw new ValidationError(
       `unknown scenario '${options.scenario}' (choose: ${deps.core.DEFAULT_DEPS.k6.SCENARIOS.join(', ')})`,
     );
   }
   const custom = customEnvironment(options);
-  if (options.vus < 1) throw new ReproError('--vus must be >= 1');
-  if (options.usersN < 0) throw new ReproError('--users must be >= 0');
+  if (options.vus < 1) throw new ValidationError('--vus must be >= 1');
+  coreLoadtest.refuseABadDuration(options.duration, '--duration');
+  if (options.usersN < 0) throw new ValidationError('--users must be >= 0');
   if (options.ramp !== '' && options.spike !== '') {
-    throw new ReproError('--ramp and --spike are mutually exclusive load shapes');
+    throw new ValidationError('--ramp and --spike are mutually exclusive load shapes');
   }
   for (const [flag, value] of [
     ['--ramp', options.ramp],
@@ -393,25 +395,19 @@ function validateLoadtest(
     if (options.vus !== 10) warn(`  note: --vus is ignored when ${flag} is given`);
   }
   for (const label of [options.save, options.compare]) {
-    if (label !== '') {
-      try {
-        deps.baseline.sanitizeLabel(label);
-      } catch (error) {
-        throw new ReproError(errorText(error));
-      }
-    }
+    if (label !== '') deps.baseline.sanitizeLabel(label);
   }
   let constraints: Record<string, constrain.Limit> = {};
   let rules: Rule[] = [];
   try {
     if (options.constrain !== '') constraints = deps.constrain.parse(options.constrain);
   } catch (error) {
-    throw new ReproError(`bad --constrain: ${errorText(error)}`);
+    throw new ValidationError(`bad --constrain: ${errorText(error)}`);
   }
   try {
     if (options.slo !== '') rules = deps.core.DEFAULT_DEPS.slo.parse(options.slo);
   } catch (error) {
-    throw new ReproError(`bad --slo: ${errorText(error)}`);
+    throw new ValidationError(`bad --slo: ${errorText(error)}`);
   }
   return { ...custom, constraints, rules };
 }
@@ -541,7 +537,7 @@ export async function runLoadtestCli(
   const services = rcServices.length > 0 ? rcServices : ['rocketchat'];
   if (options.live) {
     if (!isTruthy(asBag(meta.extra).monitoring)) {
-      throw new ReproError(
+      throw new ValidationError(
         `--live needs the monitoring stack — attach it first: houston monitor --name ${meta.name}`,
       );
     }
@@ -551,7 +547,7 @@ export async function runLoadtestCli(
         String(part).includes('remote-write-receiver'),
       )
     ) {
-      throw new ReproError(
+      throw new ValidationError(
         "--live needs Prometheus with remote-write enabled, but this repro's monitoring " +
           `predates it. Re-attach it: houston monitor --name ${meta.name} --off && ` +
           `houston monitor --name ${meta.name}`,
@@ -567,13 +563,15 @@ export async function runLoadtestCli(
       );
     }
   } catch (error) {
-    throw new ReproError(`bad --constrain: ${errorText(error)}`);
+    throw new ValidationError(`bad --constrain: ${errorText(error)}`);
   }
   let base: Bag | null = null;
   if (options.compare !== '') {
     try {
       base = deps.baseline.load(options.compare);
     } catch (error) {
+      // The baseline's own NotFoundError (exit 4) passes; an unreadable one is a plain refusal.
+      if (error instanceof ReproError) throw error;
       throw new ReproError(errorText(error));
     }
   }
@@ -857,7 +855,7 @@ export async function runCapacityCli(
     (scenario) => scenario !== 'custom' && scenario !== 'webhook',
   );
   if (!allowed.includes(options.scenario)) {
-    throw new ReproError(
+    throw new ValidationError(
       'capacity supports the built-in scenarios (journey/messages/read/mixed/login/badbot)',
     );
   }
@@ -865,16 +863,17 @@ export async function runCapacityCli(
   try {
     rules = deps.core.DEFAULT_DEPS.slo.parse(options.slo);
   } catch (error) {
-    throw new ReproError(`bad --slo: ${errorText(error)}`);
+    throw new ValidationError(`bad --slo: ${errorText(error)}`);
   }
   if (options.start < 1 || options.maxVus < options.start) {
-    throw new ReproError('--start must be >= 1 and --max >= --start');
+    throw new ValidationError('--start must be >= 1 and --max >= --start');
   }
+  coreLoadtest.refuseABadDuration(options.stepDuration, '--step-duration');
   let constraints: Record<string, constrain.Limit> = {};
   try {
     if (options.constrain !== '') constraints = deps.constrain.parse(options.constrain);
   } catch (error) {
-    throw new ReproError(`bad --constrain: ${errorText(error)}`);
+    throw new ValidationError(`bad --constrain: ${errorText(error)}`);
   }
   // Resolved as the CLI's actor first, then guarded (`requireComposeForPerf`).
   const resolved = await deps.resolveName(options.name, auditActor());
@@ -893,7 +892,7 @@ export async function runCapacityCli(
       );
     }
   } catch (error) {
-    throw new ReproError(`bad --constrain: ${errorText(error)}`);
+    throw new ValidationError(`bad --constrain: ${errorText(error)}`);
   }
   const { auth, token } = await performanceIdentity(deps, meta);
   const users =

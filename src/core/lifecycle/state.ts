@@ -6,7 +6,7 @@
  */
 import * as config from '../../lib/config';
 import { DockerError, ValidationError } from '../../lib/errors';
-import { type Emit, nullEmit, warn } from '../../lib/events';
+import { type Emit, info, nullEmit, warn } from '../../lib/events';
 import { valueKind } from '../../lib/format';
 import { namespaceFor } from '../kube/namespace';
 import { CONTEXT as KUBE_CONTEXT } from '../kube/names';
@@ -14,7 +14,7 @@ import { startWorkspace, stopWorkspace } from '../kube/scale';
 import * as engine from '../runner/engine';
 import { reproLock, updateConfig } from '../runner/locks';
 import { readMeta, updateMeta } from '../runner/record';
-import { rcState } from '../runner/queries';
+import { containerDetails, networklessContainers, rcState, startErrors } from '../runner/queries';
 import * as topology from '../topology';
 
 import * as naming from './naming';
@@ -72,10 +72,17 @@ export async function setStateKubernetes(
         await stopWorkspace(target, { context, emit });
         const pid = extra.port_forward_pid;
         if (isTruthy(pid)) {
-          stopPortForward(Number(pid), { namespace: await namespaceFor(target) });
+          await stopPortForward(Number(pid), { namespace: await namespaceFor(target) });
           await updateMeta(target, (current) => {
             delete current.extra.port_forward_pid;
           });
+        }
+        // A preset's UI forwards die with their pods the same way, but their process can
+        // outlive the pod -- and `ready` judges a forward by its process, so after a start
+        // the stale Keycloak forward read as alive, was never repaired, and SAML sign-in
+        // failed. Stopped here and LEFT RECORDED, so `ready` finds them dead and re-forwards.
+        for (const uiPid of Object.values(bag(extra.scenario_forwards))) {
+          await stopPortForward(Number(uiPid), { namespace: await namespaceFor(target) });
         }
       }
       if (action === 'start' || action === 'restart') {
@@ -96,6 +103,14 @@ export async function setStateKubernetes(
       }
     },
     { timeoutMs: INTERACTIVE_LOCK_WAIT * 1000 },
+  );
+}
+
+/** What a `down`ed workspace is told when asked to start: it has nothing to start. */
+function downedHint(target: string): string {
+  return (
+    ` - '${target}' was \`down\`ed, so it has no containers to ` +
+    'start; recreate them from its stored metadata instead'
   );
 }
 
@@ -140,6 +155,11 @@ export async function setState(
       needs_ready: action === 'start' || action === 'restart',
     };
   }
+  // A `down`ed workspace has no containers, and `compose restart` restarts the ones there
+  // are: none, exit 0, and the CLI said "restarted". `start` already refused this.
+  if (action === 'restart' && (await containerDetails(target)).length === 0) {
+    throw new DockerError(`\`docker compose restart\` failed for '${target}'${downedHint(target)}`);
+  }
   const fn = action === 'start' ? engine.start : action === 'stop' ? engine.stop : engine.restart;
   // Locked like every other mutator. Stop/Restart are always-enabled GUI buttons, so they
   // were clickable straight through a create, backup or upgrade running on the same repro
@@ -149,14 +169,51 @@ export async function setState(
   });
   if (rc !== 0) {
     // A `down`ed repro has no containers, so `compose start` can never revive it. Say
-    // what actually works instead of the exit code.
+    // what actually works instead of the exit code. Asked with `ps --all`: `rcState` reads
+    // `compose ps` WITHOUT it, so a merely STOPPED repro read as absent, and every failed
+    // start of one was told it had been `down`ed -- pointing away from compose's real error.
     let hint = '';
-    if ((action === 'start' || action === 'restart') && (await rcState(target)) === 'absent') {
-      hint =
-        ` - '${target}' was \`down\`ed, so it has no containers to ` +
-        'start; recreate them from its stored metadata instead';
+    if (
+      (action === 'start' || action === 'restart') &&
+      (await containerDetails(target)).length === 0
+    ) {
+      hint = downedHint(target);
+    } else if (action !== 'stop') {
+      // Why, from Docker: compose said it on a stream only the CLI's terminal saw.
+      const why = await startErrors(target);
+      if (why.length > 0) hint = ` — ${why.join('; ')}`;
     }
     throw new DockerError(`\`docker compose ${action}\` failed for '${target}'${hint}`);
+  }
+  // A START THAT LEFT A CONTAINER WITH NO NETWORK is recreated. An earlier start that failed
+  // on a held port detaches it, and every later start "succeeds" over a Rocket.Chat that
+  // cannot reach MongoDB and publishes no port; `compose up -d` puts it back as specified.
+  if (action === 'start' || action === 'restart') {
+    const detached = await networklessContainers(target);
+    if (detached.length > 0) {
+      info(
+        emit,
+        `${detached.join(', ')} came up with no network, left so by an earlier start that ` +
+          'failed — recreating it, data kept',
+        { phase: 'boot' },
+      );
+      if ((await engine.up(target, { pull: false })) !== 0) {
+        throw new DockerError(
+          `could not recreate ${detached.join(', ')} for '${target}', which ` +
+            'came up with no network',
+        );
+      }
+    }
+  }
+  // NOR IS A RESTART THAT LEFT ROCKET.CHAT STOPPED a restart. After a start that could not
+  // bind its port, the containers sit created-not-running, `compose restart` answers 0 and
+  // starts nothing, and the CLI printed "restarted" over a workspace serving nothing.
+  if (action === 'restart' && (await rcState(target)) !== 'running') {
+    throw new DockerError(
+      `\`docker compose restart\` left Rocket.Chat not running in '${target}' — ` +
+        `\`houston logs --name ${target}\` says why, and \`houston start --name ${target}\` ` +
+        "shows compose's own error",
+    );
   }
   // Compose keeps its published port across a stop/start, so nothing has to be
   // re-attached and there is nothing further for the caller to do.

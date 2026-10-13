@@ -1,5 +1,7 @@
 /** Seed, bulk scale, and pinned multipart settings imports. */
 
+import { seedSelection } from '../../lib/seed-options';
+import { planFrom } from '../../seed/plan';
 import * as fs from 'node:fs';
 import { randomBytes } from 'node:crypto';
 
@@ -102,10 +104,13 @@ export function register(app: FastifyInstance): void {
     const body = requestBody(request.body, false);
     const meta = await readMeta(await resolveName(request.params.name));
     const profile = Object.hasOwn(body, 'profile') ? body.profile : 'small';
+    if (typeof profile !== 'string') throw new ValidationError('seed profile must be a string');
+    const selection = seedSelection(body.scenarios, body.history_days);
+    planFrom(profile, selection);
     return submit(
       app,
       'seed',
-      (emit) => runSeedInline(meta, profile as string, bool(body.stats), emit),
+      (emit) => runSeedInline(meta, profile, bool(body.stats), emit, selection),
       { label: meta.name },
     );
   });

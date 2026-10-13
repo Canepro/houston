@@ -1,6 +1,8 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
+import { NotFoundError, ValidationError } from '../../src/lib/errors';
+
 import {
   ERROR_ABS_FLOOR,
   REGRESS_PCT,
@@ -43,7 +45,8 @@ describe('labels', () => {
 
   it('refuses a label with nothing usable left', () => {
     expect(() => sanitizeLabel('///')).toThrow(/is not a usable baseline name/u);
-    expect(() => sanitizeLabel('  ')).toThrow();
+    // A bad `--save`/`--compare` value: a usage error, exit 2 (L7-07), not a plain exit 1.
+    expect(() => sanitizeLabel('  ')).toThrow(ValidationError);
   });
 
   it('sanitises exactly as earlier releases did', () => {
@@ -81,6 +84,8 @@ describe('save and load', () => {
 
   it('names the directory it looked in when there is no such baseline', () => {
     expect(() => load('missing')).toThrow(/no saved baseline 'missing' \(looked in /u);
+    // A named thing that is not there: exit 4, as a missing workspace (L7-07), not exit 1.
+    expect(() => load('missing')).toThrow(NotFoundError);
   });
 });
 

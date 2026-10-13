@@ -115,6 +115,22 @@ afterEach(async () => {
 });
 
 describe('what an HTTP status means', () => {
+  it('can return a redirect from the responding endpoint without visiting its destination', async () => {
+    const visited: string[] = [];
+    await serving((req, res) => {
+      visited.push(req.url ?? '');
+      if (req.url === '/metadata') {
+        res.writeHead(302, { Location: '/home' });
+        res.end('provider is not loaded');
+      } else res.end('some other page');
+    });
+    const response = await rcHttp.request(`${origin}/metadata`, { followRedirects: false });
+    expect(response.status).toBe(302);
+    expect(response.headers.location).toBe('/home');
+    expect(response.text).toBe('provider is not loaded');
+    expect(visited).toEqual(['/metadata']);
+  });
+
   it('never throws for one, because rcapi reads the number', async () => {
     // Earlier releases' HTTP client returns 404s and 500s as responses and rcapi's error
     // handling reads the status, so a seam that threw on 4xx would silently invert two dozen
@@ -188,6 +204,32 @@ describe('the body', () => {
       headers: { 'Content-Type': 'application/x-custom' },
     });
     expect(seen?.headers['content-type']).toBe('application/x-custom');
+  });
+
+  it('gives up on a body past maxBytes, raw or once decoded, and caps nothing unasked', async () => {
+    // An identity provider is the first server this seam talks to that houston did not
+    // start, so a caller can say how much it will hold in memory for one answer.
+    const big = 'x'.repeat(4096);
+    await serving((req, res) => {
+      if (req.url === '/gz') {
+        res.writeHead(200, { 'Content-Encoding': 'gzip' });
+        res.end(gzipSync(big));
+      } else {
+        res.writeHead(200);
+        res.end(big);
+      }
+    });
+    await expect(rcHttp.request(origin, { maxBytes: 1024 })).rejects.toMatchObject({
+      message: `${origin} answered with more than 1024 bytes`,
+      kind: 'other',
+    });
+    // 4 KiB of one letter gzips to a few dozen bytes: the cap holds on what it decodes to.
+    await expect(rcHttp.request(`${origin}/gz`, { maxBytes: 1024 })).rejects.toMatchObject({
+      message: `${origin}/gz answered with more than 1024 bytes`,
+      kind: 'other',
+    });
+    expect((await rcHttp.request(origin, { maxBytes: 4096 })).text).toBe(big);
+    expect((await rcHttp.request(`${origin}/gz`)).text).toBe(big);
   });
 
   it('upper-cases the method and defaults to GET', async () => {

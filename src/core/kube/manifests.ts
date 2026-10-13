@@ -298,26 +298,8 @@ ${at(8)}
   );
 }
 
-/**
- * `[repository, tag]` for the chart, which wants them separately.
- *
- * `versions.resolve` returns the REPOSITORY only -- compose composes it as
- * `${image}:${tag}` -- so a naive split on the last ':' of a tagless string returns the
- * whole repository as the tag. That is truthy, so an `|| rcVersion` fallback does not save
- * it, and the chart fed it to `semverCompare`, which failed the install with "invalid
- * semantic version" rather than anything naming the image.
- *
- * A colon only introduces a tag when nothing after it looks like a path segment:
- * `registry:5000/org/img` is a host with a port, not a tag.
- */
-export function splitImage(rcImage: string, rcVersion: string): [string, string] {
-  const at = rcImage.lastIndexOf(':');
-  if (at >= 0) {
-    const tail = rcImage.slice(at + 1);
-    if (!tail.includes('/')) return [rcImage.slice(0, at), tail];
-  }
-  return [rcImage, rcVersion];
-}
+/** `[repository, tag]` for the chart, which wants them separately: see `lib/compose`. */
+export { splitImage } from '../../lib/compose';
 
 /**
  * Bind a scenario's native resources to this namespace-local workspace.
@@ -327,8 +309,11 @@ export function splitImage(rcImage: string, rcVersion: string): [string, string]
  * is what makes the resource show up under this workspace's ownership rather than
  * floating in the namespace unattributed.
  */
-export function renderScenarioManifest(manifest: string, name: string): string {
-  return manifest.split('__HOUSTON_NAME__').join(name);
+export function renderScenarioManifest(manifest: string, name: string, advertised = ''): string {
+  const bound = manifest.split('__HOUSTON_NAME__').join(name);
+  // The address a BROWSER reaches Rocket.Chat at, which Compose's file writer fills into a
+  // page (the livechat demo's widget loads from it). Left as written when not known.
+  return advertised === '' ? bound : bound.split('{{ROOT_URL}}').join(advertised);
 }
 
 /**

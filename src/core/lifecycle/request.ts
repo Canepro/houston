@@ -13,9 +13,18 @@ import * as paths from '../runner/paths';
 import { shortName } from '../kube/context';
 import { ValidationError } from '../../lib/errors';
 import { type Emit, info, nullEmit, warn } from '../../lib/events';
-import { truthyParam } from '../../lib/presets/common';
+import { EMAIL_2FA, truthyParam } from '../../lib/presets/common';
+import * as presets from '../../lib/presets/index';
+import { namesOf } from '../../lib/presets/composite';
 import { type Preset } from '../../lib/presets/types';
-import { type ReleaseFetcher, RELEASES_URL, isValidVersion } from '../../lib/versions';
+import {
+  BUILD_SOURCE,
+  type ReleaseFetcher,
+  type Resolved,
+  isValidVersion,
+  lookupUrl,
+} from '../../lib/versions';
+import { parseVersion } from '../../lib/version-spec';
 import * as topology from '../topology';
 import { planCluster } from '../kube/context';
 import { releaseInfo } from '../rcapi';
@@ -55,9 +64,124 @@ export async function releaseFetcher(
   given?: ReleaseFetcher,
 ): Promise<ReleaseFetcher | undefined> {
   if (given !== undefined) return given;
-  if (isTruthy(offline) || !isValidVersion(version)) return undefined;
-  const fetched = await releaseInfo(RELEASES_URL.replace('{version}', version));
+  const url = isTruthy(offline) ? null : lookupUrl(version);
+  if (url === null) return undefined;
+  const fetched = await releaseInfo(url);
   return () => fetched;
+}
+
+/**
+ * The image to run, on either runtime: `--rc-image`, else the box-wide `rc_image` (config.yaml
+ * or HOUSTON_RC_IMAGE), else the resolved one. A CI build's own image is not replaced by the
+ * box-wide setting, which points RELEASES at a mirror; the flag still wins.
+ */
+export function chooseImage(resolved: Resolved, flag: string, boxImage: unknown): void {
+  if (flag) resolved.rcImage = flag;
+  else if (isTruthy(boxImage) && resolved.source !== BUILD_SOURCE) {
+    resolved.rcImage = String(boxImage);
+  }
+}
+
+/**
+ * An Enterprise licence as Rocket.Chat issues it: V2 base64, or V3 `RCV3_...`. The character
+ * set is also what keeps it to one line, so it cannot add variables to the env file it is
+ * written to.
+ */
+export const LICENSE_RE = /^[A-Za-z0-9+/=_.-]{1,65536}$/u;
+
+/** The licence text, trimmed, or a refusal that never repeats it. */
+export function requireLicense(text: string): string {
+  const trimmed = text.trim();
+  if (!LICENSE_RE.test(trimmed)) {
+    throw new ValidationError(
+      '--license does not hold a Rocket.Chat licence: want the text Rocket.Chat issued (base64, ' +
+        'or starting RCV3_), on one line, at most 64 KiB',
+    );
+  }
+  return trimmed;
+}
+
+/** Presets whose login Rocket.Chat has announced will need a Premium plan from 9.0.0. */
+const PREMIUM_AUTH_PRESETS: Readonly<Record<string, string>> = {
+  ldap: 'LDAP',
+  saml: 'SAML',
+  oidc: 'Custom OAuth',
+};
+
+/**
+ * Warn when a workspace's login preset may be refused on Rocket.Chat 9 for want of a licence,
+ * or ''. Rocket.Chat 8.8 logs that LDAP and SAML login will need a Premium plan from 9.0.0,
+ * and 8.9 says the same of Custom OAuth. The gates were open drafts on 2026-10-08 (PRs #41643
+ * and #42477), so this says "may", and it is a warning, not a refusal.
+ */
+export function premiumAuthWarning(
+  presetNames: readonly string[],
+  rcVersion: string,
+  licensed: boolean,
+  regToken: string,
+): string {
+  if (licensed || regToken !== '' || !isValidVersion(rcVersion)) return '';
+  if ((parseVersion(rcVersion).release[0] ?? 0) < 9) return '';
+  // EACH MEMBER of a composed name. Compose passed the preset it built, `email+ldap` or
+  // `ldap+multi-instance`, which matched nothing -- so Docker never warned for a combination
+  // while Kubernetes, passing the members, did.
+  const names = presetNames.flatMap((name) => namesOf(name));
+  const kinds = names.map((name) => PREMIUM_AUTH_PRESETS[name]).filter((kind) => kind);
+  if (kinds.length === 0) return '';
+  return (
+    `Rocket.Chat 9.0 is set to require a Premium plan for ${kinds.join(' and ')} login, and ` +
+    `this workspace has neither --license nor --reg-token: logins through the ` +
+    `${names.filter((name) => name in PREMIUM_AUTH_PRESETS).join(' and ')} preset may be ` +
+    'refused. Add --license <file> or --reg-token <token> to test with one.'
+  );
+}
+
+/**
+ * Warn when a SAML login and the email preset are combined, or ''. With email two-factor on, Rocket.Chat asks a
+ * SAML login for the emailed code and refuses the right code, on every version measured: 8.5.1
+ * and 8.9.0, the latest, in a real browser with the first code entered at once. Its words
+ * differ (the API's "User not found", the 8.5.1 browser's "Invalid two factor code"), so the
+ * warning quotes neither. 8.9.0's handler keeps the SAML credential for the retry
+ * (`server/lib/saml/loginHandler.ts`), which is why this once said 8.9.0 fixed it; it does
+ * not. Resend sends nothing because the client's dialog asks for the user named by the SAML
+ * token (`client/lib/2fa/overrideLoginMethod.ts`). Silent once the user sets the 2FA key.
+ */
+export function samlEmailWarning(
+  pre: Pick<Preset, 'name' | 'postReady'>,
+  rcVersion: string,
+  overridden: ReadonlySet<string>,
+): string {
+  // SAML by what the preset sets up, not by its name: `ldap --set idp=saml` signs its
+  // directory users in through Keycloak's SAML too.
+  const saml = pre.postReady.some((action) => action.action === 'saml_idp_cert');
+  if (!saml || !namesOf(pre.name).includes('email')) return '';
+  if (overridden.has(EMAIL_2FA)) return '';
+  return (
+    `SAML sign-in + email on Rocket.Chat ${rcVersion}: email two-factor is on, and Rocket.Chat ` +
+    'refuses the code it emails to a SAML login, so the sign-in cannot finish (seen on 8.5.1 ' +
+    "and 8.9.0); the dialog's Resend email sends nothing after a SAML login either. " +
+    'To sign in through SAML, add --setting ' +
+    'Accounts_TwoFactorAuthentication_By_Email_Enabled=false.'
+  );
+}
+
+/**
+ * A rebuild reachable from other machines that keeps the shared admin password, or ''. The
+ * password stays what the database holds (`keptAdminPassword`), so a loopback workspace
+ * brought back with --domain or a wide --bind is public with the shared one: said, since a
+ * generated one would be printed and refused.
+ */
+export function keptSharedPasswordWarning(
+  name: string,
+  kept: string | null,
+  reachable: boolean,
+): string {
+  if (kept !== '' || !reachable) return '';
+  return (
+    `'${name}' is reachable from other machines and keeps the admin password its database ` +
+    `was made with, ${config.ADMIN_PASSWORD}: Rocket.Chat sets it only on an empty database. ` +
+    'Change it in Rocket.Chat, or rebuild the workspace with its data wiped to get a generated one.'
+  );
 }
 
 /** The URL's hostname, or "" when it has none. */
@@ -188,6 +312,86 @@ export function unknownParams(params: Record<string, unknown>, pre: Preset): str
 }
 
 /**
+ * `--set` routed to the presets of a composed workspace: `ldap.users=5`, or plain `users=5`
+ * when exactly one selected preset takes `users`. Two that take it is a refusal naming the
+ * qualified forms, never a guess.
+ */
+export function paramsByPreset(
+  names: readonly string[],
+  params: Record<string, unknown>,
+): Record<string, Record<string, unknown>> {
+  const helps = Object.fromEntries(
+    names.map((name) => [name, presets.asValidation(() => presets.load(name, {})).paramsHelp]),
+  );
+  const out: Record<string, Record<string, unknown>> = Object.fromEntries(
+    names.map((name) => [name, {}]),
+  );
+  const valid = names.flatMap((name) =>
+    Object.keys(helps[name] ?? {}).map((key) => `${name}.${key}`),
+  );
+  for (const [raw, value] of Object.entries(params)) {
+    const dot = raw.indexOf('.');
+    const qualifier = dot > 0 ? raw.slice(0, dot) : '';
+    const target = out[qualifier];
+    if (target !== undefined && Object.hasOwn(helps[qualifier] ?? {}, raw.slice(dot + 1))) {
+      target[raw.slice(dot + 1)] = value;
+      continue;
+    }
+    const owners = names.filter((name) => Object.hasOwn(helps[name] ?? {}, raw));
+    if (owners.length === 1) {
+      (out[owners[0] as string] as Record<string, unknown>)[raw] = value;
+      continue;
+    }
+    if (owners.length > 1) {
+      throw new ValidationError(
+        `--set ${raw} is taken by more than one preset; say which: ` +
+          owners.map((name) => `--set ${name}.${raw}=...`).join(' or '),
+      );
+    }
+    throw new ValidationError(
+      `unknown --set param ${raw} for presets ${names.map((name) => `'${name}'`).join(', ')} - ` +
+        `valid: ${valid.sort().join(', ') || '(none of them takes --set params)'}`,
+    );
+  }
+  return out;
+}
+
+/**
+ * `--set ldap.users=5` for ldap alone, as `users=5`: the spelling a set takes names the same
+ * parameter, and one preset refused it as unknown. Several presets are left to
+ * `paramsByPreset`, and another preset's name stays as typed, to be refused.
+ */
+export function unqualifiedParams(
+  preset: string,
+  params: Record<string, unknown>,
+): Record<string, unknown> {
+  const names = namesOf(preset);
+  if (names.length > 1) return params;
+  const prefix = `${names[0] as string}.`;
+  return Object.fromEntries(
+    Object.entries(params).map(([key, value]) => [
+      key.startsWith(prefix) ? key.slice(prefix.length) : key,
+      value,
+    ]),
+  );
+}
+
+/** Refuse a `--set` the preset does not take, on either runtime, naming the valid ones. */
+export function refuseUnknownParams(
+  params: Record<string, unknown>,
+  pre: Preset,
+  name: string,
+): void {
+  const unknown = unknownParams(params, pre);
+  if (unknown.length === 0) return;
+  const valid =
+    Object.keys(pre.paramsHelp).sort().join(', ') || '(this preset takes no --set params)';
+  throw new ValidationError(
+    `unknown --set param(s) for preset '${name}': ${unknown.join(', ')} - valid: ${valid}`,
+  );
+}
+
+/**
  * The interface these ports will be published on, as far as is known this early.
  *
  * `req.bindPublic` can still widen it later -- `resolveTls` sets that when an ACME
@@ -195,6 +399,30 @@ export function unknownParams(params: Record<string, unknown>, pre: Preset): str
  * Callers that must not over-promise use it in the conservative direction: loopback here
  * means "do not assume anything is reachable".
  */
+/** A bind that means every interface, where the port is also on loopback. */
+const WILDCARD_BINDS: readonly string[] = ['0.0.0.0', '::', '[::]', '*'];
+
+/**
+ * The address houston calls a workspace on, given what its port is published on.
+ *
+ * `localhost` for loopback and for a wildcard, which includes loopback. A single other
+ * address is the ONLY place the port exists: `--bind 172.17.0.1` published nothing on
+ * loopback, so readiness, the admin login and every API call aimed at `localhost` found
+ * nobody, and `up --wait` always ended exit 5 while Rocket.Chat served on the bridge.
+ */
+export function callHost(bindHost: string): string {
+  const bind = bindHost.trim();
+  if (bind === '' || LOOPBACK_BINDS.includes(bind) || WILDCARD_BINDS.includes(bind)) {
+    return 'localhost';
+  }
+  return bind.includes(':') && !bind.startsWith('[') ? `[${bind}]` : bind;
+}
+
+/** Whether a bind publishes on every interface, which is what the exposure warning says. */
+export function bindsEverywhere(bindHost: string): boolean {
+  return WILDCARD_BINDS.includes(bindHost.trim());
+}
+
 export function requestedBindHost(req: CreateReq): string {
   const cfg = config.loadConfig();
   if (req.bind) return String(req.bind);
@@ -214,14 +442,24 @@ export function requestedBindHost(req: CreateReq): string {
  * reached from elsewhere.
  */
 export function deriveIdpHost(req: CreateReq, emit: Emit = nullEmit): void {
-  const param = BROWSER_HOST_PARAM[req.preset];
+  // Each preset of a composed workspace, under its qualified key (`saml.idp_host`).
+  const names = namesOf(req.preset);
+  for (const name of names) deriveOne(req, name, names.length > 1 ? `${name}.` : '', emit);
+}
+
+function deriveOne(req: CreateReq, preset: string, prefix: string, emit: Emit): void {
+  const param = BROWSER_HOST_PARAM[preset];
   if (param === undefined) return;
+  const key = `${prefix}${param}`;
   const params: Record<string, unknown> = { ...req.params };
-  if (isTruthy(params[param])) return;
+  // EITHER SPELLING is the user's. In a combination a plain `--set idp_host=...` is routed
+  // to the one preset that takes it -- after this ran, so the derived `saml.idp_host` won,
+  // and the workspace pointed the browser at the root URL's host instead of the IdP typed.
+  if (isTruthy(params[key]) || (prefix !== '' && isTruthy(params[param]))) return;
   // s3_minio ONLY in presigned mode. In the default proxy mode the browser never touches
   // MinIO -- Rocket.Chat streams the bytes -- so `minio:9000` is reached over the compose
   // network, which is strictly more reliable than a host address.
-  if (req.preset === 's3_minio' && !truthyParam(params, 'presigned')) return;
+  if (preset === 's3_minio' && !truthyParam(params, `${prefix}presigned`)) return;
   // A HOST IS ONLY WORTH DERIVING IF IT CAN BE REACHED, and with the default loopback
   // bind it cannot -- by anything, including Rocket.Chat's own container. OIDC's url
   // serves the browser AND RC's backend, so deriving it here would have moved the backend
@@ -230,14 +468,14 @@ export function deriveIdpHost(req: CreateReq, emit: Emit = nullEmit): void {
   const source = req.rootUrl || (req.domain ? `https://${req.domain}` : '');
   const host = urlHostname(source);
   if (!host || host === 'localhost' || host === '127.0.0.1') return;
-  params[param] = host;
+  params[key] = host;
   req.params = params;
   info(
     emit,
-    `the ${req.preset} preset will address its own service as '${host}', ` +
+    `the ${preset} preset will address its own service as '${host}', ` +
       'taken from the URL you gave — that is the name the browser follows, ' +
       'and its default names this machine. Override with ' +
-      `\`--set ${param}=...\`.`,
+      `\`--set ${key}=...\`.`,
     { phase: 'create' },
   );
 }

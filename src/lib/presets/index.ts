@@ -5,17 +5,18 @@
  * are shipped in `data/presets`; a file of the same name in `~/.houston/presets` overrides
  * the built-in so users can tweak or add their own.
  *
- * THE SEVEN BUILDER IMPORTS BELOW ARE LOAD-BEARING. The owners could register themselves on
+ * THE BUILDER IMPORTS BELOW ARE LOAD-BEARING. The owners could register themselves on
  * first use, with the registry importing each of them; here the import moves DOWNWARD into
  * the loader instead: a rank-3 registry reaching up to a rank-6 builder is the edge the
  * layer gate exists to forbid, and a dynamic `require()` would evade the gate rather than
- * satisfy it. The check that all seven arrived stays in `registry.builders()`, which is the
+ * satisfy it. The check that every builder arrived stays in `registry.builders()`, which is the
  * half with teeth.
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import * as config from '../config';
+import { ReproError, ValidationError } from '../errors';
 import { joinPath } from '../home';
 import {
   compareCodePoints,
@@ -30,10 +31,13 @@ import {
 } from '../format';
 
 import { safeLoad, safeLoadOrdered } from './common';
+import { compositeName, composePresets, namesOf } from './composite';
+import { USER_PREFIX_PARAM } from './keycloak';
 import * as registry from './registry';
 import type { Scenario } from './scenario';
 import { emptyPreset, type Preset } from './types';
 
+import './e2ee';
 import './email';
 import './ldap';
 import './livechat';
@@ -310,6 +314,48 @@ export function load(name: string, params?: registry.Params | null): Preset {
 }
 
 /**
+ * `build`, with a preset's own refusal of its input made a usage error. A bad `--set`
+ * (`users=abc`, `tls=bogus`, `mfa=on` without an idp) or an unknown preset is a plain Error
+ * from the preset that met it; alone, `load`'s caller wraps it, and in a combination it
+ * escaped as "unhandled" -- exit 1 and a stack trace for a typo. A ReproError is already
+ * what it means to be.
+ */
+export function asValidation<T>(build: () => T): T {
+  try {
+    return build();
+  } catch (error) {
+    if (error instanceof ReproError) throw error;
+    throw new ValidationError(error instanceof Error ? error.message : String(error));
+  }
+}
+
+/**
+ * Several presets as one workspace's: each resolved for `runtime` with its own params, then
+ * composed (see `composite.ts`). A single name is exactly `load` or `resolve` of it.
+ *
+ * A directory composed with an SSO preset gets SSO users named apart, `sso-user1` with
+ * `sso-user1@example.com`: SAML merges into an existing account by email, so two stores
+ * sharing `user1@example.com` would quietly become one (owner decision, 2026-10-08).
+ */
+export function loadMany(
+  names: readonly string[],
+  params: Readonly<Record<string, registry.Params>>,
+  runtime: string,
+  overridden: ReadonlySet<string> = new Set(),
+): Preset {
+  const unique = namesOf(compositeName(names));
+  const apart = unique.includes('ldap');
+  const resolved = unique.map((name) => {
+    const own: registry.Params = { ...(params[name] ?? {}) };
+    if (apart && (name === 'saml' || name === 'oidc')) own[USER_PREFIX_PARAM] = 'sso-';
+    return asValidation(() =>
+      runtime === 'kubernetes' ? resolve(name, runtime, own) : load(name, own),
+    );
+  });
+  return composePresets(resolved, overridden);
+}
+
+/**
  * Resolve one preset through its built-in scenario adapter when present.
  *
  * `deploymentType` is an internal seam. Leaving it unset preserves the current catalogue
@@ -376,6 +422,10 @@ export function listPresets(): Preset[] {
   }
 
   for (const [name, build] of Object.entries(dynamicBuilders())) {
+    // Not listed: multi-instance is the deployment shape (`--deployment multi-instance`),
+    // which both front-ends offer as such. It stays loadable, for `--preset multi-instance`
+    // (which still works, with a hint) and for the workspaces that recorded it.
+    if (name === 'multi-instance') continue;
     seen.set(name, build({})); // default params, just for description/params_help
   }
 

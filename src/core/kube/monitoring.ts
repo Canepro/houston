@@ -7,7 +7,17 @@ import { CreateFailedError, DockerError } from '../../lib/errors';
 import { info, nullEmit, warn, type Emit } from '../../lib/events';
 import { dashboard } from '../../lib/monitoring';
 
-import { absent, askList, askObject, present, refused, require_, why } from './ask';
+import {
+  absent,
+  askList,
+  askObject,
+  classify,
+  items,
+  present,
+  refused,
+  require_,
+  why,
+} from './ask';
 import { workspaceNamespaces } from './capabilities';
 import { helmEnv, kube } from './exec';
 import {
@@ -19,11 +29,24 @@ import {
   OWNER_SELECTOR,
   OWNER_LABEL_KEY,
   OWNER_LABEL_VALUE,
+  RELEASE,
   WORKSPACE_LABEL,
   isOurs,
 } from './names';
-import { OPERATOR_NAMESPACE, releaseInstalled } from './operator';
-import { apply, clearPendingRelease, helmRollbackOnFailure, releaseState } from './release';
+import {
+  OPERATOR_NAMESPACE,
+  OPERATOR_RELEASE,
+  releaseInstalled,
+  waitForSystemNamespace,
+} from './operator';
+import {
+  apply,
+  clearPendingRelease,
+  helmRollbackOnFailure,
+  releaseState,
+  releaseValues,
+  rerenderRelease,
+} from './release';
 import type { Sleep } from './replicaset';
 
 const realSleep: Sleep = (seconds) => new Promise((resolve) => setTimeout(resolve, seconds * 1000));
@@ -305,6 +328,69 @@ export async function waitForGrafana({
   );
 }
 
+/** The kind the Rocket.Chat chart's PodMonitor is, which the shared stack brings. */
+export const PODMONITOR_CRD = 'podmonitors.monitoring.coreos.com';
+
+/** How long a just-installed CRD gets to be served, in seconds. */
+export const CRD_WAIT = 60;
+
+/**
+ * Have the workspace's release publish its PodMonitor, once the cluster can hold one.
+ *
+ * The chart renders its PodMonitor only where the cluster serves that kind, and a first
+ * `up --monitor` installs the release BEFORE the shared stack brings the CRD -- the stack
+ * waits for a workspace that serves. So helm rendered no PodMonitor, Prometheus had no target
+ * and Grafana's Rocket.Chat dashboard was empty, until a re-up happened to render the release
+ * again. Rendered again here instead, once the CRD is Established, when the chart wants a
+ * PodMonitor and the namespace has none; a release rendered after the CRD already has one.
+ */
+export async function ensurePodMonitor({
+  namespace,
+  context,
+  emit = nullEmit,
+}: {
+  namespace: string;
+  context: string;
+  emit?: Emit;
+}): Promise<void> {
+  const established = await kube.run(
+    [
+      'kubectl',
+      '--context',
+      context,
+      'wait',
+      '--for=condition=Established',
+      `crd/${PODMONITOR_CRD}`,
+      `--timeout=${String(CRD_WAIT)}s`,
+    ],
+    { timeout: CRD_WAIT + APPLY_TIMEOUT, own: isOurs(context) },
+  );
+  if (established.returncode !== 0) {
+    warn(
+      emit,
+      `Prometheus cannot find Rocket.Chat: the cluster does not serve ${PODMONITOR_CRD} ` +
+        `(${why(established)})`,
+      { phase: 'monitor' },
+    );
+    return;
+  }
+  const values = await releaseValues(RELEASE, namespace, context, { all: true });
+  if (bag(values.podMonitor).enabled !== true) return; // a chart that publishes none
+  const monitors = require_(
+    await askList('podmonitors', { context, namespace, timeout: APPLY_TIMEOUT }),
+    `the PodMonitors in ${namespace}`,
+    { context },
+  );
+  if (items(monitors).length > 0) return;
+  info(
+    emit,
+    'rendering the Rocket.Chat release again, now that the cluster serves PodMonitors, so ' +
+      'Prometheus finds it',
+    { phase: 'monitor' },
+  );
+  await rerenderRelease(namespace, context);
+}
+
 /**
  * Install the shared stack, or leave the existing one alone.
  *
@@ -393,6 +479,7 @@ export async function ensureMonitoring({
   // the operator has reconciled anything -- "resource GrafanaDashboard/... not ready.
   // status: NotFound" -- which is a race, not a failure: the stack came up perfectly well
   // anyway, and ten pods were Running while helm reported it broken.
+  await waitForSystemNamespace(context, emit);
   await clearPendingRelease(MONITORING_RELEASE, MONITORING_NAMESPACE, context, { emit });
   const res = await kube.run(
     [
@@ -821,5 +908,52 @@ export async function removeMonitoring({
   // billed EBS volume nobody can see the source of. Deleted by NAMESPACE, not by label: the
   // chart's PVCs carry its own labels, not houston's, and this namespace is houston's own.
   await reclaimMonitoringVolumes(context, emit);
+  await releaseSystemNamespace(context, emit);
   return true;
+}
+
+/**
+ * `houston-system`, once nothing of houston's needs it.
+ *
+ * helm made it (`--create-namespace`) for the operator and the monitoring stack, and
+ * neither removal took it: after the last workspace was gone it stayed, holding a webhook
+ * Secret the monitoring chart leaves behind. Removed only when neither release is there
+ * (an unreadable release counts as there) and no workload or volume is left in it -- an
+ * operator adopted rather than installed lives here too, and is not houston's to delete.
+ */
+export async function releaseSystemNamespace(context: string, emit: Emit): Promise<void> {
+  if (await releaseInstalled(MONITORING_RELEASE, MONITORING_NAMESPACE, context)) return;
+  if (await releaseInstalled(OPERATOR_RELEASE, OPERATOR_NAMESPACE, context)) return;
+  const left = await askList('deployments,statefulsets,daemonsets,jobs,pvc', {
+    context,
+    namespace: OPERATOR_NAMESPACE,
+  });
+  if (!present(left) || items(left).length > 0) return;
+  const res = await kube.run(
+    [
+      'kubectl',
+      '--context',
+      context,
+      'delete',
+      'namespace',
+      OPERATOR_NAMESPACE,
+      '--wait=true',
+      '--timeout=90s',
+    ],
+    { timeout: APPLY_TIMEOUT, own: isOurs(context) },
+  );
+  if (res.returncode === 0) {
+    info(emit, `removed the ${OPERATOR_NAMESPACE} namespace — nothing of houston's uses it now`, {
+      phase: 'teardown',
+    });
+  } else if (!absent(classify(res, { single: true }))) {
+    // NotFound is the answer this asked for: a workspace that never had monitoring took
+    // `down` here and warned that it "could not confirm" a namespace already gone.
+    warn(
+      emit,
+      `could not confirm ${OPERATOR_NAMESPACE} is gone: ${why(res)} — a new operator or ` +
+        'monitoring install must wait for its deletion to finish',
+      { phase: 'teardown' },
+    );
+  }
 }

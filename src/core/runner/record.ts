@@ -130,6 +130,23 @@ export function adminPass(meta: Metadata): string {
   return meta.adminPassword || config.ADMIN_PASSWORD;
 }
 
+/**
+ * The admin password a workspace brought back with its data must keep, or null when there is
+ * no record. Rocket.Chat reads ADMIN_PASS only when it first fills an empty database, so a new
+ * one minted on a rebuild was recorded and accepted by nothing: after `up --force`, or `up`
+ * after `down` on Kubernetes, every `api`, `token` and `seed` answered 401.
+ *
+ * ponytail: a loopback workspace rebuilt public keeps its database's shared password; houston
+ * now says so instead of printing one that does not work. Changing it takes the admin API.
+ */
+export async function keptAdminPassword(name: string): Promise<string | null> {
+  try {
+    return (await readMeta(name)).adminPassword;
+  } catch {
+    return null;
+  }
+}
+
 /** The record as the JSON document that goes on disk, in the established field order. */
 export function toDocument(meta: Metadata): Record<string, unknown> {
   const document: Record<string, unknown> = {};

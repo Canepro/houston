@@ -23,7 +23,7 @@ On a shared machine, set `HOUSTON_USER=<account>` so the audit log names who ran
 `skill` take `--json`; `capabilities` always prints JSON. Every reply is one envelope:
 
 ```json
-{"schema":"houston.info.v1","contract":2,"houston_version":"2.1.0",
+{"schema":"houston.info.v1","contract":2,"houston_version":"2.1.1",
  "generated_at":"…","ok":true,"data":{…},"warnings":[],"error":null}
 ```
 
@@ -31,6 +31,8 @@ On a shared machine, set `HOUSTON_USER=<account>` so the audit log names who ran
   first, then the envelope.
 - A failure has `"ok":false`, `"schema":"houston.error.v1"` and an `error` with a stable
   `code` and a `message`.
+- `warnings` holds every distinct warning the command raised, each a `code` and a
+  `message`, in the order raised. Branch on the code; most share the generic `WARNING`.
 - stdout is JSON only; anything for a person goes to stderr.
 - An unknown `contract`: stop. Unknown keys in `data`: ignore them.
 - `down --volumes --json` needs `--yes`.
@@ -46,10 +48,10 @@ and exit codes. Read it instead of assuming a flag exists.
 | Code | Meaning | `error.code` | What to do |
 |---|---|---|---|
 | 0 | ok | — | — |
-| 1 | internal | `REPRO_ERROR` | a refusal of no more specific kind, or a crash (stack trace on stderr). Read the message. A plain refusal such as an out-of-range `--vus` also exits 1 |
-| 2 | usage | `VALIDATION_FAILED` | the call is wrong; retrying unchanged will not help |
+| 1 | internal | `REPRO_ERROR` | a refusal of no more specific kind, or a crash (stack trace on stderr). Read the message |
+| 2 | usage | `VALIDATION_FAILED` | the call is wrong (a bad flag value, a missing argument, an unknown action); retrying unchanged will not help |
 | 3 | preflight | `PREFLIGHT_FAILED`, `ENGINE_UNAVAILABLE` | the machine is not ready: run `houston doctor` |
-| 4 | not found | `NOT_FOUND` | no such workspace |
+| 4 | not found | `NOT_FOUND` | the thing named is not there: a workspace, a file, a saved baseline |
 | 5 | not ready | `NOT_READY` | from `ready` or `up --wait`: poll again. From `down --volumes`: it is still there, read the warning |
 | 6 | gate | `GATE`, `GATE_*` | a person has to decide; see below |
 | 7 | create failed | `CREATE_FAILED` | it did not come up. Stop; do not retry in a loop |

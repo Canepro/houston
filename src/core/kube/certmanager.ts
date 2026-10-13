@@ -262,7 +262,10 @@ export async function ensureCertManager({
     info(emit, 'cert-manager: already in this cluster', { phase: 'tls' });
     return;
   }
-  if (!invited && !isLocalCluster(distribution || (await distributionOf(context)))) {
+  if (
+    !invited &&
+    !(await isLocalCluster(distribution || (await distributionOf(context)), context))
+  ) {
     throw new PreflightError(
       `cluster '${context}' has no cert-manager, and it is not on this machine, so houston ` +
         'will not install one: six CRDs and an admission webhook change what that cluster ' +

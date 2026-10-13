@@ -3,6 +3,7 @@
  */
 import type * as ErrorsNS from '../../../src/lib/errors';
 import { nullEmit } from '../../../src/lib/events';
+import { emptyPreset } from '../../../src/lib/presets/types';
 
 import type * as CreateDockerNS from '../../../src/core/lifecycle/create-docker';
 import type * as PortsNS from '../../../src/core/lifecycle/ports';
@@ -36,9 +37,71 @@ describe('picking a host port', () => {
     // The class from the SAME registry the fresh module threw from: after `resetModules` an
     // import at the top of this file is a different class object with the same name.
     const { ConflictError } = require('../../../src/lib/errors') as typeof ErrorsNS;
+    await expect(ports.pickHostPort(8300, emptyPreset('default'), '')).rejects.toThrow(
+      ConflictError,
+    );
+  });
+});
+
+describe("an explicit --port beside the presets' own ports", () => {
+  it("refuses an instance port that lands on one of the workspace's side ports", async () => {
+    jest.resetModules();
+    jest.doMock('../../../src/core/runner/ports', () => ({
+      ...jest.requireActual<object>('../../../src/core/runner/ports'),
+      usedPorts: async () => new Set<number>(),
+      portFree: async () => true,
+    }));
+    const ports = require('../../../src/core/lifecycle/ports') as typeof PortsNS;
+    const pre = { instances: 2, ports: [8081] } as Parameters<typeof PortsNS.pickHostPort>[1];
+    await expect(ports.pickHostPort(8080, pre, '')).rejects.toThrow(
+      "--port 8080: instance port 8081 is also a port this workspace's presets publish",
+    );
+    await expect(ports.pickHostPort(8090, pre, '')).resolves.toBe(8090);
+  });
+});
+
+describe('the side ports a preset publishes, once per box', () => {
+  it('names who holds them before a create is tried, and refuses the create the same way', async () => {
+    // A restore as new builds its preset again. While another workspace holds its side
+    // ports the create is refused, and the GUI learned that from a job that had started.
+    jest.resetModules();
+    jest.doMock('../../../src/core/runner/ports', () => ({
+      ...jest.requireActual<object>('../../../src/core/runner/ports'),
+      portFree: async () => true,
+    }));
+    const record = require('../../../src/core/runner/record') as typeof RecordNS;
+    const ports = require('../../../src/core/lifecycle/ports') as typeof PortsNS;
+    const meta = (name: string, preset: string, sidecar: number[]) =>
+      record.metadata({
+        name,
+        project: `houston-${name}`,
+        preset,
+        hostPort: 3000,
+        extra: { sidecar_ports: sidecar },
+      });
+    await record.write('mail-src', 'services: {}\n', meta('mail-src', 'email+ldap', [8025, 8082]));
+    await record.write('plain', 'services: {}\n', meta('plain', 'default', []));
+
+    expect(await ports.sidecarHolder('ldap+email')).toEqual({
+      name: 'mail-src',
+      ports: [8025, 8082],
+    });
+    expect(await ports.sidecarHolder('email')).toEqual({ name: 'mail-src', ports: [8025] });
+    expect(await ports.sidecarHolder('saml')).toBeNull();
+    expect(await ports.sidecarHolder('default')).toBeNull();
+    expect(await ports.sidecarHolder('')).toBeNull();
+
+    const pre = (name: string, published: number[]) =>
+      ({ name, ports: published }) as unknown as Parameters<typeof PortsNS.checkSidecarPorts>[0];
+    await expect(ports.checkSidecarPorts(pre('email', [8025]))).rejects.toThrow(
+      "preset 'email' publishes port(s) [8025], already claimed by repro 'mail-src' - " +
+        'delete it first: houston down --name mail-src --volumes',
+    );
+    // Its own ports are not a claim against itself.
     await expect(
-      ports.pickHostPort(8300, { instances: 1 } as Parameters<typeof PortsNS.pickHostPort>[1], ''),
-    ).rejects.toThrow(ConflictError);
+      ports.checkSidecarPorts(pre('email', [8025]), 'mail-src'),
+    ).resolves.toBeUndefined();
+    await expect(ports.checkSidecarPorts(pre('saml', [8081]))).resolves.toBeUndefined();
   });
 });
 
@@ -108,7 +171,7 @@ describe('a port block past the top of the range', () => {
     const ports = require('../../../src/core/lifecycle/ports') as typeof PortsNS;
     const { ValidationError } = require('../../../src/lib/errors') as typeof ErrorsNS;
     await expect(
-      ports.pickHostPort(65535, { instances: 3 } as Parameters<typeof PortsNS.pickHostPort>[1], ''),
+      ports.pickHostPort(65535, { ...emptyPreset('default'), instances: 3 }, ''),
     ).rejects.toThrow(ValidationError);
   });
 });

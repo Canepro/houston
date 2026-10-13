@@ -114,14 +114,38 @@ describe('the actor and the origin', () => {
     expect(ORIGINS).toContain('setup');
   });
 
-  it('accepts every origin earlier releases declare, and no others', () => {
-    // The origins earlier releases declared, in their order, recorded.
+  it('accepts every origin earlier releases declare, then sso, and no others', () => {
+    // The origins earlier releases declared, in their order, recorded; `sso` is the Okta
+    // sign-in's, which they never wrote.
     const recorded = 'session,local,asserted,setup,system,attempt';
-    expect([...ORIGINS]).toEqual(recorded.split(','));
+    expect([...ORIGINS]).toEqual([...recorded.split(','), 'sso']);
   });
 });
 
 describe('parse_line', () => {
+  it('preserves job acceptance and final outcomes in the existing six-field format', () => {
+    for (const outcome of ['accepted', 'done', 'error', 'stopped']) {
+      audit('alice', 'seed', 'ticket', { origin: 'session', outcome });
+      const stored = lines().at(-1) as string;
+      expect(stored.split('\t')).toHaveLength(6);
+      expect(parseLine(stored)).toMatchObject({
+        actor: 'alice',
+        kind: 'seed',
+        label: 'ticket',
+        origin: 'session',
+        outcome,
+      });
+    }
+    expect(read().lines.map((row) => row.outcome)).toEqual([
+      'stopped',
+      'error',
+      'done',
+      'accepted',
+    ]);
+    expect(parseLine('ts\talice\tseed\tticket')?.outcome).toBe('ok');
+    expect(parseLine('ts\talice\tseed\tticket\t-\tunrecognised')?.outcome).toBe('ok');
+  });
+
   it('reads a four-field line written before origin and outcome existed', () => {
     expect(parseLine('2026-01-01T00:00:00+00:00\talice\tkind\tlabel')).toEqual({
       ts: '2026-01-01T00:00:00+00:00',
@@ -195,6 +219,13 @@ describe('reading back', () => {
     expect(read({ kind: 'repro-up' }).lines.map((r) => r.label)).toEqual(['alpha']);
     expect(read({ q: 'BET' }).lines.map((r) => r.label)).toEqual(['beta']);
     expect(read({ since: '2999-01-01' }).lines).toEqual([]);
+  });
+
+  it('refuses a --since that is not a date, rather than matching nothing', () => {
+    // Compared as text against each line's timestamp, `--since notadate` filtered out
+    // every line and answered "nothing matched", exit 0.
+    audit('alice', 'repro-up', 'alpha', { origin: 'local' });
+    expect(() => read({ since: 'notadate' })).toThrow('--since wants an ISO date');
   });
 
   it('is an empty page for a log that does not exist, not an error', () => {

@@ -123,19 +123,24 @@ async function forgetHost(host) {
   openEdge();
 }
 
+const railRows = new Map();
+const railHeadings = new Map();
 function render() {
   const grid = ctx.$("#repros");
-  grid.innerHTML = "";
-  const running = ctx.ALL_REPROS.filter((r) => r.state === "running").length;
+  const focused = grid.contains(document.activeElement) ? document.activeElement : null;
+  const records = ctx.ALL_REPROS.map(ctx.displayRepro);
+  const desired = [];
+  const running = records.filter((r) => r.state === "running").length;
   // With docker unreachable every state is "?", so "0 running" would be a claim we
   // cannot support (and #running-pill is styled green).
-  const unknown = ctx.ALL_REPROS.length > 0 && ctx.ALL_REPROS.every((r) => r.state === "?");
+  const unknown = !ctx.SERVER_ONLINE || (records.length > 0 && records.every((r) => r.state === "?"));
   const pill = ctx.$("#running-pill");
   pill.textContent = unknown ? "state unknown" : `${running} running`;
   pill.className = "pill " + (unknown ? "unknown" : "running");
   ctx.$("#sb-count").textContent = `${ctx.ALL_REPROS.length} repro(s) · ` +
-    (unknown ? "state unknown (docker unavailable)" : `${running} running`);
-  ctx.$("#sb-refreshed").textContent = "Last refreshed: " + new Date().toLocaleTimeString();
+    (unknown ? "state unknown" : `${running} running`);
+  ctx.$("#sb-refreshed").textContent = (!ctx.SERVER_ONLINE ? "Server unavailable · " : "")
+    + (ctx.LAST_REPROS_AT ? "Last refreshed: " + new Date(ctx.LAST_REPROS_AT).toLocaleTimeString() : "Not read yet");
   // `no-detail` HIDES THE ACTION PANE, and a cluster's own view has one. Without the second
   // clause this line -- which runs on the four-second poll -- put the class back four
   // seconds after the view was opened, so the build button and the permissions
@@ -156,7 +161,7 @@ function render() {
   // build button and the permissions documents vanished while you were reading them.
   if (ctx.VIEW !== "workspace" && ctx.VIEW !== "cluster") ctx.$("#actpane").innerHTML = "";
 
-  let list = ctx.ALL_REPROS.filter((r) =>
+  let list = records.filter((r) =>
     (!ctx.view.filter || r.name.toLowerCase().includes(ctx.view.filter)) &&
     (!ctx.view.status || r.state === ctx.view.status) &&
     (ctx.view.scope !== "mine" || !ctx.ME || (r.owner || r.created_by) === ctx.ME));
@@ -164,8 +169,8 @@ function render() {
   list.sort((a, b) => key === "port" ? a.host_port - b.host_port
     : String(a[key]).localeCompare(String(b[key])));
 
-  if (!ctx.ALL_REPROS.length) grid.append(ctx.el("p", { class: "empty" }, "No workspaces yet. Start with “+ New workspace”."));
-  else if (!list.length) grid.append(ctx.el("p", { class: "empty" }, "Nothing matches this filter."));
+  if (!ctx.ALL_REPROS.length) desired.push(ctx.el("p", { class: "empty" }, "No workspaces yet. Start with “+ New workspace”."));
+  else if (!list.length) desired.push(ctx.el("p", { class: "empty" }, "Nothing matches this filter."));
 
   // GROUPED BY WHAT IT WANTS FROM YOU. A flat list is fine with two workspaces and
   // is the wrong shape for a shared box running eight to twelve: "which one is
@@ -180,13 +185,40 @@ function render() {
     // state the rail-head pill above already says which, and a heading over the whole
     // list is a label for the thing it is inside.
     if (title && !unknown) {
-      grid.append(ctx.el("div", { class: "rgrp" },
-        ctx.el("span", { class: "rdot " + tone }),
-        ctx.el("span", { class: "rgrp-t" }, title),
-        ctx.el("span", { class: "rgrp-n" }, String(rows.length))));
+      let heading = railHeadings.get(title);
+      if (!heading) {
+        heading = ctx.el("div", { class: "rgrp" }, ctx.el("span", { class: "rdot " + tone }),
+          ctx.el("span", { class: "rgrp-t" }, title), ctx.el("span", { class: "rgrp-n" }));
+        railHeadings.set(title, heading);
+      }
+      const count = heading.querySelector(".rgrp-n");
+      if (count.textContent !== String(rows.length)) count.textContent = String(rows.length);
+      desired.push(heading);
     }
-    for (const r of rows) grid.append(card(r));
+    for (const r of rows) {
+      let saved = railRows.get(r.name);
+      const signature = JSON.stringify([r, ctx.SELECTED === r.name, pendingOn(r.name), railWhy(r)]);
+      if (!saved) {
+        saved = { node: card(r), signature };
+        railRows.set(r.name, saved);
+      } else if (saved.signature !== signature) {
+        const updated = card(r);
+        for (const attr of updated.attributes) saved.node.setAttribute(attr.name, attr.value);
+        saved.node.replaceChildren(...updated.childNodes);
+        saved.signature = signature;
+      }
+      desired.push(saved.node);
+    }
   }
+  // Leave nodes that are already in place attached. Only moves, additions and
+  // removals change the rail, so an unchanged poll preserves keyboard focus.
+  for (let i = 0; i < desired.length; i += 1) {
+    if (grid.childNodes[i] !== desired[i]) grid.insertBefore(desired[i], grid.childNodes[i] || null);
+  }
+  while (grid.childNodes.length > desired.length) grid.lastChild.remove();
+  if (focused && focused.isConnected && document.activeElement !== focused) focused.focus({ preventScroll: true });
+  const names = new Set(ctx.ALL_REPROS.map((r) => r.name));
+  for (const name of railRows.keys()) if (!names.has(name)) railRows.delete(name);
 }
 
 // Three buckets, in the order you need them. "Wants you" is not "not running": a
@@ -276,6 +308,31 @@ const BUSY_VERB = {
 };
 const pendingOn = (name) => PENDING.get(name) || "";
 
+// A workspace job still running when this page loaded. PENDING lives in the page, so after
+// a reload during a create the rail said `down` beside a create in progress. Read once at
+// load; each one is shown as working until its job ends.
+const JOB_VERB = { create: "Creating", up: "Starting", teardown: "Removing",
+  restore: "Restoring", upgrade: "Upgrading", rollback: "Rolling back" };
+async function adoptRunningJobs() {
+  let jobs;
+  try { jobs = (await ctx.api("/api/jobs")).jobs || []; } catch (_) { return; }
+  const adopted = jobs.filter((j) => ctx.jobActive(j.status) && JOB_VERB[j.kind] && j.label
+    && !PENDING.has(j.label));
+  for (const j of adopted) PENDING.set(j.label, JOB_VERB[j.kind]);
+  if (adopted.length) render();
+  await Promise.all(adopted.map(async (j) => {
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 3000));
+      let state;
+      try { state = await ctx.api(`/api/jobs/${j.id}`); } catch (_) { break; }
+      if (!ctx.jobActive(state.status)) break;
+    }
+    if (PENDING.get(j.label) === JOB_VERB[j.kind]) PENDING.delete(j.label);
+    await ctx.loadRepros();
+    if (ctx.SELECTED === j.label) await ctx.refreshDetail({ force: true });
+  }));
+}
+
 // One builder for the card and the detail panel so a pending action looks the
 // same in both. `pending` is the label of whatever is running on this repro:
 // every button is disabled while it is set, because these are compose commands
@@ -283,6 +340,7 @@ const pendingOn = (name) => PENDING.get(name) || "";
 function actionButton(label, fn, { cls = "", small = false, pending = "", title = "" } = {}) {
   const klass = "btn" + (small ? " small" : "") + (cls ? " " + cls : "");
   const attrs = title ? { title } : {};
+  if (!ctx.SERVER_ONLINE) return ctx.el("button", { ...attrs, class: klass, disabled: "", title: "Server unavailable — changes disabled" }, label);
   if (!pending) return ctx.el("button", { ...attrs, class: klass, onclick: () => fn() }, label);
   if (pending !== label) return ctx.el("button", { ...attrs, class: klass, disabled: "" }, label);
   return ctx.el("button", { ...attrs, class: klass + " working", disabled: "" },
@@ -339,6 +397,10 @@ const NEXT_LADDER = [
 function renderActionPane(d, busyLabel) {
   const pane = ctx.$("#actpane");
   pane.innerHTML = "";
+  if (!ctx.SERVER_ONLINE) {
+    pane.append(ctx.el("p", { class: "apnote" }, "Server unavailable — changes are disabled until it returns."));
+    return;
+  }
   if (!ctx.canWrite()) {
     pane.append(ctx.el("p", { class: "apnote", title: ctx.READONLY_WHY },
       "You have the readonly role, so nothing here is available to you. "
@@ -366,6 +428,11 @@ function renderActionPane(d, busyLabel) {
     { id: "backup", label: "Back up now", fn: () => ctx.doBackup(d.name), ok: running },
     { id: "upgrade", label: "Upgrade version",
       fn: () => ctx.openUpgrade(d.name, d.rc_version), ok: running },
+    // Only when one can be made (the pre-upgrade backup is recorded and still there) and
+    // the ownership gate lets this viewer: it replaces the database. Not "running only":
+    // an upgrade whose migrations left Rocket.Chat restarting is when it is wanted most.
+    { id: "rollback", label: `Roll back to ${d.rollback_to}`, fn: () => ctx.openRollback(d),
+      ok: true, on: !!d.rollback_to && !!d.may_destroy },
     // Named for the thing rather than for one of its parts: it attaches Prometheus,
     // Grafana, Loki and the exporters, and "stream to Grafana" described the last hop.
     { id: "monitor", label: d.monitoring ? "Detach monitoring" : "Attach monitoring",
@@ -381,6 +448,11 @@ function renderActionPane(d, busyLabel) {
       ok: running && !!d.public_url, on: !kube || !!d.public_url },
     { id: "default", label: "Use for CLI commands", fn: () => ctx.doDefault(d.name),
       ok: !d.is_default },
+    // Whoever the server's ownership gate lets: the owner, an admin, or anyone under
+    // `gui.destroy_policy anyone` -- the panel's read carries this viewer's answer. On a
+    // box without accounts there is nobody to hand it to.
+    { id: "owner", label: "Hand over…", fn: () => ctx.openHandOver(d), ok: true,
+      on: ctx.ACCOUNTS && !!d.may_destroy },
   ].filter((it) => it.on !== false);
 
   const byId = new Map(items.map((it) => [it.id, it]));
@@ -455,10 +527,11 @@ Object.defineProperties(ctx, {
   "PENDING": { enumerable: true, get: () => PENDING },
   "BUSY_VERB": { enumerable: true, get: () => BUSY_VERB },
   "pendingOn": { enumerable: true, get: () => pendingOn },
+  "adoptRunningJobs": { enumerable: true, get: () => adoptRunningJobs },
   "actionButton": { enumerable: true, get: () => actionButton },
   "actBtn": { enumerable: true, get: () => actBtn },
   "runAction": { enumerable: true, get: () => runAction },
   "NEXT_LADDER": { enumerable: true, get: () => NEXT_LADDER },
   "renderActionPane": { enumerable: true, get: () => renderActionPane },
 });
-export { EDGE, DOCKER_OK, refreshEdgeBadge, openEdge, forgetHost, render, RAIL_ORDER, wantsYou, railGroups, card, railWhy, PENDING, BUSY_VERB, pendingOn, actionButton, actBtn, runAction, NEXT_LADDER, renderActionPane };
+export { EDGE, DOCKER_OK, refreshEdgeBadge, openEdge, forgetHost, render, RAIL_ORDER, wantsYou, railGroups, card, railWhy, PENDING, BUSY_VERB, pendingOn, adoptRunningJobs, actionButton, actBtn, runAction, NEXT_LADDER, renderActionPane };

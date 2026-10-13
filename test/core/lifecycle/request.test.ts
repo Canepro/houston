@@ -3,6 +3,10 @@ import * as path from 'node:path';
 
 import { createReq } from '../../../src/core/lifecycle/types';
 import {
+  chooseImage,
+  samlEmailWarning,
+  paramsByPreset,
+  premiumAuthWarning,
   deriveIdpHost,
   inferRuntime,
   savedDefaultIsBillable,
@@ -322,5 +326,162 @@ describe('the public name a cluster zone gives a workspace', () => {
     const docker = createReq({ version: '8.5.1' });
     await defaultDomainFromZone(docker, 'ticket-1234', emit);
     expect(docker.domain).toBe('');
+  });
+});
+
+describe('which image a create runs', () => {
+  const resolved = (rcImage: string, source: string) =>
+    ({ rcImage, source }) as Parameters<typeof chooseImage>[0];
+
+  it('takes the flag, then the box-wide rc_image, then the resolved one', () => {
+    const release = resolved('registry.rocket.chat/rocketchat/rocket.chat', 'releases.rocket.chat');
+    chooseImage(release, '', 'mirror.example/rc');
+    expect(release.rcImage).toBe('mirror.example/rc');
+    chooseImage(release, 'flag.example/rc', 'mirror.example/rc');
+    expect(release.rcImage).toBe('flag.example/rc');
+  });
+
+  it("keeps a CI build's own image under a box-wide mirror, which points at releases", () => {
+    const build = resolved('ghcr.io/rocketchat/rocket.chat:develop', 'ci build');
+    chooseImage(build, '', 'mirror.example/rc');
+    expect(build.rcImage).toBe('ghcr.io/rocketchat/rocket.chat:develop');
+  });
+});
+
+describe('the Rocket.Chat 9 login warning', () => {
+  it('names the login presets on 9 and above, with neither a licence nor a token', () => {
+    const said = premiumAuthWarning(['ldap'], '9.0.0', false, '');
+    expect(said).toContain('Premium plan for LDAP login');
+    expect(said).toContain('may be refused');
+    expect(premiumAuthWarning(['saml'], '9.1.0.dev0', false, '')).toContain('SAML');
+    expect(premiumAuthWarning(['oidc'], '9.0.0', false, '')).toContain('Custom OAuth');
+  });
+
+  it('warns for a combination, which Compose passes as the one name it built', () => {
+    // `email+ldap` and `ldap+multi-instance` matched no login preset, so Docker never warned
+    // for a combination while Kubernetes, passing the members, did.
+    expect(premiumAuthWarning(['email+ldap'], '9.0.0', false, '')).toContain(
+      'Premium plan for LDAP login',
+    );
+    expect(premiumAuthWarning(['ldap+multi-instance'], '9.0.0', false, '')).toContain(
+      'through the ldap preset',
+    );
+  });
+
+  it('stays quiet below 9, with a licence or a token, and for other presets', () => {
+    expect([
+      premiumAuthWarning(['ldap'], '8.9.0', false, ''),
+      premiumAuthWarning(['ldap'], '9.0.0', true, ''),
+      premiumAuthWarning(['ldap'], '9.0.0', false, 'tok'),
+      premiumAuthWarning(['email', 'default'], '9.0.0', false, ''),
+      premiumAuthWarning(['ldap'], 'not-a-version', false, ''),
+    ]).toEqual(['', '', '', '', '']);
+  });
+});
+
+describe('--set across several presets', () => {
+  it('routes a qualified key, and a plain one exactly one preset takes', () => {
+    expect(paramsByPreset(['email', 'ldap'], { 'ldap.users': '7', verification: 'true' })).toEqual({
+      email: { verification: 'true' },
+      ldap: { users: '7' },
+    });
+  });
+
+  it('refuses a plain key two presets take, naming the qualified forms', () => {
+    expect(() => paramsByPreset(['ldap', 'saml'], { users: '3' })).toThrow(
+      '--set users is taken by more than one preset; say which: --set ldap.users=... or --set saml.users=...',
+    );
+  });
+
+  it('refuses a key no selected preset takes, listing what they do', () => {
+    expect(() => paramsByPreset(['email', 'ldap'], { 'saml.users': '3' })).toThrow(
+      /unknown --set param saml\.users for presets 'email', 'ldap' - valid: .*email\.verification.*ldap\.users/u,
+    );
+  });
+});
+
+describe('the browser host of a composed workspace', () => {
+  it("is derived per preset, under that preset's qualified key", () => {
+    const req = createReq({
+      version: '8.5.1',
+      preset: 'email+saml',
+      bind: '0.0.0.0',
+      rootUrl: 'https://box.example',
+    });
+    deriveIdpHost(req);
+    expect(req.params).toEqual({ 'saml.idp_host': 'box.example' });
+  });
+});
+
+describe('a SAML login with the email preset', () => {
+  /** The workspace's preset as a create resolves it, from the real definitions. */
+  const preset = (names: string[], params: Record<string, Record<string, unknown>> = {}) =>
+    (require('../../../src/lib/presets/index') as typeof PresetsNS).loadMany(
+      names,
+      params as never,
+      'docker',
+    );
+  const EMAIL_2FA_KEY = 'OVERWRITE_SETTING_Accounts_TwoFactorAuthentication_By_Email_Enabled';
+
+  it('warns that a SAML login cannot finish email 2FA, and names the setting', () => {
+    const said = samlEmailWarning(preset(['email', 'saml']), '8.5.1', new Set());
+    expect(said).toContain('SAML sign-in + email on Rocket.Chat 8.5.1');
+    expect(said).toContain('--setting Accounts_TwoFactorAuthentication_By_Email_Enabled=false');
+  });
+
+  it("says what happens without quoting Rocket.Chat's words, which differ", () => {
+    // It quoted "User not found"; the 8.5.1 browser showed "Invalid two factor code".
+    const said = samlEmailWarning(preset(['email', 'saml']), '8.5.1', new Set());
+    expect(said).toContain(
+      'Rocket.Chat refuses the code it emails to a SAML login, so the sign-in cannot finish',
+    );
+    expect(said).not.toContain('User not found');
+  });
+
+  it('warns on 8.9.0 and later too, and no longer offers 8.9.0 as the way out', () => {
+    // 8.9.0 refused the emailed code in a real browser, through the domain and straight to
+    // the edge alike, so "or use 8.9.0 or later" sent people to a version that fails.
+    for (const version of ['8.9.0', '9.0.0']) {
+      const said = samlEmailWarning(preset(['email', 'saml']), version, new Set());
+      expect(said).toContain(`SAML sign-in + email on Rocket.Chat ${version}`);
+      expect(said).not.toContain('8.9.0 or later');
+    }
+  });
+
+  it('warns for a directory signed in through SAML, which no preset named saml says', () => {
+    // `ldap --set idp=saml` puts the directory's users behind Keycloak's SAML, and the
+    // emailed code met the same refusal there, seen live; the name check let it pass silent.
+    const said = samlEmailWarning(
+      preset(['email', 'ldap'], { ldap: { idp: 'saml' } }),
+      '8.5.1',
+      new Set(),
+    );
+    expect(said).toContain('--setting Accounts_TwoFactorAuthentication_By_Email_Enabled=false');
+  });
+
+  it('is quiet without a SAML login or the email preset, and once the user sets the key', () => {
+    expect([
+      samlEmailWarning(preset(['saml']), '8.5.1', new Set()),
+      samlEmailWarning(preset(['email', 'ldap']), '8.5.1', new Set()),
+      samlEmailWarning(preset(['email', 'ldap'], { ldap: { idp: 'oidc' } }), '8.5.1', new Set()),
+      samlEmailWarning(preset(['email', 'saml']), '8.5.1', new Set([EMAIL_2FA_KEY])),
+    ]).toEqual(['', '', '', '']);
+  });
+});
+
+describe('the IdP host a combination derives', () => {
+  it('leaves a plain --set idp_host the user typed as theirs', () => {
+    // In a combination the plain key is routed to the one preset that takes it -- after the
+    // derivation, so the derived `saml.idp_host` (the root URL's host) won over the IdP the
+    // user typed.
+    const req = createReq({
+      version: '8.5.1',
+      preset: 'email+saml',
+      bind: '0.0.0.0',
+      rootUrl: 'http://rc.example.test:3611',
+      params: { idp_host: 'sso.example.test' },
+    });
+    deriveIdpHost(req);
+    expect(req.params).toEqual({ idp_host: 'sso.example.test' });
   });
 });

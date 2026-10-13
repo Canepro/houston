@@ -54,7 +54,7 @@
         "--name",
         "alpha"
       ],
-      "code": 1,
+      "code": 2,
       "stdout": "",
       "stderr": "error: no target version given — use `--to 8.6.1` (or `--rollback` to undo)\n"
     },

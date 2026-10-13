@@ -1,7 +1,10 @@
 import type { FastifyInstance } from 'fastify';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 import { edge, type Edge } from '../../src/core/edge/types';
-import { PreflightError } from '../../src/lib/errors';
+import { saveConfig } from '../../src/lib/config';
+import { PreflightError, ValidationError } from '../../src/lib/errors';
 import type { ReproError } from '../../src/lib/errors';
 
 import {
@@ -47,6 +50,7 @@ function harness(
     normalizeDomain: (value) => [value, ''],
     servedDomain: () => '',
     bridgeAddress: jest.fn(async () => '172.17.0.1'),
+    engineKind: jest.fn(async () => 'docker'),
     resolveEdge: (domain, email, values) => edge({ domain, acmeEmail: email, ...values }) as Edge,
     requireDocker: async () => {
       calls.push('preflight');
@@ -80,6 +84,7 @@ function harness(
     tightenPrivateState: jest.fn(),
     writePid: jest.fn(() => true),
     removeOwnedPid: jest.fn(),
+    livePid: () => null,
     ...overrides,
   };
   return {
@@ -181,6 +186,34 @@ describe('the secure serve boundary', () => {
     }
   });
 
+  it('says whether Okta sign-in is on, and why not, without refusing to start', async () => {
+    const home = process.env.HOUSTON_HOME ?? '';
+    saveConfig({
+      'sso.issuer': 'https://login.example.com',
+      'sso.client_id': '0oa-client',
+      'sso.public_url': 'https://houston.example.com',
+      'sso.email_domains': 'example.com',
+    });
+    try {
+      const broken = harness();
+      await run(broken, { bind: '0.0.0.0', allowHost: ['lab.example.com'], insecure: true });
+      expect(broken.out.join('')).toContain('⚠ Okta sign-in is set up but off: no client secret');
+      expect(broken.app.listen).toHaveBeenCalled();
+      fs.writeFileSync(path.join(home, 'sso.env'), 'HOUSTON_SSO_CLIENT_SECRET=s3cret\n', {
+        mode: 0o600,
+      });
+      const ready = harness();
+      await run(ready, { bind: '0.0.0.0', allowHost: ['lab.example.com'], insecure: true });
+      expect(ready.out.join('')).toContain(
+        'Okta sign-in: on, from https://login.example.com, back at https://houston.example.com',
+      );
+      expect(ready.out.join('')).not.toContain('s3cret');
+    } finally {
+      fs.rmSync(path.join(home, 'config.yaml'), { force: true });
+      fs.rmSync(path.join(home, 'sso.env'), { force: true });
+    }
+  });
+
   it('permits an explicit insecure reachable bind without claiming HTTPS', async () => {
     let appOptions: Parameters<ServeDependencies['createApp']>[0] | undefined;
     const h = harness({
@@ -270,6 +303,40 @@ describe('the secure serve boundary', () => {
     expect(h.dependencies.openBrowser).not.toHaveBeenCalled();
   });
 
+  it('refuses --domain with no contact email as a usage error, exit 2, before touching the edge', async () => {
+    // A flag the call is missing. It was a plain ReproError, exit 1 (L7-07).
+    const h = harness();
+    const refusal = await run(h, { domain: 'support.example.com', noOpen: true }).catch(
+      (error: unknown) => error,
+    );
+    expect(refusal).toBeInstanceOf(ValidationError);
+    expect(refusal).toMatchObject({ exitCode: 2 });
+    expect((refusal as Error).message).toContain(
+      "a Let's Encrypt certificate needs a contact email",
+    );
+    expect(h.calls).toEqual([]);
+  });
+
+  it('refuses --domain on Podman without --bind, before touching the edge', async () => {
+    const h = harness({
+      servedDomain: () => 'support.example.com',
+      loadConfig: () => ({ acme_email: 'ops@example.com' }),
+      engineKind: jest.fn(async () => 'podman'),
+    });
+    await expect(run(h, { noOpen: true })).rejects.toThrow(
+      '`serve --domain` on Podman needs --bind <an address of this host the HTTPS edge can reach>',
+    );
+    expect(h.dependencies.bridgeAddress).not.toHaveBeenCalled();
+    expect(h.calls).toEqual([]);
+    // With --bind it goes ahead.
+    const told = harness({
+      servedDomain: () => 'support.example.com',
+      loadConfig: () => ({ acme_email: 'ops@example.com' }),
+      engineKind: jest.fn(async () => 'podman'),
+    });
+    expect(await run(told, { noOpen: true, bind: '10.0.0.5' })).toMatchObject({ bind: '10.0.0.5' });
+  });
+
   it('--no-domain deliberately ignores the persisted edge without changing it', async () => {
     const h = harness({ servedDomain: () => 'support.example.com' });
 
@@ -355,6 +422,133 @@ describe('the secure serve boundary', () => {
     expect(h.app.close).toHaveBeenCalledTimes(1);
   });
 
+  it('bounds shutdown before awaiting an app close held by active connections', async () => {
+    jest.useFakeTimers();
+    const exit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+    let release!: () => void;
+    let entered!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const closing = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const h = harness();
+    Object.defineProperty(h.app, 'close', {
+      value: jest.fn(async () => {
+        entered();
+        await held;
+      }),
+    });
+    const serving = run(h, { noOpen: true });
+    try {
+      await closing;
+      await jest.advanceTimersByTimeAsync(37_999);
+      expect(exit).not.toHaveBeenCalled();
+      await jest.advanceTimersByTimeAsync(1);
+      expect(exit).toHaveBeenCalledTimes(1);
+      expect(h.err.join('')).toContain('serve shutdown exceeded 38 seconds');
+      release();
+      await serving;
+      await jest.advanceTimersByTimeAsync(40_000);
+      expect(exit).toHaveBeenCalledTimes(1);
+    } finally {
+      release();
+      await serving;
+      exit.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
+  it('keeps the signal shutdown bound after app close returns with no jobs and a live handle', async () => {
+    jest.useFakeTimers();
+    const exit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+    const warning = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const timers = jest.spyOn(global, 'setTimeout');
+    const h = harness();
+    Object.defineProperty(h.app, 'jobs', { value: { active: () => 0 } });
+    const dependencies: Partial<ServeDependencies> = { ...h.dependencies };
+    Reflect.deleteProperty(dependencies, 'waitForShutdown');
+    const before = process.listenerCount('SIGTERM');
+    const serving = serve({ noOpen: true }, dependencies, h.io);
+    const pulse = jest.fn();
+    let abandoned: NodeJS.Timeout | undefined;
+    try {
+      for (
+        let attempt = 0;
+        attempt < 100 && process.listenerCount('SIGTERM') === before;
+        attempt += 1
+      ) {
+        await Promise.resolve();
+      }
+      expect(process.listenerCount('SIGTERM')).toBe(before + 1);
+      process.emit('SIGTERM');
+      await serving;
+      expect(h.app.close).toHaveBeenCalledTimes(1);
+      expect(h.app.jobs.active()).toBe(0);
+      const boundIndex = timers.mock.calls.findIndex((args) => args[1] === 38_000);
+      const bound = timers.mock.results[boundIndex]?.value as NodeJS.Timeout;
+      expect(bound.hasRef()).toBe(false);
+      const liveHandle = setInterval(pulse, 1000) as unknown as NodeJS.Timeout;
+      abandoned = liveHandle;
+      expect(liveHandle.hasRef()).toBe(true);
+      await jest.advanceTimersByTimeAsync(37_999);
+      expect(pulse).toHaveBeenCalledTimes(37);
+      expect(exit).not.toHaveBeenCalled();
+      await jest.advanceTimersByTimeAsync(1);
+      expect(exit).toHaveBeenCalledTimes(1);
+      expect(warning).toHaveBeenCalledWith(
+        '  ⚠ serve shutdown exceeded 38 seconds; ending the process\n',
+      );
+    } finally {
+      if (abandoned !== undefined) clearInterval(abandoned);
+      await serving;
+      jest.clearAllTimers();
+      exit.mockRestore();
+      warning.mockRestore();
+      timers.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
+  it('says so when shutdown stops jobs that outlasted the drain', async () => {
+    // The jobs were stopped, as Stop stops them, and nothing on the terminal said why serve
+    // was still there or what had become of them.
+    let appOptions: Parameters<ServeDependencies['createApp']>[0] | undefined;
+    const h = harness({
+      createApp: async (options) => {
+        appOptions = options;
+        return h.app;
+      },
+    });
+    await run(h, { noOpen: true });
+    appOptions?.onShutdownStop?.(['job_1']);
+    expect(h.err.join('')).toBe(
+      '  ⚠ 1 job(s) still running at shutdown — stopping them, as Stop does; what they had ' +
+        'done stays done\n',
+    );
+  });
+
+  it('cancels the shutdown deadline when app close rejects', async () => {
+    jest.useFakeTimers();
+    const exit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+    const h = harness();
+    Object.defineProperty(h.app, 'close', {
+      value: jest.fn(async () => {
+        throw new Error('controlled close failure');
+      }),
+    });
+    try {
+      await expect(run(h, { noOpen: true })).rejects.toThrow('controlled close failure');
+      await jest.advanceTimersByTimeAsync(40_000);
+      expect(exit).not.toHaveBeenCalled();
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      exit.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
   it('closes the app and removes its PID when listen fails in a way the listener does not report', async () => {
     // The pid file is written before `app.listen`, and a `finally` unlinks it.
     const h = harness({}, { listenError: new Error('controlled listen failure') });
@@ -428,8 +622,11 @@ describe('the secure serve boundary', () => {
 
       expect(result).toEqual({ printed: false, refused: true, exitCode: 3 });
       expect(h.out[0]).toBe(`houston GUI: http://localhost:${String(busy)}/\n`);
+      // And what to do: an older serve is the commonest holder, and nothing said so.
       expect(h.err.join('')).toBe(
-        `error: cannot listen on 127.0.0.1:${String(busy)}: address already in use\n`,
+        `error: cannot listen on 127.0.0.1:${String(busy)}: address already in use\n` +
+          `  an older houston serve may still hold it: \`ss -ltnp | grep ${String(busy)}\` ` +
+          'names what does; stop that, or choose another --port\n',
       );
       expect(h.dependencies.removeOwnedPid).toHaveBeenCalledWith(
         '/tmp/isolated-houston/serve.pid',
@@ -457,7 +654,34 @@ describe('the secure serve boundary', () => {
     const result = await run(h, { bind: address, port: 80, insecure: true, noOpen: true });
 
     expect(result).toEqual({ printed: false, refused: true, exitCode: 3 });
-    expect(h.err.join('')).toBe(`error: ${said}\n`);
+    expect(h.err.join('').split('\n')[0]).toBe(`error: ${said}`);
+    // Only a port in use has a holder to name.
+    expect(h.err.join('').includes('older houston serve')).toBe(code === 'EADDRINUSE');
+  });
+
+  it('names an earlier serve from this home by its pid, and leaves its pid file to it', async () => {
+    const inUse = Object.assign(new Error('listen EADDRINUSE'), {
+      code: 'EADDRINUSE',
+      syscall: 'listen',
+      address: '127.0.0.1',
+      port: 9944,
+    });
+    const h = harness({ livePid: () => 4242 }, { listenError: inUse });
+
+    const result = await run(h, { port: 9944, noOpen: true });
+
+    expect(result).toEqual({ printed: false, refused: true, exitCode: 3 });
+    expect(h.err.join('')).toBe(
+      'error: cannot listen on 127.0.0.1:9944: address already in use\n' +
+        '  an earlier houston serve from this home is still running (pid 4242): stop it ' +
+        '(`kill 4242`, or `sudo systemctl stop houston` if it runs as the service), or ' +
+        'choose another --port\n',
+    );
+    // This serve wrote over the earlier one's record before it could know; it is put back.
+    expect(h.dependencies.writePid).toHaveBeenLastCalledWith(
+      '/tmp/isolated-houston/serve.pid',
+      4242,
+    );
   });
 });
 

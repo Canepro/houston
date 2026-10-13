@@ -12,6 +12,7 @@
  * specs do not spend real seconds.
  */
 import * as config from '../lib/config';
+import { CreateFailedError } from '../lib/errors';
 import { recordAudit } from '../lib/audit';
 import { storedText } from '../lib/format';
 import { dumps } from '../lib/json-text';
@@ -89,11 +90,14 @@ async function post(url: string, options: RequestOptions = {}): Promise<HttpResp
 /** GET /api/info (public). The JSON, or null if it is not serving. */
 export async function apiInfo(
   rootUrl: string,
-  { timeoutMs = 5_000 } = {},
+  {
+    timeoutMs = 5_000,
+    requestOptions = {},
+  }: { timeoutMs?: number; requestOptions?: RequestOptions } = {},
 ): Promise<Record<string, unknown> | null> {
   let resp: HttpResponse;
   try {
-    resp = await get(`${trimEnd(rootUrl)}/api/info`, { timeoutMs });
+    resp = await get(`${trimEnd(rootUrl)}/api/info`, { ...requestOptions, timeoutMs });
   } catch (error) {
     if (error instanceof RequestFailed) return null;
     throw error;
@@ -123,18 +127,34 @@ export async function waitReady(
     isAlive,
     onTick,
     sleep = realSleep,
+    requestOptions = {},
+    page = false,
   }: {
     timeout?: number;
     interval?: number;
     isAlive?: () => boolean | Promise<boolean>;
     onTick?: (elapsed: number) => void | Promise<void>;
     sleep?: Sleep;
+    requestOptions?: RequestOptions | ((remainingMs: number) => Promise<RequestOptions | null>);
+    /** The exposed web route must return a complete page as well as its public API. */
+    page?: boolean;
   } = {},
 ): Promise<Record<string, unknown>> {
   const deadline = now() + timeout;
   for (;;) {
-    const info = await apiInfo(rootUrl);
-    if (info !== null) return info;
+    const remainingMs = (): number => Math.max(1, Math.min(5_000, (deadline - now()) * 1000));
+    const options =
+      typeof requestOptions === 'function' ? await requestOptions(remainingMs()) : requestOptions;
+    const info =
+      options === null
+        ? null
+        : await apiInfo(rootUrl, { requestOptions: options, timeoutMs: remainingMs() });
+    if (
+      info !== null &&
+      options !== null &&
+      (!page || (await pageServing(rootUrl, options, remainingMs())))
+    )
+      return info;
     if (isAlive !== undefined && !(await isAlive())) {
       throw new NotReady('Rocket.Chat container is not running (check `logs`)');
     }
@@ -146,6 +166,24 @@ export async function waitReady(
     // is unaffected.
     if (onTick !== undefined) await onTick(timeout - (deadline - now()));
     await sleep(interval);
+  }
+}
+
+async function pageServing(
+  rootUrl: string,
+  requestOptions: RequestOptions,
+  timeoutMs: number,
+): Promise<boolean> {
+  try {
+    const response = await get(`${trimEnd(rootUrl)}/`, {
+      ...requestOptions,
+      timeoutMs,
+      followRedirects: false,
+    });
+    return response.status === 200 && response.text.trim() !== '';
+  } catch (error) {
+    if (error instanceof RequestFailed) return false;
+    throw error;
   }
 }
 
@@ -389,13 +427,21 @@ export async function releasesReachable(version = '8.5.1'): Promise<number | nul
   }
 }
 
-/** The first standalone 6-digit code in an email body, or null. */
 /** How long `fetchEmailOtp` waits, and therefore how long a 2FA login can take. */
 export const OTP_WAIT_SECONDS = 30;
 
+/**
+ * The emailed 2FA code, as the six digits Rocket.Chat stored, or null.
+ *
+ * Rocket.Chat mails it as `ddd-ddd` (`EmailCheck.send2FAEmail`:
+ * `random.replace(/^(\d{3})/, '$1-')`, the same at every tag checked, 3.18.0 to 8.8.0),
+ * and its `verify` strips every non-digit before comparing, so the digits alone are what it
+ * accepts. Only that shape is read: a bare six-digit run was never the code, and taking one
+ * would spend a login attempt on a colour, a year or a ticket number in a custom template.
+ */
 export function extractOtp(text: string): string | null {
-  const found = /(?<!\d)(\d{6})(?!\d)/u.exec(text || '');
-  return found === null ? null : (found[1] as string);
+  const found = /(?<![\d-])(\d{3})-(\d{3})(?![\d-])/u.exec(text || '');
+  return found === null ? null : `${found[1] as string}${found[2] as string}`;
 }
 
 /**
@@ -442,7 +488,8 @@ export async function newestMailStamp(
 }
 
 /**
- * Poll Mailpit for a 6-digit code, optionally only in messages addressed to `toEmail`.
+ * Poll Mailpit for an emailed 2FA code (`extractOtp`), optionally only in messages addressed
+ * to `toEmail`.
  *
  * `after` (a `newestMailStamp` snapshot) skips any message not newer than it, so a code
  * left over from a previous login is never reused. Null if none shows up in time.
@@ -733,6 +780,76 @@ export async function setSetting(
     return resp.status === 200 && body(resp).success === true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * This process's loaded SAML provider, without following its missing-provider redirect.
+ * A transport failure is unknown, rather than proof that a disable has completed.
+ */
+export async function samlProviderState(
+  rootUrl: string,
+  provider: string,
+  { timeoutMs = 3_000, publicUrl = '' } = {},
+): Promise<'loaded' | 'unloaded' | 'unknown'> {
+  const exposed = new URL(publicUrl || rootUrl);
+  try {
+    const metadata = await get(
+      `${trimEnd(rootUrl)}/_saml/metadata/${encodeURIComponent(provider)}`,
+      {
+        timeoutMs,
+        followRedirects: false,
+        headers: {
+          Host: exposed.host,
+          'X-Forwarded-Proto': exposed.protocol.slice(0, -1),
+        },
+      },
+    );
+    if (metadata.status === 200 && /<(?:[\w.-]+:)?EntityDescriptor\b/u.test(metadata.text))
+      return 'loaded';
+    if (metadata.status === 404) return 'unloaded';
+    const location = metadata.headers.location;
+    if (
+      metadata.status === 302 &&
+      location !== undefined &&
+      URL.canParse(location, exposed.href) &&
+      new URL(location, exposed).href === new URL('home', `${exposed.origin}/`).href
+    )
+      return 'unloaded';
+    return 'unknown';
+  } catch (error) {
+    if (error instanceof RequestFailed || error instanceof TypeError) return 'unknown';
+    throw error;
+  }
+}
+
+/** A SAML login service exists and this Rocket.Chat process can serve its metadata. */
+export async function samlProviderReady(
+  rootUrl: string,
+  {
+    timeoutMs = 3_000,
+    auth,
+    publicUrl = '',
+  }: { timeoutMs?: number; auth?: Auth; publicUrl?: string } = {},
+): Promise<boolean> {
+  try {
+    // Self-configuration already has an admin session. Anonymous polling consumes the
+    // same per-IP provider-list quota the next visitor needs to render the SSO button.
+    const resp = await get(`${trimEnd(rootUrl)}/api/v1/service.configurations`, {
+      timeoutMs,
+      ...(auth === undefined ? {} : { headers: authHeaders(auth) }),
+    });
+    const parsed = body(resp);
+    if (resp.status !== 200 || parsed.success !== true) return false;
+    const service = list(parsed.configurations).find((entry) => entry.service === 'saml');
+    const provider = map(service?.clientConfig).provider;
+    if (typeof provider !== 'string' || provider === '') return false;
+    // The service document is shared in MongoDB; metadata is served by the instance's
+    // own loaded providers. Both matter when several processes share that document.
+    return (await samlProviderState(rootUrl, provider, { timeoutMs, publicUrl })) === 'loaded';
+  } catch (error) {
+    if (error instanceof RequestFailed) return false;
+    throw error;
   }
 }
 
@@ -1085,12 +1202,15 @@ export async function call(
     data,
     extraHeaders,
     params,
+    responseHeaders,
     timeoutMs = 30_000,
   }: {
     auth?: Auth;
     data?: unknown;
     extraHeaders?: Record<string, string>;
     params?: Record<string, string | number | boolean>;
+    /** Optional complete response headers, without changing the status/body tuple. */
+    responseHeaders?: Record<string, string>;
     timeoutMs?: number;
   } = {},
 ): Promise<[number, string]> {
@@ -1103,6 +1223,10 @@ export async function call(
     ...(params === undefined ? {} : { params }),
     timeoutMs,
   });
+  if (responseHeaders !== undefined) {
+    for (const key of Object.keys(responseHeaders)) delete responseHeaders[key];
+    Object.assign(responseHeaders, resp.headers);
+  }
   return [resp.status, resp.text];
 }
 
@@ -1112,4 +1236,69 @@ export async function call(
  * An intra-module function binding cannot be replaced from outside: swc emits exports as
  * non-configurable getters, so this object is what a caller replaces.
  */
-export const rcapi = { call };
+export interface MultipartPart {
+  readonly name: string;
+  readonly value: string | Buffer;
+  readonly filename?: string;
+  readonly type?: string;
+}
+
+export async function multipart(
+  rootUrl: string,
+  path: string,
+  headers: Record<string, string>,
+  parts: readonly MultipartPart[],
+): Promise<[number, string]> {
+  const { randomBytes } = await import('node:crypto');
+  const boundary = `houston-${randomBytes(18).toString('hex')}`;
+  const chunks: Buffer[] = [];
+  for (const part of parts) {
+    if (
+      /[\r\n"\\]/u.test(part.name) ||
+      (part.filename !== undefined && /[\r\n"\\]/u.test(part.filename))
+    ) {
+      throw new Error('invalid multipart field or filename');
+    }
+    chunks.push(
+      Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="${part.name}"${part.filename === undefined ? '' : `; filename="${part.filename}"`}\r\n${part.type === undefined ? '' : `Content-Type: ${part.type}\r\n`}\r\n`,
+      ),
+    );
+    chunks.push(Buffer.isBuffer(part.value) ? part.value : Buffer.from(part.value));
+    chunks.push(Buffer.from('\r\n'));
+  }
+  chunks.push(Buffer.from(`--${boundary}--\r\n`));
+  const clean = Object.fromEntries(
+    Object.entries(headers).filter(([key]) => key.toLowerCase() !== 'content-type'),
+  );
+  const response = await rcHttp.request(`${trimEnd(rootUrl)}/${path.replace(/^\/+/u, '')}`, {
+    method: 'POST',
+    headers: { ...clean, 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+    body: Buffer.concat(chunks),
+    timeoutMs: 60_000,
+  });
+  return [response.status, response.text];
+}
+
+export async function download(
+  rootUrl: string,
+  path: string,
+  headers: Record<string, string>,
+): Promise<HttpResponse> {
+  const base = new URL(`${trimEnd(rootUrl)}/`);
+  const target = new URL(path, base);
+  if (target.origin !== base.origin)
+    throw new Error('file download must stay on the workspace origin');
+  try {
+    return await rcHttp.request(target.href, {
+      headers,
+      binary: true,
+      sameOriginRedirects: true,
+      timeoutMs: 60_000,
+    });
+  } catch {
+    throw new CreateFailedError('workspace file download could not be completed');
+  }
+}
+
+export const rcapi = { call, multipart, download };

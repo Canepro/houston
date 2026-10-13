@@ -1,6 +1,6 @@
 {
   "constants": {
-    "privileged": ["rc_image", "reg_token", "bind", "context"],
+    "privileged": ["rc_image", "reg_token", "bind", "context", "license"],
     "billable_prefixes": ["arn:aws:eks:", "gke_"],
     "actions": ["start", "stop", "restart"],
     "essential": ["mongodb"],

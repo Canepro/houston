@@ -178,13 +178,16 @@ export function jsonModeReset(): void {
 }
 
 /**
- * Add a warning to this command's envelope. Deduplicated by code.
+ * Add a warning to this command's envelope. Deduplicated by code AND message.
  *
  * `code` is the stable half and `message` is prose, exactly as in the error payload, so
- * a caller can branch on the code without matching English.
+ * a caller can branch on the code without matching English. By code alone, every warning
+ * raised as a plain event shares `WARNING`, so only the first ever reached the envelope:
+ * `up --json` said the release was unknown and dropped the Premium-plan warning after it.
+ * The same warning raised twice is still one entry.
  */
 export function warnOnce(code: string, message: string, detail?: Record<string, unknown>): void {
-  if (warnings_.some((w) => w.code === code)) return;
+  if (warnings_.some((w) => w.code === code && w.message === message)) return;
   const entry: Warning = { code, message };
   if (detail !== undefined && Object.keys(detail).length > 0) entry.detail = { ...detail };
   warnings_.push(entry);
@@ -265,7 +268,10 @@ export function envelope(
  * dressed up as something more specific. Saying "unclassified" is honest; picking a
  * plausible code would tell a caller to retry, or not to, on no evidence.
  */
-export function errorEnvelope(exc: unknown, options: { warnings?: Warning[] } = {}): Envelope {
+export function errorEnvelope(
+  exc: unknown,
+  options: { warnings?: Warning[]; data?: unknown } = {},
+): Envelope {
   const repro = exc instanceof ReproError ? exc : null;
   const err: EnvelopeError = {
     code: repro?.code ?? ReproError.code,
@@ -289,7 +295,9 @@ export function errorEnvelope(exc: unknown, options: { warnings?: Warning[] } = 
     houston_version: houstonVersion,
     generated_at: now(),
     ok: false,
-    data: null,
+    // What a failure that still produced a result measured -- a loadtest that missed its
+    // SLO -- so the caller branching on `ok` keeps the numbers it failed on.
+    data: options.data ?? null,
     warnings: [...(options.warnings ?? [])],
     error: err,
   };

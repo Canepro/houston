@@ -2,6 +2,8 @@ import { kube } from '../../../src/core/kube/exec';
 import { DockerError } from '../../../src/lib/errors';
 import {
   ensureMonitoring,
+  ensurePodMonitor,
+  releaseSystemNamespace,
   removeGrafanaIngress,
   removeMonitoring,
 } from '../../../src/core/kube/monitoring';
@@ -255,4 +257,178 @@ it('keeps long Grafana resource names within 63 characters, including the TLS su
   expect(`${a}-tls`.length).toBeLessThanOrEqual(63);
   expect(a).not.toBe(b);
   expect(a).toMatch(/^[a-z0-9-]+$/u);
+});
+
+describe('houston-system, once nothing uses it', () => {
+  function cluster(left: unknown[]): string[][] {
+    const seen: string[][] = [];
+    jest.spyOn(kube, 'run').mockImplementation(async (argv) => {
+      seen.push([...argv]);
+      const json = argv.includes('get') ? JSON.stringify({ items: left }) : '[]';
+      return { argv, returncode: 0, stdout: json, stderr: '' };
+    });
+    return seen;
+  }
+
+  it('is removed when neither release is there and nothing is left in it', async () => {
+    // helm made it for the operator and the monitoring stack, and neither removal took it:
+    // after the last workspace it stayed, holding the chart's leftover webhook Secret.
+    const seen = cluster([]);
+    await releaseSystemNamespace('c', () => undefined);
+    expect(seen.some((argv) => argv.join(' ').includes('delete namespace houston-system'))).toBe(
+      true,
+    );
+  });
+
+  it('does not report removal until the shared namespace deletion has completed', async () => {
+    let namespaceGone = false;
+    jest.spyOn(kube, 'run').mockImplementation(async (argv) => {
+      if (argv.includes('delete')) {
+        // The cluster accepts deletion immediately, but --wait is what keeps the
+        // caller from racing the following restore's Helm Secret creation.
+        namespaceGone = argv.includes('--wait=true');
+      }
+      return {
+        argv,
+        returncode: 0,
+        stdout: argv.includes('get') ? '{"items":[]}' : '[]',
+        stderr: '',
+      };
+    });
+    const said: string[] = [];
+    await releaseSystemNamespace('c', (event) => said.push(event.message));
+    expect(namespaceGone).toBe(true);
+    expect(said.join(' ')).toContain('removed the houston-system namespace');
+  });
+
+  it('reports an unfinished shared namespace deletion instead of claiming it is gone', async () => {
+    jest.spyOn(kube, 'run').mockImplementation(async (argv) => ({
+      argv,
+      returncode: argv.includes('delete') ? 1 : 0,
+      stdout: argv.includes('get') ? '{"items":[]}' : '[]',
+      stderr: argv.includes('delete') ? 'error: timed out waiting for the condition' : '',
+    }));
+    const said: string[] = [];
+    await releaseSystemNamespace('c', (event) => said.push(event.message));
+    expect(said.join(' ')).toContain('could not confirm houston-system is gone');
+    expect(said.join(' ')).toContain('timed out');
+    expect(said.join(' ')).not.toContain('removed the houston-system namespace');
+  });
+
+  it('says nothing when it is already gone, because NotFound is the answer it wanted', async () => {
+    // `down` of a workspace that never had monitoring warned "could not confirm
+    // houston-system is gone: Error from server (NotFound)" about a namespace not there.
+    jest.spyOn(kube, 'run').mockImplementation(async (argv) => ({
+      argv,
+      returncode: argv.includes('delete') ? 1 : 0,
+      stdout: argv.includes('get') ? '{"items":[]}' : '[]',
+      stderr: argv.includes('delete')
+        ? 'Error from server (NotFound): namespaces "houston-system" not found'
+        : '',
+    }));
+    const said: string[] = [];
+    await releaseSystemNamespace('c', (event) => said.push(event.message));
+    expect(said).toEqual([]);
+  });
+
+  it('is kept while a workload is left in it, such as an adopted operator', async () => {
+    const seen = cluster([{ kind: 'Deployment', metadata: { name: 'their-operator' } }]);
+    await releaseSystemNamespace('c', () => undefined);
+    expect(seen.some((argv) => argv.includes('delete'))).toBe(false);
+  });
+});
+
+describe("a workspace's PodMonitor, once the stack brings its CRD", () => {
+  /** A cluster whose CRD wait answers `crdRc` and whose namespace holds `monitors`. */
+  function cluster(monitors: unknown[], crdRc = 0, podMonitor = true): string[][] {
+    const seen: string[][] = [];
+    jest.spyOn(kube, 'run').mockImplementation(async (argv) => {
+      seen.push([...argv]);
+      const answer = (stdout: unknown, returncode = 0) => ({
+        argv,
+        returncode,
+        stdout: typeof stdout === 'string' ? stdout : JSON.stringify(stdout),
+        stderr: returncode === 0 ? '' : 'Error from server (NotFound): no such CRD',
+      });
+      if (argv.includes('wait')) return answer('', crdRc);
+      if (argv.includes('list'))
+        return answer([{ name: 'rocketchat', status: 'deployed', chart: 'rocketchat-7.0.2' }]);
+      if (argv.includes('values'))
+        return answer(
+          argv.includes('--all')
+            ? { podMonitor: { enabled: podMonitor }, image: { tag: '8.5.1' } }
+            : { image: { tag: '8.5.1' } },
+        );
+      if (argv.includes('podmonitors')) return answer({ items: monitors });
+      return answer('');
+    });
+    return seen;
+  }
+
+  const upgrades = (seen: string[][]) =>
+    seen.filter((argv) => argv[0] === 'helm' && argv.includes('upgrade'));
+
+  it('renders the release again when it was installed before the CRD existed', async () => {
+    // The first `up --monitor` installs the release, THEN the shared stack: helm rendered no
+    // PodMonitor while `podMonitor.enabled=true`, Prometheus had no target, and Grafana showed
+    // no Rocket.Chat data until a re-up rendered it.
+    const seen = cluster([]);
+    const said: string[] = [];
+    await ensurePodMonitor({
+      namespace: 'houston-k1',
+      context: 'c',
+      emit: (event) => said.push(event.message),
+    });
+    const wait = seen.find((argv) => argv.includes('wait')) ?? [];
+    expect(wait).toEqual(
+      expect.arrayContaining([
+        '--for=condition=Established',
+        'crd/podmonitors.monitoring.coreos.com',
+        '--timeout=60s',
+      ]),
+    );
+    // The same chart and values the release has: only what the cluster allows changes.
+    expect(upgrades(seen)).toEqual([
+      [
+        'helm',
+        'upgrade',
+        'rocketchat',
+        'rocketchat/rocketchat',
+        '--kube-context',
+        'c',
+        '-n',
+        'houston-k1',
+        '--version',
+        '7.0.2',
+        '--values',
+        '-',
+      ],
+    ]);
+    expect(seen.indexOf(wait)).toBeLessThan(seen.indexOf(upgrades(seen)[0] ?? []));
+    expect(said.join(' ')).toContain('rendering the Rocket.Chat release again');
+  });
+
+  it('leaves a release alone that already has one, or whose chart publishes none', async () => {
+    for (const make of [
+      () => cluster([{ metadata: { name: 'rocketchat' } }]),
+      () => cluster([], 0, false),
+    ]) {
+      const seen = make();
+      await ensurePodMonitor({ namespace: 'houston-k1', context: 'c' });
+      expect(seen.some((argv) => argv.includes('values'))).toBe(true);
+      expect(upgrades(seen)).toEqual([]);
+    }
+  });
+
+  it('says so, and renders nothing, when the cluster never serves the CRD', async () => {
+    const seen = cluster([], 1);
+    const said: string[] = [];
+    await ensurePodMonitor({
+      namespace: 'houston-k1',
+      context: 'c',
+      emit: (event) => said.push(event.message),
+    });
+    expect(upgrades(seen)).toEqual([]);
+    expect(said.join(' ')).toContain('Prometheus cannot find Rocket.Chat');
+  });
 });

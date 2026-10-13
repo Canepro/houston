@@ -363,5 +363,20 @@ export function healthyHost(): typeof HostNS {
     dockerAvailable: (): Promise<boolean> => Promise.resolve(true),
     /** The compose plugin is v2 and recent enough for every preflight floor. */
     composeVersion: (): Promise<string | null> => Promise.resolve('2.29.0'),
+    /** Docker itself, which runs healthchecks. */
+    engine: () =>
+      Promise.resolve({
+        kind: 'docker' as const,
+        version: '27.5.1',
+        rootless: false,
+        cgroupDriver: 'systemd',
+        healthchecks: true,
+        shim: false,
+        kernel: '6.1.0',
+        cpus: 4,
+        memBytes: 8_589_934_592,
+        rootDir: '/var/lib/docker',
+        socket: '/var/run/docker.sock',
+      }),
   };
 }

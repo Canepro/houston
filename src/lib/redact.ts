@@ -23,6 +23,8 @@ export const SECRET_KEY_HINTS: readonly string[] = Object.freeze([
   '_key',
   'apikey',
   'credential',
+  // Not in earlier releases, which printed a licence wherever they printed env.
+  'rocketchat_license',
 ]);
 
 export const REDACTED = '********';
@@ -59,4 +61,36 @@ export function redactEnv(key: string, value: string): string {
   const low = key.toLowerCase();
   if (value && SECRET_KEY_HINTS.some((h) => low.includes(h))) return REDACTED;
   return (value || '').replace(URL_USERINFO, `$1:${REDACTED}@`);
+}
+
+/** Flags whose whole value is a credential. */
+const SECRET_FLAGS: readonly string[] = ['--reg-token'];
+/** Flags whose value is `KEY=VALUE`, masked by `redactEnv`'s rule for that key. */
+const PAIR_FLAGS: readonly string[] = ['--env', '-e', '--setting', '--set'];
+
+function redactFlagValue(flag: string, value: string): string {
+  if (SECRET_FLAGS.includes(flag)) return value ? REDACTED : value;
+  if (!PAIR_FLAGS.includes(flag)) return value.replace(URL_USERINFO, `$1:${REDACTED}@`);
+  const eq = value.indexOf('=');
+  if (eq < 0) return value.replace(URL_USERINFO, `$1:${REDACTED}@`);
+  return `${value.slice(0, eq + 1)}${redactEnv(value.slice(0, eq), value.slice(eq + 1))}`;
+}
+
+/**
+ * A command line with its credentials masked, for the event log: `ps` is not the only
+ * reader of an argv, and the log outlives the process. Every spelling the parser accepts:
+ * `--flag value`, `--flag=value` and `-eKEY=VALUE`.
+ */
+export function redactArgv(argv: readonly string[]): string[] {
+  return argv.map((token, i) => {
+    const previous = argv[i - 1] ?? '';
+    if (SECRET_FLAGS.includes(previous) || PAIR_FLAGS.includes(previous))
+      return redactFlagValue(previous, token);
+    const eq = token.indexOf('=');
+    if (token.startsWith('--') && eq > 0)
+      return `${token.slice(0, eq + 1)}${redactFlagValue(token.slice(0, eq), token.slice(eq + 1))}`;
+    if (token.startsWith('-e') && token.length > 2)
+      return `-e${redactFlagValue('-e', token.slice(2))}`;
+    return token.replace(URL_USERINFO, `$1:${REDACTED}@`);
+  });
 }

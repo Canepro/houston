@@ -68,7 +68,10 @@ const RANKS = [
     '^src/lib/presets/types\\.ts$',
     '^src/lib/seed-profiles\\.ts$',
   ],
-  ['^src/lib/(monitoring|version-spec|json-text)\\.ts$', '^src/lib/presets/registry\\.ts$'],
+  [
+    '^src/lib/(monitoring|version-spec|json-text|seed-options)\\.ts$',
+    '^src/lib/presets/registry\\.ts$',
+  ],
   // `targz` sits ABOVE `format`, because its only refusal message is
   // `bundle contains an unsafe entry: '<name>'` and the quoting must come from the one
   // implementation of it. Nothing below imports targz.
@@ -90,9 +93,9 @@ const RANKS = [
   // them would be a claim nothing makes. `index` is alone above them because it is the
   // loader: it imports the builders, so that import moves DOWNWARD from the loader rather
   // than upward from the registry.
-  ['^src/lib/presets/(common|scenario)\\.ts$'],
-  ['^src/lib/presets/keycloak\\.ts$'],
-  ['^src/lib/presets/(email|ldap|livechat|multi-instance|oidc|s3-minio|saml)\\.ts$'],
+  ['^src/lib/presets/(common|scenario|composite)\\.ts$'],
+  ['^src/lib/presets/(keycloak|public)\\.ts$'],
+  ['^src/lib/presets/(e2ee|email|ldap|livechat|multi-instance|oidc|s3-minio|saml)\\.ts$'],
   ['^src/lib/presets/index\\.ts$'],
   ['^src/seams/(?!exec\\.ts$)'],
   ['^src/core/runner/(paths|locks)\\.ts$'],
@@ -140,12 +143,15 @@ const RANKS = [
   // is what a layer gate is for.
   ['^src/core/audit\\.ts$'],
   ['^src/core/sessions\\.ts$'],
+  // The Okta links sit just under `users`, because removing an account tombstones its link
+  // inside the users lock; `sso`, which reads both and talks to the provider, sits above.
+  ['^src/core/sso-identities\\.ts$'],
   ['^src/core/users\\.ts$'],
-  // `firstrun` and `skill` share ONE rank because neither imports the other, and a rank
+  // `firstrun`, `skill` and `sso` share ONE rank because none imports another, and a rank
   // per module would claim an ordering between them that does not exist. They sit up
   // here for the same reason the trio above does rather than because anything forces it:
   // nothing below needs them, so nothing below should be able to reach them.
-  ['^src/core/(firstrun|skill)\\.ts$'],
+  ['^src/core/(firstrun|skill|sso)\\.ts$'],
   // `diagnose` and `topology` share a rank on the same reasoning: neither imports the
   // other. Both sit above `core/runner/` because that is what they read -- diagnose asks
   // the engine for a failed workspace's logs, topology asks the record what runtime a
@@ -184,7 +190,10 @@ const RANKS = [
   ['^src/seed/kinds\\.ts$'],
   ['^src/seed/wording\\.ts$'],
   ['^src/seed/plan\\.ts$'],
+  ['^src/seed/(receipt|assets|client)\\.ts$', '^src/core/seed-db\\.ts$'],
+  ['^src/seed/(history|executor)\\.ts$'],
   ['^src/seed/(apply|repairs)\\.ts$'],
+  ['^src/seed/verification\\.ts$'],
   ['^src/seed/check\\.ts$'],
   ['^src/core/(scaleseed|configimport)\\.ts$'],
   // `cluster` is the read-only ledger over the Kubernetes and AWS seams, and `migrate`
@@ -288,7 +297,7 @@ const RANKS = [
   // the handler registry, importing nothing sideways.
   ['^src/cli/(index|entry)\\.ts$'],
   [
-    '^src/core/(?!runner/|kube/|edge/|tls-local\\.ts$|tls\\.ts$|rcapi\\.ts$|eks\\.ts$|eks-docs\\.ts$|audit\\.ts$|sessions\\.ts$|users\\.ts$|firstrun\\.ts$|skill\\.ts$|diagnose\\.ts$|topology\\.ts$|journal\\.ts$|eventlog\\.ts$|postready\\.ts$|scaleseed\\.ts$|configimport\\.ts$|cluster\\.ts$|migrate\\.ts$|promote\\.ts$|lifecycle/|envvars\\.ts$|monitor\\.ts$|data\\.ts$|loadtest\\.ts$|backup\\.ts$|backup-compat\\.ts$|database-of\\.ts$|recovery\\.ts$|upgrade\\.ts$|doctor\\.ts$)',
+    '^src/core/(?!runner/|kube/|edge/|tls-local\\.ts$|tls\\.ts$|rcapi\\.ts$|eks\\.ts$|eks-docs\\.ts$|audit\\.ts$|sessions\\.ts$|sso-identities\\.ts$|users\\.ts$|firstrun\\.ts$|skill\\.ts$|sso\\.ts$|diagnose\\.ts$|topology\\.ts$|journal\\.ts$|eventlog\\.ts$|postready\\.ts$|scaleseed\\.ts$|configimport\\.ts$|cluster\\.ts$|migrate\\.ts$|promote\\.ts$|lifecycle/|envvars\\.ts$|monitor\\.ts$|data\\.ts$|loadtest\\.ts$|backup\\.ts$|backup-compat\\.ts$|database-of\\.ts$|seed-db\\.ts$|recovery\\.ts$|upgrade\\.ts$|doctor\\.ts$)',
     '^src/web/(?!(jobs|signin|security|route-deps|route-table|app)\\.ts$|routes/)',
   ],
 ];

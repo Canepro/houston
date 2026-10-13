@@ -14,6 +14,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
+import { namesOf } from '../lib/presets/composite';
 import * as config from '../lib/config';
 import { pathHome, joinPath } from '../lib/home';
 import { getHoustonVersion } from '../lib/jsonout';
@@ -34,6 +35,7 @@ import {
   dockerAvailable,
   dockerKernelVersion,
   dockerServerVersion,
+  engine,
   composeVersion,
   hubLoggedIn,
 } from './runner/host';
@@ -297,7 +299,26 @@ export async function checkDocker(ctx: Ctx): Promise<Row[]> {
   // NOW -- answering that from a cache is how a diagnostic tells you the opposite of
   // the truth.
   ctx.dockerUp = await dockerAvailable({ maxAgeMs: 0 });
-  if (ctx.dockerUp) {
+  const found = ctx.dockerUp ? await engine() : null;
+  if (found !== null && found.kind === 'podman') {
+    // Podman answering as `docker`: said as itself, with the one difference that stops
+    // workspaces outright.
+    line(
+      'docker',
+      'ok',
+      `Podman ${found.version || '?'} answering as docker` +
+        `${found.rootless ? ', rootless' : ''}${found.shim ? ', through the podman-docker shim' : ''}`,
+    );
+    if (!found.healthchecks) {
+      line(
+        'docker',
+        'warn',
+        `Podman runs no container healthchecks here (cgroup manager '${found.cgroupDriver || '?'}'): ` +
+          'a workspace on MongoDB 8 or with several instances waits on one and will not start. ' +
+          'Use cgroup_manager = "systemd" under a systemd user session, a Podman machine, or Docker.',
+      );
+    }
+  } else if (ctx.dockerUp) {
     // The server version, or '?' when it is empty: an empty-but-successful probe is '?',
     // as it always was, where `??` kept the empty string.
     const version = await dockerServerVersion();
@@ -317,7 +338,9 @@ export async function checkCompose(_ctx: Ctx): Promise<Row[]> {
   const line = report.line.bind(report);
   const cv = await composeVersion();
   const cvMajor = majorVersion(cv);
-  if (cvMajor !== null && cvMajor >= 2) {
+  if (cv !== null && cv.toLowerCase().includes('podman-compose')) {
+    line('compose', 'fail', `docker compose is ${cv}: houston needs the Compose v2 plugin`);
+  } else if (cvMajor !== null && cvMajor >= 2) {
     line('compose', 'ok', `docker compose v${String(cvMajor)} (${String(cv)})`);
   } else if (cv !== null && cv !== '') {
     line('compose', 'warn', `docker compose ${cv} — houston needs Compose v2 or newer`);
@@ -1024,25 +1047,31 @@ export async function checkPresets(_ctx: Ctx): Promise<Row[]> {
       // OWN keys only of the host-parameter table. A preset named `constructor` -- a legal
       // name -- found Object.prototype's here and printed a bogus `--set function Object()
       // { [native code] }=...` row.
-      const preset = (meta.preset || '').trim();
-      const param = Object.hasOwn(hostParam, preset) ? hostParam[preset] : undefined;
-      if (param === undefined) continue;
       const extra = bagOf(meta.extra);
-      if (isTruthy(bagOf(extra.params)[param])) continue; // someone said where the browser is
       // `toText` of the recorded bind: a falsy recorded value is the empty bind, not the
       // string "false".
       const bind = toText(extra.bind_host);
       if (bind === '' || bind === '127.0.0.1' || bind === 'localhost') continue;
-      line(
-        'preset-browser-host',
-        'warn',
-        `${quotedText(meta.name)} is bound to ${bind} but its ${quotedText(meta.preset)} ` +
-          `preset still points the browser at this machine. From ` +
-          `anywhere else that address is the visitor's own laptop and ` +
-          `login fails silently. Re-create with ` +
-          `\`--set ${param}=<the host people type>\``,
-        { check: 'preset-browser-host' },
-      );
+      // Each preset of a composed workspace, whose params are recorded per preset.
+      const names = namesOf((meta.preset || '').trim());
+      for (const preset of names) {
+        const param = Object.hasOwn(hostParam, preset) ? hostParam[preset] : undefined;
+        if (param === undefined) continue;
+        const own =
+          names.length > 1 ? bagOf(bagOf(extra.preset_params)[preset]) : bagOf(extra.params);
+        if (isTruthy(own[param])) continue; // someone said where the browser is
+        const key = names.length > 1 ? `${preset}.${param}` : param;
+        line(
+          'preset-browser-host',
+          'warn',
+          `${quotedText(meta.name)} is bound to ${bind} but its ${quotedText(preset)} ` +
+            `preset still points the browser at this machine. From ` +
+            `anywhere else that address is the visitor's own laptop and ` +
+            `login fails silently. Re-create with ` +
+            `\`--set ${key}=<the host people type>\``,
+          { check: 'preset-browser-host' },
+        );
+      }
     }
   } catch {
     // a check must never break the report
@@ -1656,12 +1685,30 @@ async function reportCluster(
         { check: 'kubernetes-cluster' },
       );
     } else if (pre.context !== '') {
-      line(
-        'kubernetes',
-        needed,
-        `Cluster ${quotedText(pre.context)} is configured but its API ` + 'server is not answering',
-        { check: 'kubernetes-cluster' },
-      );
+      // NAMED IS NOT CONFIGURED. `doctor --context no-such-context` passed, calling a context
+      // the kubeconfig does not hold "configured but not answering"; `cluster status` says
+      // the true thing, and so does this now -- a failure when it was asked for by name.
+      const { contexts } = await import('./kube/context');
+      const [named, unread] = await contexts();
+      if (unread === '' && !named.includes(pre.context)) {
+        line(
+          'kubernetes',
+          ctx.context !== '' ? 'fail' : needed,
+          `No kubeconfig context named ${quotedText(pre.context)}` +
+            (named.length > 0
+              ? `. This machine can see: ${named.map((name) => quotedText(name)).join(', ')}`
+              : ', and the kubeconfig names none'),
+          { check: 'kubernetes-cluster' },
+        );
+      } else {
+        line(
+          'kubernetes',
+          needed,
+          `Cluster ${quotedText(pre.context)} is configured but its API ` +
+            'server is not answering',
+          { check: 'kubernetes-cluster' },
+        );
+      }
     } else if (toolsReady(pre)) {
       // CONTEXTS BUT NO CURRENT ONE is not "nothing configured": a deleted cluster that was
       // current leaves exactly this, and the Clusters page lists the rest as running. houston

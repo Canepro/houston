@@ -34,11 +34,13 @@ import {
   waitForLoadbalancer,
 } from '../../../src/core/kube/endpoints';
 import { kube } from '../../../src/core/kube/exec';
+import { metadata, writeRecord } from '../../../src/core/runner/record';
 import {
   CLUSTER_NAME,
   CONTEXT,
   OWNER_LABEL_KEY,
   OWNER_OF_LABEL,
+  OWNER_SELECTOR,
   WORKSPACE_LABEL,
 } from '../../../src/core/kube/names';
 import {
@@ -72,11 +74,14 @@ const realRun = kube.run;
 type Rule = [(argv: readonly string[]) => boolean, Partial<KubectlResult>];
 
 let seen: string[][] = [];
+let inputs: (string | undefined)[] = [];
 
 function script(rules: Rule[], fallback: Partial<KubectlResult> = {}): void {
   seen = [];
-  kube.run = (argv) => {
+  inputs = [];
+  kube.run = (argv, options) => {
     seen.push([...argv]);
+    inputs.push(options?.input);
     const hit = rules.find(([matches]) => matches(argv));
     return Promise.resolve({
       argv,
@@ -101,6 +106,19 @@ const REFUSED = {
 };
 
 const sleep = () => Promise.resolve();
+
+function namespaceDoc(
+  name: string,
+  labels = labelsFor(name),
+  uid = 'original-namespace-uid',
+  resourceVersion = '1',
+): Record<string, unknown> {
+  return {
+    apiVersion: 'v1',
+    kind: 'Namespace',
+    metadata: { name: `houston-${name}`, uid, resourceVersion, labels },
+  };
+}
 
 afterEach(() => {
   kube.run = realRun;
@@ -196,22 +214,28 @@ describe('the namespace', () => {
     }
   });
 
-  it('creates and labels, and fails loudly if the label does not stick', async () => {
-    script([[has('label'), { returncode: 1, stderr: 'error: forbidden' }]], { stdout: '' });
+  it('creates with ownership labels atomically, and fails loudly if creation is refused', async () => {
+    script([[has('create'), { returncode: 1, stderr: 'error: forbidden' }]], { stdout: '' });
     await expect(ensureNamespace('x', { context: 'prod' })).rejects.toBeInstanceOf(
       CreateFailedError,
     );
-    // Without the label the namespace would be invisible to teardown, which is why this is
-    // a failure rather than a warning.
-    script([], { stdout: '' });
+    script([[has('create'), json(namespaceDoc('x'))]], { stdout: '' });
     const events: Event[] = [];
     expect(await ensureNamespace('x', { context: 'prod', emit: (ev) => events.push(ev) })).toBe(
       'houston-x',
     );
-    expect(seen.some((argv) => argv.includes('create') && argv.includes('namespace'))).toBe(true);
-    expect(seen.at(-1)?.filter((arg) => arg.includes('='))).toEqual(
-      Object.entries(labelsFor('x')).map(([key, value]) => `${key}=${value}`),
-    );
+    expect(seen.at(-1)).toEqual([
+      'kubectl',
+      '--context',
+      'prod',
+      'create',
+      '-f',
+      '-',
+      '-o',
+      'json',
+    ]);
+    expect(JSON.parse(inputs.at(-1) ?? '{}').metadata.labels).toEqual(labelsFor('x'));
+    expect(seen.some((argv) => argv.includes('label'))).toBe(false);
   });
 
   it('treats a namespace that is already gone as removed, not as unconfirmed', async () => {
@@ -222,8 +246,22 @@ describe('the namespace', () => {
     expect(await deleteNamespace('x', { context: 'prod', sleep })).toBe(true);
   });
 
+  it('takes down MongoDB by name and leaves the presets’ Services where they are', async () => {
+    // The owner label is on every preset object too, so deleting Services by it took the
+    // presets' Services while their Deployments ran on. `up` made them anew at new
+    // addresses, and the minio-ui nginx went on proxying to the old one: /minio/ timed out
+    // after `down` and `up`, seen live on a k3s lane.
+    script([[has('get', 'namespace'), json(namespaceDoc('x'))]]);
+    expect(await deleteNamespace('x', { context: 'prod', sleep })).toBe(true);
+    const removed = seen.find((argv) => argv.includes('delete')) ?? [];
+    // Houston's own MongoDB only: the owner label, narrowed to its name.
+    expect(removed).toEqual(
+      expect.arrayContaining(['-l', OWNER_SELECTOR, '--field-selector', 'metadata.name=mongodb']),
+    );
+  });
+
   it('refuses to delete a namespace that is not labelled as houston’s', async () => {
-    script([], json({ metadata: { labels: { team: 'platform' } } }));
+    script([], json(namespaceDoc('x', { team: 'platform' })));
     await expect(deleteNamespace('x', { context: 'prod', sleep })).rejects.toBeInstanceOf(
       ConflictError,
     );
@@ -241,7 +279,7 @@ describe('the namespace', () => {
         return Promise.resolve({
           argv,
           returncode: 0,
-          stdout: JSON.stringify({ metadata: { labels: { [OWNER_LABEL_KEY]: 'houston' } } }),
+          stdout: JSON.stringify(namespaceDoc('x')),
           ...{ stderr: '' },
         });
       }
@@ -274,7 +312,7 @@ describe('the namespace', () => {
     // users on one adopted cluster; the namespace's labels are the only evidence there is.
     const labelled = { [OWNER_LABEL_KEY]: 'houston', [WORKSPACE_LABEL]: 'mine' };
     const labelsAre = (labels: Record<string, string>) =>
-      script([[has('get', 'namespace'), json({ metadata: { labels } })]]);
+      script([[has('get', 'namespace'), json(namespaceDoc('mine', labels))]]);
 
     labelsAre({});
     await expect(ensureNamespace('mine', { context: 'c' })).rejects.toThrow(
@@ -289,7 +327,7 @@ describe('the namespace', () => {
     labelsAre(labelled);
     expect(await ensureNamespace('mine', { context: 'c' })).toBe('houston-mine');
     expect(seen.some((argv) => argv.includes('create'))).toBe(false);
-    expect(seen.some((argv) => argv.includes('label'))).toBe(true);
+    expect(seen.some((argv) => argv.includes('label'))).toBe(false);
   });
 
   it('refuses to guess about a namespace it could not ask for, and deletes nothing on that answer', async () => {
@@ -325,13 +363,7 @@ describe('the namespace', () => {
       if (argv.includes('get') && argv.includes('namespace')) {
         asked += 1;
         // The first read is the ownership check, before anything is deleted.
-        return reply(
-          asked === 1
-            ? json({
-                metadata: { labels: { [OWNER_LABEL_KEY]: 'houston', [WORKSPACE_LABEL]: 'x' } },
-              })
-            : after,
-        );
+        return reply(asked === 1 ? json(namespaceDoc('x')) : after);
       }
       return reply({});
     };
@@ -420,8 +452,140 @@ describe('the namespace', () => {
   it('counts volumes for a message and says nothing on a refused read', async () => {
     script([], { stdout: 'persistentvolumeclaim/data-mongodb-0\n' });
     expect(await workspacePvcs('x', { context: 'prod' })).toEqual(['data-mongodb-0']);
+    // EVERY claim in the workspace's own namespace: the MongoDB operator's carry its labels,
+    // not houston's, and an operator workspace's teardown said "0 volume(s)" deleting two.
+    expect(seen.at(-1)).not.toContain('-l');
     script([], { returncode: 1 });
     expect(await workspacePvcs('x', { context: 'prod' })).toEqual([]);
+  });
+});
+
+describe('F1 namespace isolation regressions', () => {
+  it.each<{ why: string; labels: Record<string, string> }>([
+    { why: 'another workspace', labels: { ...labelsFor('x'), [WORKSPACE_LABEL]: 'foreign' } },
+    { why: 'another owner', labels: { ...labelsFor('x'), [OWNER_OF_LABEL]: 'foreign' } },
+    { why: 'unattributed workspace', labels: { [OWNER_LABEL_KEY]: 'houston' } },
+  ])('F1 keeps a managed namespace attributed to $why', async ({ labels }) => {
+    script([[has('get', 'namespace'), json(namespaceDoc('x', labels))]]);
+    await expect(
+      deleteNamespace('x', { context: 'prod', volumes: true, sleep }),
+    ).rejects.toBeInstanceOf(ConflictError);
+    expect(seen.some((argv) => argv.includes('delete'))).toBe(false);
+  });
+
+  it('F1 keeps a same-owner same-workspace replacement with a different recorded UID', async () => {
+    await writeRecord('x', metadata({ name: 'x', extra: { namespace_uid: 'recorded-uid' } }));
+    script([[has('get', 'namespace'), json(namespaceDoc('x', labelsFor('x'), 'replacement-uid'))]]);
+    await expect(deleteNamespace('x', { context: 'prod', volumes: true, sleep })).rejects.toThrow(
+      /different UID/u,
+    );
+    expect(seen.some((argv) => argv.includes('delete'))).toBe(false);
+  });
+
+  it.each([
+    ['UID', 'replacement-uid', '1'],
+    ['resource version', 'original-namespace-uid', '2'],
+  ])(
+    'F1 API preconditions preserve a namespace whose %s changed after the read',
+    async (_why, currentUid, currentVersion) => {
+      await writeRecord(
+        'x',
+        metadata({
+          name: 'x',
+          extra: { namespace_owner: '', namespace_uid: 'original-namespace-uid' },
+        }),
+      );
+      let sentinelPresent = true;
+      kube.run = async (argv, options) => {
+        const res = { argv, returncode: 0, stdout: '', stderr: '' };
+        if (argv.includes('get') && argv.includes('namespace')) {
+          return { ...res, stdout: JSON.stringify(namespaceDoc('x')) };
+        }
+        if (argv.includes('delete')) {
+          const body = options?.input === undefined ? null : JSON.parse(options.input);
+          if (
+            argv.includes('--raw') &&
+            (body?.preconditions?.uid !== currentUid ||
+              body?.preconditions?.resourceVersion !== currentVersion)
+          ) {
+            return {
+              ...res,
+              returncode: 1,
+              stderr: 'Error from server (Conflict): precondition failed',
+            };
+          }
+          sentinelPresent = false;
+        }
+        return res;
+      };
+      await expect(deleteNamespace('x', { context: 'prod', volumes: true, sleep })).rejects.toThrow(
+        /precondition failed/u,
+      );
+      expect(sentinelPresent).toBe(true);
+    },
+  );
+
+  it('F1 refuses a failed create without taking over the concurrently created namespace', async () => {
+    let foreignOwner = 'foreign';
+    kube.run = async (argv) => {
+      const res = { argv, returncode: 0, stdout: '', stderr: '' };
+      if (argv.includes('create')) {
+        return {
+          ...res,
+          returncode: 1,
+          stderr: 'Error from server (AlreadyExists): namespace exists',
+        };
+      }
+      if (argv.includes('label')) foreignOwner = '';
+      return res;
+    };
+    await expect(ensureNamespace('x', { context: 'prod' })).rejects.toThrow(/AlreadyExists/u);
+    expect(foreignOwner).toBe('foreign');
+  });
+
+  it('F1 preserves namespace identity across a local handover and re-up', async () => {
+    await writeRecord(
+      'x',
+      metadata({
+        name: 'x',
+        extra: {
+          created_by: 'alice',
+          owner: 'bob',
+          namespace_owner: 'alice',
+          namespace_uid: 'original-namespace-uid',
+        },
+      }),
+    );
+    let namespacePresent = true;
+    kube.run = async (argv) => {
+      let stdout = '';
+      if (argv.includes('get') && argv.includes('namespace') && namespacePresent) {
+        stdout = JSON.stringify(namespaceDoc('x', labelsFor('x', 'alice')));
+      }
+      if (argv.includes('delete')) namespacePresent = false;
+      return { argv, returncode: 0, stderr: '', stdout };
+    };
+    await expect(assertNamespaceAvailable('x', { context: 'prod', owner: 'bob' })).resolves.toBe(
+      undefined,
+    );
+    const receipt = { uid: '', owner: '', createdUid: '' };
+    await expect(ensureNamespace('x', { context: 'prod', owner: 'bob', receipt })).resolves.toBe(
+      'houston-x',
+    );
+    expect(receipt).toEqual({ uid: 'original-namespace-uid', owner: 'alice', createdUid: '' });
+    await expect(deleteNamespace('x', { context: 'prod', volumes: true, sleep })).resolves.toBe(
+      true,
+    );
+  });
+
+  it('F1 refuses a malformed namespace identity before deleting anything', async () => {
+    script([
+      [has('get', 'namespace'), json({ metadata: { name: 'houston-x', labels: labelsFor('x') } })],
+    ]);
+    await expect(deleteNamespace('x', { context: 'prod', volumes: true, sleep })).rejects.toThrow(
+      /refusing to guess/u,
+    );
+    expect(seen.some((argv) => argv.includes('delete'))).toBe(false);
   });
 });
 

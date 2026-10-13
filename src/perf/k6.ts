@@ -12,6 +12,7 @@ import * as fs from 'node:fs';
 import * as config from '../lib/config';
 import { joinPath } from '../lib/home';
 import { projectName } from '../core/runner/record';
+import { engine } from '../core/runner/host';
 import { workspace } from '../core/runner/paths';
 import { inherit, stream } from '../seams/exec';
 
@@ -60,11 +61,16 @@ export async function k6Command(
 
   const network = `${await projectName(name)}_default`;
   const cmd = ['docker', 'run', '--rm', '--network', network, '-v', `${dest}:/k6`];
+  const found = await engine();
+  const podman = found !== null && found.kind === 'podman';
   // Run as the host user so k6 can write /k6/summary.json into the bind-mounted directory.
   // On Linux, bind-mount permissions are enforced and the image's non-root user otherwise
   // cannot write there ("permission denied"); Docker Desktop ignores this but the flag is
-  // harmless there. (POSIX only.)
-  if (typeof process.getuid === 'function' && typeof process.getgid === 'function') {
+  // harmless there. (POSIX only.) Rootless Podman maps the host user to the container's
+  // ROOT, and the host uid to a subuid that cannot write the mount: there it is 0:0.
+  if (podman && found.rootless) {
+    cmd.push('--user', '0:0');
+  } else if (typeof process.getuid === 'function' && typeof process.getgid === 'function') {
     cmd.push('--user', `${String(process.getuid())}:${String(process.getgid())}`);
   }
   for (const [k, v] of plainEnv) cmd.push('-e', `${k}=${v}`);
@@ -77,7 +83,8 @@ export async function k6Command(
     fs.chmodSync(envfile, 0o600);
     cmd.push('--env-file', envfile);
   }
-  cmd.push(K6_IMAGE, 'run');
+  // Podman resolves no short names without asking, and nothing here can answer.
+  cmd.push(podman ? `docker.io/${K6_IMAGE}` : K6_IMAGE, 'run');
   // Stream every measurement so houston can build latency-over-time buckets.
   if (timeline) cmd.push('--out', 'json=/k6/points.json');
   // Push metrics into the monitor stack's Prometheus as the test runs.

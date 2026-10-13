@@ -7,6 +7,7 @@ import { Interrupted, SpawnFailure } from '../../../src/seams/exec';
 import * as engine from '../../../src/core/runner/engine';
 import * as queries from '../../../src/core/runner/queries';
 import { metadata, writeRecord } from '../../../src/core/runner/record';
+import { listRepros } from '../../../src/core/lifecycle/inspect';
 
 /**
  * `engine` is mocked as a MODULE rather than spied on.
@@ -44,6 +45,7 @@ const psMock = engine.ps as jest.MockedFunction<typeof engine.ps>;
 const idsMock = engine.serviceContainerIds as jest.MockedFunction<
   typeof engine.serviceContainerIds
 >;
+const composeMock = engine.compose as jest.MockedFunction<typeof engine.compose>;
 
 function answer(overrides: Partial<Awaited<ReturnType<typeof seam.docker>>> = {}) {
   return { argv: ['docker'], exitCode: 0, signal: null, stdout: '', stderr: '', ...overrides };
@@ -56,7 +58,82 @@ beforeEach(() => {
   idsMock.mockResolvedValue([]);
 });
 
+describe('writer discovery before database operations', () => {
+  it('rejects a failed container read even when stdout looks empty', async () => {
+    composeMock.mockResolvedValue(answer({ exitCode: 46, stderr: 'permission denied' }));
+    await expect(queries.runningWriterServices('w', ['rocketchat'])).rejects.toThrow(
+      /could not inspect Rocket.Chat writers/u,
+    );
+  });
+
+  it.each([
+    'null',
+    '[null]',
+    'not-json',
+    '{"Service":"rocketchat"}',
+    '{"Service":"rocketchat","State":"paused"}',
+  ])('rejects uncertain writer state %s', async (stdout) => {
+    composeMock.mockResolvedValue(answer({ stdout }));
+    await expect(queries.runningWriterServices('w', ['rocketchat'])).rejects.toThrow(
+      /could not inspect Rocket.Chat writers/u,
+    );
+  });
+
+  it('reads running and stopped writers from both Compose JSON formats', async () => {
+    const rows = [
+      { Service: 'rocketchat-1', State: 'running' },
+      { Service: 'rocketchat-2', State: 'exited' },
+    ];
+    for (const stdout of [
+      JSON.stringify(rows),
+      rows.map((row) => JSON.stringify(row)).join('\n'),
+    ]) {
+      composeMock.mockResolvedValue(answer({ stdout }));
+      expect(await queries.runningWriterServices('w', ['rocketchat-1', 'rocketchat-2'])).toEqual([
+        'rocketchat-1',
+      ]);
+    }
+  });
+});
+
 describe('"could not ask" is not "the answer is none"', () => {
+  it('uses one cold service query for consistent list state and health', async () => {
+    await writeRecord(
+      'changing-list',
+      metadata({
+        name: 'changing-list',
+        project: 'houston-changing-list',
+        rootUrl: 'http://localhost:3301',
+        hostPort: 3301,
+        extra: { runtime: 'docker' },
+      }),
+    );
+    let serviceReads = 0;
+    dockerMock.mockImplementation(async (argv) => {
+      if (argv[0] === 'ps') {
+        serviceReads += 1;
+        // A second independent daemon answer would observe the stack after a stop.
+        const status = serviceReads === 1 ? 'Up 2 minutes (healthy)' : 'Exited (0) 1 second ago';
+        await Promise.resolve();
+        return answer({
+          stdout:
+            `houston-changing-list\trocketchat\t${status}\n` +
+            `houston-changing-list\tmongodb\t${status}\n`,
+        });
+      }
+      return answer({
+        stdout: JSON.stringify([{ Name: 'houston-changing-list', Status: 'running(2)' }]),
+      });
+    });
+    const rows = await listRepros();
+    expect(serviceReads).toBe(1);
+    expect(rows.find((row) => row.name === 'changing-list')).toMatchObject({
+      state: 'running',
+      health: 'healthy',
+      degraded: '',
+    });
+  });
+
   it('returns null from projectStates when the query itself failed', async () => {
     // `prune` DELETES based on absence. Reading a failed query as "no projects" is how a
     // workspace that was merely unreachable gets reclaimed.

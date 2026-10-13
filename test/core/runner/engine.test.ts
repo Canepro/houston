@@ -10,9 +10,11 @@ jest.mock('../../../src/seams/docker-cli', () => ({
   composeToFile: jest.fn(),
   composeFromFile: jest.fn(),
   invalidateQueries: jest.fn(),
+  docker: jest.fn(),
 }));
 
 const composeMock = seam.compose as jest.MockedFunction<typeof seam.compose>;
+const dockerMock = seam.docker as jest.MockedFunction<typeof seam.docker>;
 const invalidateMock = seam.invalidateQueries as jest.MockedFunction<typeof seam.invalidateQueries>;
 
 function answer(overrides: Partial<Awaited<ReturnType<typeof seam.compose>>> = {}) {
@@ -129,6 +131,50 @@ describe('reading a repro back', () => {
     await engine.stopServices('x', ['rocketchat-1', 'rocketchat-2']);
     expect(composeMock.mock.calls[0]?.[0]).toEqual(['stop', 'rocketchat-1', 'rocketchat-2']);
     await engine.rmServices('x', ['prometheus']);
-    expect(composeMock.mock.calls[1]?.[0]).toEqual(['rm', '-s', '-f', 'prometheus']);
+    // Its containers' volumes are read first (`anonymousVolumes`), then it is removed.
+    expect(composeMock.mock.calls[1]?.[0]).toEqual(['ps', '--all', '-q', 'prometheus']);
+    expect(composeMock.mock.calls[2]?.[0]).toEqual(['rm', '-s', '-f', '-v', 'prometheus']);
+  });
+
+  it("takes the containers' anonymous volumes with them, and keeps the named ones unless asked", async () => {
+    // An image's own VOLUMEs (MongoDB's /data/configdb, osixia's, Samba's) become anonymous
+    // volumes. A container removed without -v leaves them behind, and the next one gets
+    // fresh ones, so every `up --force` and plain `down` left a few more (measured: 5 and 6
+    // empty volumes after two live runs). `rm -v` removes only anonymous volumes; the data
+    // volume is named, so a plain `down` still keeps the data.
+    await engine.down('x');
+    expect(composeMock.mock.calls.map((call) => call[0])).toEqual([
+      ['ps', '--all', '-q'],
+      ['rm', '-s', '-f', '-v'],
+      ['down', '--remove-orphans'],
+    ]);
+    composeMock.mockClear();
+    await engine.down('x', { volumes: true });
+    expect(composeMock.mock.calls.map((call) => call[0])).toEqual([
+      ['ps', '--all', '-q'],
+      ['down', '--remove-orphans', '-v'],
+    ]);
+  });
+
+  it('removes an anonymous volume a recreated container mounted by name, never a named one', async () => {
+    // After a recreate (`env --set`, an upgrade, `up --force`) compose mounts the old
+    // container's anonymous volume into the new one BY NAME, and `rm -v` keeps any volume
+    // mounted by name: Rocket.Chat's /app/uploads volume outlived `up --force`, a plain
+    // `down` and even `down --volumes`.
+    const hex = 'a'.repeat(64);
+    composeMock.mockImplementation(async (argv) =>
+      answer({ stdout: argv[0] === 'ps' ? 'c1\nc2\n' : '' }),
+    );
+    dockerMock.mockImplementation(async (argv) =>
+      answer({ stdout: argv[0] === 'inspect' ? `houston-x_mongodb_data ${hex} \n${hex} \n` : '' }),
+    );
+    for (const volumes of [false, true]) {
+      dockerMock.mockClear();
+      await engine.down('x', { volumes });
+      expect(dockerMock.mock.calls.map((call) => call[0])).toEqual([
+        ['inspect', '--format', '{{range .Mounts}}{{.Name}} {{end}}', 'c1', 'c2'],
+        ['volume', 'rm', hex],
+      ]);
+    }
   });
 });

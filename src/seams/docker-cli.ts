@@ -33,7 +33,7 @@ import * as fs from 'node:fs';
 
 import { active as jsonActive } from '../lib/jsonout';
 
-import { capture, inherit, stream, type ProcessResult } from './exec';
+import { Interrupted, capture, inherit, stream, type ProcessResult } from './exec';
 
 /** How long `docker info`'s answer is reused: three seconds. */
 export const DOCKER_TTL_MS = 3_000;
@@ -42,6 +42,7 @@ export const DOCKER_TTL_MS = 3_000;
 export const QUERY_TTL_MS = 2_500;
 
 export interface DockerOptions {
+  readonly input?: string | Buffer;
   readonly cwd?: string;
   readonly timeoutMs?: number;
   /**
@@ -73,6 +74,7 @@ function options(given: DockerOptions): {
   encoding: 'utf8' | null;
   mergeStderr?: boolean;
   abortSignal?: AbortSignal;
+  input?: string | Buffer;
 } {
   return {
     ...(given.cwd !== undefined ? { cwd: given.cwd } : {}),
@@ -80,6 +82,7 @@ function options(given: DockerOptions): {
     ...(given.env !== undefined ? { env: given.env } : {}),
     ...(given.mergeStderr !== undefined ? { mergeStderr: given.mergeStderr } : {}),
     ...(given.abortSignal !== undefined ? { abortSignal: given.abortSignal } : {}),
+    ...(given.input === undefined ? {} : { input: given.input }),
     encoding: given.text === false ? null : 'utf8',
   };
 }
@@ -239,8 +242,9 @@ export async function cachedQuery<T>(key: string, produce: () => Promise<T>): Pr
 /**
  * Whether the daemon answers. Cached briefly; `maxAgeMs: 0` forces a probe.
  *
- * Never raises: a missing binary or a timeout is an answer of "no", which is what every
- * caller needs during a preflight or a health poll.
+ * Never raises a failure: a missing binary or a timeout is an answer of "no", which is what
+ * every caller needs during a preflight or a health poll. An interrupt is not an answer, so
+ * it passes, and nothing is cached for it.
  */
 export async function dockerAvailable({
   maxAgeMs = DOCKER_TTL_MS,
@@ -256,7 +260,9 @@ export async function dockerAvailable({
       ...(env !== undefined ? { env } : {}),
     });
     ok = result.exitCode === 0;
-  } catch {
+  } catch (error) {
+    // Not a failure to report: Ctrl-C or a stopped job, which must unwind (see exec).
+    if (error instanceof Interrupted) throw error;
     // A missing binary or a timeout is an answer of "no", which is what a preflight or
     // a health poll needs -- not an exception to wrap at every call site.
     ok = false;
@@ -265,7 +271,7 @@ export async function dockerAvailable({
   return ok;
 }
 
-/** Run a command and return its trimmed stdout, or null on any failure. */
+/** Run a command and return its trimmed stdout, or null on any failure; an interrupt passes. */
 export async function firstLine(
   argv: readonly string[],
   env?: NodeJS.ProcessEnv,
@@ -277,7 +283,9 @@ export async function firstLine(
       timeoutMs: 10_000,
       ...(env !== undefined ? { env } : {}),
     });
-  } catch {
+  } catch (error) {
+    // Not a failure to report: Ctrl-C or a stopped job, which must unwind (see exec).
+    if (error instanceof Interrupted) throw error;
     return null;
   }
   return result.exitCode === 0 ? String(result.stdout ?? '').trim() : null;

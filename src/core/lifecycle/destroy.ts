@@ -16,7 +16,12 @@ import { detach } from '../edge/networks';
 import { deregister as deregisterRoute } from '../edge/routes';
 import { clearWorkspace } from '../journal';
 import { deleteNamespace, namespaceFor } from '../kube/namespace';
-import { MONITORING_NAMESPACE, removeGrafanaIngress, removeMonitoring } from '../kube/monitoring';
+import {
+  MONITORING_NAMESPACE,
+  releaseSystemNamespace,
+  removeGrafanaIngress,
+  removeMonitoring,
+} from '../kube/monitoring';
 import { removeOperator } from '../kube/operator';
 import { CONTEXT as KUBE_CONTEXT, RELEASE } from '../kube/names';
 import * as engine from '../runner/engine';
@@ -63,13 +68,6 @@ export async function removeTheClusterSide(
   // AFTER the namespace, never before: deleting it took this workspace's
   // MongoDBCommunity with it while the operator was still there to clear the finalizer.
   const ns = await namespaceFor(target);
-  // The GRAFANA forward, which `monitor --off` stops and this path did not. It targets a
-  // deployment in `houston-system`, so unlike the workspace's own forward it survives the
-  // workspace -- and it went on holding :5050 after the workspace was destroyed.
-  const gpid = bag(meta.extra).grafana_pid;
-  if (isTruthy(gpid)) {
-    stopPortForward(Number(gpid), { namespace: MONITORING_NAMESPACE });
-  }
   // RETURN DELIBERATELY NOT READ, and this is the one place on this path where that is
   // right. `removeOperator` returns false for THREE reasons -- not installed, still wanted
   // by another workspace, and a failed uninstall -- and the first two are the normal
@@ -77,7 +75,12 @@ export async function removeTheClusterSide(
   await removeOperator({ context, excluding: ns, emit });
   // AND the monitoring stack, which had the same hole and is far more expensive: ten pods
   // and ~840 MB left running after the workspace that asked for them was destroyed.
-  await removeMonitoring({ context, excluding: ns, emit });
+  // And its namespace, when the operator was the last thing in it. Not again after
+  // `removeMonitoring` removed the stack: it released the namespace itself, and a second ask
+  // found it Terminating and said "removed" twice.
+  if (!(await removeMonitoring({ context, excluding: ns, emit }))) {
+    await releaseSystemNamespace(context, emit);
+  }
   // CHECKED, not assumed. Ignoring errors means a record that could not be removed -- a
   // permission problem, a file held open -- is silently left behind, and the success line
   // then says "and the local record".
@@ -116,14 +119,22 @@ export async function stopTheForwards(meta: Metadata, target: string): Promise<v
   const ns = isTruthy(extra.namespace) ? String(extra.namespace) : await namespaceFor(target);
   const pid = extra.port_forward_pid;
   if (isTruthy(pid)) {
-    stopPortForward(Number(pid), { namespace: ns });
+    await stopPortForward(Number(pid), { namespace: ns });
+  }
+  // The GRAFANA forward, which `monitor --off` stops and `down --volumes` did. It targets a
+  // deployment in `houston-system`, so unlike the workspace's own forward it survives the
+  // workspace -- it held :5050 after the workspace was destroyed -- and a PLAIN `down`
+  // left it running: the re-up's record no longer named it, so nothing ever stopped it.
+  const gpid = extra.grafana_pid;
+  if (isTruthy(gpid)) {
+    await stopPortForward(Number(gpid), { namespace: MONITORING_NAMESPACE });
   }
   // A preset's UI forwards too, or `down` leaves 8082 bound to a namespace that no longer
   // exists -- and the NEXT workspace using that preset finds the port taken by a corpse.
   const forwards = bag(extra.scenario_forwards);
   for (const uiPid of Object.values(forwards)) {
     try {
-      stopPortForward(Number(uiPid), { namespace: ns });
+      await stopPortForward(Number(uiPid), { namespace: ns });
     } catch {
       // A malformed recorded pid: nothing to stop.
     }
@@ -202,8 +213,14 @@ export async function teardownKubernetes(
   return { name: target, removed: volumes, found, runtime: topology.KUBERNETES, context };
 }
 
-/** Detach from the edge, bring the project down, and forget the name. */
+/** Stop the project, detach from the edge, bring it down, and forget the name. */
 export async function teardownCompose(target: string, volumes: boolean): Promise<void> {
+  // Stop while the edge is still attached, so its pooled upstream connections receive
+  // the backend's close. Disconnecting first strands those sockets on Podman; when a
+  // kept workspace gets a new network/IP, the first HTTPS request can reuse one and hang.
+  if ((await engine.stop(target)) !== 0) {
+    throw new DockerError(`\`docker compose stop\` failed for '${target}'`);
+  }
   // BEFORE `down`, not after: compose cannot remove a network that still has an active
   // endpoint, and the edge attached to it is exactly that.
   await detach(target);
@@ -245,19 +262,33 @@ export async function teardown(
   auditRecord(volumes ? 'down-volumes' : 'down', target);
   // Locked: `down` during a create races `docker compose up` and leaves orphaned
   // containers behind.
-  const result = await reproLock(
-    target,
-    async () => {
-      // The two runtimes answer DIFFERENTLY, and always did: the Kubernetes path reports
-      // `found` and its own `runtime`, and says its own "done" line.
-      if ((await topology.ofRepro(target)) === topology.KUBERNETES) {
-        return await teardownKubernetes(target, volumes, emit);
-      }
-      await teardownCompose(target, volumes);
-      return null;
-    },
-    { timeoutMs: INTERACTIVE_LOCK_WAIT * 1000 },
-  );
+  const body = async (): Promise<Record<string, unknown> | null> => {
+    // The two runtimes answer DIFFERENTLY, and always did: the Kubernetes path reports
+    // `found` and its own `runtime`, and says its own "done" line.
+    if ((await topology.ofRepro(target)) === topology.KUBERNETES) {
+      return await teardownKubernetes(target, volumes, emit);
+    }
+    await teardownCompose(target, volumes);
+    return null;
+  };
+  // ASKED FIRST WITHOUT WAITING, so a wait is SAID: `down --volumes` behind a running
+  // `backup` sat silent for its whole duration. Only the lock's own refusal waits; any other
+  // conflict from the teardown is the answer.
+  let result: Record<string, unknown> | null;
+  try {
+    result = await reproLock(target, body, { timeoutMs: 0 });
+  } catch (error) {
+    if (!(error instanceof ConflictError && error.message.startsWith('another houston'))) {
+      throw error;
+    }
+    info(
+      emit,
+      `another houston command is working on '${target}' (a backup, restore or upgrade?) — ` +
+        `waiting up to ${String(INTERACTIVE_LOCK_WAIT)}s for it to finish`,
+      { phase: 'teardown' },
+    );
+    result = await reproLock(target, body, { timeoutMs: INTERACTIVE_LOCK_WAIT * 1000 });
+  }
   if (result !== null) return result;
   info(emit, `'${target}' ${volumes ? 'removed' : 'down (data kept)'}`, { phase: 'done' });
   return { name: target, removed: volumes };

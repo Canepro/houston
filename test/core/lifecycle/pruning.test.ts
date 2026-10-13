@@ -87,6 +87,7 @@ describe('removing one workspace', () => {
     const errors = require('../../../src/lib/errors') as typeof ErrorsNS;
     jest.doMock('../../../src/core/runner/engine', () => ({
       ...jest.requireActual('../../../src/core/runner/engine'),
+      stop: async () => 0,
       down: async () => (mode === 'down-fail' ? 1 : 0),
     }));
     jest.doMock('../../../src/core/edge/networks', () => ({
@@ -321,6 +322,7 @@ describe('a whole prune', () => {
     }));
     jest.doMock('../../../src/core/runner/engine', () => ({
       ...jest.requireActual('../../../src/core/runner/engine'),
+      stop: async () => 0,
       down: async (name: string) => (world.down === undefined ? 0 : await world.down(name)),
     }));
     jest.doMock('../../../src/core/edge/networks', () => ({
@@ -447,7 +449,10 @@ describe('a whole prune', () => {
     // unrecorded namespace may be a colleague's workspace from their own home.
     const operator = (require('../../../src/core/kube/operator') as { OPERATOR_NAMESPACE: string })
       .OPERATOR_NAMESPACE;
-    const world = load({ namespaces: ['houston-known', 'houston-p3', operator] });
+    const world = load({
+      namespaces: ['houston-known', 'houston-p3', operator],
+      owners: { 'houston-p3': 'me' },
+    });
     await world.record.writeRecord(
       'known',
       world.record.metadata({ name: 'known', project: 'p', extra: { runtime: 'kubernetes' } }),
@@ -489,10 +494,25 @@ describe('a whole prune', () => {
     // The delete used the resolved context and the wait the hardcoded kind one, so on any
     // other cluster the wait asked a context not in the kubeconfig and read the failure as
     // "gone": exit 0 over a namespace still Terminating. Invisible on kind.
-    const world = load({ namespaces: ['houston-p9'], context: 'someone-elses-cluster' });
+    const world = load({
+      namespaces: ['houston-p9'],
+      context: 'someone-elses-cluster',
+      owners: { 'houston-p9': 'me' },
+    });
     await world.pruning.prune({ confirm: true, orphans: true });
     expect(world.deleted).toEqual(['houston-p9']);
     expect(world.waited).toEqual(['someone-elses-cluster']);
+  });
+
+  it('leaves an orphaned namespace that names no owner alone, unless forced', async () => {
+    // Made with no accounts and no HOUSTON_USER, a namespace's owner label is empty -- and
+    // so is the caller's, in the same setup. '' matched '', and `prune --orphans --yes`
+    // from a second home swept a colleague's LIVE workspace and its PVC without --force.
+    const world = load({ namespaces: ['houston-nobody'], context: 'c' });
+    expect((await world.pruning.prune({ confirm: true, orphans: true })).orphans).toEqual([]);
+    expect(world.deleted).toEqual([]);
+    await world.pruning.prune({ confirm: true, orphans: true, force: true });
+    expect(world.deleted).toEqual(['houston-nobody']);
   });
 
   it('leaves an orphaned namespace somebody else owns alone, unless forced', async () => {
@@ -515,6 +535,139 @@ describe('a whole prune', () => {
       'houston-mine',
       'houston-unreadable',
     ]);
+  });
+});
+
+describe('closing pooled edge connections while pruning Compose workspaces', () => {
+  let home = '';
+  let previous: string | undefined;
+  beforeEach(() => {
+    previous = process.env.HOUSTON_HOME;
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-prune-edge-'));
+    process.env.HOUSTON_HOME = home;
+  });
+  afterEach(() => {
+    for (const id of [
+      '../../../src/core/runner/engine',
+      '../../../src/core/runner/locks',
+      '../../../src/core/topology',
+      '../../../src/core/edge/networks',
+      '../../../src/core/edge/routes',
+    ]) {
+      jest.dontMock(id);
+    }
+    jest.resetModules();
+    process.env.HOUSTON_HOME = previous;
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  function load(failedName = '') {
+    jest.resetModules();
+    const states = new Map<string, { attached: boolean; pooledSocketOpen: boolean }>();
+    const stop = jest.fn(async (name: string) => {
+      if (name === failedName) return 1;
+      const state = states.get(name);
+      if (state?.attached) state.pooledSocketOpen = false;
+      return 0;
+    });
+    const down = jest.fn(async (name: string) => {
+      const state = states.get(name);
+      if (state?.attached) state.pooledSocketOpen = false;
+      return 0;
+    });
+    const detach = jest.fn(async (name: string) => {
+      const state = states.get(name);
+      if (state !== undefined) state.attached = false;
+    });
+    const deregister = jest.fn();
+    jest.doMock('../../../src/core/runner/engine', () => ({
+      ...jest.requireActual('../../../src/core/runner/engine'),
+      stop,
+      down,
+    }));
+    jest.doMock('../../../src/core/runner/locks', () => ({
+      ...jest.requireActual('../../../src/core/runner/locks'),
+      reproLock: (_name: string, body: () => Promise<unknown>) => body(),
+    }));
+    jest.doMock('../../../src/core/topology', () => ({
+      ...jest.requireActual('../../../src/core/topology'),
+      ofRepro: async () => 'docker',
+    }));
+    jest.doMock('../../../src/core/edge/networks', () => ({
+      ...jest.requireActual('../../../src/core/edge/networks'),
+      detach,
+    }));
+    jest.doMock('../../../src/core/edge/routes', () => ({
+      ...jest.requireActual('../../../src/core/edge/routes'),
+      deregister,
+    }));
+    const record = require('../../../src/core/runner/record') as typeof RecordNS;
+    async function fixture(name: string): Promise<void> {
+      states.set(name, { attached: true, pooledSocketOpen: true });
+      await record.writeRecord(name, record.metadata({ name, project: `houston-${name}` }));
+    }
+    return {
+      states,
+      stop,
+      down,
+      detach,
+      deregister,
+      fixture,
+      pruning: require('../../../src/core/lifecycle/pruning') as typeof PruningNS,
+    };
+  }
+
+  it('keeps the endpoint attached until the graceful prune stop has completed', async () => {
+    const { states, stop, down, detach, fixture, pruning } = load();
+    await fixture('warmed');
+    let releaseStop = (): void => undefined;
+    const held = new Promise<void>((resolve) => {
+      releaseStop = resolve;
+    });
+    stop.mockImplementationOnce(async (name) => {
+      await held;
+      const state = states.get(name);
+      if (state?.attached) state.pooledSocketOpen = false;
+      return 0;
+    });
+    const removed: string[] = [];
+    const pruningOne = pruning.removeOneWorkspace('warmed', () => undefined, removed);
+    try {
+      await Promise.resolve();
+      expect(states.get('warmed')?.attached).toBe(true);
+      expect(detach).not.toHaveBeenCalled();
+      expect(down).not.toHaveBeenCalled();
+    } finally {
+      releaseStop();
+      await pruningOne;
+    }
+    expect(states.get('warmed')?.pooledSocketOpen).toBe(false);
+    expect(removed).toEqual(['warmed']);
+  });
+
+  it('keeps a failed-stop project intact and continues the bulk sweep', async () => {
+    const { states, stop, down, detach, deregister, fixture, pruning } = load('bad');
+    await fixture('bad');
+    await fixture('good');
+    const removed: string[] = [];
+    const events: string[] = [];
+
+    await pruning.removeEachWorkspace((event) => void events.push(event.message), removed, [
+      'bad',
+      'good',
+    ]);
+
+    expect(states.get('bad')).toEqual({ attached: true, pooledSocketOpen: true });
+    expect(fs.existsSync(path.join(home, 'repros/bad/repro.json'))).toBe(true);
+    expect(events).toContain("could not stop 'bad' - skipping");
+    expect(removed).toEqual(['good']);
+    expect(stop.mock.calls.map(([name]) => name)).toEqual(['bad', 'good']);
+    expect(detach).toHaveBeenCalledTimes(1);
+    expect(detach).toHaveBeenCalledWith('good');
+    expect(down).toHaveBeenCalledTimes(1);
+    expect(down).toHaveBeenCalledWith('good', { volumes: true });
+    expect(deregister).toHaveBeenCalledTimes(1);
+    expect(deregister).toHaveBeenCalledWith('good');
   });
 });
 

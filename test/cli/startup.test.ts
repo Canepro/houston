@@ -159,6 +159,35 @@ describe('the entry point, before any command', () => {
     }).toEqual({ code: 0, marker: 'dual-v1\n' });
   });
 
+  it('records the command line with its credentials masked', () => {
+    // The log outlives the process and is read after the fact, so a token typed on the
+    // command line must not land in it. Every spelling: a whole-value flag, a KEY=VALUE flag
+    // masked by its key, and URL userinfo.
+    const home = freshHome();
+    const argv = [
+      'up',
+      '--reg-token',
+      'TOKEN-1234',
+      '--setting',
+      'LDAP_Authentication_Password=hunter2',
+      '-e',
+      'MONGO_URL=mongodb://rc:s3cret@h/db',
+      '--set=bind_password=pw9',
+      '--help',
+    ];
+    const got = run(home, argv);
+    const log = fs.readFileSync(path.join(home, 'logs', 'houston.log'), 'utf8');
+    const start = JSON.parse(log.split('\n')[0] as string) as { cmd: string };
+    expect({
+      code: got.code,
+      leaked: ['TOKEN-1234', 'hunter2', 's3cret', 'pw9'].filter((s) => log.includes(s)),
+    }).toEqual({ code: 0, leaked: [] });
+    expect(start.cmd).toBe(
+      'up --reg-token ******** --setting LDAP_Authentication_Password=******** ' +
+        '-e MONGO_URL=mongodb://rc:********@h/db --set=bind_password=******** --help',
+    );
+  });
+
   it('records which build answered and whether bin/houston sent it', () => {
     // `impl` and `via` on every record. The build is `dispatcher` only for its OWN route;
     // the other build's route, or none, is `direct`.
@@ -343,6 +372,13 @@ printf '%s\\n' "$*" >> "$(dirname "$0")/calls"
 case "$*" in
   info*|version*) printf '27.0.0\\n' ;;
   *"compose version"*) printf '2.29.1\\n' ;;
+  *"compose ps --all --format json"*)
+    state=running
+    if [ -f "$(dirname "$0")/writer-stopped" ]; then state=exited; fi
+    printf '{"Service":"rocketchat","State":"%s"}\\n' "$state"
+    ;;
+  *"compose stop rocketchat"*) : > "$(dirname "$0")/writer-stopped" ;;
+  *"compose start rocketchat"*) rm -f "$(dirname "$0")/writer-stopped" ;;
   *compose*" ps"*) printf 'rocketchat\\trunning\\tUp 10 seconds\\nmongodb\\trunning\\tUp 10 seconds\\n' ;;
 esac
 exit 0
@@ -496,12 +532,17 @@ async function closedPort(): Promise<number> {
 }
 
 /**
- * A Rocket.Chat on loopback that answers every request 200, with a body the CLI reads as
- * serving, logged in and set; a request whose path or body contains `hang` is never
- * answered. Each request is kept as `METHOD path body`.
+ * A Rocket.Chat on loopback with actual seed identity and creation response shapes;
+ * a request whose path or body contains `hang` is never answered. Each request is kept
+ * as `METHOD path body`.
  */
 async function fakeRocketChat(hang?: string) {
   const seen: string[] = [];
+  const emojis: Record<string, unknown>[] = [];
+  const rooms = new Map<string, Record<string, unknown>>([
+    ['GENERAL', { _id: 'GENERAL', name: 'general', t: 'c' }],
+  ]);
+  let sequence = 0;
   const server = http.createServer((request, response) => {
     let body = '';
     request.setEncoding('utf8').on('data', (chunk: string) => (body += chunk));
@@ -509,16 +550,99 @@ async function fakeRocketChat(hang?: string) {
       const target = request.url ?? '';
       seen.push(`${request.method ?? ''} ${target} ${body}`.trim());
       if (hang !== undefined && `${target} ${body}`.includes(hang)) return;
-      response.writeHead(200, { 'Content-Type': 'application/json' });
-      response.end(
-        JSON.stringify({
+      const url = new URL(target, 'http://127.0.0.1');
+      const api = url.pathname;
+      let payload: Record<string, unknown> = {};
+      if (body !== '' && request.headers['content-type']?.includes('application/json') === true)
+        payload = JSON.parse(body) as Record<string, unknown>;
+      const send = (status: number, result: Record<string, unknown>) => {
+        response.writeHead(status, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify(result));
+      };
+      if (api === '/api/v1/users.info')
+        return send(404, { success: false, errorType: 'error-user-not-found' });
+      if (api === '/api/v1/users.create')
+        return send(200, { success: true, user: { _id: `uid-${String(payload.username)}` } });
+      if (api === '/api/v1/login') {
+        const user = String(payload.user);
+        return send(200, {
           success: true,
-          version: '7.4.1',
-          info: { version: '7.4.1' },
-          data: { authToken: 'token', userId: 'user', me: { _id: 'user' } },
-          value: true,
-        }),
-      );
+          data: { authToken: `token-${user}`, userId: `uid-${user}`, me: { _id: `uid-${user}` } },
+        });
+      }
+      if (api === '/api/v1/emoji-custom.list')
+        return send(200, { success: true, emojis: { update: emojis } });
+      if (api === '/api/v1/emoji-custom.create') {
+        const field = (name: string) =>
+          new RegExp(`name="${name}"\\r\\n\\r\\n([^\\r\\n]*)`, 'u').exec(body)?.[1] ?? '';
+        emojis.push({
+          _id: `emoji-${field('name')}`,
+          name: field('name'),
+          aliases: [field('aliases')],
+        });
+        return send(200, { success: true });
+      }
+      if (api === '/api/v1/channels.info' || api === '/api/v1/groups.info') {
+        const room = [...rooms.values()].find((r) => r.name === url.searchParams.get('roomName'));
+        return room === undefined
+          ? send(404, { success: false, errorType: 'error-room-not-found' })
+          : send(200, { success: true, [api.includes('groups') ? 'group' : 'channel']: room });
+      }
+      if (api === '/api/v1/rooms.adminRooms.getRoom' || api === '/api/v1/rooms.info') {
+        const rid = url.searchParams.get(api.endsWith('rooms.info') ? 'roomId' : 'rid') ?? '';
+        const room = rooms.get(rid);
+        return room === undefined
+          ? send(404, { success: false, errorType: 'error-room-not-found' })
+          : send(200, { success: true, ...(api.endsWith('rooms.info') ? { room } : room) });
+      }
+      sequence += 1;
+      if (api === '/api/v1/teams.create') {
+        const rid = `room-${sequence}`;
+        const teamId = `team-${sequence}`;
+        rooms.set(rid, { _id: rid, name: payload.name, t: 'c', teamId, teamMain: true });
+        return send(200, { success: true, team: { _id: teamId, roomId: rid } });
+      }
+      if (api === '/api/v1/channels.create' || api === '/api/v1/groups.create') {
+        const rid = `room-${sequence}`;
+        const room = {
+          _id: rid,
+          name: payload.name,
+          t: api.includes('groups') ? 'p' : 'c',
+          ...((payload.extraData ?? {}) as Record<string, unknown>),
+        };
+        rooms.set(rid, room);
+        return send(200, { success: true, [api.includes('groups') ? 'group' : 'channel']: room });
+      }
+      if (api === '/api/v1/chat.sendMessage')
+        return send(200, {
+          success: true,
+          message: {
+            ...(payload.message as Record<string, unknown>),
+            u: { _id: request.headers['x-user-id'] },
+          },
+        });
+      if (api.startsWith('/api/v1/rooms.media/'))
+        return send(200, {
+          success: true,
+          file: { _id: `file-${sequence}`, url: `/file-${sequence}` },
+        });
+      if (api.startsWith('/api/v1/rooms.mediaConfirm/'))
+        return send(200, {
+          success: true,
+          message: {
+            _id: `file-message-${sequence}`,
+            rid: api.split('/').at(-2),
+            msg: payload.msg,
+            u: { _id: request.headers['x-user-id'] },
+          },
+        });
+      send(200, {
+        success: true,
+        version: '7.4.1',
+        info: { version: '7.4.1' },
+        data: { authToken: 'token', userId: 'user', me: { _id: 'user' } },
+        value: true,
+      });
     });
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -811,10 +935,12 @@ describe('Ctrl-C, as earlier releases report it', () => {
         if (holder?.pid !== undefined) process.kill(-holder.pid, 'SIGKILL');
       }
     };
+    // The one event is the wait, SAID: `down` behind another command's lock used to wait in
+    // silence for as long as that command ran.
     expect(await shape()).toEqual({
       status: 130,
       stderr: '',
-      log: [{ kind: 'start' }, { kind: 'end', exit: 130 }],
+      log: [{ kind: 'start' }, { kind: 'event' }, { kind: 'end', exit: 130 }],
       waiters: [],
     });
   }, 240_000);
@@ -870,6 +996,9 @@ describe('Ctrl-C, as earlier releases report it', () => {
         log: ['start', 'event', 'event', 'end'],
         callsAfter: [
           ['compose', 'start'],
+          // The wait for Rocket.Chat now also asks whether its one-shot setup finished.
+          ['compose', 'ps'],
+          ['inspect', '--format'],
           ['ps', '--all'],
         ],
         requests: ['GET /api/info'],
@@ -968,7 +1097,7 @@ describe('Ctrl-C, as earlier releases report it', () => {
   }, 240_000);
 
   it.each([
-    ['a room', '/api/v1/channels.create'],
+    ['a room', '"name": "team-chat"'],
     ["a seeded user's login", '"user": "alice"'],
   ])(
     'puts back the settings seed turned off when interrupted in %s, as its finally does',
@@ -1001,9 +1130,13 @@ describe('Ctrl-C, as earlier releases report it', () => {
         status: 130,
         stderr: '',
         log: ['start', 'end'],
+        // The fake answers every setting `true`, so the encryption defaults were held off too.
         requestsAfter: [
-          'POST /api/v1/settings/API_Enable_Rate_Limiter {"value": true}',
           'POST /api/v1/settings/Accounts_TwoFactorAuthentication_By_Email_Enabled {"value": true}',
+          'POST /api/v1/settings/API_Enable_Rate_Limiter {"value": true}',
+          'POST /api/v1/settings/E2E_Enabled_Default_DirectRooms {"value": true}',
+          'POST /api/v1/settings/E2E_Enabled_Default_PrivateRooms {"value": true}',
+          'POST /api/v1/settings/E2E_Force_Encryption_For_Private_Rooms {"value": true}',
         ],
         notes: [],
       });

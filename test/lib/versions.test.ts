@@ -1,8 +1,13 @@
 import { ValidationError } from '../../src/lib/errors';
 import type { ReleaseInfoResponse, Resolved } from '../../src/lib/versions';
 import {
+  BUILD_TAG_RE,
+  InvalidVersionError,
   MONGO_TAG_RE,
   NOT_A_RELEASE,
+  baseVersion,
+  buildPackageUrl,
+  lookupUrl,
   applyMongoOverride,
   flavor,
   isValidVersion,
@@ -48,6 +53,23 @@ describe('the shipped fallback map', () => {
     // A tag that is not a number at all must not read as Mongo 8+.
     expect(flavor('latest')).toBe('bitnami-legacy');
     expect(shell('latest')).toBe('mongo');
+  });
+
+  it('gives RC 7.13 the MongoDB it gets online, and 7.12 what it always had', () => {
+    // releases.rocket.chat lists 5/6/7/8 for every 7.13.x and 5.0/6.0/7.0 for 7.12 and
+    // earlier. The map's one rule for all of 7.x gave 7.13 MongoDB 7.0 offline and 8.0
+    // online: the same version, a different database, depending on the network.
+    const online = resolve('7.13.2', {
+      fetcher: () => reply(200, { compatibleMongoVersions: ['5', '6', '7', '8'] }),
+    });
+    const offline = resolve('7.13.2', { offline: true });
+    expect([offline.mongoTag, offline.mongoFlavor, offline.oplog]).toEqual([
+      online.mongoTag,
+      online.mongoFlavor,
+      online.oplog,
+    ]);
+    expect(offline.mongoTag).toBe('8.0');
+    expect(resolve('7.12.0', { offline: true }).mongoTag).toBe('7.0');
   });
 
   it('emits the oplog for RC < 8 only', () => {
@@ -278,7 +300,8 @@ describe('resolve, with the live answer stubbed', () => {
     // `8.0rc1` is a valid version under the specifier standard and a tag nobody publishes.
     const got = resolve('7.13.6', { fetcher: answering(['8.0rc1']) });
     expect(got.source).toBe('map (fallback)');
-    expect(got.mongoTag).toBe('7.0');
+    // The map's own answer for 7.13, which matches what a valid answer would have given.
+    expect(got.mongoTag).toBe('8.0');
   });
 
   it('falls back to the map when the answer lists no versions', () => {
@@ -334,5 +357,109 @@ describe('a --mongo override', () => {
     expect([got.mongoTag, got.mongoFlavor]).toEqual(['8.0', 'official']);
     applyMongoOverride(got, '6.0.5-ubi8');
     expect([got.mongoTag, got.mongoFlavor]).toEqual(['6.0.5-ubi8', 'bitnami-legacy']);
+  });
+});
+
+describe('a CI build as --version', () => {
+  const DEVELOP_PKG =
+    'https://raw.githubusercontent.com/RocketChat/Rocket.Chat/develop/apps/meteor/package.json';
+
+  it('accepts the tags ghcr publishes and nothing else', () => {
+    const ok = [
+      'develop',
+      'develop-fips',
+      'develop-cov',
+      'pr-42617',
+      'pr-1-cov',
+      'pr-42617-fips-gha-run-37666165904',
+      'develop-gha-run-1',
+    ];
+    const refused = [
+      'pr-0',
+      'pr-',
+      'pr-x',
+      'develop-amd64',
+      'develop-fips-cov',
+      'Develop',
+      '8.5.1',
+      'pr-42617\n',
+      'latest',
+    ];
+    expect(ok.filter((tag) => !BUILD_TAG_RE.test(tag))).toEqual([]);
+    expect(refused.filter((tag) => BUILD_TAG_RE.test(tag))).toEqual([]);
+  });
+
+  it("reads the version from the branch's package.json", () => {
+    expect(buildPackageUrl('develop-fips')).toBe(DEVELOP_PKG);
+    expect(buildPackageUrl('pr-42617-cov-gha-run-9')).toBe(
+      'https://raw.githubusercontent.com/RocketChat/Rocket.Chat/refs/pull/42617/head/apps/meteor/package.json',
+    );
+    expect([lookupUrl('develop'), lookupUrl('8.10.0.dev0'), lookupUrl('nope')]).toEqual([
+      DEVELOP_PKG,
+      null,
+      null,
+    ]);
+    expect(lookupUrl('8.5.1')).toBe('https://releases.rocket.chat/8.5.1/info');
+  });
+
+  it('records a version both readers order: -develop becomes .dev0', () => {
+    expect([
+      baseVersion('8.10.0-develop'),
+      baseVersion('8.10.0'),
+      baseVersion('8.10.0-rc.1'),
+    ]).toEqual(['8.10.0.dev0', '8.10.0', '8.10.0-rc.1']);
+  });
+
+  it('resolves to the build image, a real version, and the MongoDB of its release', () => {
+    const asked: string[] = [];
+    const got = resolve('pr-42617-fips', {
+      fetcher: (url) => {
+        asked.push(url);
+        return reply(200, { name: '@rocket.chat/meteor', version: '8.10.0-develop' });
+      },
+    });
+    expect(asked).toEqual([buildPackageUrl('pr-42617')]);
+    expect(got).toMatchObject({
+      rcVersion: '8.10.0.dev0',
+      rcImage: 'ghcr.io/rocketchat/rocket.chat:pr-42617-fips',
+      mongoTag: '8.0',
+      mongoFlavor: 'official',
+      oplog: false,
+      source: 'ci build',
+    });
+  });
+
+  it('refuses offline, an unknown build and an unreadable answer, naming the URL and the way round', () => {
+    const refusal = (fn: () => unknown): string => {
+      try {
+        fn();
+      } catch (error) {
+        if (error instanceof InvalidVersionError) return error.message;
+        throw error;
+      }
+      return 'resolved';
+    };
+    const offline = refusal(() => resolve('develop', { offline: true }));
+    const missing = refusal(() => resolve('pr-999999', { fetcher: () => reply(404, {}) }));
+    const garbage = refusal(() =>
+      resolve('develop', { fetcher: () => reply(200, { version: 'x' }) }),
+    );
+    const silent = refusal(() => resolve('develop', { fetcher: () => null }));
+    expect(offline).toContain('needs the network');
+    expect(missing).toContain('answered 404');
+    expect(garbage).toContain('held no readable version');
+    expect(silent).toContain('did not answer');
+    for (const message of [offline, missing, garbage, silent]) {
+      expect(message).toContain('--rc-image ghcr.io/rocketchat/rocket.chat:');
+    }
+  });
+
+  it("pairs a recorded build's .dev0 as its release, offline, for a re-up or a restore", () => {
+    expect(resolve('8.10.0.dev0', { offline: true })).toMatchObject({
+      mongoTag: '8.0',
+      source: 'map (fallback)',
+    });
+    // A pre-release still matches no rule, as it always has.
+    expect(() => resolve('8.0rc1', { offline: true })).toThrow(InvalidVersionError);
   });
 });

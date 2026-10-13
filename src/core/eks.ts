@@ -46,7 +46,7 @@ import {
 } from '../lib/errors';
 import { info, nullEmit, warn, type Emit, type EmittedPhase } from '../lib/events';
 import { mapLimit } from '../lib/map-limit';
-import { joinPath } from '../lib/home';
+import { joinPath, pathHome } from '../lib/home';
 import {
   CLUSTER_UNFINISHED,
   clearJournal,
@@ -196,6 +196,24 @@ export async function region(): Promise<string> {
 }
 
 /**
+ * The named profiles in this box's AWS config, or [] when the tool cannot say. What the
+ * setup page offers when the server was started without AWS_PROFILE: `aws sts` working in
+ * a shell that had it says nothing about the server that did not. Not `default`, which an
+ * unset AWS_PROFILE already uses.
+ */
+export async function profiles(): Promise<string[]> {
+  if (which(IDENTITY_TOOL) === '') return [];
+  const res = await awsCli.run([IDENTITY_TOOL, 'configure', 'list-profiles'], {
+    timeoutMs: asMs(IDENTITY_TIMEOUT),
+  });
+  if (res.returncode !== 0) return [];
+  return res.stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '' && line !== 'default');
+}
+
+/**
  * Whether this box could build an EKS cluster, and what is stopping it.
  *
  * Reports; never throws and never refuses. `doctor` renders it and the create path turns
@@ -207,6 +225,71 @@ export interface CloudPreflight {
   readonly tools: Readonly<Record<string, Tool>>;
   readonly identity: Identity;
   readonly region: string;
+  /** Why eksctl would not sign in as `identity` (see `shadowedProfile`), or ''/absent. */
+  readonly shadowed?: string;
+}
+
+/** The `key = value` pairs of one `[section]` of an AWS ini file; {} when absent. */
+function iniSection(file: string, section: string): Record<string, string> {
+  let text: string;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch {
+    return {};
+  }
+  const out: Record<string, string> = {};
+  let inside = false;
+  for (const raw of text.split(/\r?\n/u)) {
+    const line = raw.trim();
+    const header = /^\[\s*(.+?)\s*\]$/u.exec(line);
+    if (header !== null) {
+      // `[profile  name]` is `[profile name]`, as the AWS tools read it.
+      inside = (header[1] ?? '').replace(/\s+/gu, ' ') === section;
+    } else if (inside && line !== '' && !line.startsWith('#') && !line.startsWith(';')) {
+      const at = line.indexOf('=');
+      if (at > 0) out[line.slice(0, at).trim().toLowerCase()] = line.slice(at + 1).trim();
+    }
+  }
+  return out;
+}
+
+/**
+ * Keys in the credentials file that eksctl signs in with INSTEAD of the profile's SSO.
+ *
+ * For one profile with both, the aws CLI reads the SSO settings first and the Go SDK in
+ * eksctl reads the credentials file first. So houston's identity check (the aws CLI)
+ * passed, and a second later eksctl was refused -- `ExpiredToken`, on keys pasted into
+ * ~/.aws/credentials long before -- and with keys that still worked it would build as a
+ * different identity from the one houston checked and the spending gate approved.
+ * Returns the sentence that says which section to remove, or ''.
+ */
+export function shadowedProfile(env: NodeJS.ProcessEnv = process.env): string {
+  const named = (key: string): string => (env[key] ?? '').trim();
+  const profile = [named('AWS_PROFILE'), named('AWS_DEFAULT_PROFILE')].find((v) => v !== '');
+  const name = profile ?? 'default';
+  const configFile = named('AWS_CONFIG_FILE') || joinPath(pathHome(), '.aws', 'config');
+  const keysFile =
+    named('AWS_SHARED_CREDENTIALS_FILE') || joinPath(pathHome(), '.aws', 'credentials');
+  // `[profile default]` is the default profile too.
+  const settings = {
+    ...(name === 'default' ? iniSection(configFile, 'default') : {}),
+    ...iniSection(configFile, `profile ${name}`),
+  };
+  const sso = ['sso_session', 'sso_start_url', 'sso_account_id'].some((key) => key in settings);
+  // Keys beside the SSO settings in the config file shadow it the same way.
+  const keysHere = 'aws_access_key_id' in settings;
+  if (!sso || (!keysHere && !('aws_access_key_id' in iniSection(keysFile, name)))) return '';
+  const where = keysHere ? configFile : keysFile;
+  const section = keysHere && name !== 'default' ? `profile ${name}` : name;
+  return (
+    `${where} holds keys under [${section}], and eksctl signs in with those instead of ` +
+    `the profile's SSO sign-in that the aws CLI uses -- so eksctl would act as a different, ` +
+    `or an expired, identity from the one houston checked. Remove ` +
+    (keysHere
+      ? `the aws_access_key_id, aws_secret_access_key and aws_session_token lines from [${section}] in ${where}`
+      : `the [${section}] section from ${where}`) +
+    ` (keep a copy), then \`aws sso login --profile ${name}\` if it asks`
+  );
 }
 
 /**
@@ -246,6 +329,7 @@ export function blockers(
         'and it will use what it finds.',
     );
   }
+  if ((pre.shadowed ?? '') !== '') out.push(pre.shadowed as string);
   if (pre.region === '') {
     out.push(
       'no AWS region resolved. Set one with `aws configure set region <region>` or ' +
@@ -296,7 +380,7 @@ export async function preflight(): Promise<CloudPreflight> {
       ? whoami()
       : Promise.resolve(identity({ error: `${IDENTITY_TOOL} is not installed` })),
   ]);
-  return { tools: probed, identity: ident, region: resolvedRegion };
+  return { tools: probed, identity: ident, region: resolvedRegion, shadowed: shadowedProfile() };
 }
 
 /** Add an existing EKS cluster to this server's kubeconfig without provisioning it. */
@@ -597,6 +681,13 @@ export function clusterConfig(
  * eksctl prefixes its own progress with a level and a timestamp; the message is the part
  * worth showing, and the rest is noise on a terminal that already has its own clock.
  */
+/**
+ * How much of one eksctl line is shown. It was 200, and a refused build's only line,
+ * "checking AWS STS access – … StatusCode: 403, RequestID: …, api error ExpiredToken: …",
+ * lost exactly the part that said why. Bounded still, because a job keeps its events.
+ */
+const LINE_LIMIT = 1000;
+
 export async function streamTool(
   argv: readonly string[],
   {
@@ -632,7 +723,7 @@ export async function streamTool(
         const read = progress(shown);
         if (read !== null && (best === null || read > best)) best = read;
       }
-      info(emit, shown.slice(0, 200), best === null ? { phase } : { phase, pct: best });
+      info(emit, shown.slice(0, LINE_LIMIT), best === null ? { phase } : { phase, pct: best });
     },
   });
   if (res.returncode !== 0) {
@@ -640,7 +731,7 @@ export async function streamTool(
     if (seen.length === 0 && res.stderr !== '') {
       warn(emit, `${String(argv[0])} could not be started: ${res.stderr}`, { phase });
     }
-    for (const line of seen.slice(-6)) warn(emit, line.slice(0, 200), { phase });
+    for (const line of seen.slice(-6)) warn(emit, line.slice(0, LINE_LIMIT), { phase });
   }
   return res.returncode;
 }
@@ -1413,6 +1504,17 @@ async function buildTheCluster(
   }
 
   if (code !== 0) {
+    // ASKED, NOT ASSUMED. A build refused at eksctl's first step -- checking who it is --
+    // makes nothing, and "a partial create can still be billing" sent its owner looking
+    // for a bill that did not exist. Only AWS answering "none" to every question says so.
+    if (await nothingWasMade(name, where)) {
+      clearJournal(entry);
+      throw new CreateFailedError(
+        `eksctl could not build '${name}' in ${where} (exit ${String(code)}); its last lines ` +
+          'are above. AWS holds nothing of it -- no cluster, stack, volume, load balancer, ' +
+          'NAT gateway or address -- so nothing is billing and there is nothing to delete.',
+      );
+    }
     // The note STAYS. eksctl may have built a VPC, a NAT gateway and a control plane
     // before failing, and houston is not going to decide on its own to destroy them.
     throw new CreateFailedError(
@@ -1427,6 +1529,15 @@ async function buildTheCluster(
 
   clearJournal(entry);
   await remember(name, { region: where, account: pre.identity.account, expires, zone });
+}
+
+/** Whether AWS confirms a failed build left nothing. A read that failed is not "nothing". */
+async function nothingWasMade(name: string, where: string): Promise<boolean> {
+  const [cluster, left] = await Promise.all([
+    clusterExists(name, where),
+    sweepLeftovers(name, where),
+  ]);
+  return cluster.state === ABSENT && left.found.length === 0 && left.unreadable.length === 0;
 }
 
 /**

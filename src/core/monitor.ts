@@ -10,12 +10,13 @@
  * in `core/kube/monitoring.ts` and this module is the caller that supplies the workspace's
  * namespace.
  */
-import { toYaml, type ComposeDoc } from '../lib/compose';
+import { forEngine, toYaml, type ComposeDoc } from '../lib/compose';
 import * as config from '../lib/config';
 import { DockerError, NotReadyError, ValidationError, errorText } from '../lib/errors';
 import { type Emit, info, nullEmit, warn } from '../lib/events';
 import { toInt, quotedText, toText, isTruthy, valueKind, expectedText } from '../lib/format';
 import * as monitoring from '../lib/monitoring';
+import { publicPathsOf } from '../lib/presets/public';
 import { register as registerRoute } from './edge/routes';
 
 import { login } from './lifecycle/admin';
@@ -25,6 +26,7 @@ import { requireDocker } from './lifecycle/preconditions';
 import { stopPortForward } from './lifecycle/ready';
 import { setSetting } from './rcapi';
 import { up, rmServices } from './runner/engine';
+import { engine } from './runner/host';
 import { reproLock } from './runner/locks';
 import { removeVolumes } from './runner/queries';
 import {
@@ -117,6 +119,8 @@ async function updateDockerRoute(m: Metadata, grafana: boolean): Promise<void> {
     instances: typeof extra.instances === 'number' ? extra.instances : 1,
     local: extra.tls === 'local',
     grafana,
+    // Attaching or detaching monitoring rewrites the route: the preset's paths stay on it.
+    publicPaths: publicPathsOf(extra),
   });
 }
 
@@ -188,7 +192,7 @@ export async function attachLocked(target: string, emit: Emit = nullEmit): Promi
   const targets = rcServicesIn(doc);
   await write(
     m.name,
-    toYaml(doc as unknown as ComposeDoc),
+    toYaml(forEngine(doc as unknown as ComposeDoc, await engine())),
     m,
     monitoring.files(targets.length > 0 ? targets : ['rocketchat'], m.project),
   );
@@ -235,10 +239,11 @@ export async function kubeTarget(m: Metadata): Promise<[string, string]> {
  * Point the cluster's shared stack at this workspace, and publish Grafana.
  *
  * Nothing is installed INTO the workspace. Rocket.Chat's chart already publishes a
- * PodMonitor — `podMonitor.enabled` and `prometheusScraping.enabled` are its defaults —
- * so what `--monitor` supplies is the Prometheus willing to read it, which lives once per
- * cluster. That makes this a much cheaper operation than its Compose twin, and a shared
- * one: see `kube/monitoring`'s `removeMonitoring`.
+ * PodMonitor wherever the cluster serves that kind — `podMonitor.enabled` and
+ * `prometheusScraping.enabled` are its defaults — so what `--monitor` supplies is the
+ * Prometheus willing to read it, which lives once per cluster. That makes this a much
+ * cheaper operation than its Compose twin, and a shared one: see `kube/monitoring`'s
+ * `removeMonitoring`.
  *
  * RC's own `Prometheus_Enabled` setting is turned on the same way as on Compose, over the
  * same REST seam, because the port-forward makes the workspace reachable at exactly the
@@ -263,7 +268,19 @@ export async function attachKubernetes(target: string, emit: Emit = nullEmit): P
     );
   }
 
+  // CLAIMED FIRST. The label is the reference count every teardown reads, from any home;
+  // set after the install, another workspace's `down --volumes` during the install found no
+  // user and removed the stack under it. The reverse race -- a removal already past its count
+  // when this starts -- is still open, and only a lock in the cluster itself would close it.
+  await k8s.setMonitoringLabel(namespace, { context, wanted: true });
   await k8s.ensureMonitoring({ context, emit, publicUrl });
+  // The stack is what brings the PodMonitor CRD, so a release installed before it -- every
+  // first `up --monitor` -- has no PodMonitor until it is rendered again. Under the
+  // workspace's lock, which `up` already holds: an `upgrade` holding it would otherwise race
+  // the re-render, and helm refuses one of them or puts the old image back.
+  await reproLock(target, async () => {
+    await k8s.ensurePodMonitor({ namespace, context, emit });
+  });
   if (publicUrl) {
     const { ensureGrafanaIngress } = await import('./kube/grafana-ingress');
     await ensureGrafanaIngress(m.name, {
@@ -274,11 +291,10 @@ export async function attachKubernetes(target: string, emit: Emit = nullEmit): P
       emit,
     });
   }
-  await k8s.setMonitoringLabel(namespace, { context, wanted: true });
   const port = config.MONITOR_PORTS[1];
   const previousPid = extra.grafana_pid;
   if (isTruthy(previousPid))
-    stopPortForward(toInt(previousPid), { namespace: k8s.MONITORING_NAMESPACE });
+    await stopPortForward(toInt(previousPid), { namespace: k8s.MONITORING_NAMESPACE });
   // Public workspaces use the Ingress, so several of them can share a cluster without
   // competing for this box's single localhost:5050 forward.
   const pid = publicUrl
@@ -367,7 +383,7 @@ export async function detachKubernetes(target: string, emit: Emit = nullEmit): P
     // The Grafana forward lives in the SHARED monitoring namespace, not the workspace's —
     // so that is the identity to prove before signalling a pid. `toInt(pid)`, which
     // rejects `0x10` and `1e3` rather than reading them as numbers.
-    stopPortForward(toInt(pid), { namespace: k8s.MONITORING_NAMESPACE });
+    await stopPortForward(toInt(pid), { namespace: k8s.MONITORING_NAMESPACE });
   }
   await updateMeta(m.name, (meta) => {
     const extra = bagOf(meta.extra);

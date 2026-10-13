@@ -153,10 +153,14 @@ function places({ inventory = false } = {}) {
     const lands = emptyContextRow();
     const known = !!lands && lands.where !== "elsewhere";
     const makes = !lands && k && k.can_provision;
+    // With no saved default, where it lands is what the probe says -- and until the probe
+    // has answered that is unknown, not "Unavailable".
+    const reading = !lands && !ctx.KUBE_READ;
     const card = { key: "k8s-default", runtime: "kubernetes", context: "", ico: lands && lands.where === "aws" ? "aws" : "k8s",
       nm: "Kubernetes", wh: known ? `This server's default · ${clusterLabel(lands)}` : "This server's default cluster",
-      pill: known || makes ? ["ok", "Ready"] : ["off", "Unavailable"],
+      pill: known || makes ? ["ok", "Ready"] : reading ? ["off", "Reading…"] : ["off", "Unavailable"],
       ds: known || makes ? "Choosing a cluster is kept to admins on this server, so this uses its default."
+        : reading ? "Reading this server's Kubernetes…"
         : "Choosing a cluster is kept to admins on this server, and its default is set from the command line.",
       facts: [], usable: !!(known || makes) };
     if (lands && lands.where === "aws") aws.push(card); else here.push(card);
@@ -164,7 +168,24 @@ function places({ inventory = false } = {}) {
   }
   const locals = KUBE_CLUSTERS.filter((c) => c.where === "local");
   for (const c of locals) here.push(clusterCard(c));
-  if (!locals.length) {
+  // The Clusters page draws before its list arrives, and a list it could not read is no list:
+  // neither is "no cluster on this machine" -- the card said so about a running k3s.
+  const unread = inventory && !locals.length && !ctx.CLUSTERS;
+  // A list that WAS read but from a kubeconfig the server could not open is no list
+  // either: a `chmod 000` on a running k3s's config was shown as "No cluster on this
+  // machine, and kind is not installed", while the server had sent the reason.
+  const unreadable = !locals.length && ctx.CLUSTERS && ctx.CLUSTERS.unreadable;
+  if (unreadable) {
+    here.push({ key: "k8s-none", runtime: "kubernetes", context: "", ico: "k8s", nm: "Kubernetes", wh: "On this machine",
+      pill: ["warn", "Unreadable"], facts: [], usable: false,
+      ds: `This machine's kubeconfig could not be read: ${unreadable}` });
+  } else if (unread) {
+    const why = ctx.CLSTATE && ctx.CLSTATE.listError;
+    here.push({ key: "k8s-none", runtime: "kubernetes", context: "", ico: "k8s", nm: "Kubernetes", wh: "On this machine",
+      pill: why ? ["warn", "Not answering"] : ["off", "Reading…"], facts: [], usable: false,
+      ds: why ? `This machine's Kubernetes contexts could not be read: ${why}. houston doctor says why.`
+        : "Reading this machine's Kubernetes contexts…" });
+  } else if (!locals.length) {
     // AN EMPTY CONTEXT IS OFFERED ONLY WHEN IT CAN BE SAID WHERE IT GOES. The server
     // resolves "" to the box default first, so with a default set -- a remote cluster
     // the GUI does not show, or an EKS one -- "a local cluster will be created" would be
@@ -175,9 +196,12 @@ function places({ inventory = false } = {}) {
         pill: ["off", "Not set up yet"], facts: [roomFor("kubernetes")].filter(Boolean), usable: true,
         ds: "Houston sets up a local cluster the first time you create a Kubernetes workspace: about 3 minutes and 600 MB of memory." });
     } else {
+      // Whether kind could make one is the probe's answer; before it, nothing is known.
+      const reading = !def && !ctx.KUBE_READ;
       here.push({ key: "k8s-none", runtime: "kubernetes", context: "", ico: "k8s", nm: "Kubernetes", wh: "On this machine",
-        pill: ["off", k === null ? "Not checked" : "Unavailable"], facts: [], usable: false,
+        pill: ["off", reading ? "Reading…" : k === null ? "Not checked" : "Unavailable"], facts: [], usable: false,
         ds: def ? "No cluster on this machine. This server's default cluster is set elsewhere, so a local one is not made from here."
+          : reading ? "Reading this machine's Kubernetes…"
           : k && k.tools_ready ? "No cluster on this machine, and kind is not installed to make one. houston doctor shows what is missing."
           : "Needs kubectl and helm on the server. houston doctor shows what is missing." });
     }
@@ -255,9 +279,11 @@ function renderDestinations() {
       ctx.el("code", {}, "--context"), ")."));
   }
   applyDest();
-  // What an EKS card costs comes from the overview; ask for it once if nobody has yet.
+  // What a cluster card says -- running, and for EKS what it costs -- comes from the
+  // overview; ask for it once if a card is still without it. Not only for EKS: a local
+  // k3s card said "Reading…" for as long as the dialog stayed open.
   if (!cardsAskedForOverview && ctx.loadClusterOverview && !(ctx.CLSTATE && ctx.CLSTATE.overview)
-      && KUBE_CLUSTERS.some((c) => c.where === "aws")) {
+      && KUBE_CLUSTERS.length) {
     cardsAskedForOverview = true;
     ctx.loadClusterOverview().then((ov) => { if (ov && CREATE_STEP === 1 && ctx.$("#create-dialog").open) renderDestinations(); }).catch(() => {});
   }
@@ -336,6 +362,7 @@ function setCreateStep(n, back = false) {
   show("#create-submit", n === 2);
   show("#create-open-ws", false);
   show("#create-open-rc", false);
+  show("#create-stop", false);         // streamJob offers it once the job says it may stop
   const hint = ctx.$("#create-foot-hint");
   const p = destFor(DEST);
   if (n === 1) hint.textContent = "Next: the Rocket.Chat version and what to set up.";
@@ -348,6 +375,9 @@ function setCreateStep(n, back = false) {
     if (p && p.ico === "aws" && p.cost) sum.append(` · ~$${p.cost.toFixed(2)}/day, shared`);
     renderRuntimeAxes();
     syncHttpsFields();
+    // The place decides which presets it can take: one with no Kubernetes adapter is not
+    // offered on Kubernetes.
+    ctx.renderOptions();
   }
   const focus = n === 2 ? ctx.$("#create-form").version : sec && sec.querySelector(".wzd-q");
   if (focus) focus.focus({ preventScroll: true });
@@ -356,7 +386,7 @@ function setCreateStep(n, back = false) {
 
 function createSummaryLine() {
   const f = ctx.$("#create-form");
-  return [f.version.value.trim(), f.preset.value || "default", whereText(destFor(DEST))].filter(Boolean).join(" · ");
+  return [f.version.value.trim(), ctx.optionsPresetText() || "default", whereText(destFor(DEST))].filter(Boolean).join(" · ");
 }
 
 // The arrangement control, for the chosen runtime, and the fields that follow it.
@@ -566,14 +596,6 @@ function syncDeploymentFields() {
   ctx.$("#replicas-row").hidden = ctx.$("#deployment-value").value === "monolith";
 }
 
-function renderPresetParams() {
-  const p = ctx.PRESETS.find((x) => x.name === ctx.$("#preset-select").value);
-  ctx.$("#preset-desc").textContent = p ? p.description : "";
-  const box = ctx.$("#preset-params"); box.innerHTML = "";
-  for (const [key, help] of Object.entries((p && p.params_help) || {})) {
-    box.append(ctx.el("label", { class: "f" }, `--set ${key}`, ctx.el("input", { name: "set:" + key, placeholder: help })));
-  }
-}
 // ---- HTTPS: certificate check ------------------------------------------------
 const TLS_LABEL = {
   local: "local CA (run trust-ca)",
@@ -691,24 +713,26 @@ async function submitCreate() {
   const f = ctx.$("#create-form");
   const req = {
     version: f.version.value.trim(),
-    preset: f.preset.value,
     port: f.port.value ? parseInt(f.port.value, 10) : 0,
     monitor: f.monitor.checked, seed: f.seed.checked, wait: f.wait.checked,
     // Always sent, both of them: omitting `runtime` would let the service's default
     // decide, which would silently stop matching what this dialog showed.
     runtime: f.runtime ? f.runtime.value : "docker",
     deployment: f.deployment ? f.deployment.value : "",
-    params: {},
+    // The presets, each one's settings and the license (options.js).
+    ...ctx.optionsRequest(),
   };
   if (f.replicas && !ctx.$("#replicas-row").hidden && f.replicas.value) {
     req.replicas = parseInt(f.replicas.value, 10);
   }
   if (f.mongo_operator && f.mongo_operator.checked) req.mongo_operator = true;
   if (f.seed.checked && f.seed_profile) req.seed_profile = f.seed_profile.value;
-  if (!req.version) { ctx.toast("version is required"); f.version.focus(); return; }
-  for (const inp of f.querySelectorAll("input[name^='set:']")) {
-    if (inp.value.trim()) req.params[inp.name.slice(4)] = inp.value.trim();
+  if (f.seed.checked) {
+    const selection = ctx.seedRequest(f, "seed_"); if (selection === null) return;
+    req.seed_scenarios = selection.scenarios;
+    if (selection.history_days !== undefined) req.seed_history_days = selection.history_days;
   }
+  if (!req.version) { ctx.toast("version is required"); f.version.focus(); return; }
   for (const k of ["name", "reg_token", "mongo", "rc_image", "bind", "root_url", "context"]) {
     if (f[k] && f[k].value.trim()) req[k] = f[k].value.trim();
   }
@@ -722,7 +746,9 @@ async function submitCreate() {
       + `channels, messages and uploads — then rebuilds it.\n\nContinue?`)) return;
     req.fresh = true;
   }
-  const label = req.name || `rc-${req.version.replace(/\./gu, "-")}`;
+  // Until the server says which name it settled on (`named`): it derives one from the
+  // version and presets, and puts the account in front.
+  let label = req.name || req.version;
   const where = whereText(destFor(DEST));
   setCreateStep(3);
   const title = ctx.$("#create-progress-title");
@@ -731,9 +757,20 @@ async function submitCreate() {
   ctx.$("#create-result").innerHTML = "";
   try {
     const { job_id } = await ctx.api("/api/repros", { method: "POST", body: JSON.stringify(req) });
-    ctx.streamJob(job_id, `Creating ${req.version} (${req.preset})`, (r) => renderCreateDone(r, label),
-      { list: ctx.$("#create-progress"), title, dialog: ctx.$("#create-dialog"),
-        failed: () => { title.textContent = `${label} could not be created`; } });
+    // The job's title is what its toasts say once the dialog is closed: the workspace, as
+    // Activity names it, not the version asked for.
+    ctx.streamJob(job_id, `Creating ${label}`, (r) => renderCreateDone(r, label),
+      { list: ctx.$("#create-progress"), title, dialog: ctx.$("#create-dialog"), stop: ctx.$("#create-stop"),
+        named: (name) => {
+          label = name;
+          title.textContent = `Creating ${label} on ${where}`;
+          ctx.JOB.title = `Creating ${label}`;
+        },
+        failed: (data) => {
+          title.textContent = data && data.kind === "Stopped" ? `${label} was stopped` : `${label} could not be created`;
+          // It no longer "keeps starting": the job has ended.
+          ctx.$("#create-foot-hint").textContent = "";
+        } });
   } catch (e) {
     ctx.toast(e.message);
     setCreateStep(2, true);
@@ -796,9 +833,6 @@ ctx.$("#create-form").addEventListener("keydown", (ev) => {
   if (ev.key !== "Enter" || ev.target.tagName === "TEXTAREA" || ev.target.tagName === "BUTTON") return;
   if (CREATE_STEP === 1) { ev.preventDefault(); createNext(); }
 });
-ctx.$("#create-form").preset.addEventListener("change", () => {
-  if (CREATE_STEP === 2) ctx.$("#create-foot-hint").textContent = createSummaryLine();
-});
 ctx.$("#create-form").version.addEventListener("input", () => {
   if (CREATE_STEP === 2) ctx.$("#create-foot-hint").textContent = createSummaryLine();
 });
@@ -845,12 +879,12 @@ Object.defineProperties(ctx, {
   "syncClusterNote": { enumerable: true, get: () => syncClusterNote },
   "syncAdvancedForRuntime": { enumerable: true, get: () => syncAdvancedForRuntime },
   "syncDeploymentFields": { enumerable: true, get: () => syncDeploymentFields },
-  "renderPresetParams": { enumerable: true, get: () => renderPresetParams },
   "TLS_LABEL": { enumerable: true, get: () => TLS_LABEL },
   "doTlsStatus": { enumerable: true, get: () => doTlsStatus },
   "HTTPS_MODE_HINT": { enumerable: true, get: () => HTTPS_MODE_HINT },
   "syncHttpsFields": { enumerable: true, get: () => syncHttpsFields },
   "applyHttpsToRequest": { enumerable: true, get: () => applyHttpsToRequest },
   "submitCreate": { enumerable: true, get: () => submitCreate },
+  "createSummaryLine": { enumerable: true, get: () => createSummaryLine },
 });
-export { RUNTIMES, RUNTIME_LABEL, runtimeLabel, DEPLOYMENT_LABEL, DEPLOYMENT_NOTE, fmtGb, renderRuntimeAxes, pickRuntime, pickDeployment, ADV_GONE_LABEL, KUBE_CLUSTERS, ALL_KUBE_CLUSTERS, MACHINE_ROOM, clusterLabel, places, placeBody, renderDestinations, pickDest, startCreate, setCreateStep, runsOnThisMachine, syncLocalCaOption, syncClusterNote, syncAdvancedForRuntime, syncDeploymentFields, renderPresetParams, TLS_LABEL, doTlsStatus, HTTPS_MODE_HINT, syncHttpsFields, applyHttpsToRequest, submitCreate };
+export { RUNTIMES, RUNTIME_LABEL, runtimeLabel, DEPLOYMENT_LABEL, DEPLOYMENT_NOTE, fmtGb, renderRuntimeAxes, pickRuntime, pickDeployment, ADV_GONE_LABEL, KUBE_CLUSTERS, ALL_KUBE_CLUSTERS, MACHINE_ROOM, clusterLabel, places, placeBody, renderDestinations, pickDest, startCreate, setCreateStep, runsOnThisMachine, syncLocalCaOption, syncClusterNote, syncAdvancedForRuntime, syncDeploymentFields, TLS_LABEL, doTlsStatus, HTTPS_MODE_HINT, syncHttpsFields, applyHttpsToRequest, submitCreate };

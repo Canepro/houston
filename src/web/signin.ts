@@ -35,6 +35,48 @@ export const STATES: Readonly<Record<string, SigninState>> = Object.freeze({
     'There are no accounts on this server yet. Create one on the host: ' +
       'houston users add &lt;name&gt;',
   ],
+  // An Okta sign-in that did not complete: `sso-` and the reason code `core/sso` refused with.
+  'sso-expired': ['warn', 'That Okta sign-in expired or was already used. Start again.'],
+  'sso-denied': ['bad', 'Okta did not sign you in.'],
+  'sso-down': [
+    'bad',
+    'Okta did not answer. Try again in a moment, or sign in with your houston password.',
+  ],
+  'sso-provider': [
+    'bad',
+    'Okta refused the sign-in. Try again, or sign in with your houston password.',
+  ],
+  'sso-token': ['bad', 'The answer from Okta could not be verified, so it was not trusted.'],
+  'sso-email': ['bad', 'Your Okta account has no verified email address.'],
+  'sso-domain': ['bad', 'Your Okta email address is not one this server accepts.'],
+  'sso-disabled': ['bad', 'Okta sign-in is turned off for your account here. Ask an admin.'],
+  'sso-gone': ['bad', 'Your houston account no longer exists. Ask an admin.'],
+  'sso-admin': [
+    'warn',
+    'Your houston account is an admin, so an admin approves its first Okta sign-in, on ' +
+      'the host: houston users link-sso &lt;your name&gt;',
+  ],
+  'sso-taken': ['bad', 'That houston account is linked to a different Okta user.'],
+  'sso-name': [
+    'bad',
+    'Your Okta username does not make a valid houston account name. Ask an admin for one.',
+  ],
+  'sso-noaccount': [
+    'bad',
+    'There is no houston account for you, and this server does not create them from Okta. ' +
+      'Ask an admin.',
+  ],
+  'sso-noadmin': ['bad', 'This server has no admin yet, so it cannot create accounts from Okta.'],
+  'sso-store': [
+    'bad',
+    'Okta sign-in is unavailable here right now. Sign in with your houston password, or ask ' +
+      'an admin.',
+  ],
+  'sso-off': ['bad', 'Okta sign-in is not available on this server.'],
+  'sso-other': [
+    'warn',
+    'You are signed in to houston as someone else. Sign out first, then sign in with Okta.',
+  ],
 });
 
 /** HTML-escape `value`: `&`, `<`, `>`, `"` and `'` (as `&#x27;`). */
@@ -53,10 +95,21 @@ export function themeAttr(value: string | null | undefined): string {
   return selected === 'dark' || selected === 'light' ? ` data-theme="${selected}"` : '';
 }
 
-/** Reduce a post-sign-in destination to one same-origin absolute path. */
+/**
+ * Reduce a post-sign-in destination to one same-origin absolute path.
+ *
+ * No control character either: a browser drops a tab, CR or LF from a URL before parsing it,
+ * so the `Location: /\t/evil.example` this let through was `//evil.example`, another site --
+ * reached after a real sign-in, with a link to this server as the bait.
+ */
 export function safeNext(value: string | null | undefined): string {
   const destination = stripText(value || '/');
-  if (!destination.startsWith('/') || destination.startsWith('//') || destination.includes('\\')) {
+  if (
+    !destination.startsWith('/') ||
+    destination.startsWith('//') ||
+    destination.includes('\\') ||
+    [...destination].some((char) => char < ' ' || char === '\x7f')
+  ) {
     return '/';
   }
   return destination;
@@ -69,6 +122,8 @@ export interface SigninPageOptions {
   secure?: boolean;
   retryAfter?: number;
   theme?: string;
+  /** Offer "Sign in with Okta". False renders the page exactly as it was before Okta. */
+  okta?: boolean;
 }
 
 /** Render the complete sign-in document. Pure: no request object is needed. */
@@ -79,6 +134,7 @@ export function page({
   secure = true,
   retryAfter = 0,
   theme = '',
+  okta = false,
 }: SigninPageOptions = {}): string {
   const state = Object.hasOwn(STATES, error) ? (STATES[error] ?? ['', '']) : ['', ''];
   const [kind, message] = state;
@@ -94,6 +150,11 @@ export function page({
   const where = escapeHtml(server || 'this host');
   const next = escapeHtml(safeNext(nextUrl));
   const version = escapeHtml(getHoustonVersion());
+  const sso = okta
+    ? `<a class="btn primary signin-okta" href="/signin?sso=1&amp;next=` +
+      `${escapeHtml(encodeURIComponent(safeNext(nextUrl)))}">Sign in with Okta</a>\n` +
+      '  <p class="signin-foot">or with your houston password</p>\n  '
+    : '';
 
   return `<!doctype html>
 <html lang="en"${themeAttr(theme)}>
@@ -109,7 +170,7 @@ ${refresh}
   <div class="brand"><span class="dollar">$</span> houston</div>
   ${warning}
   ${banner}
-  <form method="post" action="/signin" class="signin-form">
+  ${sso}<form method="post" action="/signin" class="signin-form">
     <input type="hidden" name="next" value="${next}">
     <label for="u">Name</label>
     <input id="u" name="user" autocomplete="username" autocapitalize="none"

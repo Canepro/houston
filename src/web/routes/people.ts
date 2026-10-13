@@ -4,6 +4,7 @@ import type { FastifyInstance } from 'fastify';
 
 import * as audit from '../../core/audit';
 import * as sessions from '../../core/sessions';
+import { linked } from '../../core/sso-identities';
 import { ValidationError } from '../../lib/errors';
 import { orText, queryInt, queryText, requestBody } from '../route-deps';
 import type * as UsersNS from '../../core/users';
@@ -23,9 +24,11 @@ function usersModule(): typeof UsersNS {
 export function register(app: FastifyInstance): void {
   app.get('/api/users', async () => {
     const users = usersModule();
+    const okta = linked();
     return {
       users: users.listUsers().map((user) => {
         const live = sessions.listFor(user.name);
+        const email = okta.get(user.name)?.email;
         return {
           name: user.name,
           role: users.roleOf(user.name),
@@ -33,6 +36,7 @@ export function register(app: FastifyInstance): void {
           created_at: user.createdAt,
           sessions: live.length,
           last_seen: Math.max(0, ...live.map((item) => item.lastSeen)),
+          ...(email === undefined ? {} : { sso_email: email }),
         };
       }),
       roles: [...users.ROLES],

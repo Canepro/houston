@@ -80,6 +80,8 @@ export const CREATE_UNFINISHED = 'create_unfinished';
 export const RC_METRICS_ON = 'rc_metrics_on';
 export const MONGO_PROFILER_ON = 'mongo_profiler_on';
 export const EMAIL_2FA_OFF = 'email_2fa_off';
+/** One of `config.E2EE_ROOM_DEFAULT_SETTINGS`, named in `detail.setting`, off for a seed. */
+export const E2EE_DEFAULT_OFF = 'e2ee_default_off';
 export const DATABASE_DROPPED = 'database_dropped';
 export const CLUSTER_UNFINISHED = 'cluster_unfinished';
 
@@ -98,6 +100,7 @@ export const KINDS: readonly string[] = Object.freeze([
   EMAIL_2FA_OFF,
   DATABASE_DROPPED,
   CLUSTER_UNFINISHED,
+  E2EE_DEFAULT_OFF,
 ]);
 
 /** Named once so the seed path and the repair cannot disagree about which key they mean. */
@@ -130,8 +133,8 @@ export const ADVISORY: readonly string[] = Object.freeze([
  * what tells that box.
  *
  * Each one, and why it goes with the workspace:
- *   RATE_LIMITER_OFF, EMAIL_2FA_OFF, RC_METRICS_ON, MONGO_PROFILER_ON -- a setting held in
- *       the workspace's database, which the deletion took with its volume.
+ *   RATE_LIMITER_OFF, EMAIL_2FA_OFF, RC_METRICS_ON, MONGO_PROFILER_ON, E2EE_DEFAULT_OFF -- a
+ *       setting held in the workspace's database, which the deletion took with its volume.
  *   ROCKETCHAT_STOPPED, CONSTRAINTS_APPLIED -- the state of a container, and the containers
  *       are gone.
  *   BENCH_WORKSPACE -- its repair IS deleting the workspace, which has just happened.
@@ -148,6 +151,7 @@ export const WORKSPACE_KINDS: readonly string[] = Object.freeze([
   MONGO_PROFILER_ON,
   EMAIL_2FA_OFF,
   DATABASE_DROPPED,
+  E2EE_DEFAULT_OFF,
 ]);
 
 /**
@@ -166,7 +170,7 @@ export interface Entry {
   kind: string;
   workspace: string;
   pid: number;
-  /** The owning process's start time, as /proc reports it. */
+  /** The owning process's start time, as /proc reports it; '' off Linux. */
   started: string;
   at: string;
   detail: Record<string, unknown>;
@@ -186,8 +190,27 @@ export function journalDir(): string {
  *
  * Returns '' for "running, but the start time could not be read", which is a different
  * answer from null and is what `ownerAlive` leans on.
+ *
+ * Off Linux there is no /proc, and reading it answered null -- "not running" -- for every
+ * pid, this process's own included: on a Mac a CLI cluster build in another terminal read as
+ * "failed part-way", and `serve`'s startup recovery would undo work still in progress. There
+ * the answer is liveness alone, '' for a pid that exists: kill(0) succeeds, or is refused for
+ * someone else's process.
+ *
+ * ponytail: pid only, so a recycled pid keeps a dead owner's note alive (left alone, never
+ * undone). `ps -o lstart=` would add the start time, at the cost of an async `record`.
  */
 export function procStarted(pid: number): string | null {
+  if (process.platform !== 'linux') {
+    // kill(0) and kill(-n) address process GROUPS, which are always "running".
+    if (!(Math.trunc(pid) > 0)) return null;
+    try {
+      process.kill(Math.trunc(pid), 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EPERM') return null;
+    }
+    return '';
+  }
   let raw: string;
   try {
     raw = fs.readFileSync(`/proc/${Math.trunc(pid)}/stat`, 'utf8');
@@ -453,9 +476,12 @@ export function describe(entry: Entry): string {
   const w = `'${entry.workspace}'`;
   switch (entry.kind) {
     case RATE_LIMITER_OFF:
+      // A seed and a settings import turn it off too, and say so; a note without a
+      // purpose is a load test's, as every earlier one was taken to be.
       return (
-        `${w}: the API rate limiter was turned off for a performance run at ` +
-        `${entry.at} and never turned back on`
+        `${w}: the API rate limiter was turned off for ` +
+        `${String(entry.detail.purpose ?? 'a performance run')} at ${entry.at} and never ` +
+        'turned back on'
       );
     case ROCKETCHAT_STOPPED:
       return `${w}: Rocket.Chat was stopped for a backup at ${entry.at} and never started again`;
@@ -510,6 +536,12 @@ export function describe(entry: Entry): string {
         `${w}: email two-factor authentication was turned off for a seed at ` +
         `${entry.at} and never turned back on — seeded users are loginable and real ` +
         'ones may not be'
+      );
+    case E2EE_DEFAULT_OFF:
+      return (
+        `${w}: ${String(entry.detail.setting ?? 'an end-to-end encryption default')} was ` +
+        `turned off for a seed at ${entry.at} and never turned back on — new rooms it ` +
+        'covers are not created encrypted'
       );
     case RC_METRICS_ON:
       return (
@@ -670,7 +702,7 @@ export function pendingSeed(workspace: string): Record<string, unknown> {
   for (const entry of abandoned()) {
     if (entry.kind === CREATE_UNFINISHED && entry.workspace === workspace) {
       const seed = entry.detail.seed;
-      if (seed !== undefined && seed !== null && seed !== '') return { ...entry.detail };
+      if (seed === true || (typeof seed === 'string' && seed !== '')) return { ...entry.detail };
     }
   }
   return {};

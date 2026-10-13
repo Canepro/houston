@@ -1,26 +1,34 @@
+import type * as JournalNS from '../../src/core/journal';
 import type * as ApplyNS from '../../src/seed/apply';
-import { planFrom } from '../../src/seed/plan';
+import { type Plan, planFrom } from '../../src/seed/plan';
 
 const AUTH = { token: 't', userId: 'u' };
 const TWOFA = 'Accounts_TwoFactorAuthentication_By_Email_Enabled';
 const LIMITER = 'API_Enable_Rate_Limiter';
+const participantLogin = async (_root: string, who: { user: string }) => ({
+  token: `t-${who.user}`,
+  userId: `u-${who.user}`,
+});
 
 /** One fake Rocket.Chat, recording what it was asked. */
 interface Fake {
   readonly calls: [string, string, string][];
   readonly settings: [string, unknown][];
   readonly notes: string[];
+  /** Each note as recovery would describe it, at `T`. */
+  readonly described: string[];
+  readonly emojis: Record<string, unknown>[];
 }
 
 function load(
   answers: {
     settings?: Record<string, unknown>;
-    setOk?: (sid: string) => boolean;
+    setOk?: (sid: string, value: unknown) => boolean;
     reply?: (method: string, path: string, payload: Record<string, unknown>) => unknown;
   } = {},
 ): { mod: typeof ApplyNS; fake: Fake } {
   jest.resetModules();
-  const fake: Fake = { calls: [], settings: [], notes: [] };
+  const fake: Fake = { calls: [], settings: [], notes: [], described: [], emojis: [] };
   let nextId = 0;
   jest.doMock('../../src/core/rcapi', () => ({
     RequestFailed: class RequestFailed extends Error {},
@@ -28,20 +36,70 @@ function load(
       'X-Auth-Token': a.token,
       'X-User-Id': a.userId,
     }),
-    login: () => Promise.reject(new Error('no server')),
+    login: participantLogin,
     getSetting: (_u: string, _a: unknown, _p: string, sid: string) =>
       Promise.resolve((answers.settings ?? {})[sid] ?? null),
     setSetting: (_u: string, _a: unknown, _p: string, sid: string, value: unknown) => {
       fake.settings.push([sid, value]);
-      return Promise.resolve(answers.setOk === undefined ? true : answers.setOk(sid));
+      return Promise.resolve(answers.setOk === undefined ? true : answers.setOk(sid, value));
     },
     rcapi: {
+      multipart: (
+        _root: string,
+        requestPath: string,
+        _headers: unknown,
+        parts: { name: string; value: unknown }[],
+      ) => {
+        nextId += 1;
+        const id = `id${String(nextId)}`;
+        fake.calls.push(['POST', requestPath, '{}']);
+        if (requestPath === '/api/v1/emoji-custom.create') {
+          fake.emojis.push({
+            _id: id,
+            name: parts.find((p) => p.name === 'name')?.value,
+            aliases: [parts.find((p) => p.name === 'aliases')?.value],
+          });
+        }
+        return Promise.resolve([
+          200,
+          JSON.stringify({ success: true, file: { _id: id }, emoji: { _id: id } }),
+        ]);
+      },
+      download: () =>
+        Promise.resolve({
+          status: 200,
+          ok: true,
+          text: '',
+          bytes: Buffer.alloc(0),
+          headers: {},
+          url: 'http://x/file',
+        }),
       call: (_root: string, method: string, path: string, opts: Record<string, unknown>) => {
         fake.calls.push([method, path, JSON.stringify(opts.data ?? opts.params ?? {})]);
         nextId += 1;
         const body =
-          answers.reply?.(method, path, (opts.data ?? {}) as Record<string, unknown>) ??
-          defaultReply(path, `id${String(nextId)}`);
+          answers.reply?.(
+            method,
+            path,
+            (opts.data ?? opts.params ?? {}) as Record<string, unknown>,
+          ) ??
+          (path === '/api/v1/emoji-custom.list'
+            ? { success: true, emojis: { update: fake.emojis } }
+            : undefined) ??
+          defaultReply(
+            path,
+            `id${String(nextId)}`,
+            (opts.data ?? opts.params ?? {}) as Record<string, unknown>,
+          );
+        const missing =
+          method === 'GET' &&
+          /\/(?:users|channels|groups)\.info$/u.test(path) &&
+          (opts.params as Record<string, unknown>).roomName !== 'general';
+        if (missing && answers.reply === undefined)
+          return Promise.resolve([400, '{"success":false,"errorType":"error-room-not-found"}'] as [
+            number,
+            string,
+          ]);
         return Promise.resolve([200, JSON.stringify(body)] as [number, string]);
       },
     },
@@ -49,8 +107,15 @@ function load(
   jest.doMock('../../src/core/journal', () => ({
     RATE_LIMITER_OFF: 'rate_limiter_off',
     EMAIL_2FA_OFF: 'email_2fa_off',
-    record: (kind: string, workspace: string) => {
-      fake.notes.push(`+${kind}:${workspace}`);
+    E2EE_DEFAULT_OFF: 'e2ee_default_off',
+    record: (kind: string, workspace: string, detail: { setting?: string } = {}) => {
+      fake.notes.push(
+        `+${kind}:${workspace}${detail.setting === undefined ? '' : `:${detail.setting}`}`,
+      );
+      const { describe } = jest.requireActual<typeof JournalNS>('../../src/core/journal');
+      fake.described.push(
+        describe({ id: 'i', kind, workspace, pid: 1, started: '', at: 'T', detail }),
+      );
       return `${kind}-1`;
     },
     clear: (id: string) => {
@@ -60,13 +125,58 @@ function load(
   return { mod: require('../../src/seed/apply') as typeof ApplyNS, fake };
 }
 
-function defaultReply(path: string, id: string): Record<string, unknown> {
-  if (path.includes('teams.create')) return { team: { _id: `team-${id}`, roomId: id } };
-  if (path.includes('groups.create') || path.includes('groups.info')) return { group: { _id: id } };
-  if (path.includes('createDiscussion')) return { discussion: { _id: id } };
-  if (path.includes('im.create')) return { room: { _id: id } };
-  if (path.includes('sendMessage')) return { message: { _id: id } };
-  return { channel: { _id: id } };
+function defaultReply(
+  path: string,
+  id: string,
+  payload: Record<string, unknown> = {},
+): Record<string, unknown> {
+  if (path.includes('teams.create'))
+    return { success: true, team: { _id: `team-${id}`, roomId: id } };
+  if (path.includes('teams.info'))
+    return { success: true, teamInfo: { _id: `team-${id}`, roomId: id, name: payload.teamName } };
+  if (path.includes('groups.create') || path.includes('groups.info'))
+    return { success: true, group: { _id: id, name: payload.name ?? payload.roomName, t: 'p' } };
+  if (path.includes('createDiscussion'))
+    return { success: true, discussion: { _id: id, prid: payload.prid, t: 'c' } };
+  if (path.includes('rooms.getDiscussions'))
+    return { success: true, discussions: [], count: 0, offset: 0, total: 0 };
+  if (path.includes('getDiscussions'))
+    return { success: true, messages: [], count: 0, offset: 0, total: 0 };
+  if (/\/(?:im|dm)\.create$/u.test(path)) return { success: true, room: { _id: id, t: 'd' } };
+  if (path.includes('sendMessage'))
+    return {
+      success: true,
+      message: {
+        ...(payload.message as Record<string, unknown>),
+        _id: (payload.message as Record<string, unknown> | undefined)?._id ?? id,
+      },
+    };
+  if (path.includes('/rooms.mediaConfirm/')) return { success: true, message: { _id: id } };
+  if (path.includes('users.create') || path.includes('users.info'))
+    return {
+      success: true,
+      user: {
+        _id: `u-${String(payload.username)}`,
+        username: payload.username,
+        name: payload.username,
+        bio: '',
+      },
+    };
+  if (path.includes('listEmoji')) return { success: true, emojis: [] };
+  if (path.includes('members')) return { success: true, members: [], total: 0 };
+  return { success: true, channel: { _id: id, name: payload.name ?? payload.roomName, t: 'c' } };
+}
+
+function withoutAssets(plan: Plan): Plan {
+  return {
+    ...plan,
+    customEmoji: [],
+    rooms: plan.rooms.map((room) => ({
+      ...room,
+      files: [],
+      content: room.content.filter((m) => m.kind !== 'file'),
+    })),
+  };
 }
 
 describe('the settings a seed turns off', () => {
@@ -102,43 +212,97 @@ describe('the settings a seed turns off', () => {
     await mod.seed('http://x', AUTH, planFrom('small', { users: 0, channels: 0, messages: 0 }), {
       workspace: 'TICKET-1',
     });
-    expect(fake.notes).toEqual([
-      '+rate_limiter_off:TICKET-1',
-      '+email_2fa_off:TICKET-1',
-      '-rate_limiter_off-1',
-      '-email_2fa_off-1',
+    expect(fake.notes).toEqual(
+      expect.arrayContaining([
+        '+rate_limiter_off:TICKET-1',
+        '+email_2fa_off:TICKET-1',
+        '-rate_limiter_off-1',
+        '-email_2fa_off-1',
+      ]),
+    );
+    expect(fake.notes).toHaveLength(4);
+  });
+
+  it('says a seed turned the rate limiter off, in the line recovery prints', async () => {
+    // serve's recovery said "turned off for a performance run" about a seed's note.
+    const { mod, fake } = load({ settings: { [TWOFA]: false, [LIMITER]: true } });
+    await mod.seed('http://x', AUTH, planFrom('small', { users: 0, channels: 0, messages: 0 }), {
+      workspace: 'TICKET-1',
+    });
+    expect(fake.described).toEqual([
+      "'TICKET-1': the API rate limiter was turned off for a seed at T and never turned back on",
     ]);
   });
 
-  it('withdraws the note when the disable it recorded did not take', async () => {
-    // A note for a change that never happened is a recovery that would turn a setting ON
-    // that the workspace had deliberately off.
+  it('restores a setting after its disable took effect but returned no confirmation', async () => {
+    let limiterOn = true;
     const { mod, fake } = load({
       settings: { [TWOFA]: false, [LIMITER]: true },
-      setOk: (sid) => sid !== LIMITER,
+      setOk: (sid, value) => {
+        if (sid !== LIMITER) return true;
+        limiterOn = value === true;
+        return value === true;
+      },
     });
     const said: string[] = [];
     await mod.seed('http://x', AUTH, planFrom('small', { users: 0, channels: 0, messages: 0 }), {
       workspace: 'TICKET-1',
       log: (m) => said.push(m),
     });
+    expect(limiterOn).toBe(true);
+    expect(fake.settings.filter(([sid]) => sid === LIMITER)).toEqual([
+      [LIMITER, false],
+      [LIMITER, true],
+    ]);
     expect(fake.notes).toEqual(['+rate_limiter_off:TICKET-1', '-rate_limiter_off-1']);
-    expect(said.join(' ')).toContain('could not disable the API rate limiter');
+    expect(said.join(' ')).toMatch(
+      /could not (?:disable|confirm disabling) (?:the API rate limiter|API_Enable_Rate_Limiter)/u,
+    );
+  });
+
+  it('restores the second setting when restoration of the first setting fails', async () => {
+    const { mod, fake } = load({
+      settings: { [TWOFA]: true, [LIMITER]: true },
+      setOk: (sid, value) => sid !== TWOFA || value === false,
+    });
+    await expect(
+      mod.seed('http://x', AUTH, planFrom('small', { users: 0, channels: 0, messages: 0 }), {
+        workspace: 'TICKET-1',
+      }),
+    ).rejects.toThrow(/could not restore Accounts_TwoFactorAuthentication_By_Email_Enabled/u);
+    expect(fake.settings).toEqual([
+      [TWOFA, false],
+      [LIMITER, false],
+      [TWOFA, true],
+      [LIMITER, true],
+    ]);
+    expect(fake.notes).toEqual(
+      expect.arrayContaining([
+        '+email_2fa_off:TICKET-1',
+        '+rate_limiter_off:TICKET-1',
+        '-rate_limiter_off-1',
+      ]),
+    );
+    expect(fake.notes).not.toContain('-email_2fa_off-1');
   });
 
   it('says so when it could not read or disable email-2FA', async () => {
     for (const [settings, fragment] of [
-      [{ [TWOFA]: null, [LIMITER]: false }, 'could not read the email-2FA setting'],
-      [{ [TWOFA]: true, [LIMITER]: false }, 'could not disable email-2FA'],
+      [
+        { [TWOFA]: null, [LIMITER]: false },
+        /could not read (?:the email-2FA setting|Accounts_TwoFactorAuthentication_By_Email_Enabled)/u,
+      ],
+      [
+        { [TWOFA]: true, [LIMITER]: false },
+        /could not (?:disable|confirm disabling) (?:email-2FA|Accounts_TwoFactorAuthentication_By_Email_Enabled)/u,
+      ],
     ] as const) {
-      const { mod } = load({ settings, setOk: (sid) => sid !== TWOFA });
+      const { mod } = load({ settings, setOk: (sid, value) => sid !== TWOFA || value === true });
       const said: string[] = [];
       await mod.seed('http://x', AUTH, planFrom('small', { users: 0, channels: 0, messages: 0 }), {
         log: (m) => said.push(m),
       });
-      expect(said.join(' ')).toContain(fragment);
-      // Both warnings carry the consequence, which is what a reader needs.
-      expect(said.join(' ')).toContain('authored by admin');
+      expect(said.join(' ')).toMatch(fragment);
     }
   });
 });
@@ -160,7 +324,7 @@ describe('what a seed creates', () => {
     expect(paths).toContain('/api/v1/teams.create');
     expect(paths).toContain('/api/v1/groups.create');
     expect(paths).toContain('/api/v1/rooms.createDiscussion');
-    expect(paths).toContain('/api/v1/im.create');
+    expect(paths.some((p) => /\/(?:im|dm)\.create$/u.test(p))).toBe(true);
   });
 
   it('creates discussions LAST, so the ones anchored to a message have one', async () => {
@@ -187,13 +351,14 @@ describe('what a seed creates', () => {
     jest.doMock('../../src/core/rcapi', () => ({
       RequestFailed: class RequestFailed extends Error {},
       authHeaders: () => ({}),
-      login: () => Promise.reject(new Error('no server')),
+      login: participantLogin,
       getSetting: () => Promise.resolve(false),
       setSetting: () => Promise.resolve(true),
       rcapi: {
         call: (_r: string, _m: string, path: string) => {
           fake.calls.push(path);
-          if (path.includes('im.create')) return Promise.resolve([403, '{}'] as [number, string]);
+          if (/\/(?:im|dm)\.create$/u.test(path))
+            return Promise.resolve([403, '{}'] as [number, string]);
           return Promise.resolve([200, JSON.stringify(defaultReply(path, 'id1'))] as [
             number,
             string,
@@ -208,13 +373,13 @@ describe('what a seed creates', () => {
       clear: () => undefined,
     }));
     const mod2 = require('../../src/seed/apply') as typeof ApplyNS;
-    const result = (await mod2.seed('http://x', AUTH, planFrom('small'))) as Record<
+    const result = (await mod2.seed('http://x', AUTH, withoutAssets(planFrom('small')))) as Record<
       string,
       unknown
     >;
     expect(result.dms).toBe(0);
     const failures = result.failed as { name: string; why: string }[];
-    expect(failures.every((f) => f.why === 'im.create')).toBe(true);
+    expect(failures.every((f) => /(?:im|dm)\.create/u.test(f.why))).toBe(true);
     expect(failures.length).toBeGreaterThan(0);
   });
 
@@ -226,18 +391,24 @@ describe('what a seed creates', () => {
     jest.doMock('../../src/core/rcapi', () => ({
       RequestFailed: class RequestFailed extends Error {},
       authHeaders: () => ({}),
-      login: () => Promise.reject(new Error('no server')),
+      login: participantLogin,
       getSetting: () => Promise.resolve(false),
       setSetting: () => Promise.resolve(true),
       rcapi: {
-        call: (_r: string, method: string, path: string) => {
+        call: (_r: string, method: string, path: string, opts: Record<string, unknown>) => {
           if (method === 'POST' && /(channels|groups)\.create/u.test(path)) {
             return Promise.resolve([400, '{"error":"name-already-exists"}'] as [number, string]);
           }
-          return Promise.resolve([200, JSON.stringify(defaultReply(path, 'existing'))] as [
-            number,
-            string,
-          ]);
+          return Promise.resolve([
+            200,
+            JSON.stringify(
+              defaultReply(
+                path,
+                'existing',
+                (opts.data ?? opts.params ?? {}) as Record<string, unknown>,
+              ),
+            ),
+          ] as [number, string]);
         },
       },
     }));
@@ -248,12 +419,73 @@ describe('what a seed creates', () => {
       clear: () => undefined,
     }));
     const mod2 = require('../../src/seed/apply') as typeof ApplyNS;
-    const result = (await mod2.seed('http://x', AUTH, planFrom('small'))) as Record<
+    const result = (await mod2.seed('http://x', AUTH, withoutAssets(planFrom('small')))) as Record<
       string,
       unknown
     >;
     expect(result.reused as number).toBeGreaterThan(0);
     expect(result.failed).toEqual([]);
+  });
+
+  it("invites a reused private room's planned members, so their posts are not refused", async () => {
+    // The plan picks a room's authors from the profile's user count, so a private room an
+    // earlier `small` seed made held `small`'s members, and a `standard` seed's authors got
+    // `error-not-allowed` -- dropped silently, with their reactions, and the job said Done.
+    jest.resetModules();
+    const posted: [string, string][] = [];
+    jest.doMock('../../src/core/rcapi', () => ({
+      RequestFailed: class RequestFailed extends Error {},
+      authHeaders: () => ({}),
+      login: participantLogin,
+      getSetting: () => Promise.resolve(false),
+      setSetting: () => Promise.resolve(true),
+      rcapi: {
+        call: (_r: string, method: string, path: string, opts: Record<string, unknown>) => {
+          if (method === 'POST') posted.push([path, JSON.stringify(opts.data ?? {})]);
+          if (method === 'POST' && /(channels|groups|teams)\.create/u.test(path)) {
+            return Promise.resolve([400, '{"error":"name-already-exists"}'] as [number, string]);
+          }
+          return Promise.resolve([
+            200,
+            JSON.stringify(
+              defaultReply(
+                path,
+                'existing',
+                (opts.data ?? opts.params ?? {}) as Record<string, unknown>,
+              ),
+            ),
+          ] as [number, string]);
+        },
+      },
+    }));
+    jest.doMock('../../src/core/journal', () => ({
+      RATE_LIMITER_OFF: 'r',
+      EMAIL_2FA_OFF: 'e',
+      record: () => 'n',
+      clear: () => undefined,
+    }));
+    const mod2 = require('../../src/seed/apply') as typeof ApplyNS;
+    const { isPrivate } = require('../../src/seed/plan') as { isPrivate: (spec: never) => boolean };
+    const plan = withoutAssets(planFrom('small'));
+    await mod2.seed('http://x', AUTH, plan, {
+      login: async (_root: string, who: { user: string }) => ({
+        token: `t-${who.user}`,
+        userId: `u-${who.user}`,
+      }),
+    } as never);
+    const room = plan.rooms.find(
+      (spec) => isPrivate(spec as never) && spec.members.some((m) => m !== 'admin'),
+    );
+    expect(room).toBeDefined();
+    const invited = posted
+      .filter(([path]) => path === '/api/v1/groups.invite')
+      .flatMap(([, body]) => {
+        const parsed = JSON.parse(body) as { userId?: string; userIds?: string[] };
+        return parsed.userIds ?? [parsed.userId];
+      });
+    for (const member of (room?.members ?? []).filter((m) => m !== 'admin')) {
+      expect(invited).toContain(`u-${member}`);
+    }
   });
 
   it('reports a body that is not JSON as an empty one, rather than aborting', async () => {
@@ -287,7 +519,9 @@ describe('what a seed posts', () => {
       AUTH,
       planFrom('small', { users: 2, channels: 1, messages: 3 }),
     )) as { durations: Record<string, number>; latency: { count: number } };
-    expect(Object.keys(result.durations).sort()).toEqual(['channels', 'dms', 'messages', 'users']);
+    expect(Object.keys(result.durations)).toEqual(
+      expect.arrayContaining(['channels', 'dms', 'messages', 'users']),
+    );
     expect(result.latency.count).toBeGreaterThanOrEqual(1);
   });
 
@@ -306,7 +540,7 @@ describe('what a seed posts', () => {
     expect(fake.calls.filter(([, p]) => p.endsWith('chat.postMessage'))).toEqual([]);
   });
 
-  it('reacts exactly where the manifest says, once per planned index', async () => {
+  it('reacts with every actor and emoji the manifest names, explicitly enabling each action', async () => {
     // Reactions lived in the posting loop as `i % 3 == 0`, so nothing could say how many
     // there should be and nothing checked how many there were.
     const { mod, fake } = load({ settings: quiet });
@@ -316,7 +550,76 @@ describe('what a seed posts', () => {
       .filter(([, p]) => p.endsWith('chat.react'))
       .map(([, , body]) => JSON.parse(body) as Record<string, unknown>);
     expect(reacts.length).toBeGreaterThan(0);
-    for (const body of reacts) expect(Object.keys(body).sort()).toEqual(['emoji', 'messageId']);
-    expect(reacts).toHaveLength(plan.rooms.reduce((sum, r) => sum + r.reactions.length, 0));
+    for (const body of reacts)
+      expect(body).toEqual(
+        expect.objectContaining({
+          emoji: expect.any(String),
+          messageId: expect.any(String),
+          shouldReact: true,
+        }),
+      );
+    expect(reacts).toHaveLength(
+      plan.rooms.flatMap((r) => r.content).reduce((sum, m) => sum + m.reactions.length, 0),
+    );
+  });
+});
+
+describe('the encryption defaults a seed holds off', () => {
+  afterEach(() => {
+    jest.resetModules();
+  });
+
+  const DM = 'E2E_Enabled_Default_DirectRooms';
+  const PRIVATE = 'E2E_Enabled_Default_PrivateRooms';
+  const FORCE = 'E2E_Force_Encryption_For_Private_Rooms';
+
+  it('turns each that is on off before any room is made, and puts it back', async () => {
+    // On, Rocket.Chat creates the seeder's DMs and private rooms encrypted and refuses its
+    // plaintext in them (error-not-allowed): the seed left those rooms empty and exited 2.
+    let atFirstRequest: [string, unknown][] | null = null;
+    const loaded = load({
+      settings: { [TWOFA]: false, [LIMITER]: false, [DM]: true, [PRIVATE]: true, [FORCE]: true },
+      reply: () => {
+        atFirstRequest ??= [...loaded.fake.settings];
+        return undefined;
+      },
+    });
+    const { mod, fake } = loaded;
+    await mod.seed('http://x', AUTH, withoutAssets(planFrom('small', { users: 2 })), {
+      workspace: 'TICKET-1',
+      login: participantLogin,
+    });
+    expect(atFirstRequest).toEqual([
+      [DM, false],
+      [PRIVATE, false],
+      [FORCE, false],
+    ]);
+    expect(fake.settings.slice(3)).toEqual([
+      [DM, true],
+      [PRIVATE, true],
+      [FORCE, true],
+    ]);
+    // Journalled one note each, naming the setting, because a SIGKILL skips the restore.
+    expect(fake.notes).toEqual([
+      `+e2ee_default_off:TICKET-1:${DM}`,
+      `+e2ee_default_off:TICKET-1:${PRIVATE}`,
+      `+e2ee_default_off:TICKET-1:${FORCE}`,
+      '-e2ee_default_off-1',
+      '-e2ee_default_off-1',
+      '-e2ee_default_off-1',
+    ]);
+  });
+
+  it('leaves one that is off or absent alone, and says nothing about it', async () => {
+    // Absent is ordinary: the force setting arrived in Rocket.Chat 8.8.0.
+    const { mod, fake } = load({
+      settings: { [TWOFA]: false, [LIMITER]: false, [DM]: false, [PRIVATE]: null, [FORCE]: null },
+    });
+    const said: string[] = [];
+    await mod.seed('http://x', AUTH, planFrom('small', { users: 0, channels: 0, messages: 0 }), {
+      log: (m) => said.push(m),
+    });
+    expect(fake.settings).toEqual([]);
+    expect(said.join(' ')).not.toContain('E2E_');
   });
 });

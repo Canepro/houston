@@ -13,8 +13,10 @@
  * `error: ...` on stderr through the thrown `ReproError`.
  */
 
+import * as fs from 'node:fs';
+
 import * as config from '../../lib/config';
-import { ReproError } from '../../lib/errors';
+import { ReproError, ValidationError } from '../../lib/errors';
 import { joinPath } from '../../lib/home';
 import { fileErrorText, quotedText, splitTextLines, isTruthy } from '../../lib/format';
 import { Aborted, type CliIo } from '../app';
@@ -167,15 +169,16 @@ async function edgeDelete(
 ): Promise<number> {
   const spec = require('../../core/edge/spec') as typeof EdgeSpecNS;
   const runtime = require('../../core/edge/runtime') as typeof EdgeRuntimeNS;
-  if (!spec.installed()) {
-    say(io, 'no edge in this home, so it holds no names — nothing to delete.');
-    return 0;
-  }
+  // The missing host first: a usage error is one whether or not this home has an edge.
   if (host === '') {
-    throw new ReproError(
+    throw new ValidationError(
       'name the host: `houston edge delete <host>`. `houston edge status` lists what this ' +
         'edge routes and what it holds a certificate for.',
     );
+  }
+  if (!spec.installed()) {
+    say(io, 'no edge in this home, so it holds no names — nothing to delete.');
+    return 0;
   }
   // The prompt names what goes: "delete <host>" reads like removing a route, and it is
   // removing a private key.
@@ -335,7 +338,7 @@ export async function edgeCommand(
   if (action === 'start' || action === 'stop' || action === 'restart') {
     return await edgeLifecycle(io, action);
   }
-  throw new ReproError(
+  throw new ValidationError(
     `unknown action ${quotedText(action)} (want: status | start | stop | restart | logs | delete <host>)`,
   );
 }
@@ -425,6 +428,19 @@ async function probeTlsEndpoint(
   // reaches whatever else is listening here, which reported a healthy EKS workspace as
   // broken. So the NAME is what gets probed when TLS terminates elsewhere.
   if (String(meta.extra.tls_terminates ?? '') === 'cluster') {
+    // THE ORIGIN, when this box's edge passes the name through to the cluster: the name
+    // itself may be answered by a CDN in front, and behind Cloudflare this reported its
+    // certificate (Google Trust Services WE1) as the workspace's, exit 0, while the cluster
+    // served its ingress default -- which hid a certificate that never issued. The recorded
+    // ingress endpoint, asked with the name as SNI, is what the edge hands the bytes to.
+    const origin = /^(.+):(\d+)$/u.exec(String(meta.extra.ingress_endpoint ?? ''));
+    if (isTruthy(meta.extra.edge) && origin !== null) {
+      return await tls.verify(String(origin[1]), {
+        port: Number(origin[2]),
+        sni: host,
+        ...withCa,
+      });
+    }
     return await tls.verify(host, { port, ...withCa });
   }
   // BOTH LOOPBACK FAMILIES, because one of them may not be ours: k3s's ServiceLB DNATs
@@ -460,16 +476,33 @@ function renderTlsPanel(
   // The ingress controller's own placeholder: it started and has no certificate for this
   // name YET. The exit code stays non-zero: whatever the cause, this name is not serving
   // a real certificate now.
-  say(
-    io,
-    "  ✗ this is the ingress controller's built-in placeholder certificate — cert-manager " +
-      'has not issued one for this name yet.',
-  );
-  say(
-    io,
-    '    On a fresh cluster that is normal for the first minute or three. Run this again; ' +
-      'if it persists, the ACME order is stuck.',
-  );
+  // Whose placeholder it is: on Docker the edge's own Traefik serves it until Let's Encrypt
+  // answers; there is no cert-manager and no cluster to name.
+  const topology = require('../../core/topology') as typeof TopologyNS;
+  if (topology.ofMeta(meta) === topology.KUBERNETES) {
+    say(
+      io,
+      "  ✗ this is the ingress controller's built-in placeholder certificate — cert-manager " +
+        'has not issued one for this name yet.',
+    );
+    say(
+      io,
+      '    On a fresh cluster that is normal for the first minute or three. Run this again; ' +
+        'if it persists, the ACME order is stuck.',
+    );
+  } else {
+    say(
+      io,
+      "  ✗ this is the edge's built-in placeholder certificate (Traefik's default) — Let's " +
+        'Encrypt has not issued one for this name yet.',
+    );
+    say(
+      io,
+      '    The edge asks as soon as the workspace is up, so that is normal for a minute or ' +
+        'three. Run this again; if it persists, the request is failing, most likely for one ' +
+        'of the reasons below.',
+    );
+  }
   tlsTroubleshoot(io, meta, mode, host, port);
   return 1;
 }
@@ -493,11 +526,23 @@ function explainSelfSignedAcme(
     say(io, `  kubectl -n houston-${meta.name} describe certificate ${meta.name}-tls`);
   } else if (mode === acmeMode && r.staging) {
     say(io, "  ✓ serving HTTPS with a real Let's Encrypt-issued certificate.");
-    say(
-      io,
-      '  Not trusted here, which is normal for --acme-staging: DNS and the challenge both worked.',
-    );
-    say(io, '  For a trusted certificate, re-run the SAME command without --acme-staging:');
+    // WHERE STAGING CAME FROM. `config set acme.staging true` stages every `--domain`, and
+    // the advice to re-run "without --acme-staging" -- a flag never given -- changed nothing.
+    if (config.truthy(config.loadConfig().acme_staging)) {
+      say(
+        io,
+        "  Not trusted here, which is normal for Let's Encrypt staging (`acme.staging` is on): " +
+          'DNS and the challenge both worked.',
+      );
+      say(io, '  For a trusted certificate, turn staging off and re-run the SAME command:');
+      say(io, '    houston config set acme.staging false');
+    } else {
+      say(
+        io,
+        '  Not trusted here, which is normal for --acme-staging: DNS and the challenge both worked.',
+      );
+      say(io, '  For a trusted certificate, re-run the SAME command without --acme-staging:');
+    }
     say(io, `    ${promoteCommand(meta, host)}`);
   } else if (mode === acmeMode) {
     say(
@@ -673,8 +718,16 @@ async function runAndEcho(io: CliIo, argv: ExecNS.Argv): Promise<void> {
  */
 export async function trustCa(io: CliIo, uninstall: boolean, show: boolean): Promise<number> {
   const local = require('../../core/tls-local') as typeof TlsLocalNS;
-  const [key, crt] = await local.ensureCa();
   if (show) {
+    // READ, never made. `--show` is "just print the CA path", and on a fresh home it minted
+    // a CA -- a key that can sign for any name -- so the command meant to look at one
+    // created one.
+    const crt = joinPath(local.caDir(), local.CA_CRT);
+    const key = joinPath(local.caDir(), local.CA_KEY);
+    if (!fs.existsSync(crt)) {
+      say(io, `no local CA yet (${crt}) — the first \`up --https\` or \`trust-ca\` makes one.`);
+      return 0;
+    }
     say(io, `CA certificate: ${crt}`);
     say(io, `CA key:         ${key}  (keep private)`);
     await runAndEcho(io, [
@@ -690,6 +743,7 @@ export async function trustCa(io: CliIo, uninstall: boolean, show: boolean): Pro
     ]);
     return 0;
   }
+  const [, crt] = await local.ensureCa();
   const [installed, how] = await local.trust(crt, uninstall);
   if (installed) {
     say(io, `✓ CA ${uninstall ? 'removed from' : 'installed into'} ${how}.`);

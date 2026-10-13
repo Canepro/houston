@@ -25,7 +25,7 @@
  * against. `why()` and every `classify` call read them, and code that renamed them would
  * make every comparison with an earlier release a translation.
  */
-import { capture, type ProcessResult } from './exec';
+import { Interrupted, capture, type ProcessResult } from './exec';
 
 /** What a finished Kubernetes tool reported: its argv, return code, stdout and stderr. */
 export interface KubectlResult {
@@ -71,6 +71,8 @@ async function invoke(argv: readonly string[], options: KubectlOptions): Promise
       ...(options.input !== undefined ? { input: options.input } : {}),
     });
   } catch (error) {
+    // Not a failure to report: Ctrl-C or a stopped job, which must unwind (see exec).
+    if (error instanceof Interrupted) throw error;
     // A launch failure and a timeout both land here. The reason goes on stderr because
     // that is where `why()` looks for it.
     return {

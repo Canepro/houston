@@ -7,11 +7,13 @@
  * finish leaves a half-made workspace, which is worse than never starting.
  */
 import { ConflictError, DockerError, PreflightError, ValidationError } from '../../lib/errors';
+import { type Emit, warn } from '../../lib/events';
 import { quotedText, valueKind } from '../../lib/format';
 import * as presets from '../../lib/presets/index';
+import { namesOf } from '../../lib/presets/composite';
 import { actor as auditActor, record as auditRecord } from '../audit';
 import { which } from '../kube/tools';
-import { composeStandaloneVersion, composeVersion, dockerAvailable } from '../runner/host';
+import { composeStandaloneVersion, composeVersion, dockerAvailable, engine } from '../runner/host';
 import * as paths from '../runner/paths';
 import { projectName } from '../runner/record';
 import { projectConfigFiles } from '../runner/queries';
@@ -40,6 +42,18 @@ function isTruthy(value: unknown): boolean {
  */
 export async function requireTheComposePlugin(): Promise<void> {
   const cv = (await composeVersion()) ?? '';
+  // Podman's own compose provider is a different program, not Compose v2: it does not honour
+  // what houston's documents rely on (depends_on conditions, one-shot init services).
+  if (cv.toLowerCase().includes('podman-compose')) {
+    throw new PreflightError(
+      `\`docker compose\` is podman-compose (${cv}), which houston does not support. Install ` +
+        'the Compose v2 plugin; Podman then uses it as its compose provider:\n' +
+        '    mkdir -p ~/.docker/cli-plugins\n' +
+        '    curl -fsSL -o ~/.docker/cli-plugins/docker-compose \\\n' +
+        '      https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m)\n' +
+        '    chmod +x ~/.docker/cli-plugins/docker-compose',
+    );
+  }
   const major = cv ? (cv.split('.')[0] as string).replace(/^v/u, '') : '';
   if (!/^\d+$/u.test(major) || Number.parseInt(major, 10) < 2) {
     if (cv) {
@@ -247,31 +261,78 @@ export function refuseUnsupportedOnKubernetes(req: CreateReq): void {
   // still refused, because being recorded and not applied is what this guard exists to
   // prevent; but the refusal is now per preset rather than a blanket "not supported", and
   // it names the ones that DO work so the answer is actionable.
-  if (req.preset && req.preset !== 'default') {
-    const works = [...presets.scenarioNames()].sort().join(', ') || 'none yet';
-    let resolved;
-    try {
-      resolved = presets.resolve(req.preset, topology.KUBERNETES, req.params);
-    } catch (error) {
-      throw new ValidationError(
-        `preset '${req.preset}' cannot be resolved for Kubernetes: ` +
-          `${error instanceof Error ? error.message : String(error)}. ` +
-          `Presets with a Kubernetes adapter: ${works}. Or use ` +
-          '--runtime docker, where every preset works.',
-      );
-    }
-    // RESOLVING is not the same as WORKING. A preset with no scenario adapter comes back
-    // with its Compose `services` intact -- Keycloak, Mailpit, MinIO -- and this runtime
-    // builds no compose document, so those containers would simply never exist while the
-    // settings pointing at them were applied.
-    if (Object.keys(resolved.services).length > 0 && resolved.kubernetesManifests.length === 0) {
-      throw new ValidationError(
-        `preset '${req.preset}' needs backing services ` +
-          `(${Object.keys(resolved.services).sort().join(', ')}) and has no ` +
-          'Kubernetes adapter to create them, so they would be missing while ' +
-          'Rocket.Chat was configured to use them. Presets with an adapter: ' +
-          `${works}. Or use --runtime docker, where every preset works.`,
-      );
-    }
+  // Each preset of a composed workspace on its own: one without an adapter is named.
+  for (const name of namesOf(req.preset).filter((one) => one !== 'default')) {
+    refuseOneOnKubernetes(name, namesOf(req.preset).length > 1 ? {} : req.params);
   }
+}
+
+function refuseOneOnKubernetes(preset: string, params: Record<string, unknown>): void {
+  const works = [...presets.scenarioNames()].sort().join(', ') || 'none yet';
+  // A bad `--set` or an unknown preset is refused in Docker's own words: it is the input,
+  // not the runtime, and "use --runtime docker" would send the same typo to a refusal there.
+  presets.asValidation(() => presets.load(preset, params));
+  let resolved;
+  try {
+    resolved = presets.resolve(preset, topology.KUBERNETES, params);
+  } catch (error) {
+    throw new ValidationError(
+      `preset '${preset}' cannot be resolved for Kubernetes: ` +
+        `${error instanceof Error ? error.message : String(error)}. ` +
+        `Presets with a Kubernetes adapter: ${works}. Or use ` +
+        '--runtime docker, where every preset works.',
+    );
+  }
+  // RESOLVING is not the same as WORKING. A preset with no scenario adapter comes back
+  // with its Compose `services` intact -- Keycloak, Mailpit, MinIO -- and this runtime
+  // builds no compose document, so those containers would simply never exist while the
+  // settings pointing at them were applied.
+  if (Object.keys(resolved.services).length > 0 && resolved.kubernetesManifests.length === 0) {
+    throw new ValidationError(
+      `preset '${preset}' needs backing services ` +
+        `(${Object.keys(resolved.services).sort().join(', ')}) and has no ` +
+        'Kubernetes adapter to create them, so they would be missing while ' +
+        'Rocket.Chat was configured to use them. Presets with an adapter: ' +
+        `${works}. Or use --runtime docker, where every preset works.`,
+    );
+  }
+}
+
+/** Whether a compose document makes any service wait for another's healthcheck. */
+export function waitsOnHealth(doc: { services: Record<string, unknown> }): boolean {
+  return Object.values(doc.services).some((service) => {
+    const dependsOn = (service as { depends_on?: unknown }).depends_on;
+    if (typeof dependsOn !== 'object' || dependsOn === null || Array.isArray(dependsOn))
+      return false;
+    return Object.values(dependsOn).some(
+      (dependency) => (dependency as { condition?: unknown }).condition === 'service_healthy',
+    );
+  });
+}
+
+/**
+ * Refuse a document that waits on a healthcheck when this engine runs none: it would never
+ * start (MongoDB 8's replica-set init waits on MongoDB's health, so does every second
+ * instance). `--force` warns and tries anyway.
+ */
+export async function refuseHealthWaitsTheEngineCannotRun(
+  doc: { services: Record<string, unknown> },
+  force: boolean,
+  emit: Emit,
+): Promise<void> {
+  if (!waitsOnHealth(doc)) return;
+  const found = await engine();
+  if (found === null || found.healthchecks) return;
+  const why =
+    `${found.kind === 'podman' ? 'Podman' : 'This engine'} here runs no container healthchecks ` +
+    `(cgroup manager '${found.cgroupDriver || '?'}'; Podman times them with systemd), and this ` +
+    "workspace's startup waits on one, so it would never come up.";
+  const fix =
+    'Run Podman with cgroup_manager = "systemd" in containers.conf under a systemd user ' +
+    'session (a distro build; a static one cannot), or use a Podman machine or Docker.';
+  if (force) {
+    warn(emit, `${why} --force: trying anyway. ${fix}`, { phase: 'preflight' });
+    return;
+  }
+  throw new PreflightError(`${why}\n  ${fix}\n  --force tries anyway.`);
 }

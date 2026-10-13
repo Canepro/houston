@@ -13,6 +13,7 @@ import { preflight as newPreflight } from '../../../src/core/kube/tools';
 import type { TlsSpec } from '../../../src/core/tls';
 
 import { recordedLocalHost, resolveTls, tlsFromRecord } from '../../../src/core/lifecycle/tlsplan';
+import type * as ExecNS from '../../../src/core/kube/exec';
 import type * as TlsPlanNS from '../../../src/core/lifecycle/tlsplan';
 import { createReq, kubeTls } from '../../../src/core/lifecycle/types';
 
@@ -140,6 +141,7 @@ const DOCTORED = [
   '../../../src/core/kube/certmanager',
   '../../../src/core/kube/endpoints',
   '../../../src/core/kube/cluster',
+  '../../../src/core/kube/exec',
   '../../../src/core/edge/engine',
   '../../../src/core/edge/spec',
   '../../../src/core/edge/runtime',
@@ -213,6 +215,23 @@ describe('the Kubernetes HTTPS plan', () => {
           ? { context, service: 'kube-system/traefik', address: '172.16.0.2', ports: [...claims] }
           : null,
     }));
+    // A local k3s's kubeconfig names its API server on loopback, which is what makes it
+    // "on this machine" for the CA key (`isLocalCluster`).
+    jest.doMock('../../../src/core/kube/exec', () => {
+      const real = jest.requireActual('../../../src/core/kube/exec') as typeof ExecNS;
+      return {
+        ...real,
+        kube: {
+          ...real.kube,
+          run: async (argv: readonly string[]) => ({
+            argv,
+            returncode: argv.includes('config') ? 0 : 1,
+            stdout: argv.includes('config') ? 'https://127.0.0.1:6443' : '',
+            stderr: '',
+          }),
+        },
+      };
+    });
     jest.doMock('../../../src/core/kube/cluster', () => ({
       ...jest.requireActual('../../../src/core/kube/cluster'),
       ensureKubeconfig: async (plan: ClusterPlan) => {
@@ -359,6 +378,67 @@ describe('the Kubernetes HTTPS plan', () => {
     expect(starts).toEqual(['started']);
   });
 
+  it("routes an ACME name's http-01 challenge to the cluster's :80, on an edge rebuilt for it", async () => {
+    // The edge's :80 redirected cert-manager's challenge to HTTPS, where the cluster has no
+    // solver: a `--domain` workspace on a local k3s never got a certificate. The route has
+    // to carry the cluster's plain-HTTP side, and an edge an earlier houston wrote has to be
+    // rebuilt so its redirect yields to it.
+    jest.resetModules();
+    const did: string[] = [];
+    let registered: Record<string, unknown> = {};
+    jest.doMock('../../../src/core/edge/engine', () => ({
+      ...jest.requireActual('../../../src/core/edge/engine'),
+      running: async () => true,
+    }));
+    jest.doMock('../../../src/core/edge/spec', () => ({
+      ...jest.requireActual('../../../src/core/edge/spec'),
+      installed: () => true,
+      rewrite: async () => {
+        did.push('rewrite');
+        return true;
+      },
+    }));
+    jest.doMock('../../../src/core/edge/runtime', () => ({
+      ...jest.requireActual('../../../src/core/edge/runtime'),
+      ensureRunning: async () => {
+        did.push('ensureRunning');
+        return { ok: true, why: '' };
+      },
+    }));
+    jest.doMock('../../../src/core/edge/routes', () => ({
+      ...jest.requireActual('../../../src/core/edge/routes'),
+      register: async (_name: string, _host: string, options: Record<string, unknown>) => {
+        registered = options;
+        return false;
+      },
+    }));
+    jest.doMock('../../../src/core/kube/endpoints', () => ({
+      ...jest.requireActual('../../../src/core/kube/endpoints'),
+      ingressEndpoint: async (_context: string, { port = 443 }: { port?: number } = {}) => ({
+        address: '172.16.0.2',
+        port: port === 80 ? 31080 : 32023,
+        source: 'nodeport',
+        service: 'traefik/traefik',
+        local: true,
+      }),
+    }));
+    const { routeKubernetesName } =
+      require('../../../src/core/lifecycle/tlsplan') as typeof TlsPlanNS;
+    await routeKubernetesName(
+      'ws',
+      kubeTls({
+        host: 'a.example.com',
+        ingressClass: 'traefik',
+        endpoint: K3S_ENDPOINT,
+        context: 'k3s-lane',
+        issuer: { mode: 'acme', acmeEmail: 'a@b.test', acmeStaging: false },
+        clusterOwns443: false,
+      }),
+    );
+    expect(registered.passthroughHttp).toBe('172.16.0.2:31080');
+    expect(did).toEqual(['rewrite', 'ensureRunning']);
+  });
+
   it('does not blame a proxy for the default certificate served before issuance', async () => {
     // An ingress controller serves its OWN default certificate for a name it has none for
     // yet, so while the ACME order runs the cluster answers with exactly the certificate
@@ -396,6 +476,46 @@ describe('the Kubernetes HTTPS plan', () => {
     const late = await said(true);
     expect(late).toContain('something in front is terminating TLS');
     expect(late).toContain('houston doctor');
+  });
+
+  it("judges the origin's certificate, not a CDN's, when the edge passes the name through", async () => {
+    // Behind Cloudflare the name answered with Google Trust Services WE1 and the create said
+    // "serving the cluster's certificate" while cert-manager had issued nothing.
+    jest.resetModules();
+    let origin = { serving: true, fallback: true, issuer: 'CN = TRAEFIK DEFAULT CERT' };
+    jest.doMock('../../../src/core/tls', () => ({
+      ...jest.requireActual('../../../src/core/tls'),
+      verify: async (host: string, options: { sni?: string }) =>
+        options.sni === 'x.example.com' && host === K3S_ENDPOINT.address
+          ? origin
+          : { serving: true, fallback: false, issuer: 'CN = WE1, O = Google Trust Services' },
+    }));
+    const { publishKubernetesName } =
+      require('../../../src/core/lifecycle/tlsplan') as typeof TlsPlanNS;
+    const ktls = kubeTls({
+      host: 'x.example.com',
+      ingressClass: 'traefik',
+      endpoint: K3S_ENDPOINT,
+      context: 'c',
+      issuer: null,
+      clusterOwns443: false,
+    });
+    const said = async (): Promise<string> => {
+      const lines: string[] = [];
+      await publishKubernetesName('w', ktls, {
+        certReady: false,
+        emit: (event: Event) => lines.push(event.message),
+        sleep: async () => undefined,
+      });
+      return lines.join(' | ');
+    };
+    const early = await said();
+    expect(early).toContain('has not issued one yet');
+    expect(early).not.toContain("serving the cluster's certificate");
+    origin = { serving: true, fallback: false, issuer: "CN = R10, O = Let's Encrypt" };
+    const issued = await said();
+    expect(issued).toContain("is serving the cluster's certificate (CN = R10, O = Let's Encrypt)");
+    expect(issued).toContain('itself answers with CN = WE1, O = Google Trust Services');
   });
 
   it('proves a public certificate against the system store, and a local one against the CA', async () => {
@@ -527,6 +647,23 @@ describe('what the Kubernetes HTTPS plan refuses and says', () => {
       ingressEndpoint: async () => (endpoint ? { ...K3S_ENDPOINT } : null),
       hostPortClaim: async () => null,
     }));
+    // A local k3s's kubeconfig names its API server on loopback, which is what makes it
+    // "on this machine" for the CA key (`isLocalCluster`).
+    jest.doMock('../../../src/core/kube/exec', () => {
+      const real = jest.requireActual('../../../src/core/kube/exec') as typeof ExecNS;
+      return {
+        ...real,
+        kube: {
+          ...real.kube,
+          run: async (argv: readonly string[]) => ({
+            argv,
+            returncode: argv.includes('config') ? 0 : 1,
+            stdout: argv.includes('config') ? 'https://127.0.0.1:6443' : '',
+            stderr: '',
+          }),
+        },
+      };
+    });
     return [
       require('../../../src/core/lifecycle/tlsplan') as typeof TlsPlanNS,
       { context: 'default', distribution, create: false },
@@ -637,5 +774,45 @@ describe('what the HTTPS plan leaves to the operator', () => {
       '',
     );
     expect(spec?.mode).toBe(MODE_ACME);
+  });
+});
+
+describe('the ACME challenge a workspace asks for', () => {
+  it('honours `config set acme.challenge`, as the edge `serve` builds does', () => {
+    // `up --domain` ignored the override and asked for TLS-ALPN, which cannot pass a tunnel or
+    // a proxy that terminates TLS in front: on a box behind Cloudflare the first certificate
+    // failed ("Cannot negotiate ALPN protocol"), seen live, while `serve --domain` used http-01.
+    const { pickChallenge } = require('../../../src/core/lifecycle/tlsplan') as typeof TlsPlanNS;
+    const chosen = (cfg: Record<string, unknown>) => {
+      const req = createReq({ version: '8.5.1', domain: 'rc.example.com' });
+      pickChallenge(req, cfg);
+      return req.acmeChallenge;
+    };
+    expect([
+      chosen({ acme_challenge: 'http' }),
+      chosen({ acme_challenge: ' HTTP ' }),
+      chosen({}),
+    ]).toEqual(['http', 'http', 'tlsalpn']);
+  });
+});
+
+describe("the Let's Encrypt contact email", () => {
+  it('is remembered after the first use, so bringing a workspace back needs no --email', async () => {
+    // The refusal and --email's help both say so, but only `serve` wrote it: `up --name X`
+    // after `down` on an HTTPS workspace was refused for want of an email, seen live on k3s.
+    config.updateConfig((cfg) => {
+      delete cfg.acme_email;
+    });
+    await resolveTls(
+      createReq({ version: '8.5.1', domain: 'again.example.com', acmeEmail: 'first@example.com' }),
+      'again',
+      '127.0.0.1',
+    );
+    const back = await resolveTls(
+      createReq({ version: '8.5.1', domain: 'again.example.com' }),
+      'again',
+      '127.0.0.1',
+    );
+    expect(back?.acmeEmail).toBe('first@example.com');
   });
 });

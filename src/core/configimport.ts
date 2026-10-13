@@ -14,6 +14,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import * as config from '../lib/config';
+import { ValidationError } from '../lib/errors';
 import { decodeUtf8Strict } from '../lib/format';
 import { JsonSyntaxError, JsonFloat, JsonNumber, loads, spelled } from '../lib/json-text';
 
@@ -148,7 +149,11 @@ export function buildPlan(settingsJson: string, options: BuildPlanOptions = {}):
       sameValue(spelled(entry, 'value'), spelled(entry, 'packageValue'))
     )
       continue;
-    if (only !== null && only.size > 0 && !only.has(sid.split('_')[0] as string)) continue;
+    // PREFIXES, as `--only` says it takes. Compared with the id's first `_` segment, so
+    // `--only Message_` (the spelling the help invites) matched no setting at all.
+    if (only !== null && only.size > 0 && ![...only].some((prefix) => sid.startsWith(prefix))) {
+      continue;
+    }
     if (isRedacted(entry.value)) {
       plan.redacted.push(sid);
       continue;
@@ -167,6 +172,16 @@ export function buildPlan(settingsJson: string, options: BuildPlanOptions = {}):
     plan.apply.push([sid, spelled(entry, 'value')]);
   }
   plan.oauthServices = [...services].sort();
+  // SAID, not imported-zero-and-exit-0: a filter that matched nothing is usually a typo.
+  if (
+    only !== null &&
+    only.size > 0 &&
+    plan.apply.length + plan.redacted.length + plan.denied.length === 0
+  ) {
+    throw new ValidationError(
+      `--only ${[...only].join(',')} matched no setting this dump changes from its default`,
+    );
+  }
   return plan;
 }
 
@@ -272,7 +287,10 @@ async function disableLimiter(
     // JOURNALLED. The `finally` below is the only thing that restores this, and it is the
     // block a SIGKILL does not run -- so an interrupted import left the rate limiter off
     // with nothing on disk saying so.
-    if (workspace !== '') limiterNote = journal.record(journal.RATE_LIMITER_OFF, workspace);
+    if (workspace !== '')
+      limiterNote = journal.record(journal.RATE_LIMITER_OFF, workspace, {
+        purpose: 'a settings import',
+      });
     await setSetting(rootUrl, admin, pw, RATE_LIMITER, false);
   }
   return { limiterPrev, limiterNote };

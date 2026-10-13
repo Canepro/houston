@@ -73,7 +73,7 @@
       "dialled": []
     },
     "edge delete, no host": {
-      "code": 1,
+      "code": 2,
       "stdout": "",
       "stderr": "error: name the host: `houston edge delete <host>`. `houston edge status` lists what this edge routes and what it holds a certificate for.\n",
       "dialled": []
@@ -103,7 +103,7 @@
       "dialled": []
     },
     "edge, an unknown action": {
-      "code": 1,
+      "code": 2,
       "stdout": "",
       "stderr": "error: unknown action 'bogus' (want: status | start | stop | restart | logs | delete <host>)\n",
       "dialled": []
@@ -150,7 +150,7 @@
     },
     "tls-status, every family serves a placeholder": {
       "code": 1,
-      "stdout": "Checking https://t1.example.com ...\n+- TLS: w -------------------------------+\n|  Endpoint   t1.example.com:443         |\n|  Issuer     CN = TRAEFIK DEFAULT CERT  |\n|  Valid for  CN = TRAEFIK DEFAULT CERT  |\n|  Expires                               |\n+----------------------------------------+\n  ✗ this is the ingress controller's built-in placeholder certificate — cert-manager has not issued one for this name yet.\n    On a fresh cluster that is normal for the first minute or three. Run this again; if it persists, the ACME order is stuck.\n  Rocket.Chat itself is fine at http://localhost:3000 - this is the TLS layer.\n  Most likely, in order:\n    1. inbound TCP/443 not reachable from the internet (cloud security group / host firewall)\n    2. DNS: `dig +short t1.example.com` must return this host's PUBLIC IP\n    3. behind Cloudflare's orange cloud? it terminates TLS, so tlsalpn cannot work - put a provider token in ~/.houston/acme/dns.env to switch to dns-01\n  What Traefik says:  houston logs --name w | grep -i acme\n  Debug on staging (--acme-staging): production allows only 5 failed validations per hour for t1.example.com.\n",
+      "stdout": "Checking https://t1.example.com ...\n+- TLS: w -------------------------------+\n|  Endpoint   t1.example.com:443         |\n|  Issuer     CN = TRAEFIK DEFAULT CERT  |\n|  Valid for  CN = TRAEFIK DEFAULT CERT  |\n|  Expires                               |\n+----------------------------------------+\n  ✗ this is the edge's built-in placeholder certificate (Traefik's default) — Let's Encrypt has not issued one for this name yet.\n    The edge asks as soon as the workspace is up, so that is normal for a minute or three. Run this again; if it persists, the request is failing, most likely for one of the reasons below.\n  Rocket.Chat itself is fine at http://localhost:3000 - this is the TLS layer.\n  Most likely, in order:\n    1. inbound TCP/443 not reachable from the internet (cloud security group / host firewall)\n    2. DNS: `dig +short t1.example.com` must return this host's PUBLIC IP\n    3. behind Cloudflare's orange cloud? it terminates TLS, so tlsalpn cannot work - put a provider token in ~/.houston/acme/dns.env to switch to dns-01\n  What Traefik says:  houston logs --name w | grep -i acme\n  Debug on staging (--acme-staging): production allows only 5 failed validations per hour for t1.example.com.\n",
       "stderr": "",
       "dialled": [
         "127.0.0.1",

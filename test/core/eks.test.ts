@@ -54,6 +54,7 @@ import {
   keepManifest,
   oneLine,
   ownsCluster,
+  profiles,
   region,
   remember,
   remembered,
@@ -64,6 +65,7 @@ import {
   rememberZone,
   installMetricsServer,
   METRICS_SERVER_MANIFEST,
+  shadowedProfile,
   sweepLeftovers,
   keepCluster,
   shareCluster,
@@ -331,6 +333,18 @@ describe('who AWS says you are', () => {
     } finally {
       process.env = saved;
     }
+  });
+
+  it('lists the profiles a server without AWS_PROFILE could use, leaving out default', async () => {
+    // An unset AWS_PROFILE already IS default, so offering it says to restart the server
+    // into exactly the state it is in.
+    script([], { stdout: 'default\nsupport-eks-houston\n\n' });
+    expect(await profiles()).toEqual(['support-eks-houston']);
+    expect(seen).toEqual([['aws', 'configure', 'list-profiles']]);
+    script([], { stdout: 'default\n' });
+    expect(await profiles()).toEqual([]);
+    script([], { returncode: 255, stderr: 'aws: error' });
+    expect(await profiles()).toEqual([]);
   });
 });
 
@@ -1549,6 +1563,29 @@ describe('the twenty minutes nothing can verify', () => {
     expect(warned).toEqual(['line 4', 'line 5', 'line 6', 'line 7', 'line 8', 'line 9']);
   });
 
+  it('shows the whole of a refusal, because its reason is at the end of the line', async () => {
+    // A real build on a Mac: cut at 200 characters, this ended at "RequestID: …," and the
+    // reason -- an expired token eksctl had found in ~/.aws/credentials -- was never shown.
+    const refusal =
+      'Error: checking AWS STS access – cannot get role ARN for current session: operation ' +
+      'error STS: GetCallerIdentity, https response error StatusCode: 403, RequestID: ' +
+      'e74926e4-c24b-407b-8a5d-c859367ff6bd, api error ExpiredToken: The security token ' +
+      'included in the request is expired';
+    awsCli.stream = (argv, options) => {
+      options.onLine(refusal);
+      return Promise.resolve({ argv, returncode: 1, stdout: '', stderr: '' });
+    };
+    const events: Event[] = [];
+    await streamTool(['eksctl', 'create'], {
+      phase: 'provision',
+      emit: (event) => events.push(event),
+      timeout: 10,
+    });
+    const warned = events.filter((event) => event.level === 'warn').map((event) => event.message);
+    expect(warned).toEqual([refusal]);
+    expect(events[0]?.message).toBe(refusal);
+  });
+
   it('says a tool could not be started, rather than reporting an empty failure', async () => {
     awsCli.stream = (argv) =>
       Promise.resolve({ argv, returncode: 127, stdout: '', stderr: 'spawn eksctl ENOENT' });
@@ -1608,7 +1645,8 @@ describe('the journal note that outlives the process', () => {
     aws.preflight = () => Promise.resolve(READY);
     aws.describeCluster = () => Promise.resolve({ state: 'absent' as const, doc: null });
     awsCli.stream = (argv) => Promise.resolve({ argv, returncode: 1, stdout: '', stderr: '' });
-    script([]);
+    // It got as far as the cluster stack: AWS still holds it.
+    script([[has('list-stacks'), json([['eksctl-support-cluster', 'ROLLBACK_IN_PROGRESS']])]]);
     mocked(config.approvedAwsAccounts).mockReturnValue(new Set(['111122223333']));
     try {
       await expect(aws.createCluster('support', { region: 'eu-west-1' })).rejects.toThrow(
@@ -1621,6 +1659,105 @@ describe('the journal note that outlives the process', () => {
         /houston cluster delete support --region eu-west-1/u,
       );
       expect(order).toEqual(['record', 'record']);
+    } finally {
+      remove();
+    }
+  });
+});
+
+describe('keys that eksctl signs in with instead of the SSO profile', () => {
+  it('stops a build when ~/.aws/credentials shadows the profile, and names the section', async () => {
+    // A real Mac: `aws sts get-caller-identity --profile support-eks-houston` worked, and
+    // eksctl with the same profile was refused with ExpiredToken -- it had read old keys
+    // under [support-eks-houston] in the credentials file, which the aws CLI never looks at.
+    const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir() as string, 'aws-'));
+    const settings = path.join(dir, 'config');
+    const keys = path.join(dir, 'credentials');
+    fs.writeFileSync(
+      settings,
+      '[profile support-eks-houston]\nsso_session = company\nsso_account_id = 944557734124\n' +
+        'sso_role_name = TeamSupport\nregion = us-east-1\n\n[sso-session company]\n' +
+        'sso_start_url = https://example.awsapps.com/start\nsso_region = us-east-1\n',
+    );
+    fs.writeFileSync(
+      keys,
+      '[default]\naws_access_key_id = AKIAOTHER\n\n[support-eks-houston]\n' +
+        'aws_access_key_id = ASIAOLD\naws_secret_access_key = old\naws_session_token = old\n',
+    );
+    const saved = { ...process.env };
+    try {
+      Object.assign(process.env, {
+        AWS_PROFILE: 'support-eks-houston',
+        AWS_CONFIG_FILE: settings,
+        AWS_SHARED_CREDENTIALS_FILE: keys,
+      });
+      script([]);
+      const pre = await realPreflight();
+      expect(pre.shadowed).toContain(`${keys} holds keys under [support-eks-houston]`);
+      expect(pre.shadowed).toContain('Remove the [support-eks-houston] section');
+      const stopping = blockers({ ...READY, shadowed: pre.shadowed ?? '' }, { toBuild: true });
+      expect(stopping).toEqual([pre.shadowed]);
+      // Keys with no SSO to shadow are an ordinary profile, and SSO alone is the fix.
+      process.env.AWS_PROFILE = 'default';
+      expect(shadowedProfile()).toBe('');
+      process.env.AWS_PROFILE = 'support-eks-houston';
+      fs.writeFileSync(keys, '[default]\naws_access_key_id = AKIAOTHER\n');
+      expect(shadowedProfile()).toBe('');
+      // The same shadow, three other ways the files spell it.
+      fs.writeFileSync(settings, '[profile  support-eks-houston]\nsso_session = company\n');
+      fs.writeFileSync(keys, '[support-eks-houston]\naws_access_key_id = ASIAOLD\n');
+      expect(shadowedProfile()).toContain('Remove the [support-eks-houston] section');
+      fs.writeFileSync(
+        settings,
+        '[profile support-eks-houston]\nsso_session = company\naws_access_key_id = ASIAOLD\n',
+      );
+      fs.writeFileSync(keys, '');
+      expect(shadowedProfile()).toContain(
+        `${settings} holds keys under [profile support-eks-houston]`,
+      );
+      process.env.AWS_PROFILE = 'default';
+      fs.writeFileSync(settings, '[profile default]\nsso_session = company\n');
+      fs.writeFileSync(keys, '[default]\naws_access_key_id = ASIAOLD\n');
+      expect(shadowedProfile()).toContain('holds keys under [default]');
+    } finally {
+      process.env = saved;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('a build that failed before it made anything', () => {
+  it('says nothing is billing, and drops the note, only when AWS holds nothing of it', async () => {
+    // Refused at eksctl's identity check, a build made nothing -- and was still reported as
+    // "a partial create can still be billing", with a note that kept saying so.
+    const order: string[] = [];
+    const remove = installJournalSink({
+      record: () => {
+        order.push('record');
+        return 'entry-1';
+      },
+      clear: () => order.push('clear'),
+      registerSubjectPredicate: () => undefined,
+    });
+    aws.preflight = () => Promise.resolve(READY);
+    aws.describeCluster = () => Promise.resolve({ state: 'absent' as const, doc: null });
+    awsCli.stream = (argv) => Promise.resolve({ argv, returncode: 1, stdout: '', stderr: '' });
+    mocked(config.approvedAwsAccounts).mockReturnValue(new Set(['111122223333']));
+    try {
+      script([]);
+      const said = aws.createCluster('support', { region: 'eu-west-1' });
+      await expect(said).rejects.toThrow(/nothing is billing and there is nothing to delete/u);
+      await expect(said).rejects.not.toThrow(/can still be billing/u);
+      expect(order).toEqual(['record', 'clear']);
+      expect(seen.some((argv) => argv.includes('list-stacks'))).toBe(true);
+
+      // A question AWS did not answer is not "nothing there": the note and warning stay.
+      order.length = 0;
+      script([[has('list-stacks'), { returncode: 255, stderr: 'AccessDenied' }]]);
+      await expect(aws.createCluster('support', { region: 'eu-west-1' })).rejects.toThrow(
+        /can still be billing/u,
+      );
+      expect(order).toEqual(['record']);
     } finally {
       remove();
     }

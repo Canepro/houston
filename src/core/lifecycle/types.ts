@@ -37,6 +37,11 @@ export interface CreateReq {
   rcImage: string;
   mongo: string;
   regToken: string;
+  /**
+   * The Enterprise licence TEXT (`up --license <file|->` reads it). Never recorded, never in
+   * the compose document or `extra.env`: a file of its own on Compose, a Secret on Kubernetes.
+   */
+  license: string;
   params: Record<string, unknown>;
   seed: boolean;
   /**
@@ -47,6 +52,8 @@ export interface CreateReq {
    */
   seedHere: boolean;
   seedProfile: string;
+  seedScenarios: string[];
+  seedHistoryDays: number | null;
   pin: boolean;
   wait: boolean;
   offline: boolean;
@@ -86,6 +93,11 @@ export interface CreateReq {
   env: Record<string, string | null>;
   /** Who asked for this, when the GUI has named accounts. */
   actor: string;
+  /**
+   * `name` is an existing workspace `actor` may act on, so it is used as typed rather than
+   * given the actor's prefix. Set by `ownership.claimTypedName`, never from a request body.
+   */
+  exactName: boolean;
   /** Set by `resolveTls`: an ACME challenge has to publish on a public interface. */
   bindPublic: boolean;
 }
@@ -101,10 +113,13 @@ export function createReq(values: Partial<CreateReq> & Pick<CreateReq, 'version'
     rcImage: '',
     mongo: '',
     regToken: '',
+    license: '',
     params: {},
     seed: false,
     seedHere: false,
     seedProfile: 'small',
+    seedScenarios: [],
+    seedHistoryDays: null,
     pin: false,
     wait: false,
     offline: false,
@@ -127,6 +142,7 @@ export function createReq(values: Partial<CreateReq> & Pick<CreateReq, 'version'
     ingressClass: '',
     env: {},
     actor: '',
+    exactName: false,
     bindPublic: false,
     ...values,
   };
@@ -208,6 +224,14 @@ export const STATE_ACTIONS: readonly string[] = Object.freeze(['start', 'stop', 
 export const DESTROY_POLICY_KEY = 'gui.destroy_policy';
 
 /**
+ * Where `upgrade` records the automatic pre-upgrade bundle, so a rollback finds it, and the
+ * version it upgraded from. Here rather than in `upgrade`, because the detail payload reads
+ * both to say whether a rollback can be made, and `upgrade` sits above it.
+ */
+export const LAST_BACKUP_KEY = 'last_upgrade_backup';
+export const UPGRADE_FROM_KEY = 'upgraded_from';
+
+/**
  * Who may set the create fields that decide what CODE runs and where it LISTENS.
  *
  * DEFAULT: anyone who may create at all, which is member and up. Set it to `admin` to
@@ -227,6 +251,9 @@ export const PRIVILEGED_CREATE_FIELDS: readonly string[] = Object.freeze([
   'reg_token',
   'bind',
   'context',
+  // An Enterprise license decides what the workspace is allowed to do, as a registration
+  // token does: the same policy governs it.
+  'license',
 ]);
 
 /**

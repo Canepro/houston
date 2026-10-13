@@ -20,14 +20,15 @@
  * Parameters (via `--set`):
  *   instances   number of Rocket.Chat instances to run (default 2, clamped 2..5).
  */
+import { TRAEFIK_TAG } from '../config';
 import { intParam } from './common';
 import { type Params, register } from './registry';
 import { emptyPreset, type Preset } from './types';
 
-// Pinned to match the official rocketchat-compose defaults (both multi-arch; verify with
-// `docker manifest inspect` before release, as with the Mongo images).
+// Pinned to match the official rocketchat-compose defaults (multi-arch; verify with
+// `docker manifest inspect` before release, as with the Mongo images). Traefik is
+// `config.TRAEFIK_TAG`, shared with the HTTPS edge.
 const NATS_TAG = '2.11-alpine';
-const TRAEFIK_TAG = 'v3.4';
 
 /**
  * Traefik file-provider config: one load-balancer service fronting the N instances, with
@@ -103,10 +104,12 @@ export function build(params: Params): Preset {
     files: [['traefik/dynamic.yml', dynamicConfig(instances)]],
     paramsHelp: { instances: 'number of Rocket.Chat instances (default 2, max 5)' },
     notes: [
-      'Verify the mesh (lists every connected instance):',
+      'Verify the mesh (lists every connected instance; one a restart replaced stays listed a while):',
       '    houston api --name <name> GET /api/v1/instances.get',
-      'Open two different instance URLs (shown above) in separate browsers,',
-      '  post in one and watch it arrive in the other (cross-instance real-time).',
+      'Cross-instance real-time needs an Enterprise license (its scalability module): without one,',
+      '  a message posted on one instance shows on the others only after a reload. Add one with',
+      '  `--license` or in Rocket.Chat under Workspace > Subscription, then open two instance URLs',
+      '  (shown above) in separate browsers and post in one.',
     ],
   };
 }

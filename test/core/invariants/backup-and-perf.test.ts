@@ -60,14 +60,7 @@ describe('the database tools under an operator-managed MongoDB', () => {
       // The operator enables SCRAM, so an unauthenticated `mongodump` fails with "Command
       // listCollections requires authentication" -- which is what it did: backup was broken
       // on the path the official guide recommends and worked on the one that has no auth.
-      mongoToolAuth: async () => [
-        '--username',
-        'app',
-        '--password',
-        's3cr3t',
-        '--authenticationDatabase',
-        'rocketchat',
-      ],
+      mongoToolAuth: async () => 's3cr3t',
     }));
     jest.doMock('../../../src/core/topology', () => {
       const real = jest.requireActual('../../../src/core/topology') as Record<string, unknown>;
@@ -90,11 +83,14 @@ describe('the database tools under an operator-managed MongoDB', () => {
     }));
     try {
       const backup = require('../../../src/core/backup') as typeof BackupNS;
-      expect(await backup.mongoAuth('authw')).toContain('--username');
+      expect(await backup.mongoAuth('authw')).toBe('s3cr3t');
       // authenticationDatabase is the APPLICATION database, not `admin`: the user is
       // defined there, and authenticating against admin looks for a user never created.
-      const flags = await backup.mongoAuth('authw');
-      expect(flags.at(-1)).not.toBe('admin');
+      const { toolAuthenticated } = require('../../../src/core/kube/operator') as {
+        toolAuthenticated: (argv: string[], password: string) => [string[], string];
+      };
+      const [flags] = toolAuthenticated(['mongodump'], 's3cr3t');
+      expect(flags.slice(-2)).toEqual(['--authenticationDatabase', 'rocketchat']);
     } finally {
       jest.dontMock('../../../src/core/kube/operator');
       jest.dontMock('../../../src/core/topology');
@@ -107,7 +103,7 @@ describe('the database tools under an operator-managed MongoDB', () => {
     await aWorkspace('plainw');
     const backup = require('../../../src/core/backup') as typeof BackupNS;
     // Compose never reaches Kubernetes at all, so adding flags here would break it.
-    expect(await backup.mongoAuth('plainw')).toEqual([]);
+    expect(await backup.mongoAuth('plainw')).toBe('');
   });
 });
 

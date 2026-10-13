@@ -18,7 +18,15 @@ import { emptyPreset, presetFromJSON } from '../../src/lib/presets/types';
 import { safeDump } from '../../src/lib/yaml-dump';
 import { resolve as resolveVersion } from '../../src/lib/versions';
 import type { ComposeDoc, Service, Spec } from '../../src/lib/compose';
-import { HEADER, bindPorts, build, rcServiceNames, spec, toYaml } from '../../src/lib/compose';
+import {
+  HEADER,
+  bindPorts,
+  build,
+  forEngine,
+  rcServiceNames,
+  spec,
+  toYaml,
+} from '../../src/lib/compose';
 
 import type * as EdgeSpecNS from '../../src/core/edge/spec';
 import type * as EdgeTypesNS from '../../src/core/edge/types';
@@ -1181,4 +1189,117 @@ describe("the compose writer and docker compose's reader", () => {
     expect(DOCKER_READ.filter(([value]) => !changed.has(value))).toEqual([]);
     expect(DOCKER_KEPT.filter((value) => changed.has(value))).toEqual([]);
   }, 120_000);
+});
+
+describe('the Rocket.Chat image reference', () => {
+  it('runs an image that already names its tag as given, never repo:tag:version', () => {
+    // `--rc-image repo:tag` and every CI build rendered `repo:tag:8.5.1`, which no registry
+    // resolves, so the pull failed after the whole workspace had been written.
+    const image = (rcImage: string) =>
+      (build(official({ rcImage })).services.rocketchat as { image: string }).image;
+    expect(image('registry.example/rc:custom')).toBe('registry.example/rc:custom');
+    expect(image('ghcr.io/rocketchat/rocket.chat:pr-42617')).toBe(
+      'ghcr.io/rocketchat/rocket.chat:pr-42617',
+    );
+    expect(image('registry:5000/org/rc')).toBe('registry:5000/org/rc:8.5.1');
+    expect(image('registry.rocket.chat/rocketchat/rocket.chat')).toBe(
+      'registry.rocket.chat/rocketchat/rocket.chat:8.5.1',
+    );
+  });
+
+  it('pins a FIPS build to amd64, the only platform it is published for', () => {
+    const service = (rcImage: string) =>
+      build(official({ rcImage })).services.rocketchat as Record<string, unknown>;
+    expect(service('ghcr.io/rocketchat/rocket.chat:develop-fips').platform).toBe('linux/amd64');
+    expect(service('ghcr.io/rocketchat/rocket.chat:pr-1-fips-gha-run-9').platform).toBe(
+      'linux/amd64',
+    );
+    expect('platform' in service('ghcr.io/rocketchat/rocket.chat:develop')).toBe(false);
+    expect('platform' in service('registry.rocket.chat/rocketchat/rocket.chat')).toBe(false);
+  });
+});
+
+describe('the document as the engine needs it', () => {
+  const podman = {
+    kind: 'podman',
+    socket: '/run/user/1001/podman/podman.sock',
+    rootDir: '/home/u/.local/share/containers/storage',
+  };
+  const withCollector = () => {
+    const doc = build(official());
+    doc.services.collector = {
+      image: 'otel',
+      volumes: [
+        '/var/run/docker.sock:/var/run/docker.sock:ro',
+        '/var/lib/docker/containers:/hostfs/storage:ro',
+        './x:/x:ro',
+      ],
+    };
+    return doc;
+  };
+
+  it("is Docker's own document, the same object, so its bytes cannot move", () => {
+    const doc = withCollector();
+    expect(
+      forEngine(doc, {
+        kind: 'docker',
+        socket: '/var/run/docker.sock',
+        rootDir: '/var/lib/docker',
+      }),
+    ).toBe(doc);
+    expect(forEngine(doc, null)).toBe(doc);
+  });
+
+  it("on Podman logs to files, disables SELinux labels, and mounts Podman's own socket and store", () => {
+    const out = forEngine(withCollector(), podman);
+    expect(out.services.rocketchat?.logging).toEqual({ driver: 'k8s-file' });
+    expect(out.services.rocketchat?.security_opt).toEqual(['label=disable']);
+    expect(out.services.collector?.volumes).toEqual([
+      '/run/user/1001/podman/podman.sock:/var/run/docker.sock:ro',
+      '/home/u/.local/share/containers/storage/overlay-containers:/hostfs/storage:ro',
+      './x:/x:ro',
+    ]);
+    // Applied again (monitoring attached later), nothing doubles.
+    expect(forEngine(out, podman)).toEqual(out);
+  });
+});
+
+describe("the official MongoDB's replica-set initiation", () => {
+  it('rides out a moment when mongod cannot resolve itself, instead of failing the up', () => {
+    // mongod checks `mongodb` resolves to itself at `replSetInitiate`; on rootless Podman
+    // that lookup misses for a moment while a neighbouring workspace's network comes or
+    // goes. The init was ONE shot with `restart: 'no'`, so one miss failed the whole `up`.
+    const service = build(official()).services['mongo-init'] as Service;
+    const script = String((service.environment as Record<string, unknown>).RS_INIT);
+    let initiated = 0;
+    const rs = {
+      status: () => {
+        if (initiated < 3) throw new Error('no replset config has been received');
+        return { ok: 1 };
+      },
+      initiate: () => {
+        initiated += 1;
+        if (initiated < 3) throw new Error('NodeNotFound: No host described in new configuration');
+      },
+    };
+    // The shell script itself, run on a stand-in `rs`.
+    new Function('rs', 'sleep', script)(rs, () => undefined);
+    expect(initiated).toBe(3);
+  });
+
+  it('retries the connection itself, which the shell makes before its script runs', () => {
+    // A miss of `mongodb` at connect time ended the one shot before the script's own retry
+    // ran: a fresh `up` under Podman's DNS churn lost one boot in fifteen, and `restart`
+    // re-runs it. The loop is the shell's, bounded, and compose's `$$` reaches it as `$`.
+    const service = build(official()).services['mongo-init'] as Service;
+    expect(service.entrypoint).toEqual([
+      'sh',
+      '-c',
+      'for i in 1 2 3 4 5 6 7 8 9 10; do mongosh "$$MONGO_URI" --eval "$$RS_INIT" && exit 0; ' +
+        'sleep 2; done; exit 1',
+    ]);
+    expect((service.environment as Record<string, unknown>).MONGO_URI).toBe(
+      'mongodb://mongodb:27017/?directConnection=true',
+    );
+  });
 });

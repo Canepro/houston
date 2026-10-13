@@ -307,6 +307,41 @@ describe('the detail panel', () => {
     expect([plain.public_url, plain.tls]).toEqual(['', '']);
   });
 
+  it('says which version a rollback returns to, only while one can be made', async () => {
+    // The GUI had no rollback control, though the route worked: the panel needs to know
+    // whether one can be made and to what, and `rollback` needs the recorded pre-upgrade
+    // bundle to still be on disk.
+    const bundle = path.join(config.reprosDir(), '..', 'pre-upgrade.rcbak');
+    fs.mkdirSync(path.dirname(bundle), { recursive: true });
+    fs.writeFileSync(bundle, '');
+    const upgraded = { upgraded_from: '8.4.0', last_upgrade_backup: bundle };
+    await write('up', 'services: {}\n', sampleMeta('up', { extra: upgraded }));
+    // `upgrade --no-backup` clears the bundle; a rollback clears `upgraded_from`.
+    await write('nb', 'services: {}\n', sampleMeta('nb', { extra: { upgraded_from: '8.4.0' } }));
+    await write(
+      'rb',
+      'services: {}\n',
+      sampleMeta('rb', { extra: { last_upgrade_backup: bundle } }),
+    );
+    await write(
+      'gone',
+      'services: {}\n',
+      sampleMeta('gone', {
+        extra: { upgraded_from: '8.4.0', last_upgrade_backup: `${bundle}.deleted` },
+      }),
+    );
+    const { payload } = load(false);
+    const answers = [];
+    for (const name of ['up', 'nb', 'rb', 'gone']) {
+      answers.push((await payload.detail(name)).rollback_to);
+    }
+    expect(answers).toEqual(['8.4.0', '', '', '']);
+    // A path no home can expand is a hand-edited record: "", not a panel that will not open.
+    expect(
+      payload.rollbackTarget({ upgraded_from: '8.4.0', last_upgrade_backup: '~no-such-user-x/b' }),
+    ).toBe('');
+  });
+
   it('reports an unknown state, not down, when docker cannot be asked', async () => {
     // `containerDetails` answers [] both for "none" and for "could not ask docker", so the
     // detail asserted `down` while the list said `?` for the same repro -- and the panel

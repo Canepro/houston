@@ -122,6 +122,18 @@ export function edge(values: Partial<Edge> = {}): Edge {
  * in-flight challenge -- so a few restarts spend the budget for the whole hour and the
  * only safe way to test the plumbing is against staging, which is what this switch is for.
  */
+/**
+ * The challenge `config set acme.challenge` forces, or '' when it forces none. The one reading
+ * of it: the edge `serve --domain` builds and a workspace's `up --domain` (`pickChallenge`)
+ * both ask here, where only the first used to look.
+ */
+export function forcedChallenge(cfg: Record<string, unknown>): string {
+  const forced = String(cfg.acme_challenge ?? '')
+    .trim()
+    .toLowerCase();
+  return ['http', 'tlsalpn', 'dns'].includes(forced) ? forced : '';
+}
+
 export function resolveEdge(
   domain: string,
   acmeEmail: string,
@@ -138,14 +150,8 @@ export function resolveEdge(
   // failed on every attempt and the operator had no access to the DNS zone. `config set
   // acme.challenge http` is the escape hatch, and it names the mechanism rather than a
   // symptom.
-  const forced = String(cfg.acme_challenge ?? '')
-    .trim()
-    .toLowerCase();
-  const challenge = ['http', 'tlsalpn', 'dns'].includes(forced)
-    ? forced
-    : hasDns
-      ? 'dns'
-      : 'tlsalpn';
+  const forced = forcedChallenge(cfg);
+  const challenge = forced !== '' ? forced : hasDns ? 'dns' : 'tlsalpn';
   return edge({
     ...overrides,
     domain,

@@ -26,7 +26,9 @@ import { metadata } from '../../../src/core/runner/record';
 import * as topology from '../../../src/core/topology';
 
 import { kube } from '../../../src/core/kube/exec';
+import { spawnSync } from 'node:child_process';
 import {
+  QUICK_FAILURES,
   ensurePortForward,
   forwardAlive,
   forwardBound,
@@ -37,6 +39,7 @@ import {
   portForward,
   scenarioUiForwards,
   stopForward,
+  supervisorScript,
 } from '../../../src/core/kube/forward';
 import { CONTEXT } from '../../../src/core/kube/names';
 
@@ -74,9 +77,13 @@ async function freePort(): Promise<number> {
   return port;
 }
 
-async function waitFor(what: string, done: () => boolean, ms = 5000): Promise<void> {
+async function waitFor(
+  what: string,
+  done: () => boolean | Promise<boolean>,
+  ms = 5000,
+): Promise<void> {
   const until = Date.now() + ms;
-  while (!done()) {
+  while (!(await done())) {
     if (Date.now() > until) throw new Error(`timed out waiting for ${what}`);
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
@@ -100,7 +107,7 @@ let kubectlDir = '';
  * port it was given, on `--address` if it was given one -- or, as `exit`, what a kubectl
  * that cannot bind does, which is exit at once.
  */
-function installKubectl(mode: 'listen' | 'exit'): void {
+function installKubectl(mode: 'listen' | 'exit' | 'brief'): void {
   kubectlDir = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-kubectl-'));
   fs.writeFileSync(path.join(kubectlDir, 'mode'), mode);
   fs.writeFileSync(
@@ -112,18 +119,19 @@ function installKubectl(mode: 'listen' | 'exit'): void {
       "const path = require('node:path');\n" +
       'const argv = process.argv.slice(2);\n' +
       "fs.appendFileSync(path.join(__dirname, 'spawned.jsonl'), " +
-      "JSON.stringify({ pid: process.pid, argv }) + '\\n');\n" +
+      "JSON.stringify({ pid: process.pid, ppid: process.ppid, argv }) + '\\n');\n" +
       "if (fs.readFileSync(path.join(__dirname, 'mode'), 'utf8') === 'exit') process.exit(1);\n" +
       "const host = Number(String(argv[argv.length - 1]).split(':')[0]);\n" +
       "const at = argv.indexOf('--address');\n" +
       "net.createServer().listen(host, at >= 0 ? argv[at + 1] : '127.0.0.1');\n" +
-      'setTimeout(() => process.exit(0), 60000);\n',
+      // `brief`: binds, then exits on its own a second later, as a broken stream makes it.
+      "setTimeout(() => process.exit(0), fs.readFileSync(path.join(__dirname, 'mode'), 'utf8') === 'brief' ? 1000 : 60000);\n",
     { mode: 0o755 },
   );
   process.env.PATH = `${kubectlDir}${path.delimiter}${realPath ?? ''}`;
 }
 
-function spawned(): { pid: number; argv: string[] }[] {
+function spawned(): { pid: number; ppid: number; argv: string[] }[] {
   if (kubectlDir === '') return [];
   const log = path.join(kubectlDir, 'spawned.jsonl');
   if (!fs.existsSync(log)) return [];
@@ -131,11 +139,31 @@ function spawned(): { pid: number; argv: string[] }[] {
     .readFileSync(log, 'utf8')
     .split('\n')
     .filter((line) => line !== '')
-    .map((line) => JSON.parse(line) as { pid: number; argv: string[] });
+    .map((line) => JSON.parse(line) as { pid: number; ppid: number; argv: string[] });
+}
+
+/** A process's parent pid, or 0 once it is gone. */
+function parentOf(pid: number): number {
+  try {
+    const stat = fs.readFileSync(`/proc/${String(pid)}/stat`, 'utf8');
+    return Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
+  } catch {
+    return 0;
+  }
 }
 
 function killSpawned(): void {
-  for (const { pid } of spawned()) {
+  for (const { pid, ppid } of spawned()) {
+    // The supervisor first, or it starts the kubectl again -- by the parent recorded at
+    // spawn, which a kubectl that already exited can no longer name.
+    const parent = ppid;
+    if (parent > 1 && parent !== process.pid) {
+      try {
+        process.kill(-parent, 'SIGKILL');
+      } catch {
+        // already gone
+      }
+    }
     try {
       process.kill(pid, 'SIGKILL');
     } catch {
@@ -203,8 +231,8 @@ describe('whose socket a forward is', () => {
     const pid = doomed.pid as number;
     expect(await forwardBound(pid, port, { tries: 3, interval: 0.1 })).toBe(false);
     // And the ownership question itself, both ways.
-    expect(pidOwnsPort(pid, port)).toBe(false);
-    expect(pidOwnsPort(process.pid, port)).toBe(true);
+    expect(await pidOwnsPort(pid, port)).toBe(false);
+    expect(await pidOwnsPort(process.pid, port)).toBe(true);
   });
 
   it('does not certify a forward that got only one address family', async () => {
@@ -216,10 +244,10 @@ describe('whose socket a forward is', () => {
     const mine = await listen(0, '::1');
     const { port } = mine.address() as net.AddressInfo;
     // Only this process holds it: exclusive, which is the healthy forward.
-    expect(pidOwnsPort(process.pid, port)).toBe(true);
-    expect(pidOwnsPortExclusively(process.pid, port)).toBe(true);
+    expect(await pidOwnsPort(process.pid, port)).toBe(true);
+    expect(await pidOwnsPortExclusively(process.pid, port)).toBe(true);
     // A pid that holds nothing on it answers no to both.
-    expect(pidOwnsPortExclusively(1, port)).toBe(false);
+    expect(await pidOwnsPortExclusively(1, port)).toBe(false);
 
     holder(
       [],
@@ -229,8 +257,8 @@ describe('whose socket a forward is', () => {
     await waitFor('the IPv4 squatter', () => listeningInodes(port).size > 1);
     // THE SPLIT. Presence still says yes -- our IPv6 socket is really there -- and that is
     // exactly the answer that certified a broken URL.
-    expect(pidOwnsPort(process.pid, port)).toBe(true);
-    expect(pidOwnsPortExclusively(process.pid, port)).toBe(false);
+    expect(await pidOwnsPort(process.pid, port)).toBe(true);
+    expect(await pidOwnsPortExclusively(process.pid, port)).toBe(false);
   });
 });
 
@@ -248,12 +276,15 @@ describe('which process is OUR forward', () => {
         `require('net').createServer().listen(${String(port)}, '127.0.0.1');` +
         'setInterval(() => {}, 1000)',
     );
-    await waitFor('the hidden forward to bind', () => pidOwnsPort(hidden.pid as number, port));
-    expect(forwardAlive(hidden.pid, { namespace: 'houston-k', hostPort: port })).toBe(true);
-    // ...but only while the port it was started for is actually held: three facts, together.
-    expect(forwardAlive(hidden.pid, { namespace: 'houston-k', hostPort: await freePort() })).toBe(
-      false,
+    await waitFor(
+      'the hidden forward to bind',
+      async () => await pidOwnsPort(hidden.pid as number, port),
     );
+    expect(await forwardAlive(hidden.pid, { namespace: 'houston-k', hostPort: port })).toBe(true);
+    // ...but only while the port it was started for is actually held: three facts, together.
+    expect(
+      await forwardAlive(hidden.pid, { namespace: 'houston-k', hostPort: await freePort() }),
+    ).toBe(false);
 
     // A recycled pid running something else is still refused.
     const other = await freePort();
@@ -263,8 +294,8 @@ describe('which process is OUR forward', () => {
         `require('net').createServer().listen(${String(other)}, '127.0.0.1');` +
         'setInterval(() => {}, 1000)',
     );
-    await waitFor('nginx to bind', () => pidOwnsPort(nginx.pid as number, other));
-    expect(forwardAlive(nginx.pid, { namespace: 'houston-k', hostPort: other })).toBe(false);
+    await waitFor('nginx to bind', async () => await pidOwnsPort(nginx.pid as number, other));
+    expect(await forwardAlive(nginx.pid, { namespace: 'houston-k', hostPort: other })).toBe(false);
 
     // And a FULL argv is still matched strictly, so a different workspace's forward on a
     // recycled pid does not pass.
@@ -288,10 +319,11 @@ describe('which process is OUR forward', () => {
       'deployment/x',
       '3000:3000',
     ]);
-    await waitFor('the argv to be readable', () =>
-      forwardAlive(ours.pid, { namespace: 'houston-k', hostPort: 3000 }),
+    await waitFor(
+      'the argv to be readable',
+      async () => await forwardAlive(ours.pid, { namespace: 'houston-k', hostPort: 3000 }),
     );
-    expect(forwardAlive(theirs.pid, { namespace: 'houston-k', hostPort: 3000 })).toBe(false);
+    expect(await forwardAlive(theirs.pid, { namespace: 'houston-k', hostPort: 3000 })).toBe(false);
   });
 
   it('is identified by its argv, so a recycled pid is not our forward', async () => {
@@ -312,15 +344,22 @@ describe('which process is OUR forward', () => {
     const theirs = holder(argvFor('houston-theirs', '3002:3000'));
     const longer = holder(argvFor('houston-mine', '13001:3000'));
     const server = holder(['busybox', 'httpd', '-f', '-p', '8000']);
-    await waitFor('the argv to be readable', () =>
-      forwardAlive(mine.pid, { namespace: 'houston-mine', hostPort: 3001 }),
+    await waitFor(
+      'the argv to be readable',
+      async () => await forwardAlive(mine.pid, { namespace: 'houston-mine', hostPort: 3001 }),
     );
     // Someone else's workspace, same box, recycled pid.
-    expect(forwardAlive(theirs.pid, { namespace: 'houston-mine', hostPort: 3001 })).toBe(false);
+    expect(await forwardAlive(theirs.pid, { namespace: 'houston-mine', hostPort: 3001 })).toBe(
+      false,
+    );
     // Same namespace, different port -- a substring test would have matched 13001.
-    expect(forwardAlive(longer.pid, { namespace: 'houston-mine', hostPort: 3001 })).toBe(false);
+    expect(await forwardAlive(longer.pid, { namespace: 'houston-mine', hostPort: 3001 })).toBe(
+      false,
+    );
     // Not a port-forward at all.
-    expect(forwardAlive(server.pid, { namespace: 'houston-mine', hostPort: 3001 })).toBe(false);
+    expect(await forwardAlive(server.pid, { namespace: 'houston-mine', hostPort: 3001 })).toBe(
+      false,
+    );
   });
 
   it('retires the previous forward by the port it is ON, not the port being asked for', async () => {
@@ -338,23 +377,24 @@ describe('which process is OUR forward', () => {
       '3260:3000',
     ]);
     const pid = old.pid as number;
-    await waitFor('the argv to be readable', () =>
-      forwardAlive(pid, { namespace: 'ns', hostPort: 3260 }),
+    await waitFor(
+      'the argv to be readable',
+      async () => await forwardAlive(pid, { namespace: 'ns', hostPort: 3260 }),
     );
     const gone = new Promise<void>((resolve) => old.once('exit', () => resolve()));
 
     // Asked about the new port: not our forward, and nothing is signalled.
-    expect(stopForward(pid, { namespace: 'ns', hostPort: 3261 })).toBe(false);
+    expect(await stopForward(pid, { namespace: 'ns', hostPort: 3261 })).toBe(false);
     expect(running(pid)).toBe(true);
     // Asked about the port it is actually on: retired.
     const events: Event[] = [];
-    expect(stopForward(pid, { namespace: 'ns', hostPort: 3260, emit: (e) => events.push(e) })).toBe(
-      true,
-    );
+    expect(
+      await stopForward(pid, { namespace: 'ns', hostPort: 3260, emit: (e) => events.push(e) }),
+    ).toBe(true);
     await gone;
     expect(events.map((event) => event.message).join(' ')).toContain('3260');
     // No recorded pid at all is not an error.
-    expect(stopForward(0, { namespace: 'ns', hostPort: 3260 })).toBe(false);
+    expect(await stopForward(0, { namespace: 'ns', hostPort: 3260 })).toBe(false);
   });
 });
 
@@ -373,7 +413,8 @@ describe('publishing a workspace', () => {
       sleep: settle,
     });
     const [started] = spawned();
-    expect(pid).toBe(started?.pid);
+    // The pid recorded is the supervisor's, and the kubectl is its child.
+    expect(parentOf(started?.pid ?? 0)).toBe(pid);
     const argv = started?.argv ?? [];
     expect(argv[argv.indexOf('port-forward') + 1]?.startsWith('deployment/')).toBe(true);
     // The container port is 3000; the Service's is 80.
@@ -383,8 +424,8 @@ describe('publishing a workspace', () => {
   it('replaces a dead forward rather than trusting a recorded pid', async () => {
     // A forward dies with its pod, so a recorded pid is not evidence it is alive -- and a
     // recycled pid is not evidence it is OURS.
-    expect(forwardAlive(null)).toBe(false);
-    expect(forwardAlive(999999999)).toBe(false); // a pid that cannot be read is dead
+    expect(await forwardAlive(null)).toBe(false);
+    expect(await forwardAlive(999999999)).toBe(false); // a pid that cannot be read is dead
     installKubectl('listen');
     cluster();
     const port = await freePort();
@@ -395,7 +436,7 @@ describe('publishing a workspace', () => {
       pid: 999999999,
     });
     expect(spawned()).toHaveLength(1); // it did not trust the dead pid
-    expect(pid).toBe(spawned()[0]?.pid);
+    expect(parentOf(spawned()[0]?.pid ?? 0)).toBe(pid);
   });
 
   it('carries --bind to the forward, and never widens loopback on its own', async () => {
@@ -474,7 +515,7 @@ describe('publishing a workspace', () => {
       hostPort: ok,
       sleep: settle,
     });
-    expect(pid).toBe(spawned()[0]?.pid);
+    expect(parentOf(spawned()[0]?.pid ?? 0)).toBe(pid);
     expect(pid).toBeGreaterThan(0);
   });
 
@@ -506,12 +547,70 @@ describe('publishing a workspace', () => {
       sleep: settle,
     });
     const [started] = spawned();
-    expect(out).toEqual({ [port]: started?.pid });
+    expect(out).toEqual({ [port]: parentOf(started?.pid ?? 0) });
     const argv = started?.argv ?? [];
     expect(argv).toContain('deployment/keycloak');
     expect(argv.some((arg) => arg.startsWith('svc/'))).toBe(false);
     // host:container, so the CONTAINER port is what it maps to.
     expect(argv).toContain(`${String(port)}:8080`);
+  });
+});
+
+describe('a forward whose kubectl exits on its own', () => {
+  it('is started again, with nobody running ready, and stays the same recorded forward', async () => {
+    // kubectl exits when its stream to the pod breaks -- measured after 19 minutes with the
+    // pod healthy -- and the URL stayed dead until somebody ran `houston ready`.
+    installKubectl('brief');
+    cluster();
+    const port = await freePort();
+    const pid = await portForward('k', {
+      namespace: 'ns',
+      context: CONTEXT,
+      hostPort: port,
+      sleep: settle,
+    });
+    expect(pid).toBeGreaterThan(0);
+    const first = spawned()[0]?.pid ?? 0;
+    for (let n = 0; n < 60 && spawned().length < 2; n += 1) await settle();
+    const again = spawned()[1]?.pid ?? 0;
+    expect(again).not.toBe(first);
+    expect(parentOf(again)).toBe(pid);
+    expect(await forwardBound(pid, port, { sleep: settle })).toBe(true);
+    expect(await forwardAlive(pid, { namespace: 'ns', hostPort: port })).toBe(true);
+  });
+
+  it('is stopped with its kubectl, so nothing is left holding the port', async () => {
+    installKubectl('listen');
+    cluster();
+    const port = await freePort();
+    const pid = await portForward('k', {
+      namespace: 'ns',
+      context: CONTEXT,
+      hostPort: port,
+      sleep: settle,
+    });
+    const child = spawned()[0]?.pid ?? 0;
+    expect(await stopForward(pid, { namespace: 'ns', hostPort: port })).toBe(true);
+    for (let n = 0; n < 40 && (parentOf(pid) !== 0 || parentOf(child) !== 0); n += 1)
+      await settle();
+    expect([parentOf(pid), parentOf(child)]).toEqual([0, 0]);
+    for (let n = 0; n < 20 && (await forwardReachable(port, { tries: 1 })); n += 1) await settle();
+    expect(await forwardReachable(port, { tries: 1 })).toBe(false);
+  });
+
+  it('gives up after starts in a row that each end at once, such as a namespace that is gone', () => {
+    const runs = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'houston-sup-')), 'runs');
+    const done = spawnSync(
+      'sh',
+      ['-c', supervisorScript(3, 0), 'test', 'sh', '-c', `echo x >> ${runs}`],
+      {
+        timeout: 20_000,
+      },
+    );
+    expect(done.status).toBe(0);
+    expect(fs.readFileSync(runs, 'utf8').split('\n').filter(Boolean)).toHaveLength(3);
+    expect(QUICK_FAILURES).toBe(60);
+    fs.rmSync(path.dirname(runs), { recursive: true, force: true });
   });
 });
 
@@ -550,9 +649,9 @@ describe('telling somebody the URL is dead', () => {
       namespace: 'houston-k',
       port_forward_pid: 999999999,
     });
-    const titles = () => noteGroupsOf(meta).map((group) => group.title);
+    const titles = async () => (await noteGroupsOf(meta)).map((group) => group.title);
 
-    const dead = noteGroupsOf(meta).find(
+    const dead = (await noteGroupsOf(meta)).find(
       (group) => group.title === 'The URL is not published right now',
     );
     expect(dead).toBeDefined();
@@ -572,16 +671,17 @@ describe('telling somebody the URL is dead', () => {
       'deployment/rocketchat-rocketchat',
       '3000:3000',
     ]);
-    await waitFor('the argv to be readable', () =>
-      forwardAlive(live.pid, { namespace: 'houston-k', hostPort: 3000 }),
+    await waitFor(
+      'the argv to be readable',
+      async () => await forwardAlive(live.pid, { namespace: 'houston-k', hostPort: 3000 }),
     );
     meta.extra.port_forward_pid = live.pid;
-    expect(titles()).not.toContain('The URL is not published right now');
+    expect(await titles()).not.toContain('The URL is not published right now');
 
     // AND NEITHER DOES A RECORD WITH NO PID: one written before the pid was tracked says
     // nothing about what is listening, so a note claiming a fact must stay quiet.
     delete meta.extra.port_forward_pid;
-    expect(titles()).not.toContain('The URL is not published right now');
+    expect(await titles()).not.toContain('The URL is not published right now');
 
     // A Compose workspace publishes a real port and is not affected.
     const compose = metadata({
@@ -590,7 +690,7 @@ describe('telling somebody the URL is dead', () => {
       rootUrl: 'http://localhost:3001',
       hostPort: 3001,
     });
-    expect(noteGroupsOf(compose).map((group) => group.title)).not.toContain(
+    expect((await noteGroupsOf(compose)).map((group) => group.title)).not.toContain(
       'The URL is not published right now',
     );
   });

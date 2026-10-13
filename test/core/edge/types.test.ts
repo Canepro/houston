@@ -81,13 +81,14 @@ describe('the challenge flags', () => {
     expect(args.some((arg) => arg.includes('tlschallenge'))).toBe(false);
     expect(args.some((arg) => arg.includes('redirections'))).toBe(false);
 
-    // The default is unchanged: TLS-ALPN, with all three redirect flags.
+    // The default is unchanged: TLS-ALPN, with the redirect -- at priority 1, so a route on
+    // :80 (a Kubernetes name's http-01 challenge) wins over it.
     config.saveConfig({});
     const plain = resolveEdge('gui.example.test', 'a@b.test');
     expect(plain.acmeChallenge).toBe('tlsalpn');
     const plainArgs = command(plain);
     expect(plainArgs.some((arg) => arg.includes('tlschallenge'))).toBe(true);
-    expect(plainArgs.filter((arg) => arg.includes('redirections'))).toHaveLength(3);
+    expect(plainArgs.filter((arg) => arg.includes('redirections'))).toHaveLength(4);
 
     // A value nobody recognises falls back to the derivation rather than reaching Traefik,
     // where it would be a startup failure.

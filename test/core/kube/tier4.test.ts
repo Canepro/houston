@@ -32,6 +32,7 @@ import { KUBERNETES } from '../../../src/core/topology';
 import {
   bestChartAtOrBelow,
   chartEnv,
+  refuseChartOwnedEnv,
   resolveChartVersion,
   valuesFor,
   type ChartEnvEntry,
@@ -52,7 +53,7 @@ import {
 } from '../../../src/core/kube/certmanager';
 import { kube } from '../../../src/core/kube/exec';
 import { forwardAlive, listedService } from '../../../src/core/kube/forward';
-import { ensureIngress, ingressValues } from '../../../src/core/kube/ingress';
+import { ensureIngress, ingressValues, toolsIngressManifest } from '../../../src/core/kube/ingress';
 import {
   GRAFANA_DELETE_WAIT,
   MONITORING_LABEL,
@@ -415,6 +416,50 @@ describe('the MongoDB operator', () => {
     expect(ran('upgrade')).toBe(true);
   });
 
+  it('waits for a terminating shared namespace before installing an operator for a restored workspace', async () => {
+    let gone = false;
+    const terminating = json({
+      metadata: { name: OPERATOR_NAMESPACE, deletionTimestamp: '2026-10-10T00:00:00Z' },
+      status: { phase: 'Terminating' },
+    });
+    script([[has('get', 'namespace', OPERATOR_NAMESPACE), terminating]]);
+    const scripted = kube.run;
+    kube.run = async (argv, options) => {
+      if (argv.includes('wait') && argv.includes(`namespace/${OPERATOR_NAMESPACE}`)) gone = true;
+      if (argv.includes('upgrade') && !gone) {
+        return {
+          argv,
+          returncode: 1,
+          stdout: '',
+          stderr: 'cannot create Secret in terminating namespace',
+        };
+      }
+      return await scripted(argv, options);
+    };
+    await expect(
+      ensureOperator({ context: 'prod', namespace: 'houston-copy' }),
+    ).resolves.toBeUndefined();
+    expect(gone).toBe(true);
+    expect(ran('upgrade')).toBe(true);
+  });
+
+  it('does not install the operator when its previous namespace teardown cannot finish', async () => {
+    script([
+      [
+        has('get', 'namespace', OPERATOR_NAMESPACE),
+        json({ metadata: { name: OPERATOR_NAMESPACE }, status: { phase: 'Terminating' } }),
+      ],
+      [
+        has('wait', `namespace/${OPERATOR_NAMESPACE}`),
+        { returncode: 1, stderr: 'error: deletion timed out' },
+      ],
+    ]);
+    await expect(ensureOperator({ context: 'prod', namespace: 'houston-copy' })).rejects.toThrow(
+      'houston-system has not finished its previous teardown: error: deletion timed out',
+    );
+    expect(ran('upgrade')).toBe(false);
+  });
+
   it('reads a watch scope as a list, and an unset one as everything', () => {
     expect(operatorWatches('*', 'houston-x')).toBe(true);
     expect(operatorWatches('', 'houston-x')).toBe(true);
@@ -565,6 +610,29 @@ describe('the MongoDB operator', () => {
     ).toEqual(['data-volume', 'logs-volume']);
   });
 
+  it("lifts the mongod container above the operator's 500M, where the backup tools run", () => {
+    // mongodump runs inside `-c mongod`, under its limit: a backup seconds after a re-up had
+    // the container OOMKilled, which crash-looped Rocket.Chat too. The hand-written
+    // StatefulSet's values, which run the same tools in the same place.
+    const doc = YAML.parse(mongodbCommunityManifest('ws', '8.0')) as {
+      spec: {
+        statefulSet: {
+          spec: {
+            template?: {
+              spec: { containers: { name: string; resources: Record<string, unknown> }[] };
+            };
+          };
+        };
+      };
+    };
+    const containers = doc.spec.statefulSet.spec.template?.spec.containers ?? [];
+    expect(containers.map((container) => container.name)).toEqual(['mongod']);
+    expect(containers[0]?.resources).toEqual({
+      requests: { cpu: '100m', memory: '256Mi' },
+      limits: { memory: '2Gi' },
+    });
+  });
+
   it('grants clusterMonitor, which is what makes the oplog URL work', () => {
     // readWrite on the app database alone cannot read `local`, so Rocket.Chat below 8.x --
     // the only versions that still tail the oplog -- authenticated and then failed to tail.
@@ -685,6 +753,80 @@ describe('the chart', () => {
     );
   });
 
+  it('holds each variable ONCE: base < preset < override, and a null override removes it', () => {
+    // Appending gave `extraEnv` a second ADMIN_PASS whenever a preset or `up --env` named
+    // one, and two entries for one name is a server-side-apply refusal, not an override.
+    const env = chartEnv(
+      'pw',
+      '',
+      { ADMIN_PASS: 'from-the-preset', OVERWRITE_SETTING_Site_Name: 'Preset' },
+      '',
+      '',
+      { OVERWRITE_SETTING_Site_Name: 'Override', ADMIN_EMAIL: null, EXTRA: 'x' },
+    );
+    const names = env.map((entry) => entry.name);
+    expect(names.length).toBe(new Set(names).size);
+    const got = Object.fromEntries(env.map((entry) => [entry.name, entry.value]));
+    expect(got).toMatchObject({
+      ADMIN_PASS: 'from-the-preset',
+      OVERWRITE_SETTING_Site_Name: 'Override',
+      EXTRA: 'x',
+    });
+    expect('ADMIN_EMAIL' in got).toBe(false);
+  });
+
+  it('references the licence Secret, never the licence', () => {
+    const env = chartEnv('pw', '', {}, '', '', {}, true);
+    expect(env.find((entry) => entry.name === 'ROCKETCHAT_LICENSE')).toEqual({
+      name: 'ROCKETCHAT_LICENSE',
+      valueFrom: { secretKeyRef: { name: 'houston-license', key: 'license' } },
+    });
+    expect(
+      chartEnv('pw', '', {}, '', '').some((entry) => entry.name === 'ROCKETCHAT_LICENSE'),
+    ).toBe(false);
+  });
+
+  it('pulls a CI build every time, with its microservices from ghcr', () => {
+    const build = valuesFor({
+      rcVersion: '8.10.0.dev0',
+      rcImage: 'ghcr.io/rocketchat/rocket.chat:develop',
+      microservices: true,
+    });
+    expect(build.image).toEqual({
+      repository: 'ghcr.io/rocketchat/rocket.chat',
+      tag: 'develop',
+      pullPolicy: 'Always',
+    });
+    const ms = build.microservices as Record<
+      string,
+      { image?: { repository: string; pullPolicy: string }; enabled?: boolean }
+    >;
+    expect(ms.ddpStreamer?.image).toEqual({
+      repository: 'ghcr.io/rocketchat/ddp-streamer-service',
+      pullPolicy: 'Always',
+    });
+    expect(ms.streamHub).toEqual({ enabled: false });
+    // A release is untouched.
+    const release = valuesFor({
+      rcVersion: '8.5.1',
+      rcImage: 'registry.rocket.chat/rocketchat/rocket.chat',
+      microservices: true,
+    });
+    expect(release.microservices).toEqual({ enabled: true });
+    expect((release.image as { pullPolicy: string }).pullPolicy).toBe('IfNotPresent');
+  });
+
+  it('refuses an override of a variable the chart writes itself, naming what to use', () => {
+    expect(() => refuseChartOwnedEnv({ ROOT_URL: 'http://x' })).toThrow(/use --root-url/u);
+    expect(() => refuseChartOwnedEnv({ DEPLOY_METHOD: 'x' })).toThrow(ValidationError);
+    expect(() => refuseChartOwnedEnv({ OVERWRITE_SETTING_Prometheus_Enabled: 'false' })).toThrow(
+      /server-side-apply conflict/u,
+    );
+    expect(() =>
+      refuseChartOwnedEnv({ ADMIN_PASS: 'x', OVERWRITE_SETTING_Site_Name: 'y' }),
+    ).not.toThrow();
+  });
+
   it("writes a user preset's env as the text earlier releases give what its YAML holds", () => {
     // Earlier releases write each value as their own text of it, the same conversion their
     // compose writer makes: `String` wrote `true`, `null`, `Infinity`, `[object Object]`, a
@@ -713,7 +855,7 @@ describe('the chart', () => {
       { name: 'ADMIN_NAME', value: 'Admin' },
       { name: 'ADMIN_EMAIL', value: 'admin@example.com' },
       { name: 'ADMIN_PASS', value: 'pw' },
-      { name: 'ALLOW_UNSAFE_QUERY_AND_FIELDS_API_PARAMS', value: 'true' },
+      { name: 'ALLOW_UNSAFE_QUERY_AND_FIELDS_API_PARAMS', value: 'false' },
       { name: 'FLAG', value: 'True' },
       { name: 'NOTHING', value: 'None' },
       { name: 'BIG', value: '12345678901234567890' },
@@ -1023,13 +1165,13 @@ describe('the shared monitoring stack', () => {
 });
 
 describe('the port-forward', () => {
-  it('is identified by its own argv, not merely by being alive', () => {
+  it('is identified by its own argv, not merely by being alive', async () => {
     // A recycled pid belonging to a different workspace's forward -- or another user's, on a
     // shared box -- passed a liveness check dressed as an identity check.
-    expect(forwardAlive(0)).toBe(false);
-    expect(forwardAlive(null)).toBe(false);
+    expect(await forwardAlive(0)).toBe(false);
+    expect(await forwardAlive(null)).toBe(false);
     // This process is not a port-forward, whatever its pid is.
-    expect(forwardAlive(process.pid, { namespace: 'houston-x', hostPort: 3000 })).toBe(false);
+    expect(await forwardAlive(process.pid, { namespace: 'houston-x', hostPort: 3000 })).toBe(false);
   });
 
   it('parses a scenario publication row, and rejects a malformed one', () => {
@@ -1918,5 +2060,56 @@ describe('an ingress on a cluster that is not on this machine', () => {
       PreflightError,
     );
     expect(seen.filter((argv) => argv[0] === 'helm')).toEqual([]);
+  });
+});
+
+describe("a workspace's preset UIs on Kubernetes", () => {
+  it('are one Ingress on the same host and certificate Secret, each path to its Service', () => {
+    const doc = JSON.parse(
+      toolsIngressManifest('ws.example.test', {
+        ingressClass: 'traefik',
+        secretName: 'ws-tls',
+        labels: { 'houston.io/repro': 'ws' },
+        paths: [
+          {
+            preset: 'email',
+            path: '/mailpit',
+            service: 'mailpit',
+            container_port: 8025,
+            service_port: 8025,
+          },
+          {
+            preset: 'livechat',
+            path: '/livechat-demo',
+            service: 'widget-site',
+            container_port: 80,
+            service_port: 80,
+          },
+        ],
+      }),
+    ) as {
+      metadata: { name: string; annotations?: unknown };
+      spec: {
+        ingressClassName: string;
+        tls: unknown[];
+        rules: { host: string; http: { paths: { path: string; backend: unknown }[] } }[];
+      };
+    };
+    expect(doc.metadata.name).toBe('houston-tools');
+    // No cert-manager annotation: the chart's Ingress already owns that certificate.
+    expect(doc.metadata.annotations).toBeUndefined();
+    expect(doc.spec.tls).toEqual([{ hosts: ['ws.example.test'], secretName: 'ws-tls' }]);
+    expect(doc.spec.rules[0]?.http.paths).toEqual([
+      {
+        path: '/mailpit',
+        pathType: 'Prefix',
+        backend: { service: { name: 'mailpit', port: { number: 8025 } } },
+      },
+      {
+        path: '/livechat-demo',
+        pathType: 'Prefix',
+        backend: { service: { name: 'widget-site', port: { number: 80 } } },
+      },
+    ]);
   });
 });

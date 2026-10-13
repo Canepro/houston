@@ -26,7 +26,7 @@ function perfectFacts(plan: Plan): CheckNS.Facts {
     f.messages = totalMessages(spec);
     f.replies = replies(spec);
     f.reacted = reacted(spec);
-    f.threads = replies(spec);
+    f.threads = spec.threads.length;
     return f;
   });
   const planned: string[] = [];
@@ -58,6 +58,42 @@ describe('the verdict', () => {
     expect(verdict.faults).toEqual([]);
     expect(verdict.extra).toEqual([]);
     expect(verdict.checked).toBe(plan.rooms.length);
+  });
+
+  it('marks an entirely unreadable seed incomplete and counts no completed rooms', async () => {
+    const check = load();
+    const plan = planFrom('small');
+    const facts = await check.readback('http://x', AUTH, plan);
+    const verdict = check.verify(plan, facts);
+    expect(verdict.ok).toBeNull();
+    expect(verdict.checked).toBe(0);
+    expect(verdict.faults).toEqual([]);
+    expect(verdict.unreadable.length).toBeGreaterThan(0);
+  });
+
+  it('counts only completed rooms when one readback is unavailable', () => {
+    const check = load();
+    const plan = planFrom('small');
+    const facts = perfectFacts(plan);
+    facts.rooms[0]!.unreadable = 'HTTP 502';
+    const verdict = check.verify(plan, facts);
+    expect(verdict.ok).toBeNull();
+    expect(verdict.checked).toBe(plan.rooms.length - 1);
+    expect(verdict.faults).toEqual([]);
+  });
+
+  it('keeps a confirmed mismatch false even when another room is unreadable', () => {
+    const check = load();
+    const plan = planFrom('small');
+    const facts = perfectFacts(plan);
+    facts.rooms[0]!.unreadable = 'HTTP 502';
+    facts.rooms[1]!.found = false;
+    const verdict = check.verify(plan, facts);
+    expect(verdict.ok).toBe(false);
+    expect(verdict.checked).toBe(plan.rooms.length - 1);
+    expect(verdict.faults).toEqual([
+      expect.objectContaining({ kind: 'missing', room: plan.rooms[1]?.name }),
+    ]);
   });
 
   it('reports MORE than planned without calling it a fault', () => {
@@ -193,7 +229,7 @@ describe('the readback', () => {
     const asked: { path: string; auth: string }[] = [];
     // The fake inbox holds every seeded user, so whichever pair the manifest picked is
     // found -- the assertion is about WHO asked, not about which pair it was.
-    const everyone: string[] = [];
+    const inbox: { _id: string; usernames: readonly string[] }[] = [];
     jest.doMock('../../src/core/rcapi', () => ({
       RequestFailed: class RequestFailed extends Error {},
       authHeaders: (a: { token: string }) => ({ 'X-Auth-Token': a.token }),
@@ -204,10 +240,7 @@ describe('the readback', () => {
           const headers = (opts.extraHeaders ?? {}) as Record<string, string>;
           asked.push({ path, auth: headers['X-Auth-Token'] ?? '' });
           if (path.includes('im.list')) {
-            return Promise.resolve([
-              200,
-              JSON.stringify({ ims: [{ _id: 'dm1', usernames: everyone }] }),
-            ] as [number, string]);
+            return Promise.resolve([200, JSON.stringify({ ims: inbox })] as [number, string]);
           }
           if (path.includes('.messages')) {
             return Promise.resolve([200, JSON.stringify({ messages: [] })] as [number, string]);
@@ -224,7 +257,9 @@ describe('the readback', () => {
     }));
     const check = require('../../src/seed/check') as typeof CheckNS;
     const plan = planFrom('small');
-    for (let i = 0; i < plan.users; i += 1) everyone.push(username(i));
+    for (const room of plan.rooms.filter((r) => r.kind === DM || r.kind === 'group-dm')) {
+      inbox.push({ _id: `dm-${room.name}`, usernames: room.members });
+    }
     const facts = await check.readback('http://x', AUTH, plan);
     const dm = facts.rooms.find((f) => f.spec.kind === DM);
     expect(dm?.found).toBe(true);
@@ -266,6 +301,40 @@ describe('the readback', () => {
     }
     await check.readback('http://x', AUTH, plan, { tokens });
     expect(loginCalls).toBe(0);
+  });
+
+  it('matches a direct conversation by its complete participant set', async () => {
+    jest.resetModules();
+    jest.doMock('../../src/core/rcapi', () => ({
+      RequestFailed: class RequestFailed extends Error {},
+      authHeaders: (a: { token: string }) => ({ 'X-Auth-Token': a.token }),
+      login: async (_root: string, who: { user: string }) => ({
+        token: who.user,
+        userId: who.user,
+      }),
+      rcapi: {
+        call: (_root: string, _method: string, requestPath: string) =>
+          Promise.resolve([
+            200,
+            JSON.stringify(
+              requestPath === '/api/v1/im.list'
+                ? {
+                    ims: [
+                      { _id: 'different-pair', usernames: ['admin', 'bob'] },
+                      { _id: 'group-conversation', usernames: ['alice', 'bob', 'carol'] },
+                      { _id: 'exact-pair', usernames: ['bob', 'alice'] },
+                    ],
+                  }
+                : { users: [{ username: 'alice' }, { username: 'bob' }], messages: [] },
+            ),
+          ] as [number, string]),
+      },
+    }));
+    const check = require('../../src/seed/check') as typeof CheckNS;
+    const base = planFrom('small', { users: 2 });
+    const plan = { ...base, rooms: base.rooms.filter((r) => r.kind === DM) };
+    const facts = await check.readback('http://x', AUTH, plan);
+    expect(facts.rooms[0]?.rid).toBe('exact-pair');
   });
 });
 
@@ -360,9 +429,9 @@ describe('a malformed answer, read as earlier releases read it', () => {
     jest.resetModules();
   });
 
-  it('raises where earlier releases raise, in their words, after the same requests', async () => {
+  it('preserves malformed-answer refusals while profile counts and verification grow', async () => {
     const ours: unknown[] = [];
-    for (const [, table] of TABLES) {
+    for (const [label, table] of TABLES) {
       jest.resetModules();
       const asked: [string, Record<string, string>][] = [];
       jest.doMock('../../src/core/rcapi', () => ({
@@ -392,6 +461,13 @@ describe('a malformed answer, read as earlier releases read it', () => {
           tokens,
         });
         const v = check.verify(plan, facts);
+        expect(v.ok).not.toBe(true);
+        if (label === 'a threads total that is a numeric string') {
+          expect(v.rooms.some((r) => r.threads === 12)).toBe(true);
+        }
+        if (label === 'a message whose t is an empty list') {
+          expect(v.rooms.some((r) => r.messages === 1 && r.replies === 1)).toBe(true);
+        }
         res = {
           error: null,
           verdict: {
@@ -407,10 +483,29 @@ describe('a malformed answer, read as earlier releases read it', () => {
         res = { error: (error as Error).message };
       }
       res.asked = asked;
+      if (label === 'a room id that is a number') {
+        expect(
+          asked.some(
+            ([requestPath, params]) => requestPath.endsWith('.messages') && params.roomId === '7',
+          ),
+        ).toBe(true);
+      }
       ours.push(res);
     }
-    expect(Object.fromEntries(TABLES.map(([label], i) => [label, ours[i]]))).toEqual(
-      Object.fromEntries(TABLES.map(([label]) => [label, RECORDED[label]])),
+    expect(
+      Object.fromEntries(
+        TABLES.map(([label], i) => [label, (ours[i] as Record<string, unknown>).error]),
+      ),
+    ).toEqual(
+      Object.fromEntries(
+        TABLES.map(([label]) => [
+          label,
+          // Exact participant-set matching now requires the usernames field to be a list.
+          label === 'DM usernames that are a number'
+            ? 'expected a list, got an integer'
+            : (RECORDED[label] as Record<string, unknown>).error,
+        ]),
+      ),
     );
   });
 });

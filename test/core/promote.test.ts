@@ -51,6 +51,19 @@ describe('the lock order', () => {
       // `readdir` order differs between implementations on the same directory.
       'locks/TICKET-1.lock',
       'locks/TICKET-9.lock',
+      'locks/houston_edge.lock',
+    ]);
+  });
+
+  it('also locks the shared edge after the workspace locks, even with no workspaces', () => {
+    // An edge-only start/delete can otherwise change its spec while promotion reads
+    // that state. It has no workspace record for the expansion above to discover.
+    expect(promote.lockPaths(home)).toEqual([
+      '.config.lock',
+      'locks/users.lock',
+      'locks/sessions.lock',
+      'logs/houston.log',
+      'locks/houston_edge.lock',
     ]);
   });
 

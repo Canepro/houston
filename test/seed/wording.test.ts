@@ -4,11 +4,8 @@ import * as path from 'node:path';
 import {
   CHANNEL_NAMES,
   DISCUSSION_NAMES,
-  EMOJI,
   FIRST_NAMES,
-  MESSAGES,
   PRIVATE_NAMES,
-  REPLIES,
   TEAM_CHANNEL_NAMES,
   TEAM_NAMES,
   channelName,
@@ -49,10 +46,13 @@ describe('the name pools', () => {
       team: [...TEAM_NAMES],
       teamch: [...TEAM_CHANNEL_NAMES],
       disc: [...DISCUSSION_NAMES],
-      messages: [...MESSAGES],
-      replies: [...REPLIES],
-      emoji: [...EMOJI],
-    }).toEqual(RECORDED.pools);
+    }).toEqual(
+      Object.fromEntries(
+        Object.entries(RECORDED.pools).filter(([name]) =>
+          ['first', 'channel', 'private', 'team', 'teamch', 'disc'].includes(name),
+        ),
+      ),
+    );
   });
 
   it('avoids the userN names the ldap and saml presets use', () => {
@@ -95,9 +95,21 @@ describe('the deterministic choices', () => {
     expect(members([], 0, 3)).toEqual([]);
   });
 
-  it('walks DM pairs so none repeats early, as earlier releases do', () => {
+  it('preserves the first DM pairs used by existing default profiles', () => {
     const names = [...Array(6)].map((_, i) => username(i));
-    expect([...Array(25)].map((_, i) => dmPair(names, i))).toEqual(RECORDED.dm_pairs);
+    expect([...Array(6)].map((_, i) => dmPair(names, i))).toEqual(RECORDED.dm_pairs.slice(0, 6));
+  });
+
+  it('walks the complete unordered DM pair space before repeating its cycle', () => {
+    for (const n of [2, 3, 4, 5, 6, 7, 8]) {
+      const names = Array.from({ length: n }, (_, i) => username(i));
+      const count = (n * (n - 1)) / 2;
+      const pairs = Array.from({ length: count }, (_, i) => dmPair(names, i));
+      expect(new Set(pairs.map((pair) => [...pair].sort().join('~'))).size).toBe(count);
+      expect(Array.from({ length: count }, (_, i) => [...dmPair(names, count + i)].sort())).toEqual(
+        pairs.map((pair) => [...pair].sort()),
+      );
+    }
   });
 
   it('picks thread indexes on a stride, and none at all with no messages', () => {

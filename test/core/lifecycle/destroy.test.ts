@@ -37,6 +37,44 @@ it('Grafana public URL regression: destroying a TLS workspace removes its shared
   }
 });
 
+it.each([
+  [true, 0],
+  [false, 1],
+])(
+  'releases houston-system once: removeMonitoring=%s asks it again %s time(s)',
+  async (removed, asked) => {
+    // `removeMonitoring` releases the namespace itself when it removed the stack; asking again
+    // found it Terminating, and every such teardown said "removed the houston-system
+    // namespace" twice.
+    jest.resetModules();
+    const release = jest.fn(async () => undefined);
+    jest.doMock('../../../src/core/kube/monitoring', () => ({
+      ...jest.requireActual<object>('../../../src/core/kube/monitoring'),
+      removeMonitoring: async () => removed,
+      releaseSystemNamespace: release,
+    }));
+    jest.doMock('../../../src/core/kube/operator', () => ({
+      ...jest.requireActual<object>('../../../src/core/kube/operator'),
+      removeOperator: async () => false,
+    }));
+    const destroy = require('../../../src/core/lifecycle/destroy') as typeof DestroyNS;
+    try {
+      await destroy.removeTheClusterSide(
+        'prod',
+        () => undefined,
+        metadata({ name: 'w' }),
+        'w',
+        true,
+      );
+      expect(release).toHaveBeenCalledTimes(asked);
+    } finally {
+      jest.dontMock('../../../src/core/kube/monitoring');
+      jest.dontMock('../../../src/core/kube/operator');
+      jest.resetModules();
+    }
+  },
+);
+
 interface Seen {
   message: string;
   level: string;
@@ -103,6 +141,7 @@ describe('tearing a workspace down when its record will not go', () => {
     }));
     jest.doMock('../../../src/core/runner/engine', () => ({
       ...jest.requireActual('../../../src/core/runner/engine'),
+      stop: async () => 0,
       down: async () => 0,
     }));
     jest.doMock('../../../src/core/edge/routes', () => ({
@@ -223,7 +262,7 @@ describe('tearing down a Kubernetes workspace that has the monitoring stack', ()
     grafana_pid: 4242,
   };
 
-  it('takes the stack and the Grafana forward with it on --volumes, and neither on a plain down', async () => {
+  it('takes the stack and the Grafana forward with it on --volumes, and only the forward on a plain down', async () => {
     // Reported from a live k3s box: after `down --volumes` the monitoring stack was still
     // running -- ten pods and ~840 MB wanted by nobody -- and the Grafana forward went on
     // holding :5050, so the next `up --monitor` was refused for a port held by a corpse.
@@ -237,13 +276,15 @@ describe('tearing down a Kubernetes workspace that has the monitoring stack', ()
     expect(called.operator?.excluding).toBe('houston-mon');
 
     // A plain `down` keeps the namespace and the data, so the workspace can come back and
-    // the stack it wants must stay with it.
+    // the stack it wants must stay with it. Its Grafana FORWARD goes: the re-up writes a new
+    // record, and one left running was named by nothing -- it outlived `down --volumes`
+    // holding :5050. The re-up attaches monitoring again and starts its own.
     for (const key of Object.keys(called)) delete called[key];
     stopped.length = 0;
     await writeRecord('mon', metadata({ name: 'mon', project: 'p', extra }));
     await destroy.teardownKubernetes('mon', false, () => undefined);
     expect(called).toEqual({});
-    expect(stopped).not.toContain(4242);
+    expect(stopped).toContain(4242);
   });
 });
 
@@ -289,6 +330,7 @@ describe('the repair notes of a workspace that is torn down', () => {
     }));
     jest.doMock('../../../src/core/runner/engine', () => ({
       ...jest.requireActual('../../../src/core/runner/engine'),
+      stop: async () => 0,
       down: async () => 0,
     }));
     jest.doMock('../../../src/core/kube/namespace', () => ({
@@ -308,6 +350,37 @@ describe('the repair notes of a workspace that is torn down', () => {
       journal: require('../../../src/core/journal') as typeof JournalNS,
     };
   }
+
+  it('says it is waiting when another command holds the workspace, then goes ahead', async () => {
+    // `down --volumes` behind a running `backup` waited for the whole backup in silence.
+    const { destroy } = load();
+    const { reproLock } = require('../../../src/core/runner/locks') as {
+      reproLock: <T>(name: string, body: () => Promise<T>) => Promise<T>;
+    };
+    await writeRecord('busy', metadata({ name: 'busy', project: 'houston-busy' }));
+    const gate = { release: (): void => undefined, taken: false };
+    const held = reproLock(
+      'busy',
+      () =>
+        new Promise<void>((done) => {
+          gate.release = done;
+          gate.taken = true;
+        }),
+    );
+    for (let wait = 0; wait < 200 && !gate.taken; wait += 1) {
+      await new Promise((done) => setTimeout(done, 10));
+    }
+    const said: string[] = [];
+    const down = destroy.teardown('busy', { emit: (event) => void said.push(event.message) });
+    for (let wait = 0; wait < 100 && said.length === 0; wait += 1) {
+      await new Promise((done) => setTimeout(done, 10));
+    }
+    expect(said[0]).toContain("another houston command is working on 'busy'");
+    gate.release();
+    await held;
+    await down;
+    expect(said.at(-1)).toBe("'busy' down (data kept)");
+  });
 
   it('takes them on --volumes, keeps them on a plain down, and leaves every other subject alone', async () => {
     // Seen on the owner's box: 28 `create_unfinished` notes for `alice-rc8-5-1`, all still
@@ -354,5 +427,120 @@ describe('the repair notes of a workspace that is torn down', () => {
       'cluster_unfinished:notes-kub',
       'create_unfinished:bystander',
     ]);
+  });
+});
+
+describe('closing pooled edge connections before a Compose teardown', () => {
+  afterEach(() => {
+    for (const id of [
+      '../../../src/core/edge/networks',
+      '../../../src/core/edge/routes',
+      '../../../src/core/runner/engine',
+    ]) {
+      jest.dontMock(id);
+    }
+    jest.resetModules();
+  });
+
+  function load(stopCode = 0) {
+    jest.resetModules();
+    const state = { attached: true, pooledSocketOpen: true };
+    const stop = jest.fn(async () => {
+      if (stopCode === 0 && state.attached) state.pooledSocketOpen = false;
+      return stopCode;
+    });
+    const down = jest.fn(async () => {
+      // A removed endpoint cannot deliver the backend's close to the old socket.
+      if (state.attached) state.pooledSocketOpen = false;
+      return 0;
+    });
+    const detach = jest.fn(async () => {
+      state.attached = false;
+    });
+    const deregister = jest.fn();
+    jest.doMock('../../../src/core/runner/engine', () => ({
+      ...jest.requireActual('../../../src/core/runner/engine'),
+      stop,
+      down,
+    }));
+    jest.doMock('../../../src/core/edge/networks', () => ({
+      ...jest.requireActual('../../../src/core/edge/networks'),
+      detach,
+    }));
+    jest.doMock('../../../src/core/edge/routes', () => ({
+      ...jest.requireActual('../../../src/core/edge/routes'),
+      deregister,
+    }));
+    return {
+      state,
+      stop,
+      down,
+      detach,
+      deregister,
+      destroy: require('../../../src/core/lifecycle/destroy') as typeof DestroyNS,
+    };
+  }
+
+  it.each([false, true])(
+    'closes the warmed upstream socket before removing its endpoint (volumes=%s)',
+    async (volumes) => {
+      // Observed live on rootless Podman: detach left an ESTABLISHED old-IP socket,
+      // which the unchanged edge reused after re-up while fresh backend GETs worked.
+      const { state, stop, down, detach, deregister, destroy } = load();
+      await writeRecord('warmed', metadata({ name: 'warmed', project: 'houston-warmed' }));
+      await writeRecord('bystander', metadata({ name: 'bystander', project: 'houston-bystander' }));
+
+      await destroy.teardownCompose('warmed', volumes);
+
+      expect(state.pooledSocketOpen).toBe(false);
+      expect(stop).toHaveBeenCalledTimes(1);
+      expect(stop).toHaveBeenCalledWith('warmed');
+      expect(detach).toHaveBeenCalledWith('warmed');
+      expect(down).toHaveBeenCalledWith('warmed', { volumes });
+      expect(deregister).toHaveBeenCalledWith('warmed');
+      expect(await paths.exists('warmed')).toBe(!volumes);
+      expect(await paths.exists('bystander')).toBe(true);
+    },
+  );
+
+  it('keeps the endpoint, route, data and record when the graceful stop fails', async () => {
+    const { state, down, detach, deregister, destroy } = load(1);
+    await writeRecord('warmed', metadata({ name: 'warmed', project: 'houston-warmed' }));
+
+    await expect(destroy.teardownCompose('warmed', true)).rejects.toThrow(
+      "`docker compose stop` failed for 'warmed'",
+    );
+
+    expect(state).toEqual({ attached: true, pooledSocketOpen: true });
+    expect(detach).not.toHaveBeenCalled();
+    expect(down).not.toHaveBeenCalled();
+    expect(deregister).not.toHaveBeenCalled();
+    expect(await paths.exists('warmed')).toBe(true);
+  });
+
+  it('keeps the endpoint attached until the graceful stop has completed', async () => {
+    const { state, stop, down, detach, destroy } = load();
+    let releaseStop = (): void => undefined;
+    const held = new Promise<void>((resolve) => {
+      releaseStop = resolve;
+    });
+    stop.mockImplementationOnce(async () => {
+      await held;
+      if (state.attached) state.pooledSocketOpen = false;
+      return 0;
+    });
+    const tearingDown = destroy.teardownCompose('warmed', false);
+    try {
+      await Promise.resolve();
+      expect(state.attached).toBe(true);
+      expect(detach).not.toHaveBeenCalled();
+      expect(down).not.toHaveBeenCalled();
+    } finally {
+      releaseStop();
+      await tearingDown;
+    }
+    expect(state.pooledSocketOpen).toBe(false);
+    expect(detach).toHaveBeenCalledWith('warmed');
+    expect(down).toHaveBeenCalledWith('warmed', { volumes: false });
   });
 });

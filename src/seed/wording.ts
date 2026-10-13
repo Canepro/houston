@@ -103,7 +103,7 @@ export const MESSAGES: readonly string[] = Object.freeze([
 
 export const REPLIES: readonly string[] = Object.freeze([
   'Good catch — looking now.',
-  'Same here, reproduced on 8.5.1.',
+  'Same here, reproduced on the test workspace.',
   'Fixed in the branch, pushing shortly.',
   'Can you share the log line?',
   "Agreed, let's do that.",
@@ -187,9 +187,38 @@ export function dmPair(names: readonly string[], i: number): [string, string] {
   // pairs a user WITH THEMSELVES -- `im.create` accepts that and makes a self-DM, which is
   // a real Rocket.Chat object and not what a plan asking for a conversation between two
   // people meant. It appeared the moment `--users 2` was passed with the default five DMs.
-  const gap = 1 + (Math.floor(i / n) % (n - 1));
-  const a = i % n;
-  return [names[a] as string, names[(a + gap) % n] as string];
+  let remaining = i;
+  for (let gap = 1; gap <= Math.floor(n / 2); gap += 1) {
+    const width = gap * 2 === n ? n / 2 : n;
+    if (remaining < width)
+      return [names[remaining] as string, names[(remaining + gap) % n] as string];
+    remaining -= width;
+  }
+  return dmPair(names, i % Math.max(1, (n * (n - 1)) / 2));
+}
+
+export function conversation(room: string, index: number, mention = '', emoji = ''): string {
+  const topic = ['deployment review', 'incident response', 'customer support', 'sprint planning'][
+    index % 4
+  ] as string;
+  const formats = [
+    `**INC-4821 ${topic}** in #${room}. Checkpoint ${index + 1}: review the evidence before the next step.`,
+    `INC-4821 ${topic}\n- reproduce the reported behavior\n- record the result\n- agree on the next checkpoint`,
+    `INC-4821 ${topic}\n> Keep the customer updated with the observed result.\n\nReview: [Rocket.Chat documentation](https://docs.rocket.chat/)`,
+    `INC-4821 ${topic}\n\`\`\`text\nstatus=under-review\ncheckpoint=${index + 1}\n\`\`\`\nनमस्ते · مرحبا · 你好`,
+  ];
+  return `${formats[index % formats.length] as string}${mention === '' ? '' : ` @${mention}, please review.`}${emoji === '' ? '' : ` :${emoji}:`}`;
+}
+
+export function threadReply(room: string, parentIndex: number, replyIndex: number): string {
+  const replies = [
+    'I checked the reproduction steps',
+    'The logs support this checkpoint',
+    'I added the customer context',
+    'The next action is assigned',
+    'I reviewed the rollback notes',
+  ];
+  return `INC-4821 #${room}, checkpoint ${parentIndex + 1}: ${replies[(Math.floor(parentIndex / THREAD_EVERY) + replyIndex) % replies.length] as string}. Follow-up ${replyIndex + 1}.`;
 }
 
 /**

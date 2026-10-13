@@ -1,5 +1,5 @@
 /**
- * The two journal repairs a killed seed leaves behind.
+ * The journal repairs a killed seed leaves behind.
  *
  * Above tier 0, because it reaches the runner record and the RC seam and the layer gate
  * says so. Both notes are written by `apply.seed` around the
@@ -45,7 +45,19 @@ async function repairEmail2fa(
   return await repairSetting(entry, login, journal.EMAIL_2FA_SETTING);
 }
 
+/** Only a setting the seeder turns off: a note's `detail` is read back from disk. */
+async function repairE2eeDefault(
+  entry: journal.Entry,
+  _emit: unknown,
+  login: MaybeLogin,
+): Promise<boolean> {
+  const setting = String(entry.detail.setting);
+  if (!config.E2EE_ROOM_DEFAULT_SETTINGS.includes(setting)) return false;
+  return await repairSetting(entry, login, setting);
+}
+
 export function installJournalRepairs(): void {
   journal.registerRepair(journal.RATE_LIMITER_OFF, repairRateLimiter as journal.RepairHandler);
   journal.registerRepair(journal.EMAIL_2FA_OFF, repairEmail2fa as journal.RepairHandler);
+  journal.registerRepair(journal.E2EE_DEFAULT_OFF, repairE2eeDefault as journal.RepairHandler);
 }

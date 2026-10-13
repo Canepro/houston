@@ -56,6 +56,7 @@ import { OPEN_FOR_WRITE, withFileLock } from '../seams/fs/lock';
 
 import { record as auditRecord, audit as auditWrite } from './audit';
 import { revokeUser } from './sessions';
+import { forget as forgetSso } from './sso-identities';
 
 const scrypt = promisify(scryptCallback) as (
   password: string | Buffer,
@@ -322,6 +323,15 @@ async function locked<T>(body: () => T | Promise<T>): Promise<T> {
 }
 
 /**
+ * `locked`, for `core/sso`: an Okta sign-in that creates or links an account writes this file
+ * and `sso-identities.json` together, and two first sign-ins of one person must not both
+ * create it. Not re-entrant: nothing in `body` may call a function here that locks.
+ */
+export async function withUsersLock<T>(body: () => T | Promise<T>): Promise<T> {
+  return await locked(body);
+}
+
+/**
  * The three tiers, widest first. `admin` manages people; `member` is today's behaviour and
  * the default for a new account; `readonly` may look but not touch, and specifically may
  * NOT read logs, env or mint tokens -- workspace logs carry LDAP bind passwords and OAuth
@@ -571,6 +581,10 @@ export async function add(name: string, password: string, role = ''): Promise<Us
     }
     users.set(stored, [hashed, created, picked]);
     writeAll(users);
+    // A new account inherits no Okta link. One left active for this name -- by a 1.x
+    // `users remove`, or a removal while the links file was unreadable -- would otherwise
+    // sign its old Okta person in as whoever this account is for, an admin included.
+    forgetSso(stored);
     return picked;
   });
   // Audited HERE, not at the two front ends. `core/audit.ts`'s own docstring records why:
@@ -627,6 +641,10 @@ export async function remove(name: string): Promise<number> {
     requireNotLastAdmin(stored, users, 'removing them');
     users.delete(stored);
     writeAll(users);
+    // In the same lock, so no Okta sign-in can land between the two: a removed account's
+    // Okta link becomes a tombstone, and the person's next sign-in is refused rather than
+    // creating the account again.
+    forgetSso(stored);
   });
   auditRecord('user-remove', stored);
   return await revokeUser(stored);

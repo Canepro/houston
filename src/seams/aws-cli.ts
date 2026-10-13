@@ -24,7 +24,7 @@
  * on a missing binary would have to be wrapped at every call site. A launch failure or
  * a timeout becomes a result with `returncode: 127`, carrying the reason on stderr.
  */
-import { capture, stream as streamProcess, type ProcessResult } from './exec';
+import { Interrupted, capture, stream as streamProcess, type ProcessResult } from './exec';
 
 /** What a finished AWS tool reported: its argv, return code, stdout and stderr. */
 export interface AwsResult {
@@ -78,6 +78,8 @@ function shaped(argv: readonly string[], result: ProcessResult): AwsResult {
 }
 
 function failed(argv: readonly string[], error: unknown): AwsResult {
+  // Not a failure to report: Ctrl-C or a stopped job, which must unwind (see exec).
+  if (error instanceof Interrupted) throw error;
   return {
     argv: [...argv],
     returncode: LAUNCH_FAILURE_CODE,

@@ -58,6 +58,12 @@ function signOut(everywhere) {
   fetch("/api/sessions?all=1", { method: "DELETE", credentials: "same-origin" })
     .finally(() => location.assign("/signin?e=signedout"));
 }
+// Back after signing out: the server sends the page `no-store`, so a browser asks again and
+// is sent to sign-in. One that restores this page from its back/forward cache instead would
+// show a shell with polling stopped; send that one to sign-in too.
+window.addEventListener("pageshow", (event) => {
+  if (event.persisted && ctx.SIGNING_OUT) location.replace("/signin?e=signedout");
+});
 
 // ---- people (admin only) -----------------------------------------------------
 // The whole dialog is admin-only; a member gets 403 from every endpoint behind it,
@@ -72,7 +78,8 @@ async function openPeople() {
   const body = ctx.$("#people-body");
   body.innerHTML = "";
   body.append(ctx.el("p", { class: "empty" }, "loading…"));
-  ctx.$("#people-dialog").showModal();
+  if (!ctx.$("#people-dialog").open) ctx.$("#people-dialog").showModal();
+  ctx.saveLocation();
   let data;
   try { data = await ctx.api("/api/users"); }
   catch (e) { body.innerHTML = ""; body.append(ctx.el("p", { class: "empty" }, e.message)); return; }
@@ -88,6 +95,12 @@ async function openPeople() {
     if (u.implicit) {
       label.append(ctx.el("span", { class: "yours", title: "role column is blank, which means admin" },
                      " implicit"));
+    }
+    // The Okta email that signs in as this account, when one is linked.
+    if (u.sso_email) {
+      // The name cell cuts a long email short, so the title carries all of it.
+      label.append(ctx.el("span", { class: "p-okta", title: `signs in with Okta as ${u.sso_email}` },
+                     u.sso_email));
     }
     const sel = ctx.el("select", { class: "input", "aria-label": `role for ${u.name}`,
       onchange: (e) => changeRole(u.name, e.target.value) },
@@ -159,6 +172,11 @@ async function removePerson(name) {
 
 // ---- wiring -----------------------------------------------------------------
 ctx.$("#people-close").addEventListener("click", () => ctx.$("#people-dialog").close());
+ctx.$("#people-dialog").addEventListener("close", () => {
+  const dialog = ctx.$("#people-dialog");
+  if (dialog.dataset.navigationClosing) { delete dialog.dataset.navigationClosing; return; }
+  ctx.saveLocation({ replace: true });
+});
 ctx.$("#people-add-btn").addEventListener("click", addPerson);
 // ---- account menu ----------------------------------------------------------
 function closeMe() {
@@ -258,6 +276,7 @@ ctx.$("#btn-refresh").addEventListener("click", async (event) => {
       ctx.VIEW === "clusters" || ctx.VIEW === "cluster" ? ctx.clRefresh() : null,
       ctx.VIEW === "workspace" ? ctx.refreshDetail() : null,
       ctx.VIEW === "activity" ? ctx.openJobs() : null,
+      ctx.VIEW === "backups" ? ctx.openBackups() : null,
     ]);
   } finally {
     button.disabled = false;

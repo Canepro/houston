@@ -51,6 +51,109 @@ export async function hostMemory(): Promise<[number, number, number] | null> {
 }
 
 /** `[cpus, memoryBytes]` available to the docker engine/VM, or null. Never raises. */
+/** What answers `docker`: Docker, or Podman behind its socket or as the podman-docker shim. */
+export interface Engine {
+  readonly kind: 'docker' | 'podman';
+  readonly version: string;
+  readonly rootless: boolean;
+  /** `systemd` or `cgroupfs`. */
+  readonly cgroupDriver: string;
+  /**
+   * Whether container healthchecks run at all. Podman times them with systemd, so a Podman on
+   * the cgroupfs manager (a static or containerised build) never runs one: health stays
+   * `starting` and anything waiting on `service_healthy` waits forever. Measured with Podman
+   * 6.1.3 rootless, 2026-10-08.
+   */
+  readonly healthchecks: boolean;
+  /** `podman` answering as `docker`: its own JSON and its own template fields. */
+  readonly shim: boolean;
+  readonly kernel: string;
+  readonly cpus: number;
+  readonly memBytes: number;
+  /** Where its containers live: `/var/lib/docker`, or Podman's graph root. */
+  readonly rootDir: string;
+  /** The API socket on this host, for a container that must reach the engine. */
+  readonly socket: string;
+}
+
+/** The socket `docker` talks to: DOCKER_HOST's unix path, else the engine's default. */
+function socketOf(podman: boolean, rootless: boolean): string {
+  const given = process.env.DOCKER_HOST ?? '';
+  if (given.startsWith('unix://')) return given.slice('unix://'.length);
+  if (!podman) return '/var/run/docker.sock';
+  return rootless
+    ? `${process.env.XDG_RUNTIME_DIR ?? `/run/user/${String(process.getuid?.() ?? 0)}`}/podman/podman.sock`
+    : '/run/podman/podman.sock';
+}
+
+async function jsonOf(args: readonly string[]): Promise<Record<string, unknown> | null> {
+  try {
+    const result = await docker([...args], { capture: true, timeoutMs: 15_000 });
+    if (result.exitCode !== 0) return null;
+    const parsed = loads(String(result.stdout ?? '')) as unknown;
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function bagOf(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+/**
+ * The engine, from `docker info` read in either of the two shapes it comes in: Docker's API
+ * (Docker, or Podman's compatible socket, told apart by `docker version`'s components), or
+ * Podman's own (the shim). Null when nothing answers.
+ */
+export async function engine(): Promise<Engine | null> {
+  const info = await jsonOf(['info', '--format', '{{json .}}']);
+  if (info === null) return null;
+  const host = bagOf(info.host);
+  if (Object.keys(host).length > 0) {
+    const cgroupDriver = String(host.cgroupManager ?? '');
+    const rootless = bagOf(host.security).rootless === true;
+    return {
+      kind: 'podman',
+      version: String(bagOf(info.version).Version ?? ''),
+      rootless,
+      rootDir: String(bagOf(info.store).graphRoot ?? ''),
+      socket: socketOf(true, rootless),
+      cgroupDriver,
+      healthchecks: cgroupDriver === 'systemd',
+      shim: true,
+      kernel: String(host.kernel ?? ''),
+      cpus: Number(host.cpus ?? 0),
+      memBytes: Number(host.memTotal ?? 0),
+    };
+  }
+  const version = await jsonOf(['version', '--format', '{{json .}}']);
+  const components = bagOf(version?.Server).Components;
+  const podman =
+    Array.isArray(components) &&
+    components.some((component) => bagOf(component).Name === 'Podman Engine');
+  const cgroupDriver = String(info.CgroupDriver ?? '');
+  const security = Array.isArray(info.SecurityOptions) ? info.SecurityOptions.map(String) : [];
+  const rootless = security.includes('name=rootless');
+  return {
+    kind: podman ? 'podman' : 'docker',
+    version: String(info.ServerVersion ?? ''),
+    rootless,
+    rootDir: String(info.DockerRootDir ?? ''),
+    socket: socketOf(podman, rootless),
+    cgroupDriver,
+    healthchecks: !podman || cgroupDriver === 'systemd',
+    shim: false,
+    kernel: String(info.KernelVersion ?? ''),
+    cpus: Number(info.NCPU ?? 0),
+    memBytes: Number(info.MemTotal ?? 0),
+  };
+}
+
 export async function dockerCapacity(): Promise<[number, number] | null> {
   let stdout: string;
   try {
@@ -58,7 +161,7 @@ export async function dockerCapacity(): Promise<[number, number] | null> {
       capture: true,
       timeoutMs: 15_000,
     });
-    if (result.exitCode !== 0) return null;
+    if (result.exitCode !== 0) return await shimCapacity();
     stdout = String(result.stdout ?? '');
   } catch {
     return null;
@@ -101,7 +204,17 @@ export async function composeStandaloneVersion(): Promise<string | null> {
  * kernel MongoDB actually runs on -- not the macOS/Windows host kernel.
  */
 export async function dockerKernelVersion(): Promise<string | null> {
-  return await firstLine(['docker', 'info', '--format', '{{.KernelVersion}}']);
+  // The podman-docker shim has no `.KernelVersion`: its own JSON has the kernel.
+  return (
+    (await firstLine(['docker', 'info', '--format', '{{.KernelVersion}}'])) ??
+    ((await engine())?.kernel || null)
+  );
+}
+
+/** CPUs and memory from the shim's own JSON, which has no `.NCPU` or `.MemTotal`. */
+async function shimCapacity(): Promise<[number, number] | null> {
+  const found = await engine();
+  return found !== null && found.shim && found.cpus > 0 ? [found.cpus, found.memBytes] : null;
 }
 
 /**

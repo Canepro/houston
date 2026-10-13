@@ -23,6 +23,7 @@ import {
   resetLockProbe,
   withFileLock,
 } from '../../../src/seams/fs/lock';
+import { stoppable } from '../../../src/seams/exec';
 
 const ROOT = path.resolve(__dirname, '..', '..', '..');
 /** The marker earlier releases write into a home they own: state on disk, kept as they wrote it. */
@@ -216,6 +217,22 @@ describe('the platform matrix', () => {
       else process.env.PATH = realPath;
       resetLockProbe();
     }
+  });
+});
+
+describe('a job stopped while the process first looks for flock', () => {
+  it('does not answer "no flock" for the rest of the process', async () => {
+    // The probe is one promise for the whole process. Started inside a GUI job that was then
+    // stopped, its refused `flock --version` read as ABSENT, and every later lock in that
+    // `serve` was in-process only: no longer excluding a CLI on the same home.
+    resetLockProbe();
+    const stop = new AbortController();
+    stop.abort();
+    const seen = await stoppable(stop.signal, async () => await flockTool());
+    resetLockProbe();
+    const fresh = await flockTool();
+    expect(seen.tier).toBe(fresh.tier);
+    expect(await flockTool()).toBe(fresh);
   });
 });
 

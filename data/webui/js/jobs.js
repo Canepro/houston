@@ -107,7 +107,19 @@ async function doPrune() {
 // their output and steal each other's title).
 let JOB = null;
 
-function openJob(title) { ctx.$("#job-title").textContent = title; ctx.$("#job-log").textContent = ""; ctx.$("#job-dialog").showModal(); }
+function openJob(title) { ctx.$("#job-title").textContent = title; ctx.$("#job-log").textContent = ""; ctx.$("#job-stop").hidden = true; ctx.$("#job-dialog").showModal(); }
+
+// A job stuck on something it cannot see -- a create waiting on a port-forward -- held its
+// workspace until the server was killed. Stop ends it at its next step; what it did stays.
+async function stopJob(job, btn) {
+  if (!confirm("Stop this job? It ends at its next step. What it has done so far stays, "
+    + "so delete the workspace afterwards if you no longer want it.")) return;
+  btn.disabled = true;
+  try {
+    await ctx.api(`/api/jobs/${job.id}/stop`, { method: "POST" });
+    btn.textContent = "Stopping…";
+  } catch (e) { btn.disabled = false; ctx.toast(e.message); }
+}
 // What each phase of a job DOES, as a step in the create dialog's progress.
 const PHASE_STEP = {
   preflight: "Checking this machine", resolve: "Looking up the version", provision: "Preparing the cluster",
@@ -155,11 +167,23 @@ function closeJobStream() {
 }
 
 // `view`, when given, is where the job shows itself instead of the job dialog:
-// { list, title, dialog, failed } -- Create a workspace streams into its own last step.
+// { list, title, dialog, stop, failed } -- Create a workspace streams into its own last step.
 function streamJob(jobId, title, onResult, view = null) {
   closeJobStream();                       // a new job supersedes whatever was showing
   if (!view) openJob(title);
   JOB = { id: jobId, title, onResult, idx: 0, es: null, retries: 0, finished: false, view };
+  // The create dialog's own progress too: a create stuck on a port-forward was the case
+  // Stop was built for, and it could only be stopped by going to Activity to find it.
+  const stop = view ? view.stop : ctx.$("#job-stop");
+  if (stop) {
+    // Offered only where the server says a Stop is safe: kinds whose half-done state was read.
+    const job = JOB;
+    Object.assign(stop, { hidden: true, disabled: false, textContent: view ? "Stop" : "Stop job",
+                          onclick: () => stopJob(job, stop) });
+    ctx.api(`/api/jobs/${jobId}`).then((state) => {
+      if (JOB === job && !job.finished && state.stoppable) stop.hidden = false;
+    }).catch(() => { /* the stream reports the job either way */ });
+  }
   connectJob(JOB);
 }
 
@@ -173,6 +197,11 @@ function connectJob(job) {
     if (JOB !== job) { es.close(); return; }      // superseded — do not write here
     if (m.lastEventId) job.idx = Number(m.lastEventId) + 1;
     const ev = JSON.parse(m.data);
+    // The name a create settled on: for the title, not a step of its own.
+    if (ev.code === "workspace-name") {
+      if (job.view && job.view.named && ev.data) job.view.named(ev.data.workspace);
+      return;
+    }
     logLine(ev);
     if (ev.terminal) finishJob(job, ev.level === "error", ev.data || {});
   };
@@ -190,8 +219,12 @@ function finishJob(job, failed, data) {
   if (job.es) { try { job.es.close(); } catch (_) { /* already closed */ } }
   if (job.view) {
     for (const s of job.view.list.querySelectorAll(".s.run")) { s.className = failed ? "s x" : "s y"; s.textContent = failed ? "✗" : "✓"; }
+    if (job.view.stop) job.view.stop.hidden = true;
     if (failed && job.view.failed) job.view.failed(data);
-  } else ctx.$("#job-title").textContent = failed ? "Failed" : "Done";
+  } else {
+    ctx.$("#job-title").textContent = !failed ? "Done" : data.kind === "Stopped" ? "Stopped" : "Failed";
+    if (JOB === job) ctx.$("#job-stop").hidden = true;
+  }
   if (!failed && job.onResult && data.result) job.onResult(data.result);
   if (!failed) reloadForPublicGrafana(data.result, false, job);
   ctx.loadRepros().then(ctx.refreshDetail);
@@ -227,7 +260,7 @@ function pollJobUntilDone(job) {
       ? { level: "error", message: state.error || "failed" }
       : { level: "info", message: "done" });
     finishJob(job, state.status === "error",
-              { result: state.result, error: state.error });
+              { result: state.result, error: state.error, kind: state.error_kind });
   };
   setTimeout(tick, 10000);
 }
@@ -269,7 +302,7 @@ async function reconcileJob(job) {
     logLine({ level: "warn", message: "this job finished a while ago and its full "
       + "output is no longer held in memory — the progress above is what remains." });
   }
-  finishJob(job, state.status === "error", { result: state.result, error: state.error });
+  finishJob(job, state.status === "error", { result: state.result, error: state.error, kind: state.error_kind });
 }
 
 // The job keeps running server-side when the dialog is dismissed, and there is no
@@ -283,8 +316,11 @@ async function watchDetachedJob(job) {
     let state;
     try { state = await ctx.api(`/api/jobs/${job.id}`); } catch (_) { return; }
     if (ctx.jobActive(state.status)) continue;
-    ctx.toast(state.status === "error" ? `${job.title} failed: ${state.error || ""}` : `${job.title} finished`,
-          state.status === "error" ? "error" : "ok");
+    // A Stop somebody pressed is not a failure, and red "failed: stopped by admin" said it was.
+    const stopped = state.status === "error" && state.error_kind === "Stopped";
+    ctx.toast(stopped ? `${job.title}: ${state.error || "stopped"}`
+      : state.status === "error" ? `${job.title} failed: ${state.error || ""}` : `${job.title} finished`,
+    stopped ? "info" : state.status === "error" ? "error" : "ok");
     if (state.status !== "error") reloadForPublicGrafana(state.result, true);
     ctx.loadRepros().then(ctx.refreshDetail);
     return state;
@@ -501,7 +537,10 @@ function renderNoteItems(box, items) {
         ctx.el("button", { class: "cp", onclick: () => ctx.copy(it.value) }, "Copy")));
     } else if (it.kind === "place") {
       if (!group) { group = ctx.el("div", { class: "linkrows one" }); box.append(group); }
-      group.append(placeRow(it));
+      // `kind` on a parsed note is WHAT it is ("place"), and placeRow reads `kind` as a
+      // link's class ("monitor", "sidecar"): the row came out as `.place`, the Clusters
+      // card -- a column -- and Mailpit's description was cut off at the dialog's edge.
+      group.append(placeRow({ ...it, kind: "" }));
     } else {
       const para = ctx.el("p", { class: "note-p" + (listed ? "" : " solo") });
       it.lines.forEach((l, i) => { if (i) para.append(" "); para.append(linkify(l)); });

@@ -7,12 +7,15 @@ import * as zlib from 'node:zlib';
 import * as config from '../../src/lib/config';
 import type * as ComposeNS from '../../src/lib/compose';
 import type * as ErrorsNS from '../../src/lib/errors';
+import type * as ContextNS from '../../src/lib/context';
 import type * as EventsNS from '../../src/lib/events';
+import type * as ExecNS from '../../src/seams/exec';
 import { memberNames, readMember, writeTarGzFromDir } from '../../src/lib/targz';
 import type * as TargzNS from '../../src/lib/targz';
 import type * as PolicyNS from '../testsetup-policy';
 import { compatibility } from '../../src/core/backup-compat';
 import type * as BackupNS from '../../src/core/backup';
+import type * as JournalNS from '../../src/core/journal';
 import type * as TypesNS from '../../src/core/lifecycle/types';
 import { type Metadata, metadata } from '../../src/core/runner/record';
 import type * as RecordNS from '../../src/core/runner/record';
@@ -638,7 +641,14 @@ describe('backing up and restoring a workspace', () => {
   interface World {
     payload: Buffer;
     rc: number;
+    /** What the dump says on stderr. */
+    dumpErr: string;
+    stopRc: number;
     startRc: number;
+    writerStates: Record<string, string>;
+    writerQueryRc: number;
+    keepWriterRunning: boolean;
+    restoreInterrupted: boolean;
     dumped: [string, string, string[]][];
     restored: [string, string, string[], Buffer][];
     stopped: [string, string[]][];
@@ -657,6 +667,7 @@ describe('backing up and restoring a workspace', () => {
   let home = '';
   let previous: string | undefined;
   const MOCKED = [
+    '../../src/seams/exec',
     '../../src/core/kube/namespace',
     '../../src/core/kube/scale',
     '../../src/core/kube/transfer',
@@ -674,7 +685,13 @@ describe('backing up and restoring a workspace', () => {
     world = {
       payload: Buffer.from('BSON-ARCHIVE-BYTES'),
       rc: 0,
+      dumpErr: '',
+      stopRc: 0,
       startRc: 0,
+      writerStates: {},
+      writerQueryRc: 0,
+      keepWriterRunning: false,
+      restoreInterrupted: false,
       dumped: [],
       restored: [],
       stopped: [],
@@ -707,6 +724,18 @@ describe('backing up and restoring a workspace', () => {
     }));
     jest.doMock('../../src/core/runner/engine', () => ({
       ...jest.requireActual('../../src/core/runner/engine'),
+      compose: async (_name: string, argv: readonly string[]) => ({
+        argv: ['docker', 'compose', ...argv],
+        exitCode: world.writerQueryRc,
+        signal: null,
+        stderr: world.writerQueryRc === 0 ? '' : 'writer query refused',
+        stdout: JSON.stringify(
+          argv.slice(4).map((service) => ({
+            Service: service,
+            State: world.writerStates[service] ?? 'running',
+          })),
+        ),
+      }),
       composeExecToFile: async (
         name: string,
         service: string,
@@ -718,7 +747,7 @@ describe('backing up and restoring a workspace', () => {
         world.staged.push(path.dirname(dest));
         world.dumped.push([name, service, [...argv]]);
         fs.writeFileSync(dest, world.payload);
-        return [world.rc, ''];
+        return [world.rc, world.dumpErr];
       },
       composeExecFromFile: async (
         name: string,
@@ -730,6 +759,10 @@ describe('backing up and restoring a workspace', () => {
         world.limits.push(['fromFile', argv[0] ?? '', timeoutMs]);
         world.staged.push(path.dirname(source));
         world.restored.push([name, service, [...argv], fs.readFileSync(source)]);
+        if (world.restoreInterrupted) {
+          const { Interrupted } = require('../../src/seams/exec') as typeof ExecNS;
+          throw new Interrupted();
+        }
         return [world.rc, ''];
       },
       composeExecCapture: async (
@@ -744,10 +777,16 @@ describe('backing up and restoring a workspace', () => {
       },
       stopServices: async (name: string, services: readonly string[]) => {
         world.stopped.push([name, [...services]]);
-        return 0;
+        if (world.stopRc === 0 && !world.keepWriterRunning) {
+          for (const service of services) world.writerStates[service] = 'exited';
+        }
+        return world.stopRc;
       },
       startServices: async (name: string, services: readonly string[]) => {
         world.started.push([name, [...services]]);
+        if (world.startRc === 0) {
+          for (const service of services) world.writerStates[service] = 'running';
+        }
         return world.startRc;
       },
     }));
@@ -843,6 +882,41 @@ describe('backing up and restoring a workspace', () => {
   }
 
   describe('taking a backup', () => {
+    it('refuses malformed service recovery notes while accepting an explicitly stopped state', async () => {
+      const backup = load();
+      const events_ = require('../../src/lib/events') as typeof EventsNS;
+      const repair = async (detail: Record<string, unknown>) =>
+        await backup.repairStopped(
+          {
+            id: 'service-state',
+            kind: 'rocketchat_stopped',
+            workspace: 'rc8-5-1',
+            pid: process.pid,
+            started: '',
+            at: '',
+            detail,
+          },
+          events_.nullEmit,
+          null,
+        );
+      for (const detail of [
+        {},
+        { services: null },
+        { services: {} },
+        { services: ['rocketchat', 1] },
+        { services: [null] },
+        { services: [''] },
+        { services: ['   '] },
+      ]) {
+        expect(await repair(detail)).toBe(false);
+      }
+      expect(world.started).toEqual([]);
+      expect(await repair({ services: [] })).toBe(true);
+      expect(world.started).toEqual([]);
+      expect(await repair({ services: ['rocketchat'] })).toBe(true);
+      expect(world.started).toEqual([['rc8-5-1', ['rocketchat']]]);
+    });
+
     it('dumps only Rocket.Chat’s own database, from the mongodb service', async () => {
       const backup = load();
       await writeRepro('rc8-5-1');
@@ -854,6 +928,31 @@ describe('backing up and restoring a workspace', () => {
       // --db, so `admin`/`local` never travel and the target's replica set is safe.
       expect(argv[argv.indexOf('--db') + 1]).toBe('rocketchat');
       expect(fs.existsSync(String(made.path))).toBe(true);
+    });
+
+    it('leaves the registration token out of the bundle', async () => {
+      // A token is a real licence, and a bundle is what gets attached to a support case:
+      // the compose file went in verbatim, REG_TOKEN and all.
+      const backup = load();
+      const doc = clone(COMPOSE_ONE) as {
+        services: { rocketchat: { environment: Record<string, string> } };
+      };
+      doc.services.rocketchat.environment.REG_TOKEN = 'canary-token-4471';
+      await writeRepro('rc8-5-1', doc);
+      const made = await backup.create('rc8-5-1');
+      const targz = require('../../src/lib/targz') as typeof TargzNS;
+      const out = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-bundle-token-'));
+      try {
+        await targz.extractTarGz(String(made.path), out);
+        const carrying = (await membersOf(String(made.path))).filter((rel) => {
+          const file = path.join(out, rel);
+          return fs.statSync(file).isFile() && fs.readFileSync(file).includes('canary-token-4471');
+        });
+        expect(carrying).toEqual([]);
+        expect(fs.readFileSync(path.join(out, 'compose.yml'), 'utf8')).toContain("REG_TOKEN: ''");
+      } finally {
+        fs.rmSync(out, { recursive: true, force: true });
+      }
     });
 
     it('stops Rocket.Chat for the dump and starts it again', async () => {
@@ -873,6 +972,77 @@ describe('backing up and restoring a workspace', () => {
       const errors = require('../../src/lib/errors') as typeof ErrorsNS;
       await expect(backup.create('rc8-5-1')).rejects.toBeInstanceOf(errors.DockerError);
       expect(world.started).toEqual([['rc8-5-1', ['rocketchat']]]);
+    });
+
+    it('says a dump was killed, and keeps the end of what it said rather than the start', async () => {
+      // The MongoDB operator's mongod was OOMKilled under its 500M limit while the dump ran in
+      // it, and the error held only the FIRST 600 characters of stderr -- a line per collection
+      // -- so neither the kill nor its reason was in it.
+      const backup = load();
+      await writeRepro('rc8-5-1');
+      world.rc = 137;
+      world.dumpErr = [
+        ...Array.from(
+          { length: 40 },
+          (_, at) => `2026-10-13T09:32:20.${String(at)}+0000\twriting rocketchat.c${String(at)}`,
+        ),
+        'command terminated with exit code 137',
+      ].join('\n');
+      await expect(backup.create('rc8-5-1')).rejects.toThrow(
+        /mongodump failed for 'rc8-5-1': it was killed \(exit 137\), most likely for running out of memory; it last said: .*command terminated with exit code 137$/su,
+      );
+    });
+
+    it('refuses a returned writer-stop failure before mongodump and restores prior services', async () => {
+      const backup = load();
+      await writeRepro('rc8-5-1');
+      world.stopRc = 47;
+      await expect(backup.create('rc8-5-1')).rejects.toThrow(/could not stop Rocket.Chat writers/u);
+      expect(world.dumped).toEqual([]);
+      expect(world.started).toEqual([['rc8-5-1', ['rocketchat']]]);
+    });
+
+    it('refuses a successful stop that leaves a writer running before mongodump', async () => {
+      const backup = load();
+      await writeRepro('rc8-5-1');
+      world.keepWriterRunning = true;
+      await expect(backup.create('rc8-5-1')).rejects.toThrow(/writers are still running/u);
+      expect(world.dumped).toEqual([]);
+    });
+
+    it('refuses failed writer discovery before stopping or dumping', async () => {
+      const backup = load();
+      await writeRepro('rc8-5-1');
+      world.writerQueryRc = 46;
+      await expect(backup.create('rc8-5-1')).rejects.toThrow(
+        /could not inspect Rocket.Chat writers/u,
+      );
+      expect(world.dumped).toEqual([]);
+      expect(world.stopped).toEqual([]);
+    });
+
+    it('keeps originally stopped Compose instances stopped after a backup', async () => {
+      const backup = load();
+      const doc = clone(COMPOSE_ONE) as { services: Record<string, unknown> };
+      const rc = doc.services.rocketchat;
+      delete doc.services.rocketchat;
+      doc.services['rocketchat-1'] = rc;
+      doc.services['rocketchat-2'] = clone(rc);
+      await writeRepro('multi', doc);
+      world.writerStates['rocketchat-2'] = 'exited';
+      await backup.create('multi');
+      expect(world.started).toEqual([['multi', ['rocketchat-1']]]);
+      expect(world.writerStates['rocketchat-2']).toBe('exited');
+    });
+
+    it('does not start a Compose workspace whose writers were already stopped', async () => {
+      const backup = load();
+      await writeRepro('rc8-5-1');
+      world.writerStates.rocketchat = 'exited';
+      await backup.create('rc8-5-1');
+      expect(world.started).toEqual([]);
+      expect(world.waited).toEqual([]);
+      expect(world.writerStates.rocketchat).toBe('exited');
     });
 
     it('leaves Rocket.Chat running for a --live dump', async () => {
@@ -919,6 +1089,30 @@ describe('backing up and restoring a workspace', () => {
       expect([m.params, m.env_overrides]).toEqual([{ bucket: 'custom' }, { A: 'b' }]);
       expect(Number(m.archive_bytes)).toBeGreaterThan(0);
       expect(String(m.archive_sha256)).toHaveLength(64);
+    });
+
+    it("carries a composed workspace's presets and their params, and only for one", async () => {
+      const backup = load();
+      await writeRepro('combo', COMPOSE_ONE, {
+        preset: 'email+ldap',
+        extra: {
+          presets: ['email', 'ldap'],
+          preset_params: { email: {}, ldap: { users: '7' } },
+        },
+      });
+      const m = (await backup.create('combo')).manifest as Record<string, unknown>;
+      expect([m.preset, m.params, m.presets, m.preset_params]).toEqual([
+        'email+ldap',
+        {},
+        ['email', 'ldap'],
+        { email: {}, ldap: { users: '7' } },
+      ]);
+      await writeRepro('single', COMPOSE_ONE, {
+        preset: 'ldap',
+        extra: { params: { users: '3' } },
+      });
+      const one = (await backup.create('single')).manifest as Record<string, unknown>;
+      expect(['presets' in one, 'preset_params' in one]).toEqual([false, false]);
     });
 
     it('keeps the modes and times of what it copies, as earlier releases do', async () => {
@@ -1005,19 +1199,22 @@ describe('backing up and restoring a workspace', () => {
       expect(fs.statSync(String(made.path)).mode & 0o777).toBe(0o600);
     });
 
-    it('says so when Rocket.Chat does not come back after the dump', async () => {
+    it('fails truthfully but keeps the completed bundle when Rocket.Chat cannot recover', async () => {
       // Reporting "backed up" over a workspace that never came back is the exact outcome
       // the quiesce wrapper exists to prevent.
       const backup = load();
       await writeRepro('rc8-5-1');
       world.startRc = 1;
-      const { emit, seen } = events();
-      await backup.create('rc8-5-1', { emit });
-      expect(
-        seen.some(
-          (event) => event.level === 'warn' && event.message.includes('did not come back up'),
-        ),
-      ).toBe(true);
+      const dest = path.join(home, 'failed-recovery.rcbak');
+      await expect(backup.create('rc8-5-1', { out: dest })).rejects.toThrow(
+        /backup saved at.*prior state could not be restored/u,
+      );
+      expect((await backup.readManifest(dest)).repro).toBe('rc8-5-1');
+      expect(fs.statSync(dest).mode & 0o777).toBe(0o600);
+      const journal = require('../../src/core/journal') as typeof JournalNS;
+      expect(journal.openEntries().some((entry) => entry.kind === journal.ROCKETCHAT_STOPPED)).toBe(
+        true,
+      );
     });
   });
 
@@ -1038,7 +1235,8 @@ describe('backing up and restoring a workspace', () => {
         // restore: the tools probe, the `ulimit -n` probe, the drop, then the load
         ['capture', 'sh', probe * 1000],
         ['capture', 'sh', probe * 1000],
-        ['capture', 'mongosh', probe * 1000],
+        // `env HOME=/tmp mongosh`: the operator's pod has no writable home for the shell.
+        ['capture', 'env', probe * 1000],
         ['fromFile', 'mongorestore', dump * 1000],
       ]);
       expect([probe * 1000, dump * 1000]).toEqual([30_000, 3_600_000]);
@@ -1200,6 +1398,47 @@ describe('backing up and restoring a workspace', () => {
   });
 
   describe('restoring a bundle', () => {
+    it('preserves a stopped restore outcome when writer recovery also fails', async () => {
+      const { backup, bundle } = await restorable();
+      world.restoreInterrupted = true;
+      world.startRc = 1;
+      const { Interrupted } = require('../../src/seams/exec') as typeof ExecNS;
+      const { emit, seen } = events();
+      await expect(backup.restore(bundle, { emit })).rejects.toBeInstanceOf(Interrupted);
+      expect(world.restored).toHaveLength(1);
+      expect(
+        seen.some(
+          (event) => event.level === 'warn' && event.message.includes('restore was stopped'),
+        ),
+      ).toBe(true);
+      const journal = require('../../src/core/journal') as typeof JournalNS;
+      expect(journal.openEntries().some((entry) => entry.kind === journal.ROCKETCHAT_STOPPED)).toBe(
+        true,
+      );
+    });
+
+    it('fails truthfully after the data restores if the original writer state cannot recover', async () => {
+      const { backup, bundle } = await restorable();
+      world.startRc = 1;
+      await expect(backup.restore(bundle)).rejects.toThrow(/prior state could not be restored/u);
+      expect(world.restored).toHaveLength(1);
+      const journal = require('../../src/core/journal') as typeof JournalNS;
+      expect(journal.openEntries().some((entry) => entry.kind === journal.ROCKETCHAT_STOPPED)).toBe(
+        true,
+      );
+    });
+
+    it('refuses a returned writer-stop failure before dropDatabase or mongorestore', async () => {
+      const { backup, bundle } = await restorable();
+      world.stopRc = 47;
+      world.captures.length = 0;
+      await expect(backup.restore(bundle)).rejects.toThrow(/could not stop Rocket.Chat writers/u);
+      expect(world.restored).toEqual([]);
+      expect(world.captures.some((argv) => argv.some((arg) => arg.includes('dropDatabase')))).toBe(
+        false,
+      );
+    });
+
     it('restores in place with --drop, from the archive the bundle carries', async () => {
       // Without --drop a restore merges two databases into a hybrid.
       const { backup, bundle } = await restorable();
@@ -1262,10 +1501,53 @@ describe('backing up and restoring a workspace', () => {
       world.captures.length = 0;
       await backup.restore(bundle);
       const dropped = world.captures.filter((argv) =>
-        argv.some((arg) => arg.includes('dropDatabase')),
+        argv.some((arg) => arg.includes('getCollectionNames')),
       );
       expect(dropped.length).toBeGreaterThan(0);
-      expect(dropped[0]?.slice(0, 2)).toEqual(['mongosh', 'rocketchat']);
+      expect(dropped[0]?.slice(2, 4)).toEqual(['mongosh', 'rocketchat']);
+    });
+
+    it('drops with a writable HOME, which the MongoDB operator pod does not give', async () => {
+      // The shell makes ~/.mongodb first; in the operator's pod its EACCES warning filled the
+      // output the failure reason is read from.
+      const backup = load();
+      await writeRepro('rc8-5-1');
+      await backup.dropDatabase('rc8-5-1', 'rocketchat');
+      expect(world.captures[0]?.slice(0, 3)).toEqual(['env', 'HOME=/tmp', 'mongosh']);
+    });
+
+    it('empties the database under readWrite, and prints a failure where it can be read', () => {
+      // The MongoDB operator's application user holds readWrite, which may drop a collection
+      // and may NOT run dropDatabase: every restore into an operator workspace warned "could
+      // not drop ()" -- an empty reason, since the shell's error went to stderr -- and merged.
+      const backup = load();
+      const dropped: string[] = [];
+      const printed: string[] = [];
+      const db = {
+        dropDatabase: () => {
+          throw new Error('not authorized on rocketchat to execute command { dropDatabase: 1 }');
+        },
+        getCollectionNames: () => ['users', 'rocketchat_message', 'system.views'],
+        getCollection: (name: string) => ({ drop: () => void dropped.push(name) }),
+      };
+      const run = (database: unknown) =>
+        new Function('db', 'print', 'quit', backup.DROP_EVERY_COLLECTION)(
+          database,
+          (line: string) => void printed.push(line),
+          (code: number) => void printed.push(`quit ${String(code)}`),
+        );
+      run(db);
+      expect(dropped).toEqual(['users', 'rocketchat_message']);
+      expect(printed).toEqual([]);
+      run({
+        getCollectionNames: () => {
+          throw new Error('not authorized on rocketchat to execute command { listCollections }');
+        },
+      });
+      expect(printed).toEqual([
+        'drop failed: Error: not authorized on rocketchat to execute command { listCollections }',
+        'quit 1',
+      ]);
     });
 
     it('drops with the legacy shell on a MongoDB older than 5.0', async () => {
@@ -1273,7 +1555,7 @@ describe('backing up and restoring a workspace', () => {
       const backup = load();
       await writeRepro('old', COMPOSE_ONE, { mongoTag: '4.4' });
       await backup.dropDatabase('old', 'rocketchat');
-      expect(world.captures[0]?.[0]).toBe('mongo');
+      expect(world.captures[0]?.[2]).toBe('mongo');
     });
 
     it('warns rather than aborting when the drop fails', async () => {
@@ -1366,6 +1648,18 @@ describe('backing up and restoring a workspace', () => {
       expect([world.created[0]?.version, world.created[0]?.preset]).toEqual(['8.5.1', 'default']);
     });
 
+    it('records the admin password the restored database holds, the source’s', async () => {
+      // The database comes from the source, admin and all, and the record kept the new
+      // workspace's own password: every login answered 401, the Site_Url retarget first,
+      // seen live after `restore --new` from an HTTPS workspace.
+      const backup = load();
+      await writeRepro('src', COMPOSE_ONE, { adminPassword: 'Source-Pw' });
+      const made = await backup.create('src');
+      await backup.restore(String(made.path), { new: true });
+      const record = require('../../src/core/runner/record') as typeof RecordNS;
+      expect((await record.readMeta('src-restored')).adminPassword).toBe('Source-Pw');
+    });
+
     it('rebuilds the preset the bundle came from, on the runtime it came from', async () => {
       // The three-axis branch hardcoded preset "default" while reading runtime and
       // deployment from the manifest, and every modern bundle records `deployment` -- so
@@ -1383,7 +1677,7 @@ describe('backing up and restoring a workspace', () => {
           runtime: 'kubernetes',
           deployment: 'microservices',
           params: { users: '5' },
-          env_overrides: {},
+          env_overrides: { OVERWRITE_SETTING_Site_Name: 'Restored' },
         },
         events_.nullEmit,
       );
@@ -1392,6 +1686,28 @@ describe('backing up and restoring a workspace', () => {
       expect(seen?.runtime).toBe('kubernetes');
       expect(seen?.deployment).toBe('microservices');
       expect(seen?.params).toEqual({ users: '5' });
+      // The overrides too, which a Kubernetes create now honours and records.
+      expect(seen?.env).toEqual({ OVERWRITE_SETTING_Site_Name: 'Restored' });
+
+      // A composed bundle's params come back as the `--set` keys that say them.
+      await backup.createFromManifest(
+        'combo-restored',
+        {
+          rc_version: '8.5.1',
+          preset: 'email+ldap',
+          runtime: 'docker',
+          deployment: 'monolith',
+          params: {},
+          presets: ['email', 'ldap'],
+          preset_params: { email: {}, ldap: { users: '7' } },
+        },
+        events_.nullEmit,
+      );
+      expect([world.created[1]?.preset, world.created[1]?.params]).toEqual([
+        'email+ldap',
+        { 'ldap.users': '7' },
+      ]);
+      world.created.splice(1, 1);
 
       // A pre-three-axis bundle has no `deployment`; that branch always read the preset.
       await backup.createFromManifest(
@@ -1403,6 +1719,41 @@ describe('backing up and restoring a workspace', () => {
       expect(world.created[1]?.runtime).toBe('');
     });
 
+    it('is owned by whoever restores it, as a create is', async () => {
+      // From the GUI's Backups page a restored workspace had no owner: the create was made
+      // with no actor, though the audit named the admin who pressed Restore.
+      const backup = load();
+      const events_ = require('../../src/lib/events') as typeof EventsNS;
+      const context = require('../../src/lib/context') as typeof ContextNS;
+      await context.runWithContext({ actor: 'alice' }, async () => {
+        await backup.createFromManifest('owned', { rc_version: '8.5.1' }, events_.nullEmit);
+      });
+      expect(world.created.at(-1)?.actor).toBe('alice');
+    });
+
+    it('rebuilds a Kubernetes workspace on its cluster, with the operator if it had one', async () => {
+      // The manifest recorded neither: a copy of an operator-managed MongoDB came up as a
+      // plain StatefulSet on the default context, saying the operator is "opt-in".
+      const backup = load();
+      const events_ = require('../../src/lib/events') as typeof EventsNS;
+      await backup.createFromManifest(
+        'kop2',
+        {
+          rc_version: '8.5.1',
+          preset: 'default',
+          runtime: 'kubernetes',
+          deployment: 'monolith',
+          context: 'k3s-lane',
+          mongo_operator: true,
+        },
+        events_.nullEmit,
+      );
+      expect([world.created[0]?.context, world.created[0]?.mongoOperator]).toEqual([
+        'k3s-lane',
+        true,
+      ]);
+    });
+
     it('refuses --new over a workspace that already exists', async () => {
       const { backup, bundle } = await restorable();
       await writeRepro('taken');
@@ -1410,6 +1761,25 @@ describe('backing up and restoring a workspace', () => {
       const refusal = backup.restore(bundle, { new: true, name: 'taken' });
       await expect(refusal).rejects.toBeInstanceOf(errors.ConflictError);
       await expect(refusal).rejects.toThrow(/already exists/u);
+    });
+
+    it('loads a --new restore into the name the create settles on, owner prefix and all', async () => {
+      // The create puts `<actor>-` in front of a name and the load went to the bare one: a
+      // member's restore as new left `mem-<name>` running empty and failed on `<name>`.
+      const { backup, bundle } = await restorable();
+      const context = require('../../src/lib/context') as typeof ContextNS;
+      const out = await context.runWithContext({ actor: 'mem' }, async () => {
+        return await backup.restore(bundle, { new: true });
+      });
+      expect([out.name, world.created[0]?.name, world.created[0]?.actor]).toEqual([
+        'mem-rc8-5-1-restored',
+        'mem-rc8-5-1-restored',
+        'mem',
+      ]);
+      const named = await context.runWithContext({ actor: 'mem' }, async () => {
+        return await backup.restore(bundle, { new: true, name: 'copy' });
+      });
+      expect([named.name, world.created[1]?.name]).toEqual(['mem-copy', 'mem-copy']);
     });
 
     it('deduplicates the name --new derives', async () => {
@@ -1504,6 +1874,86 @@ describe('backing up and restoring a workspace', () => {
       expect(kubeAsked).toHaveLength(1);
     });
 
+    it('never puts the MongoDB operator password in an argument, on the host or in the pod', async () => {
+      // `ps` showed it, in 382 scans of one `restore --force`: `kubectl exec ... mongorestore
+      // --password <pw>`, the drop's `mongosh --password <pw>`, the dump, and the exec seam's
+      // relay, which carries the same arguments. A local cluster's pods share the host's
+      // process table, so the tool's own argv inside the pod is just as readable.
+      const PASSWORD = 'pw-9c1d4e7f-not-an-argument';
+      const argvs: string[][] = [];
+      const stdins: string[] = [];
+      const record = (argv: readonly string[], input: unknown): void => {
+        argvs.push([...argv]);
+        if (typeof input === 'string' && input !== '') stdins.push(input);
+      };
+      jest.doMock('../../src/seams/exec', () => {
+        const real = jest.requireActual<typeof ExecNS>('../../src/seams/exec');
+        return {
+          ...real,
+          // kubectl only: the lock seam reaches these too, for `flock`.
+          stream: async (argv: ExecNS.Argv, options: ExecNS.StreamOptions) => {
+            if (argv[0] !== 'kubectl') return await real.stream(argv, options);
+            record(argv, options.input);
+            await new Promise<void>((done) =>
+              options.stdoutSink?.write(world.payload, () => done()),
+            );
+            return { argv, exitCode: 0, signal: null, stdout: null, stderr: null };
+          },
+          capture: async (argv: ExecNS.Argv, options: ExecNS.CaptureOptions) => {
+            if (argv[0] !== 'kubectl') return await real.capture(argv, options);
+            const chunks: Buffer[] = [];
+            const stdin = options.stdin;
+            if (stdin !== undefined && typeof stdin !== 'string') {
+              for await (const chunk of stdin) chunks.push(Buffer.from(chunk as Buffer));
+            }
+            record(argv, Buffer.concat(chunks).toString('latin1'));
+            return { argv, exitCode: 0, signal: null, stdout: Buffer.from(''), stderr: null };
+          },
+        };
+      });
+      jest.doMock('../../src/core/kube/scale', () => ({
+        ...jest.requireActual('../../src/core/kube/scale'),
+        rocketchatReplicas: async () => ({}),
+        restoreRocketchatReplicas: async () => 0,
+        scaleRocketchat: async () => 0,
+      }));
+      jest.doMock('../../src/core/kube/namespace', () => ({
+        ...jest.requireActual('../../src/core/kube/namespace'),
+        namespaceFor: async (name: string) => `houston-${name}`,
+      }));
+      const backup = load();
+      const { kube } = require('../../src/core/kube/exec') as {
+        kube: { run: (argv: string[], options?: { input?: string }) => Promise<unknown> };
+      };
+      jest.spyOn(kube, 'run').mockImplementation(async (argv, options = {}) => {
+        record(argv, options.input);
+        const stdout = argv.includes('secret')
+          ? Buffer.from(PASSWORD).toString('base64')
+          : argv.includes('ulimit -n')
+            ? '64000\n'
+            : '';
+        return { argv, returncode: 0, stdout, stderr: '' };
+      });
+      await kubeRecord('k', { mongo_managed_by: 'operator', namespace: 'houston-k' });
+      const made = await backup.create('k');
+      await backup.restore(String(made.path), { force: true });
+
+      // What ran in the pod, from after kubectl's `--`.
+      const inPod = argvs
+        .filter((argv) => argv[0] === 'kubectl' && argv.includes('exec'))
+        .map((argv) => argv.slice(argv.indexOf('--') + 1));
+      expect(
+        inPod.flatMap((argv) => argv.filter((arg) => /^mongo(?:dump|restore|sh)$/u.test(arg))),
+      ).toEqual(['mongodump', 'mongosh', 'mongorestore']);
+      for (const argv of argvs) expect(argv.join(' ')).not.toContain(PASSWORD);
+      // It travels on stdin instead: the dump's and the load's config line, the drop's script.
+      expect(stdins.filter((input) => input.includes(PASSWORD))).toHaveLength(3);
+      // And the load's archive follows its password line, whole.
+      expect(stdins.some((input) => input.endsWith(`\n${world.payload.toString('latin1')}`))).toBe(
+        true,
+      );
+    });
+
     it('leaves a Kubernetes workspace reachable on its own port after the dump', async () => {
       // Scaling Rocket.Chat to 0 kills the port-forward with the pod, and `backup` reported
       // success over a workspace RUNNING but unreachable at its own URL -- found by an
@@ -1512,6 +1962,11 @@ describe('backing up and restoring a workspace', () => {
       const killed: number[] = [];
       jest.doMock('../../src/core/kube/scale', () => ({
         ...jest.requireActual('../../src/core/kube/scale'),
+        rocketchatReplicas: async () => ({ 'deployment.apps/rc': 1 }),
+        restoreRocketchatReplicas: async (_name: string, counts: Record<string, number>) => {
+          scaled.push(counts['deployment.apps/rc'] ?? -1);
+          return 0;
+        },
         scaleRocketchat: async (_name: string, { replicas }: { replicas: number }) => {
           scaled.push(replicas);
           return 0;

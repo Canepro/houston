@@ -5,10 +5,15 @@
  * matching a name prefix, because a prefix match once made a namespace somebody else created
  * eligible for teardown. A namespace that cannot be CONFIRMED gone is not gone.
  */
-import { ConflictError, CreateFailedError, DockerError } from '../../lib/errors';
+import {
+  ConflictError,
+  CreateFailedError,
+  DockerError,
+  MissingRecordError,
+} from '../../lib/errors';
 import { info, nullEmit, warn, type Emit } from '../../lib/events';
 import { teamMode } from '../../lib/teammode';
-import { recorded } from '../runner/record';
+import { readMeta, recorded, type Metadata } from '../runner/record';
 
 import { absent, answerWhy, askObject, present, require_, why } from './ask';
 import { clusters } from './context';
@@ -16,6 +21,7 @@ import { kube } from './exec';
 import {
   APPLY_TIMEOUT,
   CLUSTER_NAME,
+  MONGO_SERVICE,
   NS_GONE_INTERVAL,
   NS_GONE_TRIES,
   OWNER_LABEL_KEY,
@@ -117,7 +123,13 @@ export function refuseForeignNamespace(
     );
   }
   const theirs = labels[WORKSPACE_LABEL] ?? '';
-  if (theirs !== '' && theirs !== name) {
+  if (theirs === '') {
+    throw new ConflictError(
+      `namespace ${ns} records no houston workspace, so its ownership cannot be proved. ` +
+        'It will not be adopted or deleted; inspect its labels and data yourself first',
+    );
+  }
+  if (theirs !== name) {
     throw new ConflictError(
       `namespace ${ns} belongs to houston workspace '${theirs}', not '${name}'. Two ` +
         'workspaces cannot share a namespace; use a different --name',
@@ -125,6 +137,12 @@ export function refuseForeignNamespace(
   }
   const heldBy = labels[OWNER_OF_LABEL] ?? '';
   if (heldBy !== '' && heldBy !== owner) refuseForeignOwner(ns, heldBy, owner);
+  if (heldBy === '' && owner !== '') {
+    throw new ConflictError(
+      `namespace ${ns} records no owner, but '${name}' belongs to '${owner}'. ` +
+        'Its ownership cannot be proved, so it will not be adopted or deleted',
+    );
+  }
 }
 
 function metadataOf(doc: Record<string, unknown> | null): Record<string, unknown> {
@@ -139,6 +157,91 @@ function phaseOf(doc: Record<string, unknown> | null): string {
       ? (status as { phase?: unknown }).phase
       : undefined;
   return String(phase ?? '');
+}
+
+interface NamespaceIdentity {
+  readonly uid: string;
+  readonly resourceVersion: string;
+  readonly labels: Record<string, string>;
+}
+
+/** Identity comes from one authoritative object, never a filtered namespace list. */
+function identityOf(ns: string, doc: Record<string, unknown>): NamespaceIdentity {
+  const metadata = metadataOf(doc);
+  if (
+    metadata.name !== ns ||
+    typeof metadata.uid !== 'string' ||
+    metadata.uid === '' ||
+    typeof metadata.resourceVersion !== 'string' ||
+    metadata.resourceVersion === ''
+  ) {
+    throw new ConflictError(
+      `could not confirm namespace ${ns}'s UID and resource version — refusing to guess about its identity`,
+    );
+  }
+  const raw = metadata.labels;
+  const labels: Record<string, string> = {};
+  if (raw !== null && typeof raw === 'object' && !Array.isArray(raw)) {
+    for (const [key, value] of Object.entries(raw)) {
+      if (typeof value === 'string') labels[key] = value;
+    }
+  }
+  return { uid: metadata.uid, resourceVersion: metadata.resourceVersion, labels };
+}
+
+async function namespaceIdentity(ns: string, context: string): Promise<NamespaceIdentity | null> {
+  const seen = require_(await askObject('namespace', ns, { context }), `namespace ${ns}`, {
+    context,
+  });
+  return present(seen) ? identityOf(ns, seen.doc) : null;
+}
+
+async function recordedNamespaceClaim(
+  name: string,
+): Promise<{ owner: string; uid: string; recorded: boolean }> {
+  let meta: Metadata;
+  try {
+    meta = await readMeta(name);
+  } catch (error) {
+    if (error instanceof MissingRecordError) return { owner: '', uid: '', recorded: false };
+    throw error;
+  }
+  const extra: unknown = meta.extra;
+  if (extra === null || typeof extra !== 'object' || Array.isArray(extra)) {
+    throw new ConflictError(
+      `'${name}' has no readable namespace ownership record — refusing to delete`,
+    );
+  }
+  const fields = extra as Record<string, unknown>;
+  // Namespace labels identify the creating actor. A handover changes local `owner`
+  // without relabelling Kubernetes, so its current owner is checked by lifecycle's
+  // mayDestroy gate and its namespace identity still follows immutable created_by.
+  const owner = Object.hasOwn(fields, 'namespace_owner')
+    ? fields.namespace_owner
+    : (fields.created_by ?? '');
+  const uid = Object.hasOwn(fields, 'namespace_uid') ? fields.namespace_uid : '';
+  if (typeof owner !== 'string' || typeof uid !== 'string') {
+    throw new ConflictError(
+      `'${name}' has an invalid namespace ownership record — refusing to delete`,
+    );
+  }
+  return { owner, uid, recorded: true };
+}
+
+function requireSameNamespace(ns: string, identity: NamespaceIdentity, expectedUid: string): void {
+  if (expectedUid !== '' && identity.uid !== expectedUid) {
+    throw new ConflictError(
+      `namespace ${ns} has a different UID from this workspace's record, so it will not be ` +
+        'adopted or deleted. A replacement namespace is not the workspace that was recorded',
+    );
+  }
+}
+
+export interface NamespaceReceipt {
+  uid: string;
+  owner: string;
+  /** Only the UID returned by this call's successful atomic CREATE permits rollback. */
+  createdUid: string;
 }
 
 /**
@@ -233,7 +336,9 @@ export async function assertNamespaceAvailable(
   if (labels !== null && typeof labels === 'object' && !Array.isArray(labels)) {
     for (const [key, value] of Object.entries(labels)) flat[String(key)] = String(value);
   }
-  refuseForeignNamespace(ns, name, flat, owner);
+  const claim = await recordedNamespaceClaim(name);
+  refuseForeignNamespace(ns, name, flat, claim.recorded ? claim.owner : owner);
+  if (claim.uid !== '' && doc !== null) requireSameNamespace(ns, identityOf(ns, doc), claim.uid);
 }
 
 /**
@@ -251,28 +356,58 @@ export async function assertNamespaceAvailable(
  */
 export async function ensureNamespace(
   name: string,
-  { context, owner = '', emit = nullEmit }: { context: string; owner?: string; emit?: Emit },
+  {
+    context,
+    owner = '',
+    emit = nullEmit,
+    receipt,
+  }: { context: string; owner?: string; emit?: Emit; receipt?: NamespaceReceipt },
 ): Promise<string> {
   const ns = await namespaceFor(name);
-  const existing = await namespaceLabels(ns, { context });
+  const existing = await namespaceIdentity(ns, context);
   if (existing !== null) {
-    refuseForeignNamespace(ns, name, existing, owner);
-  } else {
-    await kube.run(['kubectl', '--context', context, 'create', 'namespace', ns], {
-      timeout: APPLY_TIMEOUT,
-      own: isOurs(context),
-    });
+    const claim = await recordedNamespaceClaim(name);
+    const expectedOwner = claim.recorded ? claim.owner : owner;
+    refuseForeignNamespace(ns, name, existing.labels, expectedOwner);
+    requireSameNamespace(ns, existing, claim.uid);
+    if (receipt !== undefined) {
+      Object.assign(receipt, { uid: existing.uid, owner: expectedOwner, createdUid: '' });
+    }
+    return ns;
   }
-  const labels = Object.entries(labelsFor(name, owner)).map(([key, value]) => `${key}=${value}`);
-  const res = await kube.run(
-    ['kubectl', '--context', context, 'label', 'namespace', ns, ...labels, '--overwrite'],
-    { timeout: APPLY_TIMEOUT, own: isOurs(context) },
-  );
+  // CREATE is atomic and includes the ownership labels. An AlreadyExists race is a
+  // refusal, never permission to label somebody else's namespace with --overwrite.
+  const res = await kube.run(['kubectl', '--context', context, 'create', '-f', '-', '-o', 'json'], {
+    timeout: APPLY_TIMEOUT,
+    own: isOurs(context),
+    input: JSON.stringify({
+      apiVersion: 'v1',
+      kind: 'Namespace',
+      metadata: { name: ns, labels: labelsFor(name, owner) },
+    }),
+  });
   if (res.returncode !== 0) {
     throw new CreateFailedError(
-      `could not label namespace ${ns}: ${why(res)} — without the label it would be ` +
-        'invisible to teardown',
+      `could not create namespace ${ns}: ${why(res)} — nothing else was adopted`,
     );
+  }
+  let created: unknown;
+  try {
+    created = JSON.parse(res.stdout);
+  } catch {
+    throw new CreateFailedError(
+      `namespace ${ns}'s create returned no readable identity — refusing to guess`,
+    );
+  }
+  if (created === null || typeof created !== 'object' || Array.isArray(created)) {
+    throw new CreateFailedError(
+      `namespace ${ns}'s create returned no readable identity — refusing to guess`,
+    );
+  }
+  const identity = identityOf(ns, created as Record<string, unknown>);
+  refuseForeignNamespace(ns, name, identity.labels, owner);
+  if (receipt !== undefined) {
+    Object.assign(receipt, { uid: identity.uid, owner, createdUid: identity.uid });
   }
   info(emit, `created namespace ${ns}`, { phase: 'provision' });
   return ns;
@@ -284,25 +419,17 @@ export async function ensureNamespace(
  * Still `[]` on a refused read, and deliberately: the one caller uses this to say how many
  * volumes are about to go, so being wrong understates a count in a message. Nothing
  * branches on it. Named here so the next reader knows it was considered rather than missed.
+ *
+ * EVERY claim in the namespace, not only houston-labelled ones: the namespace is the
+ * workspace's alone, and the MongoDB operator's claims carry its labels, not houston's, so
+ * an operator workspace's teardown said "0 volume(s)" while it deleted two.
  */
 export async function workspacePvcs(
   name: string,
   { context }: { context: string },
 ): Promise<string[]> {
   const res = await kube.run(
-    [
-      'kubectl',
-      '--context',
-      context,
-      '-n',
-      await namespaceFor(name),
-      'get',
-      'pvc',
-      '-l',
-      OWNER_SELECTOR,
-      '-o',
-      'name',
-    ],
+    ['kubectl', '--context', context, '-n', await namespaceFor(name), 'get', 'pvc', '-o', 'name'],
     { own: isOurs(context) },
   );
   if (res.returncode !== 0) return [];
@@ -342,6 +469,7 @@ async function deleteNamespaceAndVolumes(
   ns: string,
   context: string,
   own: boolean,
+  identity: NamespaceIdentity,
   emit: Emit,
   sleep: Sleep,
 ): Promise<boolean> {
@@ -351,8 +479,27 @@ async function deleteNamespaceAndVolumes(
     pct: 10,
   });
   const res = await kube.run(
-    ['kubectl', '--context', context, 'delete', 'namespace', ns, '--wait=false'],
-    { timeout: APPLY_TIMEOUT, own },
+    [
+      'kubectl',
+      '--context',
+      context,
+      'delete',
+      '--raw',
+      `/api/v1/namespaces/${encodeURIComponent(ns)}`,
+      '-f',
+      '-',
+    ],
+    {
+      timeout: APPLY_TIMEOUT,
+      own,
+      // Ordinary `kubectl delete -f` does not use metadata.uid as a precondition.
+      // --raw sends this DeleteOptions body to the API server unchanged.
+      input: JSON.stringify({
+        apiVersion: 'v1',
+        kind: 'DeleteOptions',
+        preconditions: { uid: identity.uid, resourceVersion: identity.resourceVersion },
+      }),
+    },
   );
   if (res.returncode !== 0) throw new DockerError(`could not delete namespace ${ns}: ${why(res)}`);
 
@@ -415,6 +562,10 @@ async function uninstallWorkspaceWorkloads(
   if (rel.returncode !== 0 && !why(rel).toLowerCase().includes('not found')) {
     throw new DockerError(`could not uninstall ${RELEASE} from ${ns}: ${why(rel)}`);
   }
+  // MongoDB BY NAME, and still only houston's. The owner label alone is on every preset
+  // object too, so this took every preset's Service while their Deployments ran on; `up` then
+  // made them anew at new addresses, under a minio-ui nginx still proxying to the old one.
+  // The label stays: an operator's own `mongodb` StatefulSet is not houston's to delete.
   const gone = await kube.run(
     [
       'kubectl',
@@ -426,6 +577,8 @@ async function uninstallWorkspaceWorkloads(
       'statefulset,service',
       '-l',
       OWNER_SELECTOR,
+      '--field-selector',
+      `metadata.name=${MONGO_SERVICE}`,
     ],
     { timeout: APPLY_TIMEOUT, own },
   );
@@ -453,7 +606,16 @@ export async function deleteNamespace(
     volumes = false,
     emit = nullEmit,
     sleep = realSleep,
-  }: { context: string; volumes?: boolean; emit?: Emit; sleep?: Sleep },
+    expectedUid,
+    owner,
+  }: {
+    context: string;
+    volumes?: boolean;
+    emit?: Emit;
+    sleep?: Sleep;
+    expectedUid?: string;
+    owner?: string;
+  },
 ): Promise<boolean> {
   const ns = await namespaceFor(name);
   const own = isOurs(context);
@@ -463,9 +625,9 @@ export async function deleteNamespace(
   // therefore reported "nothing to remove" -- after which the caller deleted the local
   // record and told the reader the namespace and its PersistentVolumeClaim were gone,
   // while all of it went on running with the only record that knew about it destroyed.
-  let labels: Record<string, string> | null;
+  let identity: NamespaceIdentity | null;
   try {
-    labels = await namespaceLabels(ns, { context });
+    identity = await namespaceIdentity(ns, context);
   } catch (error) {
     // A DELETED CLUSTER IS NOT AN UNREACHABLE ONE. Its kubeconfig entry survives, but a
     // namespace cannot outlive a cluster that is provably absent. A failed kind probe
@@ -481,8 +643,8 @@ export async function deleteNamespace(
   // ABSENT IS THE MOST CONFIRMED-GONE STATE THERE IS, and this returned false for it -- so
   // teardown read "not confirmed gone", kept the local record, and said so. A Kubernetes
   // record whose namespace has already been removed could then NEVER be deleted.
-  if (labels === null) return true;
-  if (labels[OWNER_LABEL_KEY] !== OWNER_LABEL_VALUE) {
+  if (identity === null) return true;
+  if (identity.labels[OWNER_LABEL_KEY] !== OWNER_LABEL_VALUE) {
     // Refused rather than deleted. Reaching a namespace houston does not own is either a
     // half-labelled adoption or the wrong cluster -- and neither is a reason to delete
     // somebody's namespace.
@@ -492,10 +654,13 @@ export async function deleteNamespace(
         'yourself if you meant to',
     );
   }
+  const claim = await recordedNamespaceClaim(name);
+  refuseForeignNamespace(ns, name, identity.labels, owner ?? claim.owner);
+  requireSameNamespace(ns, identity, expectedUid ?? claim.uid);
   if (volumes) {
     // Reported as it happens, and WAITED for. `--wait=false` returned instantly and `down`
     // said "removed" while the namespace was still Terminating.
-    return await deleteNamespaceAndVolumes(name, ns, context, own, emit, sleep);
+    return await deleteNamespaceAndVolumes(name, ns, context, own, identity, emit, sleep);
   }
   // CHECKED. Both of these had their return codes dropped, so an RBAC denial or an
   // unreachable API server left the release installed and the pods running while `down`

@@ -108,6 +108,12 @@ export interface Event {
 }
 
 /**
+ * The code of the warning a stopped or failed create's cleanup gives when it took back
+ * everything the create had made, so a job's closing line does not say that any of it stays.
+ */
+export const NOTHING_LEFT = 'nothing-left';
+
+/**
  * An emitter is any callable taking one Event. Kept as a plain function type (not a
  * class) so a test can pass `events.push.bind(events)` and the CLI can pass a small
  * adapter.

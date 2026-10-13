@@ -2,15 +2,21 @@
  * Docker, for the edge. Tier 1 of `src/core/edge/`.
  *
  * Everything here goes through `seams/docker-cli.ts`, and this module is the adapter that
- * gives those calls the edge's contract: NEVER RAISES, the caller reads the return code.
+ * gives invocation failures the edge's contract: invocation adapters NEVER RAISE, the caller
+ * reads the return code. The lifecycle lock and checked ingress repair can still refuse
+ * an operation.
  *
  * That contract is not decoration. `houston edge stop` on a fresh home answered with a
  * stack trace naming a path under HOUSTON_HOME, because `cwd` is `edgeDir()` and a home
  * that has never had an edge has no such directory. 127 is what a shell reports for
  * "could not run it", and the reason travels on stderr where `why()` already looks.
  */
+import { isIPv4, isIPv6 } from 'node:net';
+
+import { DockerError } from '../../lib/errors';
 import { quotedText, isTruthy } from '../../lib/format';
 import { compose as composeSeam, docker as dockerSeam } from '../../seams/docker-cli';
+import { engine as hostEngine } from '../runner/host';
 import { listMeta } from '../runner/record';
 import { portFree } from '../runner/ports';
 
@@ -135,13 +141,22 @@ export async function bridgeAddress(): Promise<string> {
     '--format',
     '{{(index .IPAM.Config 0).Gateway}}',
   ]);
-  return out.returncode === 0 ? out.stdout.trim() : '';
+  const gateway = out.returncode === 0 ? out.stdout.trim() : '';
+  // ONLY IF THIS MACHINE CAN LISTEN THERE. A VM engine (Docker Desktop, a Podman machine)
+  // keeps its bridge inside the VM, so the gateway is no address of this host and the GUI
+  // could not bind it; such an engine forwards host.docker.internal to the host's loopback
+  // instead. Asked by binding, not by listing interfaces: a Docker host's docker0 is DOWN
+  // until a container uses it, and listing would wrongly call its gateway absent.
+  if (gateway !== '' && !(await portFree(0, gateway))) return '127.0.0.1';
+  return gateway;
 }
 
 /** Stop the edge. Routes are files and survive this, so starting it again restores
  * every name with no re-registration. */
 export async function down(): Promise<number> {
-  return (await composeRun(['down', '--remove-orphans'])).returncode;
+  return await paths.edgeLock(
+    async () => (await composeRun(['down', '--remove-orphans'])).returncode,
+  );
 }
 
 /**
@@ -161,6 +176,7 @@ export async function ourContainer(): Promise<string> {
     '--format',
     '{{.ID}}',
   ]);
+  if (out.returncode !== 0) return '';
   for (const cid of out.stdout.split(/\s+/u).filter((entry) => entry !== '')) {
     const where = await dockerRun([
       'inspect',
@@ -168,9 +184,161 @@ export async function ourContainer(): Promise<string> {
       '--format',
       '{{index .Config.Labels "com.docker.compose.project.working_dir"}}',
     ]);
-    if (where.stdout.trim() === paths.edgeDir()) return cid;
+    if (where.returncode === 0 && where.stdout.trim() === paths.edgeDir()) return cid;
   }
   return '';
+}
+
+/** A checked observation preserves its reason without authorising a mutation on unknown. */
+interface IngressProbe<T> {
+  readonly value: T | null;
+  readonly reason: string;
+}
+
+/** The inspected IPv4 of the edge's own ingress network, or unknown. */
+async function ingressAddress(cid: string): Promise<IngressProbe<string>> {
+  const seen = await dockerRun(['inspect', cid, '--format', '{{json .NetworkSettings.Networks}}']);
+  if (seen.returncode !== 0) {
+    return { value: null, reason: `could not inspect ingress: ${why(seen)}` };
+  }
+  try {
+    const parsed: unknown = JSON.parse(seen.stdout);
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const ingress = (parsed as Record<string, unknown>)[`${PROJECT}_default`];
+      if (ingress !== null && typeof ingress === 'object' && !Array.isArray(ingress)) {
+        const address = (ingress as Record<string, unknown>).IPAddress;
+        if (typeof address === 'string' && isIPv4(address)) {
+          return { value: address, reason: '' };
+        }
+      }
+    }
+    return { value: null, reason: `inspect has no valid IPv4 for ${PROJECT}_default` };
+  } catch {
+    return { value: null, reason: 'ingress inspect was not valid JSON' };
+  }
+}
+
+/** Actual IPv4 interface addresses from the command proven in the edge image. */
+async function namespaceAddresses(cid: string): Promise<IngressProbe<Set<string>>> {
+  const seen = await dockerRun(['exec', cid, 'ip', 'addr', 'show'], {
+    timeoutMs: 5_000,
+  });
+  if (seen.returncode !== 0) {
+    return { value: null, reason: `could not read actual ingress addresses: ${why(seen)}` };
+  }
+  const lines = seen.stdout.split('\n').filter((line) => line.trim() !== '');
+  if (lines.length === 0) return { value: null, reason: 'actual address output was empty' };
+  const addresses = new Set<string>();
+  let hasInterface = false;
+  const malformed = { value: null, reason: 'actual address output was malformed' };
+  for (const line of lines) {
+    if (/^[1-9]\d*:\s+\S+:\s+<[^>]+>\s+mtu\s+\d+(?:\s.*)?$/u.test(line)) {
+      hasInterface = true;
+      continue;
+    }
+    if (!hasInterface || !/^\s/u.test(line)) return malformed;
+    const text = line.trim();
+    if (/^inet\s/u.test(text)) {
+      const match =
+        /^inet\s+([0-9.]+)\/(\d+)(?:\s+brd\s+([0-9.]+))?\s+scope\s+(?:host|global|link)(?:\s+\S+)*$/u.exec(
+          text,
+        );
+      if (
+        match === null ||
+        match[1] === undefined ||
+        match[2] === undefined ||
+        !isIPv4(match[1]) ||
+        Number(match[2]) > 32 ||
+        (match[3] !== undefined && !isIPv4(match[3]))
+      ) {
+        return malformed;
+      }
+      addresses.add(match[1]);
+      continue;
+    }
+    if (/^inet6\s/u.test(text)) {
+      const match =
+        /^inet6\s+([0-9a-f:.]+)\/(\d+)\s+scope\s+(?:host|global|link|site)(?:\s+\S+)*$/iu.exec(
+          text,
+        );
+      if (
+        match === null ||
+        match[1] === undefined ||
+        match[2] === undefined ||
+        !isIPv6(match[1]) ||
+        Number(match[2]) > 128
+      ) {
+        return malformed;
+      }
+      continue;
+    }
+    if (
+      /^link\/(?:loopback|ether)\s+(?:[0-9a-f]{2}:){5}[0-9a-f]{2}(?:\s+brd\s+(?:[0-9a-f]{2}:){5}[0-9a-f]{2})?$/iu.test(
+        text,
+      ) ||
+      /^valid_lft\s+(?:forever|\d+sec)\s+preferred_lft\s+(?:forever|\d+sec)$/u.test(text)
+    ) {
+      continue;
+    }
+    return malformed;
+  }
+  return addresses.size > 0
+    ? { value: addresses, reason: '' }
+    : { value: null, reason: 'actual address output contained no IPv4 addresses' };
+}
+
+/**
+ * Repair only a proven missing rootless-Podman ingress address after a network change.
+ *
+ * Podman can retain the edge's own network in inspect after losing its actual interface.
+ * The published rootless forwarder then accepts TCP but cannot reach Traefik. A restart
+ * rebuilds this container's namespace and forwarder without changing routes or certs.
+ *
+ * Call with edgeLock held. Docker, rootful Podman, unknown probes and workspace-only
+ * address loss leave the existing behavior alone. A known broken ingress briefly stops
+ * THIS home's shared edge exactly once; a failed or unverified repair raises its reason.
+ */
+export async function repairRootlessIngress(): Promise<void> {
+  const host = await hostEngine();
+  if (host === null || host.kind !== 'podman' || !host.rootless) return;
+  const cid = await ourContainer();
+  if (cid === '') return;
+  const address = await ingressAddress(cid);
+  if (address.value === null) return;
+  const actual = await namespaceAddresses(cid);
+  if (actual.value === null || actual.value.has(address.value)) return;
+
+  // Re-read both ownership and ingress after the first observation. A replaced edge,
+  // unreadable probe, or legitimate address change cannot authorise restarting stale ID.
+  if ((await ourContainer()) !== cid) return;
+  const currentAddress = await ingressAddress(cid);
+  if (currentAddress.value === null) return;
+  const currentActual = await namespaceAddresses(cid);
+  if (currentActual.value === null || currentActual.value.has(currentAddress.value)) return;
+  const restarted = await dockerRun(['restart', cid]);
+  if (restarted.returncode !== 0) {
+    throw new DockerError(`Podman edge ingress repair failed for ${cid}: ${why(restarted)}`);
+  }
+  if ((await ourContainer()) !== cid) {
+    throw new DockerError(`Podman edge ingress repair lost ownership of ${cid}`);
+  }
+  const repairedAddress = await ingressAddress(cid);
+  const repairedActual = await namespaceAddresses(cid);
+  if (
+    repairedAddress.value === null ||
+    repairedActual.value === null ||
+    !repairedActual.value.has(repairedAddress.value)
+  ) {
+    const reason =
+      repairedAddress.value === null
+        ? repairedAddress.reason
+        : repairedActual.value === null
+          ? repairedActual.reason
+          : `inspected address ${repairedAddress.value} is still absent from the container`;
+    throw new DockerError(
+      `Podman edge ingress repair did not restore ${PROJECT}_default on ${cid}: ${reason}`,
+    );
+  }
 }
 
 /**

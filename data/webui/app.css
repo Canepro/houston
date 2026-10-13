@@ -175,6 +175,9 @@ input:focus, select:focus, textarea:focus {
 .btn.danger:hover { color: var(--red); border-color: var(--red);
   background: rgba(217,45,32,.10); }
 .btn.danger:focus-visible { color: var(--red); }
+/* Except where the destroying IS the moment: the rollback's confirm replaces the database,
+   so its button is red at rest, beside the red banner saying what is lost. */
+#rollback-dialog .btn.danger { color: var(--red); border-color: var(--red); }
 .btn.small { padding: .3rem .6rem; font-size: .78rem; }
 /* `docker compose stop|start|restart|down` run synchronously for seconds with no
    progress to stream, so the button itself carries the feedback: a spinner and
@@ -269,6 +272,12 @@ input:focus, select:focus, textarea:focus {
 .signin-foot { color: var(--muted); font-size: .8rem; text-align: center;
   margin: 1rem 0 0; line-height: 1.6; }
 .signin-foot code { font-family: var(--mono); color: var(--ink); }
+/* "Sign in with Okta": the page's first action when Okta is on, solid like the form's. */
+.btn.signin-okta { display: flex; justify-content: center; padding: .6rem; font-weight: 600;
+  text-decoration: none; background: var(--accent-fill); border-color: var(--accent-fill);
+  color: var(--accent-ink); }
+.btn.signin-okta:hover { background: var(--accent-strong); border-color: var(--accent-strong);
+  color: var(--accent-ink); }
 .owner { font-size: .7rem; color: var(--muted);
   border: 1px solid var(--line2); border-radius: 999px; padding: .05rem .45rem; }
 .owner::before { content: "@"; color: var(--dim); }
@@ -388,7 +397,9 @@ input:focus, select:focus, textarea:focus {
 .wstate::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .wstate.running { color: var(--green); }
 .wstate.stopped, .wstate.paused, .wstate.created { color: var(--amber); }
-.wstate.down, .wstate.unknown { color: var(--dim); }
+/* Down and unknown keep the base `--muted`, as their pills do. They were `--dim`, 2.8:1
+   at 9.6px -- and "down" is the state Home lists under Needs you, the one to be read.
+   The hollow dot is what sets them apart, not a fainter word. */
 .wstate.down::before, .wstate.unknown::before { background: transparent; box-shadow: inset 0 0 0 1px currentColor; }
 /* `failed` joins the red group rather than getting a colour of its own: a wedged
    Helm release or a pod in ImagePullBackOff is the same signal as `dead` -- this is
@@ -466,7 +477,12 @@ input:focus, select:focus, textarea:focus {
    the edge and unreachable with nothing to say so. It scrolls in its own strip
    now -- the rule this file already applies to any wide content. */
 .tabs { display: flex; gap: 1.2rem; border-bottom: 1px solid var(--line); margin: 1rem 0;
-  overflow-x: auto; scrollbar-width: thin; }
+  overflow-x: auto; scrollbar-width: thin;
+  /* ...and says so, because a phone shows no scrollbar: a shadow at the right edge while
+     there is more, gone at the end. The cover scrolls with the tabs (`local`) and slides
+     over the shadow, which stays put, once the last one is in view. */
+  background: linear-gradient(to left, var(--bg) 45%, transparent) right / 2rem 100% no-repeat local,
+    radial-gradient(farthest-side at 100% 50%, var(--line2), transparent) right / .8rem 100% no-repeat scroll; }
 .tab { flex: 0 0 auto; }
 .tab { font-size: .7rem; font-weight: 600; letter-spacing: .09em;
   text-transform: uppercase; color: var(--dim); background: none; border: none;
@@ -775,6 +791,8 @@ form menu { display: flex; justify-content: flex-end; gap: .5rem; padding: 0; ma
 .p-name { font-family: var(--mono); font-size: .84rem; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
 .p-sess { font-size: .72rem; color: var(--dim); white-space: nowrap; }
+/* The Okta email an account is linked to: a fact, so no colour of its own. */
+.p-okta { color: var(--dim); margin-left: .35rem; }
 .prow .input { height: 1.9rem; padding: 0 .5rem; font-size: .76rem;
   border: 1px solid var(--line2); border-radius: var(--r-xs);
   background-color: var(--bg); color: var(--ink); }
@@ -885,6 +903,28 @@ button.jobrow:hover { background: var(--panel2); }
     gap: .25rem; }
 }
 
+/* Collapse navigation before the tablet header clips its account control.
+   Workspace panes keep their own narrower breakpoint. */
+@media (max-width: 900px) {
+  /* The four top links become a popover off one button. Four links, a theme toggle
+     and an account name wrapped onto a second row of chrome here, which on a 430px
+     screen is a quarter of the height spent before anything is said about a
+     workspace. Same four buttons, moved -- not a second copy. */
+  .chip.navtoggle { display: inline-flex; }
+  .toplinks { position: absolute; top: calc(100% + .3rem); right: .6rem; z-index: 40;
+    display: none; flex-direction: column; align-items: stretch; gap: 0;
+    min-width: 11rem; padding: .3rem; background: var(--panel);
+    border: 1px solid var(--line2); border-radius: var(--r-md);
+    box-shadow: var(--shadow-2); }
+  body.nav-open .toplinks { display: flex; }
+  .toplinks .toplink { padding: .5rem .6rem; text-align: left; border-radius: var(--r-sm); }
+  .toplinks .toplink:hover { background: var(--panel2); }
+  /* The current-page marker is a 2px rule under a horizontal nav; stacked it would
+     be a line across the middle of the item below it. */
+  .toplinks .toplink::after { content: none; }
+  .topbar { position: relative; }
+}
+
 /* Step two: one column. The rail is a capped, scrollable strip above the stage --
    it is how you choose a workspace, so it cannot simply go. */
 @media (max-width: 760px) {
@@ -921,24 +961,6 @@ button.jobrow:hover { background: var(--panel2); }
   .grafana-embed { height: 240px; }
 
   /* ---- D: designed for this width, rather than merely surviving it ---- */
-
-  /* The four top links become a popover off one button. Four links, a theme toggle
-     and an account name wrapped onto a second row of chrome here, which on a 430px
-     screen is a quarter of the height spent before anything is said about a
-     workspace. Same four buttons, moved -- not a second copy. */
-  .chip.navtoggle { display: inline-flex; }
-  .toplinks { position: absolute; top: calc(100% + .3rem); right: .6rem; z-index: 40;
-    display: none; flex-direction: column; align-items: stretch; gap: 0;
-    min-width: 11rem; padding: .3rem; background: var(--panel);
-    border: 1px solid var(--line2); border-radius: var(--r-md);
-    box-shadow: var(--shadow-2); }
-  body.nav-open .toplinks { display: flex; }
-  .toplinks .toplink { padding: .5rem .6rem; text-align: left; border-radius: var(--r-sm); }
-  .toplinks .toplink:hover { background: var(--panel2); }
-  /* The current-page marker is a 2px rule under a horizontal nav; stacked it would
-     be a line across the middle of the item below it. */
-  .toplinks .toplink::after { content: none; }
-  .topbar { position: relative; }
 
   /* The rail becomes a horizontal picker, one row high. It is how you choose a
      workspace so it cannot go, and a capped vertical strip spent 38vh of a phone on
@@ -987,6 +1009,12 @@ button.jobrow:hover { background: var(--panel2); }
   body.pane-open .actpane { display: flex; }
 }
 @media (max-width: 560px) {
+  /* The rail's controls WRAP on a phone. One scrolling row put the status and sort
+     filters wholly past a 390px screen, behind a scroller nothing said was one; two
+     rows show all four. */
+  .rail-controls { flex-wrap: wrap; overflow-x: visible; }
+  .rail-controls .input { flex: 1 1 9rem; width: auto; }
+  .rail-two { flex: 1 1 100%; }
   .bar, .toolbar-controls { flex-wrap: wrap; }
   .topbar-actions { flex-wrap: wrap; }
   .kv-grid { grid-template-columns: 1fr; }
@@ -1580,6 +1608,9 @@ code .tok { white-space: nowrap; }
 .pv .btn:disabled, .wzd .btn:disabled { box-shadow: none; }
 .pv .m, .wzd .m { font: 12px var(--mono); color: var(--muted); }
 .linkbtn { border: 0; background: none; color: var(--blue); cursor: pointer; padding: 0; font: inherit; font-weight: 600; }
+/* The panel header's link keeps the small size `.linkbtn` was given first: the rule above resets
+   `font`, which made "About this scenario" render full size and bold. */
+.panelcard-h .linkbtn { font-size: .74rem; font-weight: 400; }
 .pcard { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg);
   box-shadow: var(--shadow-1), var(--edge); }
 .pill.ok { color: var(--green); border-color: color-mix(in srgb, var(--green) 35%, transparent);
@@ -1834,6 +1865,86 @@ dialog.wzd > form { display: flex; flex-direction: column; min-height: 0; flex: 
   .wzd .wzd-f .wzd-hint { display: none; }
   .wzd-f .btn { flex: 1; justify-content: center; }
 }
+/* ---- Create a workspace: presets, their settings, the license (options.js) ---- */
+.span-all { grid-column: 1 / -1; }
+/* A fact about a thing, not a state: no dot, no colour. "CI build", "Licensed". */
+.pill.plain { color: var(--muted); border: 1px solid var(--line2); background: var(--panel2);
+  font: 600 11px var(--sans); padding: .1rem .5rem; letter-spacing: 0; }
+.pill.plain::before { content: none; }
+.wzd label.f > .pill.plain { margin-left: .35rem; vertical-align: 1px; }
+.d-sub .pill.plain { align-self: center; }
+.wzd .hint code { font: 11.5px var(--mono); color: var(--ink); display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
+.wzd .hint a { color: var(--blue); font-weight: 600; text-decoration: none; }
+.wzd .hint a:hover { text-decoration: underline; }
+.wzd .hint .looking { color: var(--dim); animation: pv-pulse 1.2s var(--ease) infinite; }
+.wzd form textarea { margin-top: .3rem; background: var(--panel2); border-radius: var(--r-sm);
+  font-size: 12.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.wzd form textarea:focus { background: var(--panel); }
+.wzd form label.linkbtn { display: inline; margin: 0; font-size: inherit; color: var(--blue); font-weight: 600; }
+.lic { border-top: 1px dashed var(--line); padding-top: .75rem; }
+.lic-h { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; min-height: 1.6rem; }
+.lic-h .f { font-size: 12.5px; font-weight: 600; color: var(--muted); }
+.lic-h .sp, .lic-sum .sp { flex: 1; }
+.lic .linkbtn { font-size: 13px; }
+.lic-b { margin-top: .35rem; }
+.lic-b > label.f { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.lic-sum { display: flex; align-items: center; gap: .4rem .8rem; flex-wrap: wrap; margin-top: .4rem;
+  padding: .5rem .75rem; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--panel2); font-size: 13px; }
+.lic-sum code { font: 600 12.5px var(--mono); }
+.plist { border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; background: var(--panel); }
+.wzd .plist label.prow { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: .2rem .7rem;
+  align-items: start; margin: 0; padding: .55rem .8rem; border-top: 1px solid var(--line);
+  cursor: pointer; font-size: 13.5px; font-weight: 400; color: var(--ink); }
+.plist .prow:first-child { border-top: 0; }
+.plist .prow:hover { background: var(--panel2); }
+.plist .prow:has(input:checked) { background: var(--accent-soft); }
+.wzd form .plist input[type=checkbox] { width: auto; margin: .2rem 0 0; }
+.prow-t { display: grid; grid-template-columns: 8.2rem minmax(0, 1fr); gap: .1rem .8rem; align-items: baseline; min-width: 0; }
+.prow-n { font: 600 13px var(--mono); }
+.prow-d { color: var(--muted); font-size: 13px; }
+.prow-why { font-size: 12px; color: var(--muted); align-self: center; white-space: nowrap; }
+.wzd .plist label.prow.off { cursor: not-allowed; }
+.plist .prow.off .prow-t { opacity: .5; }
+.plist .prow.off:hover { background: none; }
+.wzd #pnone { margin: .4rem 0 0; }
+.wzd .fsec-f > #pcombo, .wzd .fsec-f > #v9 { margin: .6rem 0 0; }
+.pcombo { font-size: 13px; color: var(--muted); }
+.pcombo b { font: 600 12.5px var(--mono); color: var(--ink); }
+.pcombo p { margin: .3rem 0 0; color: var(--ink); line-height: 1.55; }
+.banner .linkbtn { font-size: inherit; }
+.ppanels { display: grid; gap: .6rem; margin-top: .6rem; }
+.ppanels:empty { display: none; }
+.ppanel { border: 1px solid var(--line); border-radius: var(--r-md); background: var(--panel); }
+.ppanel-h { display: flex; align-items: baseline; gap: .6rem; padding: .5rem .8rem;
+  border-bottom: 1px solid var(--line); font: 600 13px var(--mono); }
+.prm { display: grid; grid-template-columns: 8rem minmax(0, 1fr); gap: .7rem .9rem; padding: .75rem .8rem .85rem; }
+.prm > .k { font-size: 12.5px; font-weight: 600; color: var(--muted); padding-top: .4rem; overflow-wrap: anywhere; }
+.prm > .k code { font: 600 12.5px var(--mono); color: var(--ink); }
+.prm > .v { min-width: 0; display: grid; gap: .4rem; justify-items: start; }
+.wzd form .prm input.num { width: 6.5rem; margin-top: 0; }
+.wzd form .prm input.txt { width: min(16rem, 100%); margin-top: 0; }
+.wzd .prm .seg { flex-wrap: wrap; max-width: 100%; }
+.wzd .prm .seg button { font-size: 13px; padding: .34rem .75rem; }
+.prm .seg button:disabled { cursor: not-allowed; }
+.prm .seg.off { opacity: .55; }
+.wzd .prm .hint { margin: 0; }
+.wzd form .prm label.ck { display: flex; gap: .45rem; align-items: flex-start; margin: 0;
+  font-size: 13.5px; font-weight: 400; color: var(--ink); }
+.wzd form .prm label.ck input { width: auto; margin: .2rem 0 0; }
+.prm label.ck .opt { color: var(--muted); }
+.pchips { display: inline-flex; align-items: baseline; gap: .3rem; color: var(--dim); }
+.pchip { font: 600 11.5px var(--mono); color: var(--ink); padding: .05rem .4rem;
+  border: 1px solid var(--line2); border-radius: var(--r-xs); background: var(--panel); }
+@media (max-width: 760px) {
+  .wzd .plist label.prow { grid-template-columns: auto minmax(0, 1fr); }
+  .prow-t { grid-template-columns: minmax(0, 1fr); }
+  .prow-why { grid-column: 2; white-space: normal; }
+  .prm { grid-template-columns: minmax(0, 1fr); gap: .3rem; }
+  .prm > .k { padding-top: .55rem; }
+  .prm > .k:first-child { padding-top: 0; }
+  .lic-h .sp { display: none; }
+}
 @media (prefers-reduced-motion: reduce) {
-  .pv.anim, dialog.wzd[open], .wzd-step.anim, .pill.busy::before, .checklist .s.run, .skel { animation: none; }
+  .pv.anim, dialog.wzd[open], .wzd-step.anim, .pill.busy::before, .checklist .s.run, .skel,
+  .wzd .hint .looking { animation: none; }
 }

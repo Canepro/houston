@@ -51,6 +51,19 @@ describe('the shipped skill file', () => {
     });
   });
 
+  it('never tells an agent to attach the admin password', () => {
+    // `info --json` carries `data.login.password` (the 1.x payload, which the skill itself
+    // reads to tell the person how to log in), generated for any workspace reachable beyond
+    // loopback. The skill called that whole record "the record to attach".
+    const shipped = fs.readFileSync(generator.TARGET, 'utf8');
+    const collect = shipped.slice(
+      shipped.indexOf('### Collect what a case needs'),
+      shipped.indexOf('### Tear it down'),
+    );
+    expect(collect).toContain('the record to attach');
+    expect(collect).toContain("jq 'del(.data.login.password)'");
+  });
+
   it('is what the two project copies hold, byte for byte', () => {
     const shipped = fs.readFileSync(generator.TARGET, 'utf8');
     for (const copy of generator.PROJECT_COPIES) {

@@ -43,7 +43,7 @@ function initTheme() {
 initTheme();
 // The initial VIEW is an assignment, not a setView() call, so nothing had
 // marked the top bar on first load — you arrived on Home with no link lit.
-ctx.setView(ctx.VIEW);
+ctx.setView(ctx.VIEW, { history: false });
 ctx.$("#btn-prune").addEventListener("click", ctx.doPrune);
 ctx.$("#filter").addEventListener("input", (e) => { ctx.view.filter = e.target.value.trim().toLowerCase(); ctx.render(); });
 ctx.$("#status-filter").addEventListener("change", (e) => { ctx.view.status = e.target.value; ctx.render(); });
@@ -51,35 +51,22 @@ ctx.$("#sort-by").addEventListener("change", (e) => { ctx.view.sort = e.target.v
 ctx.$("#scope-filter").addEventListener("change", (e) => {
   ctx.view.scope = e.target.value; localStorage.setItem("rc_scope", ctx.view.scope); ctx.render();
 });
-ctx.$("#preset-select").addEventListener("change", ctx.renderPresetParams);
 // The fork and the segmented control carry their own handlers, so there is nothing
 // to bind here: a <select>'s change event was the only reason those lines existed.
 ctx.$("#https-mode").addEventListener("change", ctx.syncHttpsFields);
 // The profile only means anything when seeding is on, so don't show it otherwise.
 function syncCreateSeed() {
-  ctx.$("#create-seed-profile-row").hidden = !ctx.$("#create-form").seed.checked;
+  const form = ctx.$("#create-form"), on = form.seed.checked;
+  ctx.$("#create-seed-profile-row").hidden = !on;
+  ctx.$("#create-seed-options").hidden = !on;
+  form.seed_profile.disabled = !on;
+  for (const input of ctx.$("#create-seed-options").querySelectorAll("input")) input.disabled = !on;
+  form.seed_history_days.disabled = !on || !form.seed_history.checked;
 }
 ctx.$("#create-form").seed.addEventListener("change", syncCreateSeed);
-// Resolve the version as it is typed: which MongoDB it pairs with, and whether this
-// engine can even run that MongoDB -- before committing to a multi-GB pull.
-let versionTimer = null;
-ctx.$("#create-form").version.addEventListener("input", (e) => {
-  const v = e.target.value.trim();
-  const out = ctx.$("#version-hint");
-  clearTimeout(versionTimer);
-  if (!v) { out.textContent = ""; out.className = "hint"; return; }
-  versionTimer = setTimeout(async () => {
-    try {
-      const r = await ctx.api(`/api/versions/${encodeURIComponent(v)}`);
-      out.textContent = `Mongo ${r.mongo_tag} (${r.mongo_flavor})` +
-        (r.warning ? ` — ${r.warning}` : `  ·  via ${r.source}`);
-      out.className = r.warning ? "hint bad" : "hint";
-    } catch (err) {
-      out.textContent = err.message;
-      out.className = "hint bad";
-    }
-  }, 400);
-});
+ctx.$("#create-form").seed_history.addEventListener("change", syncCreateSeed);
+ctx.$("#seed-form").history.addEventListener("change", ctx.syncSeedMode);
+// The version as it is typed -- its MongoDB, a CI build's base release -- is options.js's.
 ctx.$("#create-cancel").addEventListener("click", () => ctx.$("#create-dialog").close());
 ctx.$("#create-submit").addEventListener("click", (e) => { e.preventDefault(); ctx.submitCreate(); });
 ctx.$("#job-close").addEventListener("click", () => ctx.$("#job-dialog").close());
@@ -99,6 +86,14 @@ ctx.$("#upgrade-cancel").addEventListener("click", () => ctx.$("#upgrade-dialog"
 ctx.$("#upgrade-to").addEventListener("change", ctx.checkUpgradePlan);
 ctx.$("#upgrade-to").addEventListener("blur", ctx.checkUpgradePlan);
 ctx.$("#upgrade-go").addEventListener("click", (e) => { e.preventDefault(); ctx.submitUpgrade(); });
+ctx.$("#rollback-cancel").addEventListener("click", () => ctx.$("#rollback-dialog").close());
+ctx.$("#rollback-go").addEventListener("click", ctx.submitRollback);
+ctx.$("#owner-cancel").addEventListener("click", () => ctx.$("#owner-dialog").close());
+// On `submit`, so Enter in the name field hands it over too; the dialog stays open for a refusal.
+ctx.$("#owner-form").addEventListener("submit", (e) => { e.preventDefault(); ctx.submitHandOver(); });
+ctx.$("#restore-cancel").addEventListener("click", () => ctx.$("#restore-dialog").close());
+ctx.$("#restore-go").addEventListener("click", ctx.submitRestoreNew);
+ctx.$("#restore-into").addEventListener("click", ctx.restoreIntoInstead);
 ctx.$("#import-cancel").addEventListener("click", () => ctx.$("#import-dialog").close());
 ctx.$("#import-preview").addEventListener("click", (e) => { e.preventDefault(); ctx.previewImport(); });
 ctx.$("#import-apply").addEventListener("click", ctx.applyImport);
@@ -125,6 +120,5 @@ Object.defineProperties(ctx, {
   "applyTheme": { enumerable: true, get: () => applyTheme },
   "initTheme": { enumerable: true, get: () => initTheme },
   "syncCreateSeed": { enumerable: true, get: () => syncCreateSeed },
-  "versionTimer": { enumerable: true, get: () => versionTimer, set: value => { versionTimer = value; } },
 });
-export { THEME_KEY, applyTheme, initTheme, syncCreateSeed, versionTimer };
+export { THEME_KEY, applyTheme, initTheme, syncCreateSeed };

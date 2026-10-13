@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import * as config from '../lib/config';
+import { NotFoundError, ValidationError } from '../lib/errors';
 import { joinPath } from '../lib/home';
 
 const LABEL_RE = /[^a-z0-9_-]+/gu;
@@ -30,7 +31,7 @@ export function sanitizeLabel(label: string): string {
     .replace(LABEL_RE, '-')
     .replace(/^-+/u, '')
     .replace(/-+$/u, '');
-  if (!clean) throw new Error(`'${label}' is not a usable baseline name`);
+  if (!clean) throw new ValidationError(`'${label}' is not a usable baseline name`);
   return clean;
 }
 
@@ -52,7 +53,7 @@ export function save(label: string, payload: unknown): string {
 export function load(label: string): Record<string, unknown> {
   const target = baselinePath(label);
   if (!fs.existsSync(target)) {
-    throw new Error(
+    throw new NotFoundError(
       `no saved baseline '${sanitizeLabel(label)}' (looked in ${path.dirname(target)})`,
     );
   }

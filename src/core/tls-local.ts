@@ -184,7 +184,10 @@ export async function issueLeaf(
     const ext = path.join(tmp, 'ext.cnf');
     fs.writeFileSync(ext, leafExt(host, extraSans), 'utf8');
     await openssl(['genrsa', '-out', key, '2048']);
-    await openssl(['req', '-new', '-key', key, '-out', csr, '-subj', `/CN=${host}`]);
+    // The name is in the SANs, which is all a browser reads. A common name holds at most 64
+    // characters, and openssl refuses a longer one outright, so a long name goes without.
+    const subject = host.length <= 64 ? `/CN=${host}` : '/O=houston';
+    await openssl(['req', '-new', '-key', key, '-out', csr, '-subj', subject]);
     await openssl([
       'x509',
       '-req',

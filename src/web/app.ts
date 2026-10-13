@@ -29,6 +29,8 @@ export interface AppOptions {
   firstRun?: boolean;
   trustedProxies?: readonly TrustedNetwork[];
   jobs?: JobManager;
+  /** Told which jobs shutdown stops because they outlasted the drain. */
+  onShutdownStop?: (jobIds: readonly string[]) => void;
 }
 
 export interface ServePosture {
@@ -227,7 +229,18 @@ export function parseJsonBody(body: string): unknown {
 }
 
 export async function createApp(options: AppOptions = {}): Promise<FastifyInstance> {
-  const app = Fastify({ logger: false, exposeHeadRoutes: false });
+  const app = Fastify({
+    logger: false,
+    exposeHeadRoutes: false,
+    // avvio's plugin timeout (10 s) also bounds each preClose hook, and the job drain's own
+    // bounds are longer (`installJobs`): cut at 10 s, a running job was neither waited for nor
+    // stopped and `close()` rejected. `serve` bounds the whole shutdown itself.
+    pluginTimeout: 0,
+    // Once the drain is over, every connection is ended. An open stream, or a keep-alive
+    // connection whose request was still in flight, held `server.close()` -- the second for
+    // the 72 s keep-alive timeout, past serve's 38 s backstop.
+    forceCloseConnections: true,
+  });
   app.removeContentTypeParser('application/json');
   app.addContentTypeParser(
     'application/json',
@@ -262,7 +275,10 @@ export async function createApp(options: AppOptions = {}): Promise<FastifyInstan
   });
   await app.register(multipart, { throwFileSizeLimit: false });
   await app.register(sse);
-  installJobs(app, { ...(options.jobs === undefined ? {} : { manager: options.jobs }) });
+  installJobs(app, {
+    ...(options.jobs === undefined ? {} : { manager: options.jobs }),
+    ...(options.onShutdownStop === undefined ? {} : { onStopping: options.onShutdownStop }),
+  });
   app.decorate('houstonFirstRun', options.firstRun ?? false);
   const supplied = options.allowHosts ?? [];
   const allowed = new Set(

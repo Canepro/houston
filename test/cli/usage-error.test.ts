@@ -6,7 +6,8 @@
  * releases answered for the same argv at the same width was recorded the same way: their
  * real command-line app with every command replaced by a stub. For each argv the verdicts
  * must agree -- run, help for the same target, the version, or a usage error -- and a usage
- * error must be the same bytes on stderr with nothing on stdout.
+ * error must be the same bytes on stderr with nothing on stdout -- except, under --json,
+ * the one error envelope the owner decided it prints (`asRecorded`).
  *
  * The corpus is generated from COMMAND_SPECS so every command and option is reached: unknown
  * long and short options, near misses with their "Possible options", options missing their
@@ -116,7 +117,7 @@ async function typescript(
     columns: () => null,
   };
   // jsonout writes its envelope to process.stdout itself, so that is captured too: a usage
-  // error under --json must leave stdout EMPTY, as earlier releases do.
+  // error under --json leaves exactly one error envelope there (`asRecorded`).
   const write = jest.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
     stdout += String(chunk);
     return true;
@@ -169,6 +170,34 @@ function shape(outcome: Outcome) {
     return { code: outcome.code, stdout, stackTrace: lastLine(outcome.stderr) };
   }
   return { code: outcome.code, stdout, stderr: outcome.stderr };
+}
+
+/**
+ * A usage error under --json, held to its envelope and then compared as recorded.
+ *
+ * Earlier releases left stdout EMPTY there, and so did this build until the owner's
+ * 2026-10-09 decision: automation.md promises every reply is one envelope, and a script
+ * parsing the last line of `up --json` with a mistyped `--port` read nothing. So where the
+ * recording has an empty stdout, ours must be exactly one `houston.error.v1` envelope with
+ * `VALIDATION_FAILED` -- and the rest (stderr's panel, byte for byte, and exit 2) is still
+ * compared with the recording.
+ */
+function asRecorded(argv: readonly string[], expected: unknown, outcome: Outcome): Outcome {
+  const recordedStdout = (expected as { stdout?: unknown }).stdout;
+  if (!argv.includes('--json') || outcome.code !== 2 || recordedStdout !== '') return outcome;
+  const lines = outcome.stdout.split('\n').filter((line) => line !== '');
+  const envelope = JSON.parse(lines[0] ?? 'null') as {
+    schema?: string;
+    ok?: boolean;
+    error?: { code?: string };
+  } | null;
+  expect({
+    lines: lines.length,
+    schema: envelope?.schema,
+    ok: envelope?.ok,
+    code: envelope?.error?.code,
+  }).toEqual({ lines: 1, schema: 'houston.error.v1', ok: false, code: 'VALIDATION_FAILED' });
+  return { ...outcome, stdout: '' };
 }
 
 /** A V8 stack's first frame, which is how a stack trace on stderr is recognised. */
@@ -289,7 +318,9 @@ async function compare(
     // this stubbed harness.
     if ('ran' in expected && /^error: /u.test(typescriptOutcome.stderr)) continue;
     const ranIn = houstonHome ?? process.env.HOUSTON_HOME ?? '';
-    const ours = JSON.stringify(shape(typescriptOutcome)).split(ranIn).join('<home>');
+    const ours = JSON.stringify(shape(asRecorded(argv, expected, typescriptOutcome)))
+      .split(ranIn)
+      .join('<home>');
     if (ours !== JSON.stringify(expected)) {
       if (recording) {
         record(recorded, key, JSON.parse(ours));
@@ -455,7 +486,7 @@ describe("the CLI's verdict on an argv is the one earlier releases gave", () => 
 
   test('every int and float option reads its digits and spaces as earlier releases did', async () => {
     const numeric = numericOptions();
-    expect(numeric).toHaveLength(19); // --days joined the 18 (cluster keep)
+    expect(numeric).toHaveLength(21); // History days on up and seed join the existing numeric flags.
     const cases = numeric.flatMap(([spec, { long }]) =>
       NUMBER_TEXTS.map(
         (text) => [[...spec.path.split(' '), ...required(spec), long, text], null] as const,
@@ -472,7 +503,7 @@ describe("the CLI's verdict on an argv is the one earlier releases gave", () => 
     // 5`, and the 2**53 deviation reached even a value earlier releases throw away. The
     // reverse order, where the kept text is the bad one, is a usage error in both.
     const numeric = numericOptions();
-    expect(numeric).toHaveLength(19); // --days joined the 18 (cluster keep)
+    expect(numeric).toHaveLength(21); // History days on up and seed join the existing numeric flags.
     const cases = numeric.flatMap(([spec, option]) => {
       const base = [...spec.path.split(' '), ...required(spec)];
       const first = option.short ?? option.long;

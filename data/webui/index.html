@@ -31,6 +31,7 @@
         <button id="btn-jobs" class="toplink">Activity</button>
         <button id="btn-clusters" class="toplink">Clusters</button>
         <button id="btn-scenarios" class="toplink">Scenarios</button>
+        <button id="btn-backups" class="toplink">Backups</button>
         <button id="btn-refresh" class="toplink">Refresh</button>
       </div>
       <!-- Shown only where the four links would wrap onto a second row of chrome,
@@ -51,7 +52,7 @@
             <small id="me-sessions-n"></small></button>
           <button type="button" id="me-people" role="menuitem" hidden>People &amp; roles
             <small>admin</small></button>
-          <button type="button" id="me-passwd" role="menuitem">Change your password</button>
+          <button type="button" id="me-passwd" role="menuitem">Change your houston password</button>
           <hr>
           <button type="button" id="me-out" role="menuitem" class="danger">Sign out</button>
         </div>
@@ -143,26 +144,58 @@
           <div class="wzd-summary"><span id="create-summary"></span><span class="sp"></span>
             <button type="button" class="linkbtn" id="create-change">Change</button></div>
           <div class="fsec"><div class="fsec-l">Rocket.Chat</div><div class="fsec-f two">
-            <div><label class="f">Version <input name="version" placeholder="8.5.1" required autocomplete="off"></label>
+            <div><label class="f">Version <span class="pill plain" id="version-pill" hidden>CI build</span>
+                <input name="version" placeholder="8.5.1" required autocomplete="off"></label>
               <p id="version-hint" class="hint"></p></div>
             <div><label class="f">Name <span class="opt">(optional)</span>
                 <input name="name" placeholder="derived from the version" autocomplete="off"></label>
               <p class="hint">Used in commands, e.g. <code>houston logs &lt;name&gt;</code>.</p></div>
+            <!-- The license: pasted or read from a file, then masked. Never shown again. -->
+            <div class="lic span-all" id="lic">
+              <div class="lic-h">
+                <span class="f">Enterprise license <span class="opt">(optional)</span></span>
+                <span class="pill plain" id="lic-pill" hidden>Licensed</span>
+                <span class="sp"></span>
+                <button type="button" class="linkbtn" id="lic-add">Add a license</button>
+                <button type="button" class="linkbtn" id="lic-cancel" hidden>Cancel</button>
+              </div>
+              <p class="hint" id="lic-policy" hidden>Limited to admins on this server (<code>gui.create_policy admin</code>).</p>
+              <div class="lic-sum" id="lic-sum" hidden>
+                <span id="lic-sum-t"></span>
+                <span class="sp"></span>
+                <button type="button" class="linkbtn" id="lic-replace">Replace</button>
+                <button type="button" class="linkbtn" id="lic-remove">Remove</button>
+              </div>
+              <div class="lic-b" id="lic-b" hidden>
+                <label class="f" for="lic-text">Paste the license</label>
+                <textarea id="lic-text" rows="3" spellcheck="false" autocomplete="off" placeholder="Paste the license"></textarea>
+                <p class="hint">or <label class="linkbtn" for="lic-file">choose a file</label><input type="file" id="lic-file" hidden> · Kept in its own file on the server, never shown again.</p>
+              </div>
+            </div>
           </div></div>
-          <div class="fsec"><div class="fsec-l">Preset</div><div class="fsec-f">
-            <select name="preset" id="preset-select" aria-label="Preset"></select>
-            <p id="preset-desc" class="hint"></p>
-            <div id="preset-params"></div>
+          <div class="fsec"><div class="fsec-l">Presets</div><div class="fsec-f">
+            <!-- Several presets at once, each with its own settings (options.js). -->
+            <div class="plist" id="plist" role="group" aria-label="Presets"></div>
+            <p class="hint" id="pnone">Nothing ticked: a plain Rocket.Chat.</p>
+            <div class="callout pcombo" id="pcombo" hidden></div>
+            <p class="banner warn" id="v9" hidden></p>
+            <div class="ppanels" id="ppanels"></div>
             <div class="checks">
               <label><input type="checkbox" name="seed"> Sample data <span class="opt">(users, channels, messages)</span></label>
               <label><input type="checkbox" name="monitor"> Monitoring <span class="opt">(Prometheus + Grafana)</span></label>
               <label id="create-seed-profile-row" class="f" hidden>Sample data size
                 <select name="seed_profile">
-                  <option value="small">small — 5 users, 3 channels, 5 msgs/channel</option>
-                  <option value="standard">standard — 20 users, 8 channels, 20 msgs/channel</option>
-                  <option value="large">large — 100 users, 20 channels, 100 msgs/channel</option>
+                  <option value="small">small</option>
+                  <option value="standard">standard</option>
+                  <option value="large">large</option>
                 </select>
               </label>
+              <div id="create-seed-options" hidden>
+                <div class="checks seed-scenarios" data-prefix="seed_"></div>
+                <div class="checks"><label><input type="checkbox" name="seed_history"> Historical messages</label></div>
+                <label class="f">History in days <input type="number" name="seed_history_days" value="180" min="1" max="36500" disabled></label>
+                <p class="hint">Dates are synthetic. Existing messages keep their dates.</p>
+              </div>
             </div>
           </div></div>
           <!-- HTTPS stays visible and outside the collapsible: how a workspace is reached
@@ -199,6 +232,7 @@
             <!-- Filled from the server's own refusal registry, so this never claims a
                  field is unavailable that has since been built. -->
             <p id="adv-gone" class="adv-gone" hidden></p>
+            <p id="adv-policy" class="adv-gone" hidden>The Rocket.Chat image, registration token and bind host are limited to admins on this server (<code>gui.create_policy admin</code>).</p>
             <div class="grid3">
               <label class="f">Host port <input name="port" type="number" min="1024" max="65535" placeholder="auto"></label>
               <label class="f">Bind host <input name="bind" placeholder="127.0.0.1"></label>
@@ -233,6 +267,7 @@
       <footer class="wzd-f">
         <button type="button" class="btn" id="create-back" hidden>← Back</button>
         <span class="hint wzd-hint" id="create-foot-hint"></span>
+        <button type="button" class="btn" id="create-stop" hidden>Stop</button>
         <button type="button" class="btn" id="create-cancel">Cancel</button>
         <button type="button" class="btn solid" id="create-next">Next →</button>
         <button value="ok" class="btn solid" id="create-submit" hidden>Create workspace</button>
@@ -255,6 +290,12 @@
       <label id="seed-profile-row">Profile
         <select name="profile"><option>small</option><option>standard</option><option>large</option></select>
       </label>
+      <div id="seed-options">
+        <div class="checks seed-scenarios" data-prefix=""></div>
+        <div class="checks"><label><input type="checkbox" name="history"> Historical messages</label></div>
+        <label>History in days <input type="number" name="history_days" value="180" min="1" max="36500" disabled></label>
+        <p class="hint">Dates are synthetic. Existing messages keep their dates.</p>
+      </div>
       <label id="seed-scale-row" hidden>Scale spec
         <input name="scale" placeholder="users=50000,messages=800000@team-chat">
       </label>
@@ -286,6 +327,60 @@
       <menu>
         <button type="button" id="upgrade-cancel" class="btn">Cancel</button>
         <button type="button" class="btn primary" id="upgrade-go" disabled>Upgrade</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <!-- Roll back the last upgrade: POST /api/repros/{name}/upgrade/rollback. Offered only
+       when the panel's read says one can be made (`rollback_to`: the pre-upgrade backup is
+       recorded and still on disk). Red, because it replaces the database with the one that
+       backup holds: whatever happened in the workspace after the upgrade is gone. -->
+  <dialog id="rollback-dialog">
+    <form id="rollback-form" method="dialog">
+      <h2 id="rollback-title">Roll back</h2>
+      <p class="banner bad" id="rollback-what"></p>
+      <p class="hint">It runs as a job, like the upgrade did, and the panel is read again when
+        it ends.</p>
+      <menu>
+        <button type="button" id="rollback-cancel" class="btn">Cancel</button>
+        <button type="button" id="rollback-go" class="btn danger">Roll back</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <!-- Hand a workspace over: POST /api/repros/{name}/owner. Offered to whoever the server's
+       ownership gate lets (the owner, an admin, or anyone under `gui.destroy_policy
+       anyone`); its refusal is shown here rather than in a toast behind the dialog. An
+       admin picks from the people list, which only an admin may read; anyone else types
+       the name. -->
+  <dialog id="owner-dialog">
+    <form id="owner-form" method="dialog">
+      <h2 id="owner-title">Hand over</h2>
+      <p class="hint" id="owner-now"></p>
+      <label id="owner-pick-row">New owner <select id="owner-pick"></select></label>
+      <label id="owner-to-row">New owner's sign-in name
+        <input id="owner-to" autocomplete="off" spellcheck="false"></label>
+      <p id="owner-err" class="banner bad" hidden></p>
+      <menu>
+        <button type="button" id="owner-cancel" class="btn">Cancel</button>
+        <button type="submit" id="owner-go" class="btn primary">Hand over</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <!-- Restore a backup as a NEW workspace. The server is asked first whether another
+       workspace holds the side ports the backup's scenario publishes (one per box): if one
+       does the restore would be refused, so that is said here, with what works instead,
+       before anything starts. -->
+  <dialog id="restore-dialog">
+    <form id="restore-form" method="dialog">
+      <h2>Restore as a new workspace</h2>
+      <p class="hint" id="restore-what"></p>
+      <p class="banner warn" id="restore-held" hidden></p>
+      <menu>
+        <button type="button" id="restore-cancel" class="btn">Cancel</button>
+        <button type="button" id="restore-into" class="btn" hidden></button>
+        <button type="button" id="restore-go" class="btn primary">Restore</button>
       </menu>
     </form>
   </dialog>
@@ -480,6 +575,9 @@
         <input name="confirm" autocomplete="off" spellcheck="false"></label>
       <label class="toggle"><input type="checkbox" name="force">
         Delete without reading what it holds (<code>--force</code>)</label>
+      <p class="hint" id="cluster-delete-force-hint">Force skips only that look inside, so any
+        workspaces still in the cluster go with it. It never skips the other checks: houston
+        deletes only a cluster it built, in the AWS account it is signed in to.</p>
       <p class="hint">houston releases its load balancers before the delete, then lists
         anything AWS still holds for this cluster.</p>
       <menu>
@@ -525,7 +623,7 @@
        keeps this one -- and NOTHING in the browser called it. It was built and
        unreachable; this is the two fields it was missing. -->
   <dialog id="passwd-dialog">
-    <h2>Change your password</h2>
+    <h2>Change your houston password</h2>
     <p class="hint">Every other session you are signed in on ends. This one stays,
       so you are not signed out of the tab you changed it in.</p>
     <form id="passwd-form" method="dialog">
@@ -556,7 +654,7 @@
   <dialog id="job-dialog">
     <h2 id="job-title">Working…</h2>
     <pre id="job-log" class="log" aria-live="polite"></pre>
-    <menu><button id="job-close" class="btn">Close</button></menu>
+    <menu><button id="job-stop" class="btn" hidden>Stop job</button><button id="job-close" class="btn">Close</button></menu>
   </dialog>
 
   <script type="module" src="js/boot.js"></script>

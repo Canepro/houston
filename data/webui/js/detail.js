@@ -148,9 +148,11 @@ async function renderBackups(body, d) {
   body.append(ctx.el("p", { class: "hint" },
     "Backups hold this workspace's Rocket.Chat database plus the version and preset "
     + "that produced it. Sidecar data (uploads, IdP state) is not included."));
-  const bar = ctx.el("div", { class: "row2" },
-    ctx.el("button", { class: "btn primary", onclick: () => doBackup(d.name) }, "Back up now"));
-  body.append(bar);
+  if (ctx.canWrite()) {
+    const attrs = ctx.SERVER_ONLINE ? {} : { disabled: "" };
+    body.append(ctx.el("div", { class: "row2" },
+      ctx.el("button", { ...attrs, class: "btn primary", onclick: () => doBackup(d.name) }, "Back up now")));
+  }
   const list = ctx.el("div", {}, ctx.el("p", { class: "empty" }, "loading…"));
   body.append(list);
 
@@ -166,26 +168,72 @@ async function renderBackups(body, d) {
     list.append(ctx.el("p", { class: "empty" }, "No backups yet for this workspace."));
     return;
   }
-  const t = ctx.el("table", { class: "dtable" }, ctx.el("tr", {},
-    ctx.el("th", {}, "bundle"), ctx.el("th", {}, "from"), ctx.el("th", {}, "size"), ctx.el("th", {}, "")));
+  list.append(backupTable(rows, d.name));
+}
+
+// One table for both places bundles are listed: a workspace's Backups tab (`here` names
+// that workspace) and the Backups page (`here` is ""), which lists every bundle on the box.
+function backupTable(rows, here) {
+  const cols = here ? ["bundle", "from", "size", ""] : ["bundle", "workspace", "from", "size", ""];
+  const t = ctx.el("table", { class: "dtable" },
+    ctx.el("tr", {}, ...cols.map((c) => ctx.el("th", {}, c))));
   for (const b of rows) {
     if (b.error) {
       t.append(ctx.el("tr", {}, ctx.el("td", {}, shortName(b.path)),
-        ctx.el("td", { class: "v bad", colspan: "3" }, "unreadable: " + b.error)));
+        ctx.el("td", { class: "v bad", colspan: String(cols.length - 1) }, "unreadable: " + b.error)));
       continue;
     }
     const label = ctx.el("td", {}, shortName(b.path));
     if (b.label) label.append(ctx.el("span", { class: "pill small" }, b.label));
-    t.append(ctx.el("tr", {}, label,
-      ctx.el("td", { class: "v" }, `RC ${b.rc_version}`),
-      ctx.el("td", { class: "v" }, fmtBytes(b.bytes)),
-      ctx.el("td", {},
-        ctx.el("button", { class: "btn small primary", onclick: () => doRestore(b, d.name) }, "restore"),
-        ctx.el("button", { class: "btn small", onclick: () => doRestore(b, "", true) }, "as new"),
-        ctx.el("button", { class: "btn small danger", onclick: () => doDeleteBackup(b) }, "delete"))));
+    const row = ctx.el("tr", {}, label);
+    if (!here) {
+      // A fact, not a state: no colour.
+      const ws = ctx.el("td", { class: "v" }, b.repro || "?");
+      if (b.repro && !ctx.ALL_REPROS.some((r) => r.name === b.repro)) {
+        ws.append(ctx.el("span", { class: "pill small plain" }, "deleted"));
+      }
+      row.append(ws);
+    }
+    row.append(ctx.el("td", { class: "v" }, `RC ${b.rc_version}`),
+      ctx.el("td", { class: "v" }, fmtBytes(b.bytes)));
+    const act = ctx.el("td", {});
+    if (here && ctx.canWrite()) {
+      act.append(
+        ctx.el("button", { class: "btn small primary", onclick: () => doRestore(b, here) }, "restore"),
+        ctx.el("button", { class: "btn small", onclick: () => openRestoreNew(b) }, "as new"),
+        ctx.el("button", { class: "btn small danger", onclick: () => doDeleteBackup(b) }, "delete"));
+    } else if (!here && ctx.canWrite()) {
+      act.append(ctx.el("button", { class: "btn small primary", onclick: () => openRestoreNew(b) },
+        "restore as new"));
+    }
+    row.append(act);
+    t.append(row);
   }
-  t.append();
-  list.append(t);
+  return t;
+}
+
+// ---- every backup on this machine -----------------------------------------------
+// Bundles OUTLIVE the workspace they came from, and the Backups tab lives on that
+// workspace's panel: once it was deleted, nothing in the GUI listed its bundles, and
+// restoring one as new -- the one way back -- could not be reached. Read from the same
+// call `houston backups` makes.
+async function openBackups() {
+  ctx.setView("backups");
+  ctx.$(".panes").classList.add("no-detail");
+  ctx.$("#actpane").innerHTML = "";
+  const panel = ctx.$("#detail");
+  panel.innerHTML = "";
+  const body = ctx.el("div", { class: "home-body" }, ctx.el("p", { class: "empty" }, "loading…"));
+  panel.append(ctx.el("div", { class: "home-head" }, ctx.el("h1", {}, "Backups"),
+    ctx.el("p", {}, "Every backup on this machine, deleted workspaces' included. Restoring "
+      + "one as new rebuilds its workspace: the version, the scenario and the data.")), body);
+  let rows;
+  try { rows = (await ctx.api("/api/backups")).backups || []; }
+  catch (e) { body.innerHTML = ""; body.append(ctx.el("p", { class: "empty" }, String(e.message || e))); return; }
+  if (ctx.VIEW !== "backups") return;                   // a newer view won the race
+  body.innerHTML = "";
+  body.append(rows.length ? backupTable(rows, "")
+    : ctx.el("p", { class: "empty" }, "No backups on this machine yet. Back one up from its workspace's panel."));
 }
 
 async function doBackup(name) {
@@ -200,40 +248,89 @@ async function doBackup(name) {
   } catch (e) { ctx.toast(e.message); }
 }
 
-async function doRestore(b, into, asNew = false) {
+async function doRestore(b, into) {
   // Ask the SERVER whether this is allowed before offering the button's action:
   // a downgrade is refused, and an older-into-newer restore is a migration the
   // user has to opt into. Learning that after a job started is too late.
   let verdict = null;
-  if (!asNew && into) {
-    try {
-      verdict = (await ctx.api("/api/backups/compatibility", {
-        method: "POST", body: JSON.stringify({ bundle: b.path, name: into }),
-      })).compatibility;
-    } catch (e) { ctx.toast(String(e.message || e), "bad"); return; }
-    if (verdict && !verdict.allowed) { ctx.toast(verdict.blocked_reason, "bad"); return; }
-  }
-  const lines = [];
-  if (asNew) {
-    lines.push(`Create a NEW workspace from ${shortName(b.path)} (RC ${b.rc_version}).`);
-  } else {
-    lines.push(`Restore ${shortName(b.path)} into ${into}.`,
-      "", "Existing collections are DROPPED — this replaces the data, it does not merge.");
-  }
+  try {
+    verdict = (await ctx.api("/api/backups/compatibility", {
+      method: "POST", body: JSON.stringify({ bundle: b.path, name: into }),
+    })).compatibility;
+  } catch (e) { ctx.toast(String(e.message || e), "bad"); return; }
+  if (verdict && !verdict.allowed) { ctx.toast(verdict.blocked_reason, "bad"); return; }
+  const lines = [`Restore ${shortName(b.path)} into ${into}.`,
+    "", "Existing collections are DROPPED — this replaces the data, it does not merge."];
   for (const w of ((verdict && verdict.warnings) || [])) lines.push("", "⚠ " + w);
   if (!confirm(lines.join("\n"))) return;
   try {
     const { job_id } = await ctx.api("/api/restore", {
       method: "POST",
       body: JSON.stringify({
-        bundle: b.path, name: asNew ? "" : into, new: asNew,
+        bundle: b.path, name: into, new: false,
         allow_upgrade: !!(verdict && verdict.requires_flag === "allow_upgrade"),
       }),
     });
-    ctx.streamJob(job_id, asNew ? `Restoring ${shortName(b.path)} as a new workspace`
-                            : `Restoring ${shortName(b.path)} into ${into}`,
-      (res) => { ctx.toast(`restored ${(res && res.name) || ""}`, "ok"); refresh(); });
+    ctx.streamJob(job_id, `Restoring ${shortName(b.path)} into ${into}`,
+      // No refresh here: finishJob re-reads the list and the panel once this returns. A
+      // bare `refresh()` named nothing, threw, and skipped that re-read.
+      (res) => { ctx.toast(`restored ${(res && res.name) || ""}`, "ok"); });
   } catch (e) { ctx.toast(e.message); }
+}
+
+// ---- restore as new ------------------------------------------------------------
+// A dialog rather than a confirm, because it may have to say why it cannot be done. The
+// bundle's scenario is built again, and its side ports (Mailpit's 8025, phpLDAPadmin's
+// 8082, ...) are published once per machine: while another workspace holds them, usually
+// the very one the backup came from, the create is refused -- and that used to be learned
+// from a job that had already started.
+let RESTORE = null;
+async function openRestoreNew(b) {
+  let held = null;
+  try {
+    held = (await ctx.api("/api/backups/compatibility", {
+      method: "POST", body: JSON.stringify({ bundle: b.path }),
+    })).held || null;
+  } catch (e) { ctx.toast(String(e.message || e), "bad"); return; }
+  RESTORE = b;
+  ctx.$("#restore-what").textContent = `A new workspace from ${shortName(b.path)}: `
+    + `Rocket.Chat ${b.rc_version}${b.preset ? `, ${b.preset}` : ""}, with the data it holds.`;
+  const box = ctx.$("#restore-held"), into = ctx.$("#restore-into");
+  const source = b.repro && ctx.ALL_REPROS.some((r) => r.name === b.repro) ? b.repro : "";
+  box.hidden = !held;
+  into.hidden = !held || !source;
+  ctx.$("#restore-go").disabled = !!held;
+  if (held) {
+    // AMBER: it wants you to choose another way, and nothing has been destroyed.
+    const ways = [source && `restore into ${source}, which replaces its data`,
+      `delete ${held.name}, then restore this backup as new from Backups`].filter(Boolean);
+    box.textContent = `${held.name} already publishes port${held.ports.length > 1 ? "s" : ""} `
+      + `${held.ports.join(", ")}, which the ${b.preset} scenario needs too. One machine `
+      + `publishes each port once, so this restore would be refused. Instead: ${ways.join("; or ")}.`;
+    into.textContent = `Restore into ${source} instead`;
+  }
+  ctx.$("#restore-dialog").showModal();
+}
+
+async function submitRestoreNew() {
+  const b = RESTORE;
+  ctx.$("#restore-dialog").close();
+  try {
+    const { job_id } = await ctx.api("/api/restore", {
+      method: "POST", body: JSON.stringify({ bundle: b.path, name: "", new: true }),
+    });
+    // finishJob re-reads the list and the panel; the Backups page is drawn from the list
+    // too (which workspaces are deleted), so it is drawn again once the list is read.
+    ctx.streamJob(job_id, `Restoring ${shortName(b.path)} as a new workspace`, (res) => {
+      ctx.toast(`restored ${(res && res.name) || ""}`, "ok");
+      if (ctx.VIEW === "backups") ctx.loadRepros().then(openBackups);
+    });
+  } catch (e) { ctx.toast(e.message); }
+}
+
+function restoreIntoInstead() {
+  ctx.$("#restore-dialog").close();
+  doRestore(RESTORE, RESTORE.repro);
 }
 
 async function doDeleteBackup(b) {
@@ -243,6 +340,77 @@ async function doDeleteBackup(b) {
     ctx.toast("backup deleted", "ok");
     ctx.renderTab();
   } catch (e) { ctx.toast(String(e.message || e), "bad"); }
+}
+
+// ---- roll back the last upgrade ----------------------------------------------------
+// Offered only when the panel's read says one can be made (`rollback_to`) and this viewer
+// passes the ownership gate. Red, because the database is replaced with the backup's.
+let ROLLBACK_TARGET = "";
+function openRollback(d) {
+  ROLLBACK_TARGET = d.name;
+  ctx.$("#rollback-title").textContent = `Roll back ${d.name} to ${d.rollback_to}`;
+  ctx.$("#rollback-what").textContent = `${d.name} goes back to Rocket.Chat ${d.rollback_to}, `
+    + `and its database is replaced with the backup taken before it was upgraded to `
+    + `${d.rc_version}. Everything that happened in it since (messages, users, settings) is lost.`;
+  ctx.$("#rollback-dialog").showModal();
+}
+
+async function submitRollback() {
+  const name = ROLLBACK_TARGET;
+  ctx.$("#rollback-dialog").close();
+  try {
+    const { job_id } = await ctx.api(`/api/repros/${encodeURIComponent(name)}/upgrade/rollback`,
+      { method: "POST", body: JSON.stringify({}) });
+    // finishJob re-reads the list and the panel, so the version and this control follow.
+    ctx.streamJob(job_id, `Rolling ${name} back`, (res) => {
+      ctx.toast(`rolled back to ${(res && res.rolled_back_to) || "the earlier version"}`, "ok");
+    });
+  } catch (e) { ctx.toast(e.message); }
+}
+
+// ---- hand over ----------------------------------------------------------------------
+// POST /api/repros/{name}/owner. The new owner is who may delete it, roll it back and
+// hand it on. An admin picks from the people list, which only an admin may read; anyone
+// else types the name. A refusal is the server's own words, said in the dialog.
+let OWNER_TARGET = "";
+async function openHandOver(d) {
+  OWNER_TARGET = d.name;
+  let names = [];
+  if (ctx.canAdmin()) {
+    try { names = ((await ctx.api("/api/users")).users || []).map((u) => u.name); }
+    catch (_) { names = []; }                         // the name field still works
+  }
+  names = names.filter((n) => n !== d.owner);
+  ctx.$("#owner-title").textContent = `Hand over ${d.name}`;
+  ctx.$("#owner-now").textContent = (d.owner
+    ? `It belongs to ${d.owner === ctx.ME ? "you" : d.owner}. ` : "Nobody owns it yet. ")
+    + "The new owner is the one who may delete it, roll it back or hand it on; who made it, "
+    + "and who held it before, stay in its history.";
+  const pick = ctx.$("#owner-pick");
+  pick.innerHTML = "";
+  for (const n of names) pick.append(ctx.el("option", { value: n }, n));
+  ctx.$("#owner-pick-row").hidden = !names.length;
+  ctx.$("#owner-to-row").hidden = !!names.length;
+  ctx.$("#owner-to").value = "";
+  ctx.$("#owner-err").hidden = true;
+  ctx.$("#owner-dialog").showModal();
+}
+
+async function submitHandOver() {
+  const err = ctx.$("#owner-err");
+  const to = (ctx.$("#owner-pick-row").hidden ? ctx.$("#owner-to").value : ctx.$("#owner-pick").value).trim();
+  err.hidden = true;
+  if (!to) { err.textContent = "Name who it goes to."; err.hidden = false; return; }
+  try {
+    const r = await ctx.api(`/api/repros/${encodeURIComponent(OWNER_TARGET)}/owner`,
+      { method: "POST", body: JSON.stringify({ to }) });
+    ctx.$("#owner-dialog").close();
+    ctx.toast(`${r.name} now belongs to ${r.to}`, "ok");
+    await ctx.loadRepros();
+    if (ctx.SELECTED === r.name) await ctx.refreshDetail({ force: true });
+  } catch (e) {
+    err.textContent = String(e.message || e); err.hidden = false;
+  }
 }
 
 let UPGRADE_TARGET = "";
@@ -295,7 +463,6 @@ async function submitUpgrade() {
       ctx.toast(errs.length
         ? `upgraded to ${res.to_version} with ${errs.length} migration error(s)`
         : `upgraded to ${(res && res.to_version) || to}`, errs.length ? "warn" : "ok");
-      refresh();
     });
   } catch (e) { ctx.toast(e.message); }
 }
@@ -326,6 +493,15 @@ Object.defineProperties(ctx, {
   "fmtBytes": { enumerable: true, get: () => fmtBytes },
   "shortName": { enumerable: true, get: () => shortName },
   "renderBackups": { enumerable: true, get: () => renderBackups },
+  "backupTable": { enumerable: true, get: () => backupTable },
+  "openBackups": { enumerable: true, get: () => openBackups },
+  "openRestoreNew": { enumerable: true, get: () => openRestoreNew },
+  "submitRestoreNew": { enumerable: true, get: () => submitRestoreNew },
+  "restoreIntoInstead": { enumerable: true, get: () => restoreIntoInstead },
+  "openRollback": { enumerable: true, get: () => openRollback },
+  "submitRollback": { enumerable: true, get: () => submitRollback },
+  "openHandOver": { enumerable: true, get: () => openHandOver },
+  "submitHandOver": { enumerable: true, get: () => submitHandOver },
   "doBackup": { enumerable: true, get: () => doBackup },
   "doRestore": { enumerable: true, get: () => doRestore },
   "doDeleteBackup": { enumerable: true, get: () => doDeleteBackup },
@@ -336,4 +512,4 @@ Object.defineProperties(ctx, {
   "ENV_SETTING_PREFIX": { enumerable: true, get: () => ENV_SETTING_PREFIX },
   "doEnvChange": { enumerable: true, get: () => doEnvChange },
 });
-export { renderEnv, fmtBytes, shortName, renderBackups, doBackup, doRestore, doDeleteBackup, UPGRADE_TARGET, openUpgrade, checkUpgradePlan, submitUpgrade, ENV_SETTING_PREFIX, doEnvChange };
+export { renderEnv, fmtBytes, shortName, renderBackups, backupTable, openBackups, openRestoreNew, submitRestoreNew, restoreIntoInstead, openRollback, submitRollback, openHandOver, submitHandOver, doBackup, doRestore, doDeleteBackup, UPGRADE_TARGET, openUpgrade, checkUpgradePlan, submitUpgrade, ENV_SETTING_PREFIX, doEnvChange };

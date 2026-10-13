@@ -296,6 +296,13 @@ describe('a run that never reaches its finally', () => {
         if (id !== '') cleared.push(id);
       },
     }));
+    // The settings go back; the constraints are what this is about. (The restore answered
+    // false against a port nobody listens on, and the limiter's note was cleared anyway --
+    // the defect `restoreSetting` fixes.)
+    jest.doMock('../../src/core/rcapi', () => ({
+      ...jest.requireActual('../../src/core/rcapi'),
+      setSetting: async () => true,
+    }));
     const loadtest = require('../../src/core/loadtest') as typeof LoadtestNS;
     const deps = loadtest.depsWith(fakeDeps(calls));
     const run = loadtest.newLoadRun();
@@ -341,6 +348,80 @@ describe('a run that never reaches its finally', () => {
       events.some((event) => event.message.includes('could not restore resource limits')),
     ).toBe(true);
     expect(calls.constrainRestore).toEqual(['restore']);
+  });
+
+  it('puts the rate limiter back with a fresh login when the run outlived its own', async () => {
+    // The login, mixed and journey scenarios log the admin in hundreds of times; Rocket.Chat
+    // keeps 50 login tokens, so the run's own session was pruned before the restore. The
+    // refusal was dropped -- the limiter stayed OFF, the note was cleared, nothing said.
+    jest.resetModules();
+    const cleared: string[] = [];
+    const tried: string[] = [];
+    jest.doMock('../../src/core/journal', () => ({
+      ...jest.requireActual('../../src/core/journal'),
+      clear: (id: string) => {
+        if (id !== '') cleared.push(id);
+      },
+    }));
+    jest.doMock('../../src/core/rcapi', () => ({
+      ...jest.requireActual('../../src/core/rcapi'),
+      setSetting: async (_u: string, auth: { token: string }) => {
+        tried.push(auth.token);
+        return auth.token === 'fresh';
+      },
+    }));
+    jest.doMock('../../src/core/lifecycle/admin', () => ({
+      ...jest.requireActual('../../src/core/lifecycle/admin'),
+      login: async () => ({ token: 'fresh', userId: 'u' }),
+    }));
+    const loadtest = require('../../src/core/loadtest') as typeof LoadtestNS;
+    const run = loadtest.newLoadRun();
+    run.limiterWasOff = false;
+    run.limiterNote = 'lim';
+    const events: string[] = [];
+    await loadtest.putEverythingBack({
+      auth: { token: 'pruned', userId: 'u' },
+      deps: loadtest.DEFAULT_DEPS,
+      emit: ((event: { message: string }) => events.push(event.message)) as never,
+      m: { name: 'w', rootUrl: 'http://127.0.0.1:1', extra: {} } as never,
+      run,
+    });
+    expect(tried).toEqual(['pruned', 'fresh']);
+    expect(cleared).toContain('lim');
+    expect(events.join(' ')).not.toContain('could not restore the API rate limiter');
+  });
+
+  it('says so, and keeps the note, when the rate limiter cannot be put back', async () => {
+    jest.resetModules();
+    const cleared: string[] = [];
+    jest.doMock('../../src/core/journal', () => ({
+      ...jest.requireActual('../../src/core/journal'),
+      clear: (id: string) => {
+        if (id !== '') cleared.push(id);
+      },
+    }));
+    jest.doMock('../../src/core/rcapi', () => ({
+      ...jest.requireActual('../../src/core/rcapi'),
+      setSetting: async () => false,
+    }));
+    jest.doMock('../../src/core/lifecycle/admin', () => ({
+      ...jest.requireActual('../../src/core/lifecycle/admin'),
+      login: async () => ({ token: 'fresh', userId: 'u' }),
+    }));
+    const loadtest = require('../../src/core/loadtest') as typeof LoadtestNS;
+    const run = loadtest.newLoadRun();
+    run.limiterWasOff = false;
+    run.limiterNote = 'lim';
+    const events: string[] = [];
+    await loadtest.putEverythingBack({
+      auth: { token: 'pruned', userId: 'u' },
+      deps: loadtest.DEFAULT_DEPS,
+      emit: ((event: { message: string }) => events.push(event.message)) as never,
+      m: { name: 'w', rootUrl: 'http://127.0.0.1:1', extra: {} } as never,
+      run,
+    });
+    expect(cleared).not.toContain('lim');
+    expect(events.join(' ')).toContain('could not restore the API rate limiter');
   });
 
   it('reports the constraints repair by the PROBLEM LIST, not by array truthiness', async () => {
@@ -528,6 +609,51 @@ describe("a load test's verdict", () => {
       events,
     };
   }
+
+  it('says Rocket.Chat restarted under the cap, rather than presenting its restart as load', async () => {
+    // `--constrain rc=1cpu/1g` on a Rocket.Chat over that cap: the kernel restarted it, k6
+    // saw 100% errors, and the result read as a load result, exit 0, with no word about it.
+    jest.resetModules();
+    let count = 0;
+    jest.doMock('../../src/core/runner/queries', () => ({
+      ...jest.requireActual('../../src/core/runner/queries'),
+      rcRestartCount: async () => count,
+    }));
+    const loadtest = require('../../src/core/loadtest') as typeof LoadtestNS;
+    const deps = loadtest.depsWith({
+      mongoprof: {
+        ...(require('../../src/perf/mongoprof') as object),
+        collect: async () => null,
+      } as never,
+      timeline: {
+        ...jest.requireActual<object>('../../src/perf/timeline'),
+        parse: () => null,
+      } as never,
+      verdict: {
+        ...jest.requireActual<object>('../../src/perf/verdict'),
+        analyze: () => [],
+      } as never,
+    });
+    const run = loadtest.newLoadRun();
+    run.summary = { p95: 1, rps: 1, error_rate: 1 };
+    run.restartsBefore = 0;
+    count = 1;
+    const warned: string[] = [];
+    const out = await loadtest.loadtestVerdict({
+      deps,
+      emit: ((event: { level: string; message: string }) => {
+        if (event.level === 'warn') warned.push(event.message);
+      }) as never,
+      m: { name: 'x' } as never,
+      req: loadtest.loadtestReq({ name: 'x', diag: true }),
+      rules: [],
+      run,
+    });
+    expect(out.verdictLines[0]).toContain(
+      'Rocket.Chat restarted 1x during the run under --constrain',
+    );
+    expect(warned.join(' ')).toContain('restarted 1x');
+  });
 
   it('reports the same summary line and side fields as earlier releases', async () => {
     // What earlier releases reported for this run, recorded.
@@ -879,5 +1005,22 @@ describe('what a capacity search refuses before it runs', () => {
       );
     expect(refused?.constructor.name).toBe('ValidationError');
     expect(refused?.message).toContain('port-forward');
+  });
+});
+
+describe('a load test duration', () => {
+  const loadtestNS = jest.requireActual<typeof LoadtestNS>('../../src/core/loadtest');
+  it.each(['30s', '1m30s', '500ms', '1.5h', '2m', '1000', '90'])(
+    'takes %s, as k6 does',
+    (value) => {
+      expect(() => loadtestNS.refuseABadDuration(value, '--duration')).not.toThrow();
+    },
+  );
+
+  it.each(['forever', '30 s', '10x', '', 'm', '-5s'])('refuses %j as a usage error', (value) => {
+    // houston passed any word to k6, which started, failed, and the command exited 1.
+    expect(() => loadtestNS.refuseABadDuration(value, '--duration')).toThrow(
+      expect.objectContaining({ code: 'VALIDATION_FAILED', exitCode: 2 }),
+    );
   });
 });

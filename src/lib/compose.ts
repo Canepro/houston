@@ -59,6 +59,8 @@ export interface Spec {
   publicUrl: string;
   hostPort: number;
   regToken: string | null;
+  /** Whether the workspace holds an Enterprise licence in `LICENSE_ENV_FILE`. */
+  licensed: boolean;
   preset: Preset;
   /** --monitor: add Prometheus + Grafana. */
   monitoring: boolean;
@@ -96,6 +98,7 @@ export function spec(fields: Partial<Spec> & Pick<Spec, 'projectName' | 'preset'
     publicUrl: '',
     hostPort: 0,
     regToken: null,
+    licensed: false,
     monitoring: false,
     envOverrides: {},
     containerPort: RC_CONTAINER_PORT,
@@ -147,7 +150,7 @@ function rcEnvironment(s: Spec): Record<string, string> {
     DEPLOY_METHOD: 'docker',
     DEPLOY_PLATFORM: 'compose',
     MONGO_URL,
-    ALLOW_UNSAFE_QUERY_AND_FIELDS_API_PARAMS: 'true',
+    ALLOW_UNSAFE_QUERY_AND_FIELDS_API_PARAMS: 'false',
     // Every repro should be usable out of the box: skip the setup wizard (houston also
     // finalizes it over the API on `ready`) and auto-provision the first admin. Presets
     // only add their scenario-specific settings.
@@ -231,9 +234,15 @@ function mongoServiceOfficial(s: Spec): Record<string, Service> {
   const image = `docker.io/mongodb/mongodb-community-server:${s.mongoTag}-ubi8`;
   const sh = s.mongoShell; // mongosh for Mongo >= 5
   const uri = 'mongodb://mongodb:27017/?directConnection=true';
+  // RETRIED, a minute at most. mongod checks that `mongodb` resolves to itself, and one
+  // failed lookup made this single shot exit 1 and the whole `up` fail -- on rootless Podman
+  // its DNS misses for a moment whenever a neighbouring workspace's network comes or goes
+  // (measured: 3 in 38,302 lookups during a neighbour's up and down, `NodeNotFound` at
+  // `replSetInitiate`). `var`, which every shell this image may carry parses.
   const initiate =
-    "try { rs.status() } catch (e) { rs.initiate({ _id: 'rs0', " +
-    "members: [{ _id: 0, host: 'mongodb:27017' }] }) }";
+    'for (var i = 1; ; i++) { try { rs.status(); break } catch (e) { ' +
+    "try { rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'mongodb:27017' }] }); " +
+    'break } catch (f) { if (i >= 30) throw f; sleep(2000) } } }';
   return {
     'mongodb-fix-permission': {
       image,
@@ -259,11 +268,22 @@ function mongoServiceOfficial(s: Spec): Record<string, Service> {
         start_period: '20s',
       },
     },
+    // THE CONNECTION RETRIED TOO, not only the initiate: the shell connects before `--eval`
+    // runs, so a lookup of `mongodb` that missed at that moment ended this one shot -- a
+    // fresh `up` under Podman's DNS churn lost one boot in fifteen, and every `restart`
+    // re-runs it. The address and the script travel as environment so the shell quotes
+    // nothing; `$$` is compose's escape for a `$` the shell is to read.
     'mongo-init': {
       image,
       restart: 'no',
       depends_on: { mongodb: { condition: 'service_healthy' } },
-      entrypoint: [sh, uri, '--eval', initiate],
+      entrypoint: [
+        'sh',
+        '-c',
+        `for i in 1 2 3 4 5 6 7 8 9 10; do ${sh} "$$MONGO_URI" --eval "$$RS_INIT" && exit 0; ` +
+          'sleep 2; done; exit 1',
+      ],
+      environment: { MONGO_URI: uri, RS_INIT: initiate },
     },
   };
 }
@@ -390,12 +410,99 @@ function publishThroughEntryService(
   }
 }
 
+/**
+ * `[repository, tag]` for the chart, which wants them separately, and `imageRef`.
+ *
+ * `versions.resolve` returns the REPOSITORY only -- compose composes it as
+ * `${image}:${tag}` -- so a naive split on the last ':' of a tagless string returns the
+ * whole repository as the tag. That is truthy, so an `|| rcVersion` fallback does not save
+ * it, and the chart fed it to `semverCompare`, which failed the install with "invalid
+ * semantic version" rather than anything naming the image.
+ *
+ * A colon only introduces a tag when nothing after it looks like a path segment:
+ * `registry:5000/org/img` is a host with a port, not a tag.
+ */
+export function splitImage(rcImage: string, rcVersion: string): [string, string] {
+  const at = rcImage.lastIndexOf(':');
+  if (at >= 0) {
+    const tail = rcImage.slice(at + 1);
+    if (!tail.includes('/')) return [rcImage.slice(0, at), tail];
+  }
+  return [rcImage, rcVersion];
+}
+
+/**
+ * The image reference to run: the image as given when it already names a tag (a CI build,
+ * `--rc-image repo:tag`), else `<image>:<version>`. Appending unconditionally rendered
+ * `repo:tag:8.5.1`, which no registry can resolve.
+ */
+export function imageRef(rcImage: string, rcVersion: string): string {
+  const [repo, tag] = splitImage(rcImage, rcVersion);
+  return `${repo}:${tag}`;
+}
+
+/** What `forEngine` needs to know about the engine a document will run on. */
+export interface EngineShape {
+  readonly kind: string;
+  /** The engine's API socket on this host. */
+  readonly socket: string;
+  /** Where it keeps containers: `/var/lib/docker`, or Podman's graph root. */
+  readonly rootDir: string;
+}
+
+const DOCKER_SOCKET = '/var/run/docker.sock';
+const DOCKER_CONTAINERS = '/var/lib/docker/containers';
+
+/**
+ * The document as the engine it will run on needs it. Docker's is returned as it is, the
+ * same object, so its bytes cannot move. On Podman (measured rootless, 4.9.3 and 6.1.3):
+ * - logs to files (`k8s-file`), where its default is journald, which leaves nothing for the
+ *   log collector to tail; the collector already reads that CRI line format;
+ * - the Docker paths a service mounts become Podman's own: its socket for the API, and its
+ *   container store for the logs (`/var/lib/docker` does not exist; creating it is refused);
+ * - `label=disable`, so a host with SELinux lets the containers read the files houston
+ *   mounts (harmless where there is none).
+ */
+export function forEngine(doc: ComposeDoc, engine: EngineShape | null): ComposeDoc {
+  if (engine === null || engine.kind !== 'podman') return doc;
+  const out = clone(doc);
+  for (const service of Object.values(out.services)) {
+    service.logging = { driver: 'k8s-file' };
+    const options = Array.isArray(service.security_opt) ? service.security_opt.map(String) : [];
+    // Idempotent: a document re-applied (monitoring attached later) is not doubled.
+    if (!options.includes('label=disable')) service.security_opt = [...options, 'label=disable'];
+    if (!Array.isArray(service.volumes)) continue;
+    service.volumes = service.volumes.map((volume) => {
+      const text = String(volume);
+      if (text.startsWith(`${DOCKER_SOCKET}:`))
+        return `${engine.socket}${text.slice(DOCKER_SOCKET.length)}`;
+      if (text.startsWith(`${DOCKER_CONTAINERS}:`)) {
+        return `${engine.rootDir}/overlay-containers${text.slice(DOCKER_CONTAINERS.length)}`;
+      }
+      return volume;
+    });
+  }
+  return out;
+}
+
+/** The workspace file holding `ROCKETCHAT_LICENSE`, 0600, beside the compose document. */
+export const LICENSE_ENV_FILE = '.license.env';
+
+/** A FIPS build is published for amd64 only (measured on ghcr, 2026-10-08). */
+export function isAmd64Only(rcImage: string): boolean {
+  return /-fips(-gha-run-[0-9]+)?$/u.test(splitImage(rcImage, '')[1]);
+}
+
 /** The Rocket.Chat service, or N clones of it behind a load balancer. */
 function rocketchatServices(n: number, official: boolean, s: Spec): Record<string, Service> {
   const rocketchat: Service = {
-    image: `${s.rcImage}:${s.rcTag}`,
+    image: imageRef(s.rcImage, s.rcTag),
+    ...(isAmd64Only(s.rcImage) ? { platform: 'linux/amd64' } : {}),
     restart: 'always',
     environment: rcEnvironment(s),
+    // The licence from a file of its own, never in `environment`: this document is printed
+    // by `env`, read by the GUI and kept in the workspace for anyone to open.
+    ...(s.licensed ? { env_file: [LICENSE_ENV_FILE] } : {}),
     ports: [`${s.hostPort}:${s.containerPort}`],
     // The same probe the cloned instances have always had. Without it Docker reports no
     // health for this service, and `detail()` then falls back to the container STATE --

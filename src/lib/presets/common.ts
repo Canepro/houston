@@ -105,6 +105,13 @@ export function safeLoadAll(text: string): unknown[] {
  * that published a port nothing had reserved is the collision `PRESET_PORTS` exists to
  * prevent, and answering `undefined` would put that port in the compose file anyway.
  */
+/**
+ * Email 2FA, which ldap, saml, oidc and livechat turn OFF only because a repro has no mail
+ * server to send the code. A soft default: composed with `email`, which brings Mailpit and
+ * turns it on, email's value wins. See `composite.ts`.
+ */
+export const EMAIL_2FA = 'OVERWRITE_SETTING_Accounts_TwoFactorAuthentication_By_Email_Enabled';
+
 export function presetPorts(name: string): readonly number[] {
   const ports = config.PRESET_PORTS[name];
   if (ports === undefined)
@@ -155,6 +162,18 @@ export function intParam(params: Params, key: string, fallback: number): number 
       cause: error,
     });
   }
+}
+
+/** Read a `--set` param that must be one of `choices`; empty or absent -> the first. */
+export function choiceParam(params: Params, key: string, choices: readonly string[]): string {
+  const value = params[key];
+  const fallback = choices[0] ?? '';
+  if (value === null || value === undefined || String(value).trim() === '') return fallback;
+  const chosen = String(value).trim().toLowerCase();
+  if (!choices.includes(chosen)) {
+    throw new Error(`--set ${key}=${shownValue(value)} expects one of: ${choices.join(', ')}`);
+  }
+  return chosen;
 }
 
 /** Read a string `--set` param; empty or absent -> the default. */
@@ -278,6 +297,8 @@ export interface K8sManifestOptions {
   readonly ui?: Record<string, PortPair>;
   readonly readiness?: Bag;
   readonly workspace?: string;
+  /** A PersistentVolumeClaim mounted at `path`: what the Compose twin keeps in a named volume. */
+  readonly data?: { readonly path: string; readonly size: string };
 }
 
 /**
@@ -313,15 +334,45 @@ export function k8sManifests(options: K8sManifestOptions): string {
     });
   }
   const pod = containerSpec(name, image, ports, env, args, mounts, readiness);
+  const spec: Bag = {
+    replicas: 1,
+    selector: { matchLabels: { app } },
+    template: { metadata: { labels }, spec: pod },
+  };
+  // THE CONTAINER'S OWN FILESYSTEM DIES WITH THE POD, and `stop` scales to zero. MinIO kept
+  // its objects AND its bucket there, so the first stop/start emptied the workspace's
+  // uploads for good. A claim survives a scale to zero and a data-keeping `down`, and goes
+  // with the namespace on `down --volumes` -- the Compose named volume's lifetime. The
+  // cluster's default StorageClass, as MongoDB's claim uses. Recreate, because a
+  // ReadWriteOnce claim is one writer's: a rolling update would start the new pod beside
+  // the old one holding it.
+  if (options.data !== undefined) {
+    const claim = `${name}-data`;
+    docs.push({
+      apiVersion: 'v1',
+      kind: 'PersistentVolumeClaim',
+      metadata: { name: claim, labels },
+      spec: {
+        accessModes: ['ReadWriteOnce'],
+        resources: { requests: { storage: options.data.size } },
+      },
+    });
+    const container = (pod.containers as Bag[])[0] as Bag;
+    container.volumeMounts = [
+      ...((container.volumeMounts as Bag[] | undefined) ?? []),
+      { name: 'data', mountPath: options.data.path },
+    ];
+    pod.volumes = [
+      ...((pod.volumes as Bag[] | undefined) ?? []),
+      { name: 'data', persistentVolumeClaim: { claimName: claim } },
+    ];
+    spec.strategy = { type: 'Recreate' };
+  }
   docs.push({
     apiVersion: 'apps/v1',
     kind: 'Deployment',
     metadata: { name, labels },
-    spec: {
-      replicas: 1,
-      selector: { matchLabels: { app } },
-      template: { metadata: { labels }, spec: pod },
-    },
+    spec,
   });
   appendServices(docs, name, ports, ui, labels);
   return docs.map((doc) => safeDump(doc)).join('---\n');

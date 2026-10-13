@@ -95,6 +95,19 @@ export function hostOk(context: SecurityContext, header: string | null | undefin
   return context.anyHost || context.allowed.has(hostname(header));
 }
 
+/** The names every local port answers to, which an allow-list entry cannot vouch for. */
+const LOOPBACK_NAMES: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '::1']);
+
+/**
+ * Whether an Origin authority (`host[:port]`, scheme removed) is this server's own.
+ *
+ * Its own host is compared WITH its port: `localhost:9999` is another server on this
+ * machine -- a workspace's Rocket.Chat, say -- and a hostname-only comparison let it through
+ * whenever a browser sent no `Sec-Fetch-Site`. A host the operator named with `--allow-host`
+ * still matches by name, because a proxy that rewrote Host left no port to compare; the
+ * loopback names are not trusted that way. The scheme is not compared: one port answers one
+ * scheme, and behind a proxy this server cannot know which the browser used.
+ */
 export function originOk(
   context: SecurityContext,
   header: string | null | undefined,
@@ -102,7 +115,10 @@ export function originOk(
 ): boolean {
   const originHost = hostname(header);
   if (!originHost) return false;
-  return context.allowed.has(originHost) || originHost === hostname(hostHeader);
+  if (originHost === hostname(hostHeader)) {
+    return stripText(header ?? '').toLowerCase() === stripText(hostHeader ?? '').toLowerCase();
+  }
+  return context.allowed.has(originHost) && !LOOPBACK_NAMES.has(originHost);
 }
 
 export function crossSite(
@@ -253,6 +269,28 @@ export function signinOk(source: string): void {
   if (seen === undefined || seen.length === 0) return;
   if (seen.length <= 1) signinFailures.delete(source);
   else signinFailures.set(source, seen.slice(Math.floor(seen.length / 2)));
+}
+
+/** Okta sign-ins one address may start per `SIGNIN_WINDOW`, counted apart from passwords. */
+export const SSO_MAX_STARTS = 20;
+const ssoStarts = new Map<string, number[]>();
+
+/** Count an Okta sign-in start from `source`, or refuse it: false once over the limit. */
+export function ssoStartAllowed(source: string): boolean {
+  const now = monotonicSeconds();
+  if (ssoStarts.size > SIGNIN_MAX_KEYS) {
+    for (const [address, hits] of ssoStarts) {
+      if (now - (hits.at(-1) ?? 0) > SIGNIN_WINDOW) ssoStarts.delete(address);
+    }
+    // Still full: every key is live. Forgetting them costs at most more starts, which the
+    // pending cap in `core/sso` bounds anyway; growing without limit costs the server.
+    if (ssoStarts.size > SIGNIN_MAX_KEYS) ssoStarts.clear();
+  }
+  const hits = (ssoStarts.get(source) ?? []).filter((stamp) => now - stamp < SIGNIN_WINDOW);
+  if (hits.length >= SSO_MAX_STARTS) return false;
+  hits.push(now);
+  ssoStarts.set(source, hits);
+  return true;
 }
 
 export async function doSignin(

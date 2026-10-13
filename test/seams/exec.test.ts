@@ -2,26 +2,31 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { Readable, Writable } from 'node:stream';
 import * as v8 from 'node:v8';
 import * as vm from 'node:vm';
 
 import {
-  Interrupted,
-  POPEN_SIGINT_WAIT_MS,
-  ProcessTimeout,
-  SpawnFailure,
   capture,
   cleanup,
   interrupt,
+  Interrupted,
+  POPEN_SIGINT_WAIT_MS,
+  ProcessTimeout,
   resetInterruptForTest,
   sleep,
+  SpawnFailure,
   startDetached,
+  stoppable,
   stream,
-  unwindsOnInterrupt,
   type ProcessChunk,
+  unwindsOnInterrupt,
 } from '../../src/seams/exec';
 import { ReproError } from '../../src/lib/errors';
+import type * as AwsCliNS from '../../src/seams/aws-cli';
+import type * as DockerCliNS from '../../src/seams/docker-cli';
+import type * as KubectlNS from '../../src/seams/kubectl';
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const NODE = process.execPath;
@@ -648,5 +653,56 @@ describe('Ctrl-C, as an Interrupted reaches what Houston waits on', () => {
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(ended).toBe(1);
     expect(carriedOn).toBe(false);
+  });
+});
+
+describe('stopping one job, as the GUI Stop button does', () => {
+  it('kills the child a stopped job waits on, and leaves another job’s child alone', async () => {
+    // A stuck job is as often inside `kubectl` as inside a sleep; Stop has to reach both,
+    // and only the job it was pressed for.
+    const stop = new AbortController();
+    const keep = new AbortController();
+    const long = [process.execPath, '-e', 'setTimeout(() => {}, 30000)'] as const;
+    const started = performance.now();
+    const stopped = stoppable(stop.signal, async () => await capture(long));
+    const other = stoppable(keep.signal, async () => await capture(long, { timeoutMs: 1500 }));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    stop.abort();
+    await expect(stopped).rejects.toBeInstanceOf(Interrupted);
+    expect(performance.now() - started).toBeLessThan(5000);
+    // The other job's child was not stopped: it ran on until its own timeout.
+    await expect(other).rejects.toBeInstanceOf(ProcessTimeout);
+    // And a wait the stopped job starts afterwards does not start at all.
+    await expect(stoppable(stop.signal, async () => await sleep(10_000))).rejects.toBeInstanceOf(
+      Interrupted,
+    );
+  });
+
+  it('reaches the job through the kubectl, aws and docker seams, which used to swallow it', async () => {
+    // A stopped `ready` on a real k3s workspace took eleven seconds to end: the kubectl seam
+    // turned the Interrupted into "exit 127", the pod wait read that as a refused question,
+    // and retried three times before giving up. A Ctrl-C was swallowed the same way.
+    const { kubectl } = require('../../src/seams/kubectl') as typeof KubectlNS;
+    const { awsCli } = require('../../src/seams/aws-cli') as typeof AwsCliNS;
+    const docker = require('../../src/seams/docker-cli') as typeof DockerCliNS;
+    const long = [process.execPath, '-e', 'setTimeout(() => {}, 30000)'];
+    for (const [tool, call] of [
+      ['kubectl', async () => await kubectl.run(long)],
+      ['aws', async () => await awsCli.run(long)],
+      ['aws stream', async () => await awsCli.stream(long, { onLine: () => undefined })],
+      ['docker', async () => await docker.firstLine(long)],
+    ] as const) {
+      const stop = new AbortController();
+      const running = stoppable<unknown>(stop.signal, call);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      stop.abort();
+      await expect([
+        tool,
+        await running.then(
+          () => 'answered',
+          (e: unknown) => e,
+        ),
+      ]).toEqual([tool, expect.any(Interrupted)]);
+    }
   });
 });

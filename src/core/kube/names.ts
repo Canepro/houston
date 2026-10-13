@@ -39,6 +39,12 @@ export const NAMESPACE_PREFIX = 'houston-';
  */
 export const RELEASE = 'rocketchat';
 
+/** Every chart application writer, including microservices; backing services stay up. */
+export const APPLICATION_SELECTOR = `app.kubernetes.io/instance=${RELEASE},app.kubernetes.io/name!=nats`;
+
+/** The monolith alone: legacy stop journals never changed microservice counts. */
+export const MONOLITH_SELECTOR = 'app.kubernetes.io/name=rocketchat';
+
 /**
  * Ownership. Selection is ALWAYS by this label, never by a name prefix: anyone can
  * create a namespace called `houston-anything`, and a teardown that matched on the

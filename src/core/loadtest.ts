@@ -31,6 +31,7 @@ import * as resourcesModule from '../perf/resources';
 import * as sloModule from '../perf/slo';
 import * as timelineModule from '../perf/timeline';
 import * as verdictModule from '../perf/verdict';
+import { Interrupted } from '../seams/exec';
 import { login } from './lifecycle/admin';
 import { grafanaUrlOf } from './lifecycle/inspect';
 import { resolveName } from './lifecycle/naming';
@@ -39,6 +40,7 @@ import * as journal from './journal';
 import { generatePat, getSetting, loginUser, setSetting, type Auth } from './rcapi';
 import { readCompose, readMeta, adminPass, type Metadata } from './runner/record';
 import * as paths from './runner/paths';
+import { rcRestartCount } from './runner/queries';
 import { username as seedUsername } from '../seed/wording';
 import * as topology from './topology';
 
@@ -305,6 +307,8 @@ export interface LoadRun {
   summary: Bag | null;
   rcmReport: Record<string, Record<string, rcmetricsModule.SeriesSummary>>;
   sinceMs: number;
+  /** Rocket.Chat's restart count when a constrained run began; -1 when none was read. */
+  restartsBefore: number;
 }
 
 export function newLoadRun(): LoadRun {
@@ -323,7 +327,36 @@ export function newLoadRun(): LoadRun {
     summary: null,
     rcmReport: {},
     sinceMs: 0,
+    restartsBefore: -1,
   };
+}
+
+/**
+ * Put a setting back, and say whether it went back.
+ *
+ * `setSetting` answers false rather than throwing, and that answer was dropped: the warning
+ * in the `catch` could never fire, and the journal note was cleared either way. The login,
+ * mixed and journey scenarios log the admin in hundreds of times, and Rocket.Chat keeps 50
+ * login tokens (MAX_RESUME_LOGIN_TOKENS) -- so the session this run started with was
+ * pruned before it ended, the restore was refused, and the rate limiter stayed OFF with
+ * nothing said. Every later run then read it as "was off" and left it. A refused restore
+ * logs in afresh and tries once more.
+ */
+async function restoreSetting(
+  m: Metadata,
+  auth: Auth,
+  settingId: string,
+  value: unknown,
+): Promise<boolean> {
+  if (await setSetting(m.rootUrl, auth, adminPass(m), settingId, value)) return true;
+  let fresh: Auth;
+  try {
+    fresh = await login(m);
+  } catch (error) {
+    if (error instanceof Interrupted) throw error;
+    return false;
+  }
+  return await setSetting(m.rootUrl, fresh, adminPass(m), settingId, value);
 }
 
 /** Undo every side effect this run armed, whichever way it ended. */
@@ -357,10 +390,9 @@ export async function putEverythingBack({
     run.resources = await run.mon.stop();
   }
   if (!run.limiterWasOff) {
-    try {
-      await setSetting(m.rootUrl, auth, adminPass(m), config.RC_RATE_LIMITER_SETTING, true);
+    if (await restoreSetting(m, auth, config.RC_RATE_LIMITER_SETTING, true)) {
       journal.clear(run.limiterNote);
-    } catch {
+    } else {
       restoreWarning(
         'could not restore the API rate limiter setting',
         '  ⚠ could not restore the API rate limiter setting',
@@ -368,10 +400,9 @@ export async function putEverythingBack({
     }
   }
   if (run.metricsChanged) {
-    try {
-      await setSetting(m.rootUrl, auth, adminPass(m), deps.monitoring.RC_METRICS_SETTING, false);
+    if (await restoreSetting(m, auth, deps.monitoring.RC_METRICS_SETTING, false)) {
       journal.clear(run.metricsNote);
-    } catch {
+    } else {
       restoreWarning(
         'could not restore the Prometheus metrics setting',
         '  ⚠ could not restore the Prometheus metrics setting',
@@ -451,6 +482,7 @@ export async function armAndRun({
     run.constrainNote = journal.record(journal.CONSTRAINTS_APPLIED, m.name, {
       applied: run.appliedConstraints.map((a) => ({ ...a })),
     });
+    run.restartsBefore = await rcRestartCount(m.name);
     if (cli === null) {
       info(emit, `constrained: ${deps.constrain.human(perService)} (restored after)`, {
         phase: 'k6',
@@ -474,12 +506,17 @@ export async function armAndRun({
       config.RC_RATE_LIMITER_SETTING,
       false,
     );
-    if (req.setupWarnings && !changed) {
+    if (!changed) {
+      // NEVER TURNED OFF, so there is nothing to put back: restoring it anyway now says
+      // "could not restore" about a setting this run never changed.
+      run.limiterWasOff = true;
       journal.clear(run.limiterNote);
       run.limiterNote = '';
-      const words = 'could not disable the API rate limiter — results may be throttled (429s)';
-      if (cli === null) warn(emit, words, { phase: 'k6' });
-      else cli.warn(`  ⚠ ${words}`);
+      if (req.setupWarnings) {
+        const words = 'could not disable the API rate limiter — results may be throttled (429s)';
+        if (cli === null) warn(emit, words, { phase: 'k6' });
+        else cli.warn(`  ⚠ ${words}`);
+      }
     }
   }
   // The banner: after the caps and the limiter, before the diagnostics are armed.
@@ -609,6 +646,20 @@ export async function loadtestVerdict({
       })
     : [];
   const passed = sloResults.length === 0 || sloResults.every((r) => r.ok);
+  // A CAP THAT KILLED IT, said. Under a memory cap the kernel can restart Rocket.Chat while
+  // the load runs, and the run then measures the restart -- it reported 100% errors as a
+  // load result with no word about why.
+  if (run.restartsBefore >= 0) {
+    const restarts = (await rcRestartCount(m.name)) - run.restartsBefore;
+    if (restarts > 0) {
+      const words =
+        `Rocket.Chat restarted ${String(restarts)}x during the run under --constrain: ` +
+        'these numbers are its restart, not its load. Give it more memory.';
+      verdictLines.unshift(words);
+      if (cli === null) warn(emit, words, { phase: 'k6' });
+      else cli.warn(`  ⚠ ${words}`);
+    }
+  }
 
   const grafana = req.live ? grafanaUrlOf(m) : null;
   const summary = run.summary ?? {};
@@ -641,6 +692,16 @@ export interface LoadtestPrepared {
   users: Bag[];
 }
 
+/**
+ * A duration k6 takes: a Go duration (`30s`, `1m30s`, `500ms`, `1.5h`) or a bare number of
+ * milliseconds. Checked here because houston passed any word to k6, which started and then
+ * failed: `loadtest --duration forever` ran, exited 1 and said why only in k6's own output.
+ */
+export function refuseABadDuration(value: string, flag: string): void {
+  if (/^(\d+(\.\d+)?|(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))+)$/u.test(value.trim())) return;
+  throw new ValidationError(`bad ${flag}: '${value}' is not a duration (e.g. 30s, 2m, 1m30s)`);
+}
+
 export async function loadtestPreflight(
   deps: LoadtestDeps,
   req: LoadtestReq,
@@ -652,6 +713,7 @@ export async function loadtestPreflight(
   if (req.vus < 1) {
     throw new ValidationError('vus must be >= 1');
   }
+  refuseABadDuration(req.duration, 'duration');
 
   // Refused here rather than at the top, so a bad --scenario is still named before a bad
   // --name: the request's own shape is cheaper to check and is what the caller most
@@ -939,6 +1001,7 @@ export async function capacityPreflight(
   if (req.start < 1 || req.maxVus < req.start) {
     throw new ValidationError('start must be >= 1 and max >= start');
   }
+  refuseABadDuration(req.stepDuration, 'step duration');
 
   await requireComposeForPerf(req.name, 'capacity'); // see runLoadtest for the why
   const m = await readMeta(await resolveName(req.name));
@@ -996,10 +1059,9 @@ export async function putTheWorkspaceBack({
     else cli.warn(words);
   };
   if (!search.limiterWasOff) {
-    try {
-      await setSetting(m.rootUrl, auth, adminPass(m), config.RC_RATE_LIMITER_SETTING, true);
+    if (await restoreSetting(m, auth, config.RC_RATE_LIMITER_SETTING, true)) {
       journal.clear(search.limiterNote);
-    } catch {
+    } else {
       restoreWarning(
         'could not restore the API rate limiter setting',
         '  ⚠ could not restore the API rate limiter setting',
@@ -1007,10 +1069,9 @@ export async function putTheWorkspaceBack({
     }
   }
   if (search.metricsChanged) {
-    try {
-      await setSetting(m.rootUrl, auth, adminPass(m), deps.monitoring.RC_METRICS_SETTING, false);
+    if (await restoreSetting(m, auth, deps.monitoring.RC_METRICS_SETTING, false)) {
       journal.clear(search.metricsNote);
-    } catch {
+    } else {
       restoreWarning(
         'could not restore the Prometheus metrics setting',
         '  ⚠ could not restore the Prometheus metrics setting',
@@ -1070,7 +1131,12 @@ export async function searchForCapacity({
     (await getSetting(m.rootUrl, auth, adminPass(m), config.RC_RATE_LIMITER_SETTING)) === false;
   if (!search.limiterWasOff) {
     search.limiterNote = journal.record(journal.RATE_LIMITER_OFF, m.name);
-    await setSetting(m.rootUrl, auth, adminPass(m), config.RC_RATE_LIMITER_SETTING, false);
+    if (!(await setSetting(m.rootUrl, auth, adminPass(m), config.RC_RATE_LIMITER_SETTING, false))) {
+      // Never turned off, so nothing to put back (as in `armAndRun`).
+      search.limiterWasOff = true;
+      journal.clear(search.limiterNote);
+      search.limiterNote = '';
+    }
   }
   if (
     (await getSetting(m.rootUrl, auth, adminPass(m), deps.monitoring.RC_METRICS_SETTING)) !== true

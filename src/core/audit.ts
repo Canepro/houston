@@ -36,6 +36,7 @@ import * as path from 'node:path';
 
 import { FIELD_LIMIT, field, installAuditRecorder } from '../lib/audit';
 import * as config from '../lib/config';
+import { ValidationError } from '../lib/errors';
 import { currentContext } from '../lib/context';
 import { joinPath } from '../lib/home';
 
@@ -43,7 +44,7 @@ import { joinPath } from '../lib/home';
 export const AUDIT_FILE = 'audit.log';
 
 /**
- * How the identity on a line was established. Six values rather than a
+ * How the identity on a line was established. Seven values rather than a
  * verified/asserted boolean, because the code already distinguishes them and the
  * difference is what makes a line evidence or not:
  *
@@ -56,6 +57,7 @@ export const AUDIT_FILE = 'audit.log';
  *             belongs to nobody -- it may not even be an account. It is its own origin
  *             precisely so nothing reads these lines as "alice did something": alice is
  *             the name that was GUESSED AT, not the actor.
+ *   sso       an Okta sign-in that linked or created the account it names.
  *
  * `setOrigin` silently ignores anything not in this list, so a value missing from it does
  * not raise -- it writes "-" and looks like a legacy line. `setup` was omitted at first
@@ -68,6 +70,7 @@ export const ORIGINS: readonly string[] = Object.freeze([
   'setup',
   'system',
   'attempt',
+  'sso',
 ]);
 
 /** Rotate at 32 MB, keeping five. Checked cheaply rather than on every write. */
@@ -190,6 +193,10 @@ export interface AuditRecord {
   outcome: string;
 }
 
+// Acceptance is not completion. Background jobs record both in the existing
+// sixth field, while old rows and unknown values retain their earlier meaning.
+const KNOWN_OUTCOMES = new Set(['ok', 'denied', 'accepted', 'done', 'error', 'stopped']);
+
 /**
  * One stored line -> a record, or null if it is not one.
  *
@@ -211,7 +218,7 @@ export function parseLine(line: string): AuditRecord | null {
     kind: parts[2] as string,
     label: parts[3] as string,
     origin: originCell === '-' ? '' : originCell,
-    outcome: outcomeCell === 'ok' || outcomeCell === 'denied' ? outcomeCell : 'ok',
+    outcome: KNOWN_OUTCOMES.has(outcomeCell) ? outcomeCell : 'ok',
   };
 }
 
@@ -260,6 +267,13 @@ export function read(options: ReadOptions = {}): AuditPage {
     since = '',
     maxBytes = 8 * 1024 * 1024,
   } = options;
+  // A DATE, or refused. `since` is compared as text against each line's ISO timestamp, so
+  // `--since notadate` silently filtered out every line and answered "nothing matched".
+  if (since !== '' && Number.isNaN(Date.parse(since))) {
+    throw new ValidationError(
+      `--since wants an ISO date such as 2026-10-09 or 2026-10-09T08:00:00, not '${since}'`,
+    );
+  }
   const target = auditPath();
   const out: AuditRecord[] = [];
   let scanned = 0;

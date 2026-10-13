@@ -10,7 +10,12 @@ import { createRepro } from '../../core/lifecycle/create-docker';
 import { teardown } from '../../core/lifecycle/destroy';
 import { describe, listRepros } from '../../core/lifecycle/inspect';
 import { deriveFor, resolveName } from '../../core/lifecycle/naming';
-import { maySetPrivilegedFields, setOwner } from '../../core/lifecycle/ownership';
+import {
+  claimTypedName,
+  maySetPrivilegedFields,
+  ownerGate,
+  setOwner,
+} from '../../core/lifecycle/ownership';
 import { detail } from '../../core/lifecycle/payload';
 import {
   checkStateRequest,
@@ -28,10 +33,12 @@ import { dockerStats } from '../../core/runner/queries';
 import { adminPass, readMeta } from '../../core/runner/record';
 import * as topology from '../../core/topology';
 import * as config from '../../lib/config';
-import { NotReadyError, ValidationError, errorText } from '../../lib/errors';
+import { ConflictError, NotReadyError, ValidationError, errorText } from '../../lib/errors';
 import { joinPath } from '../../lib/home';
 import { quotedText, toTextAny, stripText, isTruthy } from '../../lib/format';
 import { userPath } from '../../lib/presets';
+import { isBuildTag } from '../../lib/versions';
+import { compositeName, namesOf, qualifiedParams } from '../../lib/presets/composite';
 import {
   actor,
   bag,
@@ -44,6 +51,7 @@ import {
   strings,
   submit,
 } from '../route-deps';
+import { ACTIVE_STATUSES } from '../jobs';
 import type * as EnvvarsNS from '../../core/envvars';
 import type * as KubeContextNS from '../../core/kube/context';
 import type * as KubeStatusNS from '../../core/kube/status';
@@ -98,6 +106,8 @@ function createRequest(request: FastifyRequest) {
     seed: 'seed',
     seed_here: 'seedHere',
     seed_profile: 'seedProfile',
+    seed_scenarios: 'seedScenarios',
+    seed_history_days: 'seedHistoryDays',
     pin: 'pin',
     wait: 'wait',
     offline: 'offline',
@@ -120,9 +130,29 @@ function createRequest(request: FastifyRequest) {
     ingress_class: 'ingressClass',
     env: 'env',
     bind_public: 'bindPublic',
+    // The license TEXT (the CLI's --license reads a file into the same field).
+    license: 'license',
   };
   for (const [wire, internal] of Object.entries(names)) {
     if (Object.hasOwn(body, wire)) fields[internal] = body[wire];
+  }
+  // Several presets, as `presets: ["ldap", "email"]`, spelled into the one canonical
+  // `preset` the create reads. Params may come per preset ({"ldap": {"users": 5}}) or as the
+  // `--set` keys that say them ({"ldap.users": 5}). An older server ignores `presets`.
+  if (Object.hasOwn(body, 'presets')) {
+    if (Object.hasOwn(body, 'preset')) {
+      throw new ValidationError('give `preset` or `presets`, not both');
+    }
+    const list = body.presets;
+    if (!Array.isArray(list) || !list.every((name) => typeof name === 'string')) {
+      throw new ValidationError('`presets` must be a list of preset names, e.g. ["ldap", "email"]');
+    }
+    fields.preset = compositeName(list as string[]);
+    const params = bag(body.params);
+    const perPreset = Object.entries(params).every(
+      ([key, value]) => list.includes(key) && typeof value === 'object' && value !== null,
+    );
+    if (perPreset && Object.keys(params).length > 0) fields.params = qualifiedParams(params);
   }
   return createReq(fields as unknown as Parameters<typeof createReq>[0]);
 }
@@ -158,16 +188,46 @@ async function statsOf(name: string): Promise<{ cpu: number; mem_mb: number }> {
   return { cpu: oneDecimal(cpu), mem_mb: oneDecimal(memory / 1e6) };
 }
 
+/**
+ * A delete asked for while another job is working on the same workspace waited a silent
+ * minute for that job's lock and then failed with "another houston operation is still
+ * working on it". It is refused at once instead, naming the job and how to end it.
+ */
+function refuseWhileBusy(app: FastifyInstance, name: string): void {
+  const busy = app.jobs
+    .listJobs()
+    // A cluster job's label is a cluster, region or context, not a workspace.
+    .find(
+      (job) =>
+        job.label === name && ACTIVE_STATUSES.has(job.status) && !job.kind.startsWith('cluster-'),
+    );
+  if (busy === undefined) return;
+  // UTC, as every other time houston prints.
+  const since = new Date(busy.started_at * 1000).toISOString().slice(11, 16);
+  throw new ConflictError(
+    `'${name}' is busy: its ${busy.kind} job, started at ${since} UTC` +
+      `${busy.actor !== '' ? ` by ${busy.actor}` : ''}, is still running. ` +
+      (busy.stoppable
+        ? 'Open it in Activity and press Stop job, or wait for it to finish, then delete again.'
+        : 'Wait for it to finish, then delete again.'),
+  );
+}
+
 export function register(app: FastifyInstance): void {
   app.get('/api/repros', async () => ({ repros: await listRepros() }));
   app.get<{ Params: { name: string } }>(
     '/api/repros/:name',
     async (request) => await describe(request.params.name),
   );
-  app.get<{ Params: { name: string } }>(
-    '/api/repros/:name/detail',
-    async (request) => await detail(request.params.name),
-  );
+  app.get<{ Params: { name: string } }>('/api/repros/:name/detail', async (request) => {
+    const d = await detail(request.params.name);
+    // THIS VIEWER's answer to the ownership gate that deleting a workspace's data, handing
+    // it over and rolling it back all pass, so the pane offers those only to someone the
+    // server will let. Added here, not in `detail()`: a web actor is an identity the server
+    // authenticated, and the CLI's is the caller's own assertion.
+    const [mayDestroy] = await ownerGate(String(d.name), actor(request));
+    return { ...d, may_destroy: mayDestroy };
+  });
   app.get<{ Params: { name: string } }>(
     '/api/repros/:name/stats',
     async (request) => await statsOf(request.params.name),
@@ -181,9 +241,12 @@ export function register(app: FastifyInstance): void {
         reg_token: 'regToken',
         bind: 'bind',
         context: 'context',
+        license: 'license',
       };
       return isTruthy(req[keys[field] as keyof typeof req]);
     });
+    // A CI build is unreleased code chosen by name: the decision `rc_image` is gated for.
+    if (isBuildTag(req.version)) privileged.push('a CI build version');
     if (privileged.length > 0 && !maySetPrivilegedFields(actor(request))) {
       const extra = privileged.includes('bind')
         ? '  For a workspace everyone on this box should reach, `houston config set bind_host 0.0.0.0` sets it once for the box.'
@@ -206,11 +269,15 @@ export function register(app: FastifyInstance): void {
     }
     if (isTruthy(req.preset)) {
       try {
-        userPath(req.preset);
+        // Each name of a set: the set's own spelling (`email+ldap`) is not a name.
+        for (const name of namesOf(req.preset)) userPath(name);
       } catch (error) {
         throw new ValidationError(errorText(error));
       }
     }
+    // So the label below names the workspace the create acts on. A name that is not a
+    // string is the job's to refuse.
+    if (typeof req.name === 'string') await claimTypedName(req);
     // The release lookup is the JOB's, inside `createRepro` where the pairing is resolved:
     // the request holding a response open for it answered nothing the job does not answer
     // again.
@@ -225,13 +292,16 @@ export function register(app: FastifyInstance): void {
       // A typed name is labelled -- and so audited -- as the workspace it makes: with
       // accounts `gui-1` becomes `alice-gui-1`, and the audit said `create gui-1`, a name
       // nothing on the box answers to. The same function the create uses. A derived name
-      // waits on the version lookup, so that label stays the version asked for, and a name
-      // that is not a string keeps the label earlier releases gave it.
+      // waits on the version lookup, so the job starts labelled with the version asked for,
+      // and its audit line waits for the name the create settles on: History listed every
+      // such create as "8.5.1". A name that is not a string keeps the label earlier releases
+      // gave it.
       {
         label:
           typeof req.name === 'string' && isTruthy(req.name)
             ? deriveFor(req)
             : ((isTruthy(req.name) ? req.name : req.version) as string),
+        auditWhenNamed: !isTruthy(req.name),
       },
     );
   });
@@ -245,16 +315,47 @@ export function register(app: FastifyInstance): void {
   app.post<{ Params: { name: string } }>('/api/repros/:name/up', async (request) => {
     const target = await resolveName(request.params.name);
     const meta = await readMeta(target);
+    const extra = bag(meta.extra);
+    // BROUGHT BACK AS ITS CREATOR, by anyone who may act for it. This sent no actor at all,
+    // and a Kubernetes namespace carries its creator as its owner label: the create refused
+    // the owner themselves ("HOUSTON_USER is not set"), so a GUI user could take a
+    // workspace down and never bring it back. `created_by` is that label, and the rewritten
+    // record keeps it.
+    //
+    // THIS workspace, never `<actor>-<name>`: a workspace made from the CLI has no
+    // `created_by`, so the clicker's prefix went on its name and the create failed on the
+    // ports the real one holds. Anyone else is refused, not given a new workspace.
+    const me = actor(request);
+    const [mayAct, owner] = await ownerGate(target, me);
+    if (!mayAct) {
+      throw new ConflictError(
+        `${target} belongs to ${owner} — only ${owner} or an admin can bring it back up.`,
+      );
+    }
+    const creator = typeof extra.created_by === 'string' ? extra.created_by : me;
     const req = createReq({
       version: meta.rcVersion,
       name: target,
+      exactName: true,
+      actor: creator,
       wait: true,
       offline: true,
       ...(topology.axesOfMeta(meta) as Partial<ReturnType<typeof createReq>>),
+      // The params it was made with, which a Kubernetes start re-applies: without them it
+      // came back with each preset's defaults.
+      params:
+        extra.preset_params === undefined
+          ? { ...bag(extra.params) }
+          : qualifiedParams(bag(extra.preset_params)),
     });
-    return submit(app, 'up', (emit) => createRepro(req, emit, { streamOutput: true }), {
-      label: target,
-    });
+    // With the monitoring hook, as the create has it: a monitored Kubernetes workspace came
+    // back without its monitoring, "not supplied by the caller".
+    return submit(
+      app,
+      'up',
+      (emit) => createRepro(req, emit, { streamOutput: true, monitorAttach: monitor.attach }),
+      { label: target },
+    );
   });
 
   app.post<{ Params: { name: string } }>('/api/repros/:name/ready', async (request) => {
@@ -448,6 +549,7 @@ export function register(app: FastifyInstance): void {
     const volumes = queryBool(request.query.volumes, false, 'volumes');
     const confirm = queryBool(request.query.confirm, false, 'confirm');
     const target = await checkTeardownRequest(request.params.name, { volumes, confirm });
+    refuseWhileBusy(app, target);
     return submit(app, 'teardown', (emit) => teardown(target, { volumes, confirm, emit }), {
       label: target,
     });

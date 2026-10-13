@@ -197,9 +197,22 @@ describe('resolveAxes', () => {
     expect(() => resolveAxes({ replicas: -1 })).toThrow(/--replicas must be at least 1\./u);
   });
 
-  it('refuses a scenario stacked on multi-instance rather than dropping one', () => {
-    expect(() => resolveAxes({ deployment: 'multi-instance', preset: 'ldap' })).toThrow(
-      /cannot yet be combined with a multi-instance deployment/u,
+  it('composes a scenario with a multi-instance deployment instead of refusing it', () => {
+    // This was refused while a Preset was all-or-nothing. Composition merges them, and the
+    // compose build applies the scenario's settings to every instance.
+    const axes = resolveAxes({ deployment: 'multi-instance', preset: 'ldap' });
+    expect([axes.deployment, axes.preset, axes.params[LEGACY_REPLICA_PARAM]]).toEqual([
+      MULTI_INSTANCE,
+      'ldap+multi-instance',
+      2,
+    ]);
+  });
+
+  it('reads multi-instance among several presets as the deployment, and keeps the rest', () => {
+    const axes = resolveAxes({ preset: 'email+ldap+multi-instance' });
+    expect([axes.deployment, axes.preset]).toEqual([MULTI_INSTANCE, 'email+ldap+multi-instance']);
+    expect(() => resolveAxes({ preset: 'ldap+multi-instance', deployment: 'monolith' })).toThrow(
+      /ask for two different deployments/u,
     );
   });
 
@@ -246,6 +259,20 @@ describe('resolveAxes', () => {
   });
 });
 
+describe('axesOfMeta on a composed multi-instance workspace', () => {
+  it('keeps its scenarios, which resolve back to the same set', () => {
+    const axes = axesOfMeta({
+      preset: 'ldap+multi-instance',
+      extra: { runtime: 'docker', deployment: 'multi-instance', instances: 3 },
+    });
+    expect([axes.deployment, axes.preset]).toEqual([MULTI_INSTANCE, 'ldap']);
+    expect(
+      resolveAxes({ deployment: String(axes.deployment), preset: String(axes.preset), replicas: 3 })
+        .preset,
+    ).toBe('ldap+multi-instance');
+  });
+});
+
 describe('axesOfMeta', () => {
   it('rebuilds a multi-instance workspace without printing a deprecation nobody caused', () => {
     // `restore` and the GUI's start button both rebuild a request from an existing
@@ -268,6 +295,16 @@ describe('axesOfMeta', () => {
     expect(axesOfMeta({ extra: {} })).not.toHaveProperty('context');
     expect(axesOfMeta({ extra: { context: 'prod-eu' } })).toHaveProperty('context', 'prod-eu');
     expect(axesOfMeta({ extra: { context: '   ' } })).not.toHaveProperty('context');
+  });
+
+  it('says the operator runs MongoDB, so a rebuild does not apply houston’s own over it', () => {
+    // The GUI's Start rebuilds from these axes; without it, `kubectl apply` met the operator's
+    // StatefulSet and failed. Absent for every other workspace.
+    expect(axesOfMeta({ extra: { mongo_managed_by: 'operator' } })).toHaveProperty(
+      'mongoOperator',
+      true,
+    );
+    expect(axesOfMeta({ extra: {} })).not.toHaveProperty('mongoOperator');
   });
 
   it('agrees with earlier releases for every shape of recorded workspace', () => {
@@ -375,7 +412,6 @@ describe('the three axes, decided in one function', () => {
       [{ runtime: 'docker', deployment: 'microservices' }, '--runtime kubernetes'],
       [{ runtime: 'k8s', deployment: 'multi-instance' }, '--runtime docker'],
       [{ replicas: 3 }, '--deployment multi-instance'],
-      [{ preset: 'ldap', deployment: 'multi-instance' }, 'separately'],
       [{ preset: 'multi-instance', deployment: 'monolith' }, 'two different deployments'],
       [{ runtime: 'nomad' }, 'Known runtimes'],
       [{ deployment: 'sharded' }, 'Known deployments'],
@@ -847,8 +883,9 @@ describe('each command asks the runtime the workspace is on', () => {
     }));
     jest.doMock('../../src/core/lifecycle/ports', () => ({
       ...jest.requireActual('../../src/core/lifecycle/ports'),
-      // What a FRESH allocation gives, so a returning workspace landing here moved.
-      pickHostPort: async () => 3000,
+      // What a FRESH allocation gives, so a returning workspace landing here moved. A port
+      // given to it (asked for, or recorded) comes back once checked, as the real one does.
+      pickHostPort: async (port: number) => port || 3000,
     }));
     return {
       k8s: require('../../src/core/lifecycle/create-k8s') as typeof CreateK8sNS,

@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { capture } from '../../src/seams/exec';
+import type * as TlsplanNS from '../../src/core/lifecycle/tlsplan';
 
 import {
   caDir,
@@ -106,6 +107,24 @@ describe('a leaf certificate', () => {
   });
 });
 
+describe('a leaf for a name longer than a common name holds', () => {
+  it('is issued with the name in its SANs and no common name', async () => {
+    // A 51-character workspace name: openssl refused `/CN=<69 characters>` outright.
+    const host = `${'a'.repeat(51)}.houston.localhost`;
+    const [certPem] = await issueLeaf(host);
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-leaf-test-'));
+    try {
+      const leaf = path.join(tmp, 'leaf.crt');
+      fs.writeFileSync(leaf, certPem, 'utf8');
+      const text = await describe_(leaf);
+      expect(text).toContain(`DNS:${host}`);
+      expect(text).not.toContain('CN = a');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('the manual instructions', () => {
   it('name the file and both directions, because trust is the part sudo may refuse', () => {
     const install = manualTrustInstructions('/tmp/houston/ca/ca.crt');
@@ -117,5 +136,28 @@ describe('the manual instructions', () => {
     // And it says the warning is safe to click through: a repro is not a production site,
     // and a person stuck on trust has somewhere to go.
     expect(install).toContain('Or skip it');
+  });
+});
+
+describe("a directory's certificate", () => {
+  it("is issued for the service name Rocket.Chat dials, by houston's own CA", async () => {
+    const { issueDirectoryCertificate } =
+      require('../../src/core/lifecycle/tlsplan') as typeof TlsplanNS;
+    const cert = await issueDirectoryCertificate();
+    const [, caPath] = await ensureCa();
+    expect(cert.ca).toBe(fs.readFileSync(caPath, 'utf8'));
+    expect(cert.key).toContain('PRIVATE KEY');
+    const file = path.join(os.tmpdir(), `houston-dir-${String(process.pid)}.crt`);
+    fs.writeFileSync(file, cert.crt);
+    try {
+      const text = await describe_(file);
+      expect(text).toContain('DNS:openldap');
+      const verified = await capture(['openssl', 'verify', '-CAfile', caPath, file], {
+        encoding: 'utf8',
+      });
+      expect(String(verified.stdout)).toContain(': OK');
+    } finally {
+      fs.rmSync(file, { force: true });
+    }
   });
 });

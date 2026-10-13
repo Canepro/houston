@@ -1,6 +1,6 @@
 ---
 name: houston
-description: Use when someone asks to create, spin up, boot or start a Rocket.Chat workspace or server on a given version ("a workspace on 7.4.1"), reproduce a support ticket or reported behaviour, check whether a bug is version-specific, or compare two versions; with LDAP, SAML, OIDC, email, S3/MinIO, livechat or air-gapped; to seed sample data, list what is running, read logs, back up, restore or upgrade a workspace, or tear it down. Drives the `houston` CLI, which runs a version-matched Rocket.Chat and MongoDB on Docker or Kubernetes.
+description: Use when someone asks to create, spin up, boot or start a Rocket.Chat workspace or server on a given version ("a workspace on 7.4.1"), reproduce a support ticket or reported behaviour, check whether a bug is version-specific, or compare two versions; with LDAP, SAML, OIDC, email, S3/MinIO, livechat, E2EE or air-gapped; to seed sample data, list what is running, read logs, back up, restore or upgrade a workspace, or tear it down. Drives the `houston` CLI, which runs a version-matched Rocket.Chat and MongoDB on Docker or Kubernetes.
 ---
 
 # houston
@@ -25,6 +25,7 @@ command takes it and read the last line (see [The output contract](#the-output-c
 | a workspace on 7.4.1 | `houston up --version 7.4.1 --name <n> --wait --json` | `houston info --name <n> --json`, and report back |
 | the same with LDAP | `houston up --version 7.4.1 --name <n>-ldap --preset ldap --wait --json` | a **new name**: an existing one is reused as it was |
 | SAML, OIDC, email, S3, livechat, offline | `--preset saml`, `oidc`, `email`, `s3_minio`, `livechat` or `airgapped` on `up` | `oidc`: ask the person to add `127.0.0.1 keycloak` to `/etc/hosts` |
+| encrypted conversations | `houston up --version 8.8.0 --name <n> --preset e2ee --wait --json` | the person signs in as `e2e-alice` and `e2e-bob` in two browser profiles ([E2EE](#e2ee)) |
 | the customer's MongoDB version too | `houston up --version 7.4.1 --mongo 6.0 --name <n> --wait --json` | only when the ticket names it |
 | several Rocket.Chat instances | `houston up --version 7.4.1 --name <n> --deployment multi-instance --replicas 3 --wait --json` | Docker only |
 | put some data in it | `houston seed --name <n> --profile standard --verify-seed` | exit 0 means the readback matched ([Sample data](#sample-data)) |
@@ -130,7 +131,7 @@ From `houston info --name <n> --json`:
 Every `--json` reply is one envelope:
 
 ```json
-{"schema":"houston.info.v1","contract":2,"houston_version":"2.1.0",
+{"schema":"houston.info.v1","contract":2,"houston_version":"2.1.1",
  "generated_at":"...","ok":true,"data":{...},"warnings":[],"error":null}
 ```
 
@@ -148,25 +149,41 @@ guess. New keys may appear in `data` or `warnings`; ignore ones you do not know.
 
 ### Presets
 
-`capabilities.presets` lists what this build has: `airgapped`, `default`, `email`, `ldap`, `livechat`, `oidc`, `s3_minio`, `saml`. A preset starts the side
+`capabilities.presets` lists what this build has: `airgapped`, `default`, `e2ee`, `email`, `ldap`, `livechat`, `oidc`, `s3_minio`, `saml`. A preset starts the side
 service, wires Rocket.Chat to it and turns the feature on, so it is ready when you
 arrive: an `ldap` workspace has users, an `email` one catches every message Rocket.Chat
 sends, `airgapped` has no route to Rocket.Chat Cloud. `houston presets` prints each
 preset's `--set` parameters; `--set users=130000` on `ldap` is the large-directory case.
 
 - `--preset` takes a **name from that list, never a path**.
-- **One preset per workspace.** Boot two workspaces rather than combining scenarios.
-- Several instances is `--deployment multi-instance`, not a preset, and cannot be
-  combined with one. `--preset multi-instance` is the old spelling; it still works,
-  and warns.
+- **Presets combine:** repeat `--preset` (`--preset ldap --preset email`). Qualify a shared
+  parameter with the preset's name (`--set ldap.users=500`). `saml` and `oidc` cannot be
+  combined; a conflict between two presets' settings is refused until `--setting`/`--env`
+  says which.
+- Several instances is `--deployment multi-instance`, not a preset; a preset combines with
+  it. `--preset multi-instance` is the old spelling; it still works, and warns.
+
+### E2EE
+
+The `e2ee` preset only sets Rocket.Chat's E2E settings and creates `e2e-alice`, `e2e-bob`
+and `e2e-carol` (password = username); keys and E2EE passwords are made in each person's
+browser, so you cannot send or read encrypted messages yourself. Options:
+`policy=optional|default|enforced` (`enforced` needs 8.8.0 or later and is refused on an
+older version), `files=on|off`, `allow_unencrypted=on|off`, `users=on|off`. The browser
+must reach Rocket.Chat on localhost or over HTTPS. `data/docs/e2ee.md` has the rest.
 
 ### Sample data
 
 A profile contains every kind of room, because tickets are rarely about a public
 channel: channels, teams, discussions, direct messages, threads and reactions.
-`standard` is 22 rooms, 287 messages, 48 threads across 20 users.
+`standard` is 25 rooms, 431 content messages and 162 thread replies across 20 users.
+All profiles include group DMs, files, profiles, reactions, pins, stars and custom emoji.
+Repeat `--scenario room-states` and `--scenario permissions` for support cases.
+Add `--history-days 180` for synthetic historical dates on a managed database; creation
+uses `--seed-scenario` and `--seed-history-days` alongside `--seed`. Interrupted runs
+resume with the same options or `ready`; uncertain uploads refuse duplicate replay.
 
-Seeding reads everything back and checks it against the plan. **Treat a false or
+Seeding reads everything back and checks it against the plan. **Treat a false, null or
 missing result as unproven**; do not infer success from a 2xx write.
 `--verify-seed` makes a mismatch fail the command. `seed` has no `--json`, so its exit
 code is the answer; afterwards `houston info --name <n> --json` shows `data.seed.ok`.
@@ -223,7 +240,9 @@ NOT covered by the answer. The whole procedure is `houston cluster guide`.
 
 `houston info --name <n> --json` is the record to attach: version, MongoDB pairing,
 runtime and deployment, links, and on Kubernetes the namespace and the pods, with the
-reason any cannot start. Credentials in its env listing are masked.
+reason any cannot start. Credentials in its env listing are masked, but `data.login`
+carries the admin password, generated for any workspace reachable beyond loopback. Drop it
+before attaching: `houston info --name <n> --json | jq 'del(.data.login.password)' > case.json`.
 
 ### Tear it down
 

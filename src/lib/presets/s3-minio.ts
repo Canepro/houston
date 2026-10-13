@@ -197,6 +197,9 @@ function minioManifests(): string {
     ],
     env: { MINIO_ROOT_USER: USER, MINIO_ROOT_PASSWORD: PASSWORD },
     args: ['server', '/data', '--console-address', `:${String(CONSOLE_PORT)}`],
+    // The bucket is a directory in here, so keeping /data keeps it too: the one-shot
+    // `minio-init` Job never runs again, and nothing else would recreate it.
+    data: { path: '/data', size: '2Gi' },
     // TWO Services, one Deployment: MinIO serves the S3 API and the console from the same
     // process, and a Kubernetes label value cannot contain a comma -- so each Service
     // names the workload through `houston.io/ui-deployment` instead of carrying a list of
@@ -232,7 +235,9 @@ function minioServices(bucket: string): Record<string, Record<string, unknown>> 
       ],
     },
     // One-shot: wait for MinIO to accept connections, then create the bucket. `mc mb -p`
-    // is idempotent (no error if it already exists).
+    // is idempotent (no error if it already exists), so BOTH steps retry: on rootless
+    // Podman the bucket step itself met a DNS flap ("lookup minio: i/o timeout") and the
+    // container exited for good with no bucket.
     'minio-init': {
       image: `docker.io/pgsty/mc:${MC_TAG}`,
       restart: 'no',
@@ -240,8 +245,8 @@ function minioServices(bucket: string): Record<string, Record<string, unknown>> 
       entrypoint: [
         'sh',
         '-c',
-        `until mc alias set local http://minio:${String(S3_PORT)} ${USER} ${PASSWORD}; ` +
-          `do sleep 1; done; mc mb -p local/${bucket}`,
+        `until mc alias set local http://minio:${String(S3_PORT)} ${USER} ${PASSWORD} && ` +
+          `mc mb -p local/${bucket}; do sleep 1; done`,
       ],
     },
   };

@@ -1,157 +1,349 @@
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-
 import { PROFILES } from '../../src/lib/seed-profiles';
-
 import {
   ANCHOR_MESSAGES,
+  CHANNEL,
   DISCUSSION,
   DM,
   GENERAL,
+  PRIVATE,
   REACT_EVERY,
+  TEAM,
+  TEAM_CHANNEL,
+  TEAM_CHANNEL_PRIVATE,
+  TEAM_PRIVATE,
   THREAD_EVERY,
 } from '../../src/seed/kinds';
 import {
   type Plan,
+  UnknownProfileError,
   byKind,
   dms,
-  isPrivate,
   named,
   planFrom,
   planTotalMessages,
   planTotalReplies,
-  reacted,
   replies,
   rich,
   totalMessages,
-  UnknownProfileError,
 } from '../../src/seed/plan';
 
-/**
- * The manifests earlier releases planned, recorded: one per profile, keyed by its name, and
- * one per override row below, keyed by the profile and the overrides' JSON.
- */
-const RECORDED = JSON.parse(
-  fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'seed', 'plan.json'), 'utf8'),
-) as Record<string, unknown>;
+const DEFAULT_COUNTS = [
+  {
+    profile: 'small',
+    users: 5,
+    rooms: 12,
+    main: 38,
+    threads: 12,
+    replies: 24,
+    files: 4,
+    openings: 2,
+    content: 68,
+  },
+  {
+    profile: 'standard',
+    users: 20,
+    rooms: 25,
+    main: 253,
+    threads: 54,
+    replies: 162,
+    files: 12,
+    openings: 4,
+    content: 431,
+  },
+  {
+    profile: 'large',
+    users: 100,
+    rooms: 60,
+    main: 2620,
+    threads: 524,
+    replies: 2620,
+    files: 24,
+    openings: 6,
+    content: 5270,
+  },
+] as const;
 
-/** The manifest, in earlier releases' own field names, so a rename shows up as a difference. */
-function dump(plan: Plan) {
+function counts(plan: Plan) {
   return {
     profile: plan.profile,
     users: plan.users,
-    channels: plan.channels,
-    messages: plan.messages,
-    reactions: plan.reactions,
-    dms: dms(plan),
-    rich: rich(plan),
-    total_messages: planTotalMessages(plan),
-    total_replies: planTotalReplies(plan),
-    by_kind: byKind(plan),
-    rooms: plan.rooms.map((r) => ({
-      kind: r.kind,
-      name: r.name,
-      members: [...r.members],
-      messages: r.messages,
-      threads: [...r.threads],
-      reactions: [...r.reactions],
-      parent: r.parent,
-      from_message: r.fromMessage,
-      private: isPrivate(r),
-      replies: replies(r),
-      reacted: reacted(r),
-      total_messages: totalMessages(r),
-    })),
+    rooms: plan.rooms.length,
+    main: plan.rooms.reduce((sum, r) => sum + r.messages, 0),
+    threads: plan.rooms.reduce((sum, r) => sum + r.threads.length, 0),
+    replies: planTotalReplies(plan),
+    files: plan.rooms.reduce((sum, r) => sum + r.files.length, 0),
+    openings: plan.rooms.filter((r) => r.fromMessage >= 0).length * ANCHOR_MESSAGES,
+    content: planTotalMessages(plan),
   };
 }
 
-describe('the manifest', () => {
-  it.each(['small', 'standard', 'large'])('is identical to earlier releases for %s', (profile) => {
-    expect(dump(planFrom(profile))).toEqual(RECORDED[profile]);
+describe('the advanced seed manifest', () => {
+  it.each(DEFAULT_COUNTS)('plans the agreed first-run counts for $profile', (expected) => {
+    expect(counts(planFrom(expected.profile))).toEqual(expected);
   });
 
   it.each([
-    [{ users: 2 }, 'small'],
-    [{ users: 4, messages: 0 }, 'small'],
-    [{ channels: 0, users: 3 }, 'standard'],
-    [{ users: 1 }, 'large'],
-    [{ users: -5 }, 'small'],
-    [{ messages: 1 }, 'standard'],
-  ] as const)('is identical to earlier releases with %o', (overrides, profile) => {
-    const recorded = RECORDED[`${profile} ${JSON.stringify(overrides)}`];
-    expect(recorded).toBeDefined();
-    expect(dump(planFrom(profile, overrides))).toEqual(recorded);
+    ['small', 2, 1, 1, 0, 1, 1, 2, 2, 1],
+    ['standard', 5, 2, 1, 1, 2, 2, 3, 5, 3],
+    ['large', 12, 4, 2, 1, 3, 3, 6, 20, 8],
+  ] as const)(
+    'plans the agreed room structure for %s',
+    (
+      profile,
+      publicRooms,
+      privateRooms,
+      publicTeams,
+      privateTeams,
+      publicChildren,
+      privateChildren,
+      discussions,
+      direct,
+      group,
+    ) => {
+      expect(byKind(planFrom(profile))).toEqual({
+        [CHANNEL]: publicRooms,
+        [PRIVATE]: privateRooms,
+        [TEAM]: publicTeams,
+        ...(privateTeams === 0 ? {} : { [TEAM_PRIVATE]: privateTeams }),
+        [TEAM_CHANNEL]: publicChildren,
+        [TEAM_CHANNEL_PRIVATE]: privateChildren,
+        [GENERAL]: 1,
+        [DISCUSSION]: discussions,
+        [DM]: direct,
+        'group-dm': group,
+      });
+    },
+  );
+
+  it.each([
+    ['small', 15, 43, 9, 12, 12, 2, 1],
+    ['standard', 96, 278, 17, 25, 25, 6, 3],
+    ['large', 897, 2551, 32, 60, 60, 20, 6],
+  ] as const)(
+    'plans the agreed feature counts for %s',
+    (profile, reacted, reactions, pins, stars, mentions, edits, emoji) => {
+      const plan = planFrom(profile);
+      const content = plan.rooms.flatMap((r) => r.content);
+      expect({
+        reacted: content.filter((m) => m.reactions.length > 0).length,
+        reactions: content.reduce((sum, m) => sum + m.reactions.length, 0),
+        pins: content.filter((m) => m.pin).length,
+        stars: content.filter((m) => m.star !== '').length,
+        mentions: content.filter((m) => m.mention !== '').length,
+        edits: content.filter((m) => m.editedText !== '').length,
+        emoji: plan.customEmoji.length,
+      }).toEqual({ reacted, reactions, pins, stars, mentions, edits, emoji });
+    },
+  );
+
+  it('creates a team before its channels and a parent before its discussions', () => {
+    const plan = planFrom('large');
+    const index = new Map(plan.rooms.map((r, i) => [r.name, i]));
+    for (const room of plan.rooms)
+      if (room.parent !== '') expect(index.get(room.parent)).toBeLessThan(index.get(room.name)!);
   });
 
-  it('carries the same profile shapes earlier releases ship', () => {
-    const recorded = {
-      small: {
-        users: 5,
-        channels: 2,
-        private: 1,
-        teams: 1,
-        team_channels: 2,
-        discussions: 2,
-        dms: 2,
-        messages: 5,
-        reactions: false,
-      },
-      standard: {
-        users: 20,
-        channels: 5,
-        private: 2,
-        teams: 2,
-        team_channels: 2,
-        discussions: 3,
-        dms: 5,
-        messages: 20,
-        reactions: true,
-      },
-      large: {
-        users: 100,
-        channels: 12,
-        private: 4,
-        teams: 3,
-        team_channels: 2,
-        discussions: 6,
-        dms: 20,
-        messages: 100,
-        reactions: true,
-      },
-    };
-    const ours = Object.fromEntries(
-      Object.entries(PROFILES).map(([k, v]) => [
-        k,
-        {
-          users: v.users,
-          channels: v.channels,
-          private: v.private,
-          teams: v.teams,
-          team_channels: v.teamChannels,
-          discussions: v.discussions,
-          dms: v.dms,
-          messages: v.messages,
-          reactions: v.reactions,
-        },
-      ]),
-    );
-    expect(ours).toEqual(recorded);
+  it('counts multiple replies and uploaded files as content messages', () => {
+    for (const expected of DEFAULT_COUNTS) {
+      for (const room of planFrom(expected.profile).rooms) {
+        expect(replies(room)).toBe(room.threads.length * room.replyCount);
+        expect(totalMessages(room)).toBe(
+          room.messages +
+            replies(room) +
+            room.files.length +
+            (room.fromMessage >= 0 ? ANCHOR_MESSAGES : 0),
+        );
+        expect(room.content).toHaveLength(room.messages + replies(room) + room.files.length);
+      }
+    }
   });
 
-  it('names an unknown profile and lists the real ones', () => {
+  it('uses public and private discussion parents in every profile and all six categories in large', () => {
+    for (const profile of Object.keys(PROFILES)) {
+      const plan = planFrom(profile);
+      const discussions = plan.rooms.filter((r) => r.kind === DISCUSSION);
+      const parents = discussions.map((r) => named(plan, r.parent)!);
+      expect(parents.some((r) => [CHANNEL, TEAM, TEAM_CHANNEL].includes(r.kind))).toBe(true);
+      expect(
+        parents.some((r) => [PRIVATE, TEAM_PRIVATE, TEAM_CHANNEL_PRIVATE].includes(r.kind)),
+      ).toBe(true);
+      for (const discussion of discussions) {
+        const parent = named(plan, discussion.parent)!;
+        for (const member of discussion.members) expect(parent.members).toContain(member);
+      }
+    }
+    const large = planFrom('large');
+    expect(
+      new Set(
+        large.rooms.filter((r) => r.kind === DISCUSSION).map((r) => named(large, r.parent)?.kind),
+      ),
+    ).toEqual(new Set([CHANNEL, PRIVATE, TEAM, TEAM_PRIVATE, TEAM_CHANNEL, TEAM_CHANNEL_PRIVATE]));
+  });
+
+  it('starts threads and reactions at the promised main-message strides in every profile', () => {
+    for (const profile of Object.keys(PROFILES)) {
+      const plan = planFrom(profile);
+      expect(rich(plan)).toBe(true);
+      for (const room of plan.rooms) {
+        expect(room.threads).toEqual(
+          Array.from(
+            { length: Math.ceil(room.messages / THREAD_EVERY) },
+            (_, i) => i * THREAD_EVERY,
+          ),
+        );
+        expect(room.reactions).toEqual(
+          Array.from({ length: Math.ceil(room.messages / REACT_EVERY) }, (_, i) => i * REACT_EVERY),
+        );
+      }
+    }
+  });
+
+  it('plans authors and feature actors from actual room membership without self reactions', () => {
+    for (const profile of Object.keys(PROFILES)) {
+      for (const room of planFrom(profile).rooms) {
+        const keys = new Set(room.content.map((m) => m.key));
+        expect(keys.size).toBe(room.content.length);
+        for (const message of room.content) {
+          expect(room.members).toContain(message.author);
+          if (message.parent !== '') expect(keys.has(message.parent)).toBe(true);
+          for (const reaction of message.reactions) {
+            expect(room.members).toContain(reaction.author);
+            expect(reaction.author).not.toBe(message.author);
+          }
+          if (message.star !== '') expect(room.members).toContain(message.star);
+          if (message.mention !== '') {
+            expect(room.members).toContain(message.mention);
+            expect(message.mention).not.toBe(message.author);
+            expect(message.text).toContain(`@${message.mention}`);
+          }
+          if (room.kind === DM || room.kind === 'group-dm') expect(message.pin).toBe(false);
+        }
+      }
+    }
+  });
+
+  it('keeps direct and group conversations distinct and caps them by participant combinations', () => {
+    for (const users of [0, 1, 2, 3, 4, 5, 6]) {
+      const plan = planFrom('large', { users });
+      const direct = plan.rooms.filter((r) => r.kind === DM);
+      const groups = plan.rooms.filter((r) => r.kind === 'group-dm');
+      expect(direct.length).toBeLessThanOrEqual((users * (users - 1)) / 2);
+      expect(groups.length).toBeLessThanOrEqual(
+        users < 3 ? 0 : (users * (users - 1) * (users - 2)) / 6,
+      );
+      for (const [rooms, size] of [
+        [direct, 2],
+        [groups, 3],
+      ] as const) {
+        expect(new Set(rooms.map((r) => [...r.members].sort().join('~'))).size).toBe(rooms.length);
+        for (const room of rooms) expect(new Set(room.members).size).toBe(size);
+      }
+    }
+  });
+
+  it('keeps the established derived-room minima and fixtures with a zero public-message override', () => {
+    for (const profile of Object.keys(PROFILES)) {
+      const plan = planFrom(profile, { messages: 0 });
+      for (const room of plan.rooms) {
+        if (room.kind === GENERAL || room.kind === CHANNEL) {
+          expect(room.messages).toBe(0);
+          expect(room.threads).toEqual([]);
+          expect(room.reactions).toEqual([]);
+        } else if (room.kind === DISCUSSION || room.kind === DM) {
+          expect(room.messages).toBe(2);
+        } else {
+          expect(room.messages).toBe(3);
+        }
+        if (room.kind === DISCUSSION && room.fromMessage >= 0) {
+          expect(named(plan, room.parent)?.messages).toBeGreaterThan(0);
+        }
+      }
+      expect(plan.rooms.reduce((sum, r) => sum + r.files.length, 0)).toBe(
+        PROFILES[profile]!.fileSets * 4,
+      );
+      expect(planTotalMessages(plan)).toBe({ small: 45, standard: 120, large: 378 }[profile]);
+    }
+  });
+
+  it('recalculates membership and conversation counts for reduced overrides', () => {
+    const plan = planFrom('standard', { users: 3, channels: 0, messages: 1 });
+    expect([plan.users, plan.channels, plan.messages]).toEqual([3, 0, 1]);
+    expect(plan.rooms.filter((r) => r.kind === CHANNEL)).toEqual([]);
+    for (const room of plan.rooms) {
+      for (const member of room.members) expect(['alice', 'bob', 'carol']).toContain(member);
+      if (room.kind === GENERAL) expect(room.messages).toBe(1);
+      else if (room.kind === DISCUSSION || room.kind === DM) expect(room.messages).toBe(2);
+      else expect(room.messages).toBe(3);
+    }
+  });
+
+  it('gives general the complete seeded user list and survives no users', () => {
+    expect(named(planFrom('standard'), 'general')?.members).toHaveLength(PROFILES.standard!.users);
+    const empty = planFrom('small', { users: 0 });
+    expect(dms(empty)).toBe(0);
+    expect(named(empty, 'general')?.members).toEqual([]);
+  });
+
+  it('keeps every room name unique, with a team prefix on child channels', () => {
+    const plan = planFrom('large');
+    expect(new Set(plan.rooms.map((r) => r.name)).size).toBe(plan.rooms.length);
+    for (const room of plan.rooms.filter((r) => r.kind.startsWith('team-channel')))
+      expect(room.name.startsWith(`${room.parent}-`)).toBe(true);
+  });
+
+  it('is deterministic before execution so repeated runs request the same content', () => {
+    expect(planFrom('standard')).toEqual(planFrom('standard'));
+  });
+});
+
+describe('optional support scenarios and history validation', () => {
+  it.each([
+    ['small', 16, 88, 13],
+    ['standard', 29, 451, 21],
+    ['large', 64, 5290, 36],
+  ] as const)('plans fixed support scenario additions for %s', (profile, rooms, content, pins) => {
+    const plan = planFrom(profile, { scenarios: ['room-states', 'permissions'] });
+    expect(plan.rooms).toHaveLength(rooms);
+    expect(planTotalMessages(plan)).toBe(content);
+    expect(plan.rooms.flatMap((r) => r.content).filter((m) => m.pin)).toHaveLength(pins);
+  });
+
+  it('rejects the permissions scenario when fewer than four seeded users are available', () => {
+    expect(() => planFrom('small', { users: 3, scenarios: ['permissions'] })).toThrow(/four|4/u);
+  });
+
+  it('rejects unknown scenarios and invalid historical windows before execution', () => {
+    expect(() => planFrom('small', { scenarios: ['unknown'] })).toThrow(/scenario/u);
+    for (const historyDays of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])
+      expect(() => planFrom('small', { historyDays })).toThrow(/history|historical/u);
+  });
+
+  it('keeps normal timestamps optional and preserves profile counts for historical seeding', () => {
+    const ordinary = planFrom('standard');
+    const historical = planFrom('standard', { historyDays: 180 });
+    expect(ordinary.historyDays).toBeNull();
+    expect(historical.historyDays).toBe(180);
+    expect(counts(historical)).toEqual(counts(ordinary));
+  });
+});
+
+describe('the profile catalogue and validation', () => {
+  it('uses the shared profile catalogue in the order small, standard, large', () => {
+    expect(Object.keys(PROFILES)).toEqual(['small', 'standard', 'large']);
+    for (const name of Object.keys(PROFILES))
+      expect(planFrom(name).users).toBe(PROFILES[name]?.users);
+  });
+
+  it('names an unknown profile and lists the real profiles', () => {
     expect(() => planFrom('nope')).toThrow(
       "unknown seed profile 'nope' (want small | standard | large)",
     );
   });
 
-  it('refuses what earlier releases refuse, in their words and as its own class', () => {
-    // Only the profile table's own keys are profiles, and the refusal quotes the name as
-    // earlier releases did. An index reached through the prototype, so `constructor` built a
-    // plan of undefined counts, and a quote in the name was spelled '...' where earlier
-    // releases switch to double quotes. Its own class, so the seed preamble has one to catch.
+  it('refuses prototype names and preserves the quoted usage error contract', () => {
     const profiles = ['constructor', '__proto__', 'toString', "it's", '', 'Small'];
     const want = '(want small | standard | large)';
-    const recorded = [
+    const errors = [
       `unknown seed profile 'constructor' ${want}`,
       `unknown seed profile '__proto__' ${want}`,
       `unknown seed profile 'toString' ${want}`,
@@ -159,157 +351,9 @@ describe('the manifest', () => {
       `unknown seed profile '' ${want}`,
       `unknown seed profile 'Small' ${want}`,
     ];
-    const ours = profiles.map((p) => {
-      try {
-        planFrom(p);
-        return null;
-      } catch (error) {
-        expect(error).toBeInstanceOf(UnknownProfileError);
-        return (error as Error).message;
-      }
-    });
-    expect(ours).toEqual(recorded);
-  });
-});
-
-describe('what the manifest promises', () => {
-  const plan = planFrom('standard');
-
-  it('creates a team before its channels and a parent before its discussions', () => {
-    // Order IS the manifest: sorting this list later would break seeding, so nothing does.
-    const index = new Map(plan.rooms.map((r, i) => [r.name, i]));
-    for (const room of plan.rooms) {
-      if (room.parent === '') continue;
-      expect(index.get(room.parent)).toBeLessThan(index.get(room.name) as number);
+    for (const [i, profile] of profiles.entries()) {
+      expect(() => planFrom(profile)).toThrow(UnknownProfileError);
+      expect(() => planFrom(profile)).toThrow(errors[i]);
     }
-  });
-
-  it('counts a threaded reply as a message in the room', () => {
-    // `channels.messages` returns a reply with a `tmid`, so a count that omits it does not
-    // match what the server reports -- which is exactly the mismatch a verifier would
-    // report as a fault on a perfectly good seed.
-    const room = named(plan, 'general');
-    expect(room).not.toBeNull();
-    expect(totalMessages(room!)).toBe(room!.messages + room!.threads.length);
-  });
-
-  it('counts the anchor messages a message-opened discussion arrives holding', () => {
-    const opened = plan.rooms.filter((r) => r.kind === DISCUSSION && r.fromMessage >= 0);
-    const against = plan.rooms.filter((r) => r.kind === DISCUSSION && r.fromMessage < 0);
-    expect(opened.length).toBeGreaterThan(0);
-    expect(against.length).toBeGreaterThan(0);
-    for (const r of opened) {
-      expect(totalMessages(r)).toBe(r.messages + r.threads.length + ANCHOR_MESSAGES);
-    }
-    for (const r of against) expect(totalMessages(r)).toBe(r.messages + r.threads.length);
-  });
-
-  it('never asks for a DM a user has with themselves', () => {
-    // `im.create` accepts a self-pair and makes a real self-DM, which is not what a plan
-    // asking for a conversation between two people meant. It appeared the moment
-    // `--users 2` was passed with the default five DMs.
-    for (const profile of ['small', 'standard', 'large']) {
-      for (const users of [2, 3, 4, 5, 20]) {
-        for (const room of planFrom(profile, { users }).rooms) {
-          if (room.kind !== DM) continue;
-          expect(room.members[0]).not.toBe(room.members[1]);
-        }
-      }
-    }
-  });
-
-  it('asks for no more DMs than there are distinct pairs', () => {
-    // `im.create` for a pair that already has a room returns THAT room, so asking for five
-    // DMs from two users produced five records pointing at one -- and the verification then
-    // reported rooms short that were simply the same room counted twice.
-    for (const users of [2, 3, 4, 5]) {
-      const plan_ = planFrom('standard', { users });
-      expect(dms(plan_)).toBeLessThanOrEqual((users * (users - 1)) / 2);
-      const pairs = plan_.rooms
-        .filter((r) => r.kind === DM)
-        .map((r) => [...r.members].sort().join('~'));
-      expect(new Set(pairs).size).toBe(pairs.length);
-    }
-  });
-
-  it('threads and reacts on a fixed stride, so the readback knows where to look', () => {
-    const room = named(plan, 'general');
-    expect(room!.threads).toEqual(
-      [...Array(Math.ceil(room!.messages / THREAD_EVERY))].map((_, i) => i * THREAD_EVERY),
-    );
-    expect(room!.reactions).toEqual(
-      [...Array(Math.ceil(room!.messages / REACT_EVERY))].map((_, i) => i * REACT_EVERY),
-    );
-  });
-
-  it('plans no reactions at all on a profile that does not ask for them', () => {
-    const small = planFrom('small');
-    expect(small.reactions).toBe(false);
-    for (const room of small.rooms) expect(room.reactions).toEqual([]);
-  });
-
-  it('gives general the whole user list, because everyone is already in it', () => {
-    const general = named(plan, 'general');
-    expect(general?.kind).toBe(GENERAL);
-    expect(general?.members).toHaveLength(plan.users);
-  });
-
-  it('survives a profile with no users at all', () => {
-    const empty = planFrom('small', { users: 0 });
-    expect(dms(empty)).toBe(0);
-    expect(named(empty, 'general')?.members).toEqual([]);
-  });
-});
-
-describe('the profile catalogue the plan reads', () => {
-  it('is the shared leaf table, in the order small, standard, large', () => {
-    // `capabilities` needs the profile names without importing the seeder, so the table is
-    // its own leaf and the plan reads THAT one rather than a copy of it.
-    expect(Object.keys(PROFILES)).toEqual(['small', 'standard', 'large']);
-    for (const name of Object.keys(PROFILES)) {
-      expect({ name, users: planFrom(name).users }).toEqual({
-        name,
-        users: PROFILES[name]?.users,
-      });
-    }
-    expect(() => planFrom('huge')).toThrow('(want small | standard | large)');
-  });
-});
-
-describe('a profile and its overrides', () => {
-  it('takes its counts from the profile, and an override reshapes the manifest', () => {
-    const standard = planFrom('standard');
-    expect([standard.users, standard.channels, standard.messages, rich(standard)]).toEqual([
-      20,
-      5,
-      20,
-      true,
-    ]);
-    const small = planFrom('standard', { users: 3, messages: 1 });
-    // Override + inherit.
-    expect([small.users, small.messages, small.channels]).toEqual([3, 1, 5]);
-    // The MANIFEST, not just the counts: three users means every room's membership is
-    // drawn from three names.
-    for (const room of small.rooms) {
-      for (const member of room.members) expect(['alice', 'bob', 'carol']).toContain(member);
-    }
-  });
-
-  it('is the same manifest every time, so a ticket and its reproduction can be compared', () => {
-    // A plan of counts has nothing to read back and check against.
-    const a = planFrom('standard');
-    const b = planFrom('standard');
-    expect(a.rooms).toEqual(b.rooms);
-    expect(planTotalMessages(a)).toBe(planTotalMessages(b));
-  });
-
-  it('gives every room of the large profile its own name, team channels prefixed', () => {
-    // A channel name is unique workspace-wide, so two teams both wanting `planning` would
-    // collide and the second team would come out empty.
-    const names = planFrom('large').rooms.map((r) => r.name);
-    expect(new Set(names).size).toBe(names.length);
-    const teamChannels = planFrom('large').rooms.filter((r) => r.kind.startsWith('team-channel'));
-    expect(teamChannels.length).toBeGreaterThan(0);
-    for (const room of teamChannels) expect(room.name).toContain('-');
   });
 });

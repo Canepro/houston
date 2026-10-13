@@ -13,12 +13,14 @@ import {
   composeFromFile,
   composeStream,
   composeToFile,
+  docker,
 } from '../../seams/docker-cli';
-import type { ProcessResult } from '../../seams/exec';
+import { Interrupted, type ProcessResult } from '../../seams/exec';
 
 import * as paths from './paths';
 
 export interface ComposeOptions {
+  readonly input?: string | Buffer;
   readonly capture?: boolean;
   readonly timeoutMs?: number;
   readonly text?: boolean;
@@ -104,7 +106,65 @@ export async function up(
 export async function down(name: string, { volumes = false } = {}): Promise<number | null> {
   const args = ['down', '--remove-orphans'];
   if (volumes) args.push('-v');
-  return await mutating(name, args);
+  const anonymous = await anonymousVolumes(name, []);
+  // An image's own VOLUMEs become anonymous volumes, which a container removed without -v
+  // leaves behind; the next one gets fresh ones. `rm -v` removes only those, never the
+  // named data volume, so a down that keeps the data still leaves nothing else behind.
+  if (!volumes) {
+    const removed = await mutating(name, ['rm', '-s', '-f', '-v']);
+    if (removed !== 0) return removed;
+  }
+  const rc = await mutating(name, args);
+  if (rc === 0) await removeAnonymous(anonymous);
+  return rc;
+}
+
+/** The 64-hex name Docker and Podman give a volume nobody named. */
+const ANONYMOUS_VOLUME = /^[0-9a-f]{64}$/u;
+
+/**
+ * The anonymous volumes `services`' containers (all of them for none) mount, by name.
+ *
+ * `-v` is not enough on its own: once compose RECREATES a container (`env --set`, an
+ * upgrade, `up --force`), the new one mounts the old one's anonymous volume BY NAME, and
+ * Docker's `rm -v` keeps any volume mounted by name. So Rocket.Chat's `/app/uploads` volume
+ * outlived `up --force`, a data-keeping `down` and even `down --volumes` -- one more empty
+ * volume per recreate-heavy workspace on a shared box.
+ */
+async function anonymousVolumes(name: string, services: readonly string[]): Promise<string[]> {
+  try {
+    const listed = await compose(name, ['ps', '--all', '-q', ...services], { capture: true });
+    const ids = String(listed.stdout ?? '')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line !== '');
+    if (listed.exitCode !== 0 || ids.length === 0) return [];
+    const mounts = await docker(
+      ['inspect', '--format', '{{range .Mounts}}{{.Name}} {{end}}', ...ids],
+      { capture: true, timeoutMs: 15_000 },
+    );
+    if (mounts.exitCode !== 0) return [];
+    return [
+      ...new Set(
+        String(mounts.stdout ?? '')
+          .split(/\s+/u)
+          .filter((volume) => ANONYMOUS_VOLUME.test(volume)),
+      ),
+    ];
+  } catch (error) {
+    if (error instanceof Interrupted) throw error;
+    return [];
+  }
+}
+
+/** Remove them, once nothing mounts them; one still in use is simply left. */
+async function removeAnonymous(volumes: readonly string[]): Promise<void> {
+  if (volumes.length === 0) return;
+  try {
+    await docker(['volume', 'rm', ...volumes], { capture: true, timeoutMs: 30_000 });
+  } catch (error) {
+    if (error instanceof Interrupted) throw error;
+  }
 }
 
 export async function start(name: string): Promise<number | null> {
@@ -156,7 +216,8 @@ export async function composeExecCapture(
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     });
     return [result.exitCode ?? 1, String(result.stdout ?? '')];
-  } catch {
+  } catch (error) {
+    if (error instanceof Interrupted) throw error; // Ctrl-C or a stopped job: unwind
     return [1, ''];
   }
 }
@@ -176,6 +237,7 @@ export async function composeExecToFile(
     });
     return [result.exitCode ?? 1, result.stderr];
   } catch (error) {
+    if (error instanceof Interrupted) throw error; // Ctrl-C or a stopped job: unwind
     return [1, String(error)];
   }
 }
@@ -195,6 +257,7 @@ export async function composeExecFromFile(
     });
     return [result.exitCode ?? 1, result.output];
   } catch (error) {
+    if (error instanceof Interrupted) throw error; // Ctrl-C or a stopped job: unwind
     return [1, String(error)];
   }
 }
@@ -219,12 +282,15 @@ export async function startServices(
   return (await compose(name, ['start', ...services])).exitCode;
 }
 
-/** Stop and remove specific services (`docker compose rm -s -f <services>`). */
+/** Stop and remove specific services and their anonymous volumes (`rm -s -f -v <services>`). */
 export async function rmServices(
   name: string,
   services: readonly string[],
 ): Promise<number | null> {
-  return (await compose(name, ['rm', '-s', '-f', ...services])).exitCode;
+  const anonymous = await anonymousVolumes(name, services);
+  const rc = (await compose(name, ['rm', '-s', '-f', '-v', ...services])).exitCode;
+  if (rc === 0) await removeAnonymous(anonymous);
+  return rc;
 }
 
 /** Container id(s) of one compose service in this repro (usually a single id). */
@@ -255,10 +321,13 @@ export async function ps(name: string): Promise<string> {
 
 /**
  * Captured (not streamed) combined logs for a repro, for post-mortem diagnosis of a
- * failed `up`. '' on error.
+ * failed `up`. '' on error. `services` narrows them to those services; none is every one.
  */
-export async function composeLogsCapture(name: string, { tail = 200 } = {}): Promise<string> {
-  const result = await compose(name, ['logs', '--no-color', '--tail', String(tail)], {
+export async function composeLogsCapture(
+  name: string,
+  { tail = 200, services = [] as readonly string[] } = {},
+): Promise<string> {
+  const result = await compose(name, ['logs', '--no-color', '--tail', String(tail), ...services], {
     capture: true,
   });
   return String(result.stdout ?? '') + String(result.stderr ?? '');

@@ -40,7 +40,18 @@ function flushLogs() {
 }
 function queueLog(e) {
   logv.pending.push(e);
+  // Frames can pause while the WebSocket keeps streaming (for example in a
+  // background tab). Keep only the latest window, just like the main buffer.
+  if (logv.pending.length > LOG_MAX) logv.pending.shift();
   if (!logv.frame) logv.frame = requestAnimationFrame(flushLogs);
+}
+function releaseLogsView() {
+  if (logv.frame) cancelAnimationFrame(logv.frame);
+  logv.frame = 0;
+  logv.pending = [];
+  logv.buf = [];
+  logv.unseen = 0;
+  logv.onUnseen = null;
 }
 
 // kubectl's `--prefix`: `[pod/<pod>/<container>] the actual line`. On a microservices
@@ -197,45 +208,102 @@ function renderLogs(body, d) {
   };
   setStat("wait", "connecting…");
 
-  const ws = new WebSocket(`${proto}://${location.host}/api/repros/${d.name}/logs/stream?tail=300`);
-  ctx.dstate.logsWS = ws;
-  let opened = false, got = 0;
-  ws.onopen = () => {
-    opened = true;
-    setStat("live", "streaming");
-    // A container that has printed nothing looks exactly like a broken stream.
-    // After a few seconds of an OPEN socket with no line, say which it is.
-    setTimeout(() => {
-      if (ctx.dstate.logsWS === ws && ws.readyState === 1 && !got) {
-        setStat("idle", "connected · nothing logged yet");
+  // A replaced pod and a restarted serve both end a previously healthy stream.
+  // Retry while this workspace is up; a successful dashboard poll can reopen it
+  // after a longer outage. Superseded streams never reconnect into another tab.
+  let tries = 0, policyClosed = false, established = false, recoveryAllowed = false;
+  const connect = () => {
+    const ws = new WebSocket(`${proto}://${location.host}/api/repros/${d.name}/logs/stream?tail=300`);
+    ctx.dstate.logsWS = ws;
+    let opened = false, got = 0, since = 0;
+    ws.onopen = () => {
+      opened = true;
+      established = true;
+      recoveryAllowed = false;
+      since = Date.now();
+      setStat("live", "streaming");
+      // A container that has printed nothing looks exactly like a broken stream.
+      // After a few seconds of an OPEN socket with no line, say which it is.
+      setTimeout(() => {
+        if (ctx.dstate.logsWS === ws && ws.readyState === 1 && !got) {
+          setStat("idle", "connected · nothing logged yet");
+        }
+      }, 4000);
+    };
+    ws.onmessage = (m) => {
+      if (ctx.dstate.logsWS !== ws) return;
+      if (!got++) setStat("live", "streaming");
+      const e = parseLogLine(m.data);
+      logv.buf.push(e);
+      if (logv.buf.length > LOG_MAX) logv.buf.shift();
+      // Buffered unfiltered, deliberately: a service that only logs at info still
+      // has to appear in the filter while the level is set to error, or you cannot
+      // select the service whose errors you are looking for.
+      queueLog(e);
+    };
+    // A socket that never opened was refused or never arrived -- the server closes
+    // before accept() for a missing session or an insufficient role, and a browser
+    // reports that as a failed handshake, not as a close code worth printing. One
+    // that opened and then closed is a stream that ended, which is a different
+    // sentence and a different thing to do about it.
+    ws.onclose = (event) => {
+      if (ctx.dstate.logsWS !== ws) return;           // superseded by a newer stream
+      ctx.dstate.logsWS = null;
+      if (event.code === 1008) {
+        // A permission refusal is not a transient outage. This panel remains
+        // blocked even if the list poll succeeds or the server later recovers.
+        policyClosed = true;
+        setStat("bad", "stream refused — your session is not permitted to read these logs", true);
+        return;
       }
-    }, 4000);
+      const row = (ctx.ALL_REPROS || []).find((r) => r.name === d.name);
+      const up = row && ["running", "starting"].includes(row.state);
+      if (since && Date.now() - since > 60000) tries = 0;   // it had been following fine
+      if (up && tries < 5 && (established || recoveryAllowed || tries > 0)) {
+        tries += 1;
+        setStat("wait", "stream ended · reconnecting…");
+        // Only into the panel it was opened for: a tab switch or a redraw since then has
+        // its own stream, and this status line is no longer on the page.
+        ctx.dstate.logsRetryTimer = setTimeout(() => {
+          ctx.dstate.logsRetryTimer = null;
+          reconnect();
+        }, 1500 * tries);
+        return;
+      }
+      setStat("bad", opened ? "stream ended" : "could not connect — refused or unreachable", true);
+    };
+    ws.onerror = () => { if (ctx.dstate.logsWS === ws && !opened) setStat("bad", "could not connect", true); };
   };
-  ws.onmessage = (m) => {
-    if (!got++) setStat("live", "streaming");
-    const e = parseLogLine(m.data);
-    logv.buf.push(e);
-    if (logv.buf.length > LOG_MAX) logv.buf.shift();
-    // Buffered unfiltered, deliberately: a service that only logs at info still
-    // has to appear in the filter while the level is set to error, or you cannot
-    // select the service whose errors you are looking for.
-    queueLog(e);
+  const reconnect = ({ serverRecovered = false } = {}) => {
+    const row = (ctx.ALL_REPROS || []).find((r) => r.name === d.name);
+    if (policyClosed || !stat.isConnected || ctx.SELECTED !== d.name || ctx.VIEW !== "workspace"
+        || ctx.dstate.tab !== "logs" || !ctx.canWrite() || !ctx.SERVER_ONLINE || ctx.dstate.logsWS
+        || !row || !["running", "starting"].includes(row.state)) return;
+    // Ordinary successful polls do not reset the five-attempt budget. A real
+    // unavailable -> available transition is a new chance to connect, including
+    // a first handshake that failed while serve was down.
+    if (serverRecovered) { tries = 0; recoveryAllowed = true; }
+    if (tries > 5 || (!established && !recoveryAllowed)) return;
+    if (ctx.dstate.logsRetryTimer) { clearTimeout(ctx.dstate.logsRetryTimer); ctx.dstate.logsRetryTimer = null; }
+    connect();
   };
-  // A socket that never opened was refused or never arrived -- the server closes
-  // before accept() for a missing session or an insufficient role, and a browser
-  // reports that as a failed handshake, not as a close code worth printing. One
-  // that opened and then closed is a stream that ended, which is a different
-  // sentence and a different thing to do about it.
-  ws.onclose = () => {
-    if (ctx.dstate.logsWS !== ws) return;           // superseded by a newer stream
-    ctx.dstate.logsWS = null;
-    setStat("bad", opened ? "stream ended" : "could not connect — refused or unreachable", true);
-  };
-  ws.onerror = () => { if (ctx.dstate.logsWS === ws && !opened) setStat("bad", "could not connect", true); };
+  ctx.dstate.logsReconnect = reconnect;
+  if (ctx.SERVER_ONLINE) connect();
+}
+
+// A refusal, shown in place of the chart. Kept until another workspace is selected: a
+// Kubernetes panel re-renders as its pods change, and each render asked again for an
+// answer that was always going to be 409.
+function statsRefused(message) {
+  ctx.dstate.statsRefused = message;
+  const box = ctx.$("#chart");
+  if (box) { box.innerHTML = ""; box.append(ctx.el("p", { class: "hint pre" }, message)); }
 }
 
 function startStats() {
   if (ctx.dstate.statsTimer) clearInterval(ctx.dstate.statsTimer);
+  ctx.dstate.statsTimer = null;
+  if (ctx.dstate.statsRefused) { statsRefused(ctx.dstate.statsRefused); return; }
   // ONE IN FLIGHT, AND ONLY FOR THE WORKSPACE THAT ASKED. `docker stats` can take
   // most of a minute on a loaded box while this fires every three seconds, so
   // without a guard the calls pile up and each one makes the next slower. And the
@@ -260,10 +328,9 @@ function startStats() {
       // and swallowing it left an empty box under a title that says "live",
       // repainting every 3s, while the server's own instructions for fixing it
       // were thrown away. Stop asking and show them.
-      if (e && (e.status === 409 || e.status === 400)) {
+      if (e && (e.status === 409 || e.status === 400) && asked === ctx.SELECTED) {
         if (ctx.dstate.statsTimer) { clearInterval(ctx.dstate.statsTimer); ctx.dstate.statsTimer = null; }
-        const box = ctx.$("#chart");
-        if (box) { box.innerHTML = ""; box.append(ctx.el("p", { class: "hint pre" }, e.message)); }
+        statsRefused(e.message);
       }
       /* anything else is transient: keep polling */
     } finally {
@@ -436,10 +503,16 @@ async function doDown(name) {
   // being told whose it is.
   const owner = (ctx.ALL_REPROS.find((r) => r.name === name) || {}).owner
               || (ctx.ALL_REPROS.find((r) => r.name === name) || {}).created_by || "";
-  const whose = owner && owner !== ctx.ME
-    ? `\n\nThis workspace belongs to ${owner}, not you — the server will refuse `
-      + `unless you are an admin.\nHand it over first:  houston chown -n ${name} --to ${ctx.ME}`
-    : "";
+  // What follows from that is the ownership gate's, and the panel's read carries this
+  // viewer's answer. This used to send the reader to `houston chown`: a shell command a
+  // GUI user may not have, and one the gate refuses a member who is not the owner anyway.
+  const d = ctx.dstate.detail && ctx.dstate.detail.name === name ? ctx.dstate.detail : {};
+  const whose = !owner || owner === ctx.ME ? ""
+    : d.may_destroy === false
+      ? `\n\nThis workspace belongs to ${owner}, not you, so the server will refuse to `
+        + `delete its data. ${owner} or an admin can hand it over to you with `
+        + "\"Hand over…\" in its panel."
+      : `\n\nThis workspace belongs to ${owner}, not you.`;
   const vol = confirm(
     `Also DELETE ${name}'s data volume and record?${whose}\n\n` +
     `OK = delete everything (irreversible).\nCancel = keep the data.`);
@@ -454,10 +527,11 @@ async function doDown(name) {
 }
 // ---- seed dialog ------------------------------------------------------------
 let SEED_TARGET = null;
-function openSeed(name) {
+async function openSeed(name) {
+  await ctx.loadSeedChoices();
   SEED_TARGET = name;
   ctx.$("#seed-title").textContent = `Seed data: ${name}`;
-  ctx.$("#seed-mode").value = "profile";
+  ctx.$("#seed-form").reset();
   syncSeedMode();
   ctx.$("#seed-dialog").showModal();
 }
@@ -465,6 +539,10 @@ function syncSeedMode() {
   const scale = ctx.$("#seed-mode").value === "scale";
   ctx.$("#seed-profile-row").hidden = scale;
   ctx.$("#seed-scale-row").hidden = !scale;
+  ctx.$("#seed-options").hidden = scale;
+  ctx.$("#seed-form").profile.disabled = scale;
+  for (const input of ctx.$("#seed-options").querySelectorAll("input")) input.disabled = scale;
+  ctx.$("#seed-form").history_days.disabled = scale || !ctx.$("#seed-form").history.checked;
   ctx.$("#seed-hint").textContent = scale
     ? "Bulk Mongo insert: credential-less users, no app hooks. For scale/perf only."
     : "Creates real, loginable users/channels/messages via the REST API.";
@@ -475,6 +553,8 @@ async function submitSeed() {
   // Validate first: closing the dialog before checking discarded the typed spec and
   // reset the mode selector, so the user had to re-pick "Bulk --scale" every time.
   if (scale && !f.scale.value.trim()) { ctx.toast("enter a scale spec"); return; }
+  const selection = scale ? null : ctx.seedRequest(f);
+  if (!scale && selection === null) return;
   ctx.$("#seed-dialog").close();
   try {
     let job;
@@ -482,7 +562,7 @@ async function submitSeed() {
       job = await ctx.api(`/api/repros/${SEED_TARGET}/scale`, { method: "POST", body: JSON.stringify({ scale: f.scale.value.trim() }) });
       ctx.streamJob(job.job_id, `Scale prefill: ${SEED_TARGET}`);
     } else {
-      job = await ctx.api(`/api/repros/${SEED_TARGET}/seed`, { method: "POST", body: JSON.stringify({ profile: f.profile.value }) });
+      job = await ctx.api(`/api/repros/${SEED_TARGET}/seed`, { method: "POST", body: JSON.stringify({ profile: f.profile.value, ...selection }) });
       // The renderer goes here as well as in JOB_RESULT_RENDERER: the table only
       // covers reopening a job from Activity, and the run you just started is the
       // one you are watching.
@@ -506,6 +586,7 @@ Object.defineProperties(ctx, {
   "logv": { enumerable: true, get: () => logv },
   "flushLogs": { enumerable: true, get: () => flushLogs },
   "queueLog": { enumerable: true, get: () => queueLog },
+  "releaseLogsView": { enumerable: true, get: () => releaseLogsView },
   "K8S_PREFIX": { enumerable: true, get: () => K8S_PREFIX },
   "parseLogLine": { enumerable: true, get: () => parseLogLine },
   "passes": { enumerable: true, get: () => passes },
@@ -530,4 +611,4 @@ Object.defineProperties(ctx, {
   "submitSeed": { enumerable: true, get: () => submitSeed },
   "clearScale": { enumerable: true, get: () => clearScale },
 });
-export { LEVELS, PINO, MONGOSEV, LOG_MAX, logv, flushLogs, queueLog, K8S_PREFIX, parseLogLine, passes, logRow, refreshServiceOptions, renderLogList, renderLogs, startStats, STATS_INTERVAL_S, niceMax, fmtAgo, drawChart, refreshDetail, STATE_LABEL, doState, doMonitor, doBringUp, doDown, SEED_TARGET, openSeed, syncSeedMode, submitSeed, clearScale };
+export { LEVELS, PINO, MONGOSEV, LOG_MAX, logv, flushLogs, queueLog, releaseLogsView, K8S_PREFIX, parseLogLine, passes, logRow, refreshServiceOptions, renderLogList, renderLogs, startStats, STATS_INTERVAL_S, niceMax, fmtAgo, drawChart, refreshDetail, STATE_LABEL, doState, doMonitor, doBringUp, doDown, SEED_TARGET, openSeed, syncSeedMode, submitSeed, clearScale };

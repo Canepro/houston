@@ -45,6 +45,9 @@ export function register(app: FastifyInstance): void {
     const body = requestBody(request.body, false);
     const loadtest = loadtestModule();
     const target = await resolveName(request.params.name);
+    // REFUSED HERE, a 400, as the action pane expects: it was a 200 and a job that then
+    // failed with the same sentence.
+    await loadtest.requireComposeForPerf(target, 'loadtest');
     const req = loadRequest(target, body);
     return submit(app, 'loadtest', (emit) => loadtest.runLoadtest(req, emit), { label: target });
   });
@@ -53,6 +56,7 @@ export function register(app: FastifyInstance): void {
     const body = requestBody(request.body, false);
     const loadtest = loadtestModule();
     const target = await resolveName(request.params.name);
+    await loadtest.requireComposeForPerf(target, 'capacity');
     const req = capacityRequest(target, body);
     return submit(app, 'capacity', (emit) => loadtest.runCapacity(req, emit), { label: target });
   });

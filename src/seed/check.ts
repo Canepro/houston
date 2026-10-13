@@ -6,7 +6,6 @@
  */
 import { type Auth, RequestFailed, authHeaders, login as realLogin, rcapi } from '../core/rcapi';
 import {
-  containsChecked,
   dictGetChecked,
   hashableKey,
   toInt,
@@ -18,7 +17,7 @@ import {
 } from '../lib/format';
 import { loads as jsonLoads } from '../lib/json-text';
 
-import { ABSENT, DISCUSSION, DM, TEAM_CHANNEL, TEAM_CHANNEL_PRIVATE } from './kinds';
+import { ABSENT, DISCUSSION, DM, GROUP_DM, TEAM_CHANNEL, TEAM_CHANNEL_PRIVATE } from './kinds';
 import {
   type Plan,
   type RoomFacts,
@@ -139,7 +138,11 @@ async function readDm(
   const ims = dictGetChecked(body, 'ims');
   const list = isTruthy(ims) ? ims : orElse(dictGetChecked(body, 'update'), []);
   for (const room of iterateChecked(list)) {
-    if (containsChecked(orElse(dictGetChecked(room, 'usernames'), []), spec.members[1] as string)) {
+    const participants = [...iterateChecked(orElse(dictGetChecked(room, 'usernames'), []))];
+    if (
+      participants.length === spec.members.length &&
+      spec.members.every((name) => participants.includes(name))
+    ) {
       f.found = true;
       f.rid = ridOf(dictGetChecked(room, '_id', ''));
       break;
@@ -167,7 +170,7 @@ async function readRoomFacts(
   for (const spec of plan.rooms) {
     const f = roomFacts(spec);
     facts.push(f);
-    if (spec.kind === DM) {
+    if (spec.kind === DM || spec.kind === GROUP_DM) {
       await readDm(asUser, countMessages, f, get, spec);
       continue;
     }
@@ -373,7 +376,7 @@ export interface Fault {
 }
 
 export interface Verdict {
-  readonly ok: boolean;
+  readonly ok: boolean | null;
   readonly faults: Fault[];
   readonly extra: Bag[];
   readonly unreadable: Bag[];
@@ -442,12 +445,15 @@ function collectFaults(extra: Bag[], facts: Facts, faults: Fault[], unreadable: 
  * nothing -- which is exactly what happened to the version of this that shipped with an
  * exact-equality gate and a known-lossy seeder.
  */
-export function verify(_plan: Plan, facts: Facts): Verdict {
+export function verify(plan: Plan, facts: Facts): Verdict {
   const faults: Fault[] = [];
   const extra: Bag[] = [];
   const unreadable: Bag[] = [];
 
   collectFaults(extra, facts, faults, unreadable);
+  for (const room of plan.rooms)
+    if (!facts.rooms.some((f) => f.spec.name === room.name && f.spec.kind === room.kind))
+      unreadable.push({ what: room.name, why: 'no readback result' });
   // A discussion's ANCHOR is checked by that message count, not separately: one opened from
   // a message arrives holding ANCHOR_MESSAGES it did not post, so a `pmid` that silently
   // stopped being sent makes the room come back two short -- a fault, named by room. That is
@@ -455,11 +461,11 @@ export function verify(_plan: Plan, facts: Facts): Verdict {
   // out. The variant was dead code for a while (discussions were created before their
   // parents had said anything) and nothing noticed, which is what this now prevents.
   return {
-    ok: faults.length === 0,
+    ok: faults.length > 0 ? false : unreadable.length > 0 ? null : true,
     faults,
     extra,
     unreadable,
-    checked: facts.rooms.length,
+    checked: facts.rooms.filter((f) => f.unreadable === '').length,
     rooms: facts.rooms.map((f) => ({
       kind: f.spec.kind,
       name: f.spec.name,

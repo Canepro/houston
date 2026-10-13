@@ -9,6 +9,7 @@
 
 import * as config from '../../lib/config';
 import { joinPath } from '../../lib/home';
+import { reproLock } from '../runner/locks';
 
 /** `<home>/edge` -- deliberately a sibling of `repros/`, never inside it. */
 export const EDGE_DIR = 'edge';
@@ -30,6 +31,16 @@ export const PROJECT = 'houston_edge';
 
 /** The edge's own container, as compose names it: `<project>-<service>-<index>`. */
 export const CONTAINER = `${PROJECT}-edge-1`;
+
+/**
+ * Serialise shared edge mutations across workspace jobs and CLI processes.
+ *
+ * The reserved project name cannot be a sanitised workspace name. Take this after a
+ * workspace lock; nested prepare/write/up/down calls reuse the seam's reentrant lock.
+ */
+export async function edgeLock<T>(body: () => T | Promise<T>): Promise<T> {
+  return await reproLock(PROJECT, body);
+}
 
 export function edgeDir(): string {
   return joinPath(config.home(), EDGE_DIR);

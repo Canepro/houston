@@ -47,7 +47,17 @@ export function register(app: FastifyInstance): void {
             : profile !== ''
               ? 'named profile'
               : 'server credential chain';
-    return { profile, source, account: who.account, principal: who.arn, error: who.error, region };
+    // Only when it would help: not signed in, and no profile named.
+    const profiles = who.error !== '' && profile === '' ? await eks.profiles() : [];
+    return {
+      profile,
+      profiles,
+      source,
+      account: who.account,
+      principal: who.arn,
+      error: who.error,
+      region,
+    };
   });
 
   app.post('/api/clusters/connect', async (request) => {

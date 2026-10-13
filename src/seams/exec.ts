@@ -194,6 +194,38 @@ type InterruptState =
   | { readonly mode: 'raise'; delivered: boolean };
 
 const frames = new AsyncLocalStorage<Frame>();
+
+/**
+ * The stop signal of the job this call chain belongs to: `serve`'s Stop button.
+ *
+ * The Ctrl-C machinery here is the whole process's. A GUI job is one of many in `serve`, and
+ * the only way to end one that was stuck -- a create waiting ten minutes on a port-forward it
+ * could not see -- was to kill the server, while its lock held up every other operation on
+ * that workspace. So a job carries its own signal. Aborted, every wait in that job that a
+ * Ctrl-C could reach rejects with Interrupted, a child stopped first; so does every wait it
+ * starts afterwards, so a catch that swallows one cannot carry the job on; and the other
+ * jobs never notice. Waits inside `cleanup` still run to the end.
+ */
+const stops = new AsyncLocalStorage<AbortSignal>();
+
+/** Run `body` as a job that aborting `signal` stops (see `stops`). */
+export function stoppable<T>(signal: AbortSignal, body: () => Promise<T>): Promise<T> {
+  return stops.run(signal, body);
+}
+
+/**
+ * Run `body` outside any job's stop scope: for work SHARED between jobs, such as a probe
+ * memoised for the whole process. Started inside a job that is then stopped, its answer
+ * would be "refused" for every job that awaits it, for as long as the process runs.
+ */
+export function unstoppable<T>(body: () => Promise<T>): Promise<T> {
+  return stops.exit(body);
+}
+
+/** This chain's stop signal -- none inside cleanup, which runs to the end regardless. */
+function stopSignal(): AbortSignal | undefined {
+  return frames.getStore()?.cleanup != null ? undefined : stops.getStore();
+}
 const waiting = new Set<Waiting>();
 /** Waits taken over and still in their grace: calling one ends the grace now. */
 const inGrace = new Set<() => void>();
@@ -265,6 +297,8 @@ export function interruptibly<T>(
   const gated = gate();
   if (gated === 'raise') return Promise.reject(new Interrupted());
   if (gated === 'hold') return new Promise<T>(() => undefined);
+  const signal = stopSignal();
+  if (signal?.aborted === true) return Promise.reject(new Interrupted());
   const { done, stop } = start();
   const frame = frames.getStore();
   return new Promise<T>((resolve, reject) => {
@@ -297,14 +331,21 @@ export function interruptibly<T>(
         if (raise) reject(new Interrupted());
       },
     };
+    // Its job stopped: this wait alone is taken over, as a Ctrl-C would take it.
+    const stopped = (): void => {
+      if (waiting.delete(entry)) void entry.take(true);
+    };
     waiting.add(entry);
+    signal?.addEventListener('abort', stopped, { once: true });
     done.then(
       (value) => {
         waiting.delete(entry);
+        signal?.removeEventListener('abort', stopped);
         if (!taken) resolve(value);
       },
       (error: unknown) => {
         waiting.delete(entry);
+        signal?.removeEventListener('abort', stopped);
         if (!taken) reject(error);
       },
     );

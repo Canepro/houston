@@ -41,6 +41,8 @@ houston info --name ticket-1234                                                 
 | `kubernetes` | `microservices` (default) | the Helm chart, about 9 pods |
 | `kubernetes` | `monolith` | the Helm chart, about 5 pods |
 
+- Microservices are an Enterprise feature: without a license, Rocket.Chat replicas after
+  the first stop. `info` says so; add a license with `--license` or in Rocket.Chat.
 - Each workspace is a namespace, `houston-<name>`, reached on `http://localhost:<port>`
   through a port-forward houston starts.
 - `--mongo-operator` runs MongoDB under the community operator, with authentication
@@ -66,12 +68,14 @@ Each refusal says why and what to do instead.
 | `up --fresh` | `houston down --name <name> --volumes`, then `up` again |
 | `loadtest`, `capacity` | load-test a Docker workspace on the same version |
 | `env --set`, `--setting`, `--unset` | the `helm upgrade` the refusal prints, or `houston api` for a setting |
+| `up --env` or `--setting` naming a variable the chart writes itself (`ROOT_URL`, `MONGO_URL`, `REG_TOKEN`, `DEPLOY_*`, Prometheus and microservice variables) | `--root-url` or `--domain`, `--reg-token`; anything else goes through |
 | `seed --scale` | `houston seed --name <name>` |
 | `up --https` on a cluster not on this machine | `--domain`, below |
 | Rocket.Chat below 8.0.0 on an arm64 node (such as Graviton) | an amd64 node: those images are amd64 only |
 | Rocket.Chat below 3.7.2 | Docker: no usable Helm chart exists |
 
-`logs`, `env` (reading), `upgrade`, `backup`, `restore`, `seed`, `monitor`, `api`, `pat`,
+`up --env` and `--setting` work on both runtimes, and a re-up, `backup` and `restore --new`
+keep them. `logs`, `env` (reading), `upgrade`, `backup`, `restore`, `seed`, `monitor`, `api`, `pat`,
 `token` and `stats` work on both runtimes (`stats` needs metrics-server and says how to
 install it).
 

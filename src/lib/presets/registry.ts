@@ -6,7 +6,7 @@
  *
  * WHO IMPORTS THE BUILDERS IS DELIBERATE. The owners could register themselves on first
  * use, with this module importing each; here the LOADER imports them and this module only
- * checks that all seven arrived. A rank-2
+ * checks that every builder arrived. A rank-2
  * registry reaching up to a rank-6 builder is the upward edge the layer gate exists to
  * forbid, and a dynamic `require()` would evade the gate rather than satisfy it. The
  * check with teeth -- "these names must be registered or nothing is returned" -- stays
@@ -34,6 +34,7 @@ export const SCENARIOS: Record<string, unknown> = {};
  * what the check needs, so the names are what is kept.
  */
 export const DYNAMIC_PRESETS: readonly string[] = Object.freeze([
+  'e2ee',
   'email',
   'ldap',
   'livechat',

@@ -11,7 +11,7 @@ import * as path from 'node:path';
 
 import { CreateFailedError, DockerError } from '../../lib/errors';
 import { info, nullEmit, warn, type Emit } from '../../lib/events';
-import { startDetached } from '../../seams/exec';
+import { Interrupted, capture, startDetached } from '../../seams/exec';
 
 import { answerWhy, askList, items, refused } from './ask';
 import { envFor, kube } from './exec';
@@ -36,6 +36,55 @@ export const UI_PORT_LABEL = 'houston.io/ui-port';
 export const ENDPOINT_WAIT_TRIES = 60;
 
 export const ENDPOINT_WAIT_INTERVAL = 2.0;
+
+/**
+ * Whether ownership is read from /proc. Everywhere else -- macOS, where the owner's kind
+ * workspaces run -- /proc is absent, every answer below came back empty, and a live forward
+ * read as dead: pid 0 recorded, "the port-forward did not stay up", and a fresh kubectl per
+ * check that died with "address already in use" while the first one kept the port. There,
+ * `lsof` and `ps` answer the same questions. Read per call, so a test can be a Mac.
+ */
+function hasProc(): boolean {
+  return process.platform === 'linux';
+}
+
+/** What `command` printed, or "" when it could not be run in time. Off Linux only. */
+async function printed(command: [string, ...string[]]): Promise<string> {
+  try {
+    return String((await capture(command, { encoding: 'utf8', timeoutMs: 5_000 })).stdout ?? '');
+  } catch (error) {
+    // A Ctrl-C mid-`ps` is the caller's to unwind, not "no such process".
+    if (error instanceof Interrupted) throw error;
+    return '';
+  }
+}
+
+/**
+ * Off Linux: the pids LISTENING on `port`, as `lsof -Fp` names them -- one `p<pid>` line
+ * per process, whatever families it bound.
+ *
+ * ponytail: lsof run as a non-root user sees only that user's processes, so a squatter
+ * belonging to someone else is invisible here where /proc/net/tcp would show it. Good enough
+ * for a laptop; run lsof through sudo if a shared Mac ever matters.
+ */
+async function listeningPids(port: number): Promise<Set<number>> {
+  const text = await printed(['lsof', '-nP', `-iTCP:${String(port)}`, '-sTCP:LISTEN', '-Fp']);
+  const out = new Set<number>();
+  for (const line of text.split('\n')) if (line.startsWith('p')) out.add(Number(line.slice(1)));
+  return out;
+}
+
+/** The command that names what listens on `port`. A Mac has no `ss`. */
+export function holderCommand(port: number): string {
+  return hasProc()
+    ? `ss -ltnp | grep ${String(port)}`
+    : `lsof -nP -iTCP:${String(port)} -sTCP:LISTEN`;
+}
+
+/** Whether anything at all listens on `port`. */
+async function portHeld(port: number): Promise<boolean> {
+  return hasProc() ? listeningInodes(port).size > 0 : (await listeningPids(port)).size > 0;
+}
 
 /** Socket inodes LISTENING on `port`, from /proc/net/tcp{,6}. */
 export function listeningInodes(port: number): Set<string> {
@@ -90,7 +139,8 @@ export function socketInodesOf(pid: number): Set<string> {
  * An unreadable /proc entry (a process that is not ours) yields no inodes and so answers
  * false, which is the safe direction.
  */
-export function pidOwnsPort(pid: number, port: number): boolean {
+export async function pidOwnsPort(pid: number, port: number): Promise<boolean> {
+  if (!hasProc()) return (await listeningPids(port)).has(pid);
   const inodes = listeningInodes(port);
   if (inodes.size === 0) return false;
   const mine = socketInodesOf(pid);
@@ -113,12 +163,48 @@ export function pidOwnsPort(pid: number, port: number): boolean {
  * `http://localhost:P`, and on a box whose `localhost` resolves to `::1` first, binding IPv4
  * only would break the URL for everybody.
  */
-export function pidOwnsPortExclusively(pid: number, port: number): boolean {
+export async function pidOwnsPortExclusively(pid: number, port: number): Promise<boolean> {
+  return await pidsOwnPortExclusively([pid], port);
+}
+
+/** `pidOwnsPortExclusively` for a supervised forward: the shell or the kubectl it runs. */
+async function pidsOwnPortExclusively(pids: readonly number[], port: number): Promise<boolean> {
+  if (!hasProc()) {
+    const listening = await listeningPids(port);
+    return listening.size > 0 && [...listening].every((pid) => pids.includes(pid));
+  }
   const inodes = listeningInodes(port);
   if (inodes.size === 0) return false;
-  const mine = socketInodesOf(pid);
+  const mine = new Set(pids.flatMap((pid) => [...socketInodesOf(pid)]));
   for (const inode of inodes) if (!mine.has(inode)) return false;
   return true;
+}
+
+/** `pid` and its children: a supervised forward's socket belongs to its kubectl. */
+async function withChildren(pid: number): Promise<number[]> {
+  if (!hasProc()) {
+    const text = await printed(['pgrep', '-P', String(pid)]);
+    return [
+      pid,
+      ...text
+        .split('\n')
+        .filter((line) => /^\d+$/u.test(line))
+        .map(Number),
+    ];
+  }
+  const out = [pid];
+  for (const entry of fs.readdirSync('/proc')) {
+    if (!/^\d+$/u.test(entry)) continue;
+    try {
+      // The parent is the second field after the command, which may itself hold ") ".
+      const stat = fs.readFileSync(`/proc/${entry}/stat`, 'utf8');
+      if (Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]) === pid)
+        out.push(Number(entry));
+    } catch {
+      // gone between the listing and the read
+    }
+  }
+  return out;
 }
 
 function alive(pid: number): boolean {
@@ -151,10 +237,10 @@ export async function forwardBound(
     if (!alive(pid)) return false;
     // OUR CHILD'S SOCKET, not "a socket". Asking whether the PORT answers made this return
     // true against a squatter every time, in a tenth of a millisecond.
-    if (pidOwnsPortExclusively(pid, hostPort)) return true;
+    if (await pidsOwnPortExclusively(await withChildren(pid), hostPort)) return true;
     await sleep(interval);
   }
-  return alive(pid) && pidOwnsPortExclusively(pid, hostPort);
+  return alive(pid) && (await pidsOwnPortExclusively(await withChildren(pid), hostPort));
 }
 
 /**
@@ -198,10 +284,16 @@ export async function forwardReachable(
  * kubectl that is also listening on exactly the port we recorded is a coincidence worth
  * accepting -- the alternative is calling every healthy forward on every k3s host dead.
  */
-function forwardAliveWithoutArgv(pid: number, hostPort: number | null): boolean {
+async function forwardAliveWithoutArgv(
+  pid: number,
+  hostPort: number | null,
+  argv: readonly string[],
+): Promise<boolean> {
   let comm: string;
   try {
-    comm = fs.readFileSync(`/proc/${String(pid)}/comm`, 'utf8').trim();
+    comm = hasProc()
+      ? fs.readFileSync(`/proc/${String(pid)}/comm`, 'utf8').trim()
+      : path.basename(argv[0] ?? '');
   } catch {
     return false;
   }
@@ -209,7 +301,24 @@ function forwardAliveWithoutArgv(pid: number, hostPort: number | null): boolean 
   if (hostPort === null) return true;
   // `pidOwnsPort`, not `forwardReachable`: "the port answers" is satisfied by whoever holds
   // it, which is exactly the confusion this fallback exists inside.
-  return pidOwnsPort(pid, hostPort);
+  return await pidOwnsPort(pid, hostPort);
+}
+
+/**
+ * A process's argv, or null for one that cannot be read. /proc keeps the NUL boundaries;
+ * `ps` joins with spaces, which splits no token a forward's argv carries.
+ */
+async function argvOf(pid: number): Promise<string[] | null> {
+  if (!hasProc()) {
+    const line = (await printed(['ps', '-o', 'args=', '-p', String(pid)])).trim();
+    return line === '' ? null : line.split(/\s+/u);
+  }
+  try {
+    const raw = fs.readFileSync(`/proc/${String(pid)}/cmdline`, 'utf8');
+    return raw.split('\0').filter((token) => token !== '');
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -223,24 +332,19 @@ function forwardAliveWithoutArgv(pid: number, hostPort: number | null): boolean 
  * The argv already carries the proof. Matched as whole NUL-separated tokens, because a
  * substring test lets `3000` match `13000`.
  */
-export function forwardAlive(
+export async function forwardAlive(
   pid: number | null | undefined,
   { namespace = '', hostPort = null }: { namespace?: string; hostPort?: number | null } = {},
-): boolean {
+): Promise<boolean> {
   if (pid === null || pid === undefined || pid === 0) return false;
-  let raw: string;
-  try {
-    raw = fs.readFileSync(`/proc/${String(pid)}/cmdline`, 'utf8');
-  } catch {
-    return false;
-  }
-  const argv = raw.split('\0').filter((token) => token !== '');
+  const argv = await argvOf(pid);
+  if (argv === null) return false;
   // AN ARGV OF ONE IS NOT AN ARGV THAT DISAGREES. On a host where `kubectl` is a symlink to
   // `k3s` -- which is every k3s host -- the multi-call binary rewrites its own command line
   // when it dispatches, so /proc/<pid>/cmdline reads `kubectl` and then nothing. Reading that
   // as "the forward is gone" made this respawn onto a port its own live forward already
   // held, on every call.
-  if (argv.length <= 1) return forwardAliveWithoutArgv(pid, hostPort);
+  if (argv.length <= 1) return await forwardAliveWithoutArgv(pid, hostPort, argv);
   if (!argv.includes('port-forward')) return false;
   if (namespace !== '' && !argv.includes(namespace)) return false;
   if (hostPort !== null && !argv.some((token) => token.startsWith(`${String(hostPort)}:`))) {
@@ -257,21 +361,17 @@ export function forwardAlive(
  * 3260 asked about 3261, got false, recorded pid 0 and walked away -- leaving the old
  * kubectl alive on 3260 with nothing able to find it again.
  */
-export function stopForward(
+export async function stopForward(
   pid: number | null | undefined,
   {
     namespace,
     hostPort,
     emit = nullEmit,
   }: { namespace: string; hostPort: number | null; emit?: Emit },
-): boolean {
+): Promise<boolean> {
   if (pid === null || pid === undefined || pid === 0) return false;
-  if (!forwardAlive(pid, { namespace, hostPort })) return false;
-  try {
-    process.kill(pid, 'SIGTERM');
-  } catch {
-    return false;
-  }
+  if (!(await forwardAlive(pid, { namespace, hostPort }))) return false;
+  if (!signalForward(pid)) return false;
   info(emit, `stopped the previous port-forward on :${String(hostPort)} (pid ${String(pid)})`, {
     phase: 'boot',
   });
@@ -303,12 +403,58 @@ function forwardArgv(
   return argv;
 }
 
+/**
+ * Stop a forward: SIGTERM to the process group it leads, so a supervisor takes its kubectl
+ * with it. Every forward is started detached, and so leads its own group. True if signalled.
+ */
+export function signalForward(pid: number): boolean {
+  try {
+    process.kill(-pid, 'SIGTERM');
+    return true;
+  } catch {
+    try {
+      process.kill(pid, 'SIGTERM');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+/** Starts in a row, each over in under 10 s, after which the supervisor stops trying. */
+export const QUICK_FAILURES = 60;
+
+/**
+ * The supervisor's loop: run `"$@"` again whenever it exits, pausing `pause` seconds, and
+ * give up after `quickFailures` runs in a row that each ended within ten seconds -- a
+ * namespace that is gone, a port someone else holds.
+ */
+export function supervisorScript(quickFailures: number, pause: number): string {
+  return (
+    `n=0; while [ "$n" -lt ${String(quickFailures)} ]; do s=$(date +%s); "$@"; ` +
+    'if [ $(($(date +%s) - s)) -lt 10 ]; then n=$((n + 1)); else n=0; fi; ' +
+    `sleep ${String(pause)}; done`
+  );
+}
+
+/**
+ * Start a forward that restarts itself. kubectl exits whenever its stream to the pod breaks --
+ * measured after 19 minutes with the pod healthy and never restarted -- and once `up` has
+ * returned nothing was left to start it again, so the URL stayed dead until somebody ran
+ * `houston ready`. The shell keeps kubectl's argv as its own trailing tokens, which is what
+ * `forwardAlive` reads, so a supervised forward is identified exactly as a bare kubectl is.
+ * Windows has no `sh`, and keeps the bare kubectl.
+ */
 async function spawnForward(argv: [string, ...string[]], context: string): Promise<number> {
   const env = envFor(context);
+  const supervised: [string, ...string[]] =
+    process.platform === 'win32'
+      ? argv
+      : ['sh', '-c', supervisorScript(QUICK_FAILURES, 2), 'houston-port-forward', ...argv];
   try {
     // Detached, so it outlives the `up` that started it -- the workspace has to stay
     // reachable after the command returns, exactly as a published Compose port does.
-    const child = await startDetached(argv, { ...(env !== undefined ? { env } : {}) });
+    const child = await startDetached(supervised, { ...(env !== undefined ? { env } : {}) });
     return child.pid;
   } catch {
     return 0;
@@ -408,7 +554,7 @@ export async function portForward(
   // THE OLD ONE GOES FIRST. A `--port` change leaves the previous kubectl alive holding the
   // previous port, with nothing able to find it again because every later lookup asks about
   // the NEW port.
-  stopForward(previousPid, {
+  await stopForward(previousPid, {
     namespace,
     hostPort: previousPort !== null && previousPort !== 0 ? previousPort : hostPort,
     emit,
@@ -427,16 +573,18 @@ export async function portForward(
   // CONFIRMED, not assumed: returning the pid recorded one for a kubectl that had already
   // exited because the port was taken.
   if (!(await forwardBound(pid, hostPort, { sleep }))) {
+    // Not left retrying: no record names it, so nothing would ever stop it.
+    signalForward(pid);
     // WHY IT DID NOT COME UP, rather than one guess applied to every cause. This asserted
     // "Something else probably holds that port" unconditionally, and the commonest cause is
     // the exact opposite: during a rolling update the pod the forward attached to goes away,
     // kubectl exits, and NOTHING holds the port. A false alarm that prescribes destroying
     // the workspace is worse than no alarm.
-    if (listeningInodes(hostPort).size > 0) {
+    if (await portHeld(hostPort)) {
       warn(
         emit,
         `the port-forward for '${name}' did not come up on port ${String(hostPort)}: ` +
-          `something else already holds it — \`ss -ltnp | grep ${String(hostPort)}\` says ` +
+          `something else already holds it — \`${holderCommand(hostPort)}\` says ` +
           `what, and \`houston down --name ${name}\` then \`houston up\` picks a free one.`,
         { phase: 'wait' },
       );
@@ -480,7 +628,7 @@ export async function ensurePortForward(
     emit?: Emit;
   },
 ): Promise<number> {
-  if (forwardAlive(pid, { namespace, hostPort })) return pid;
+  if (await forwardAlive(pid, { namespace, hostPort })) return pid;
   // The recorded pid is handed on as the one to retire: it is not alive ON THIS PORT, which
   // is a different statement from "it is not alive".
   return await portForward(name, {
@@ -591,6 +739,9 @@ export async function scenarioUiForwards(
       forwards[hostPort] = pid;
       info(emit, `${svc} published at http://localhost:${String(hostPort)}`, { phase: 'boot' });
     } else {
+      // Not left running: no record names a forward that never bound, so nothing would
+      // ever stop it, and the command below would find its port taken.
+      if (pid !== 0) signalForward(pid);
       warn(
         emit,
         `${svc} is running but http://localhost:${String(hostPort)} is not answering yet; ` +
@@ -631,6 +782,9 @@ export async function grafanaForward({
   if (pid === 0) return 0;
   // Same rule as the workspace forward. This path has form: it is where "reported attached
   // and exit 0, and a curl a moment later got nothing" was measured.
-  if (!(await forwardBound(pid, hostPort))) return 0;
+  if (!(await forwardBound(pid, hostPort))) {
+    signalForward(pid);
+    return 0;
+  }
   return pid;
 }

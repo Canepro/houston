@@ -14,6 +14,7 @@ import {
   ConflictError,
   PreflightError,
   ValidationError,
+  errorText,
 } from '../../lib/errors';
 import { type Emit, info, nullEmit, warn } from '../../lib/events';
 import { toText } from '../../lib/format';
@@ -35,9 +36,14 @@ import {
   recordIssuance,
   budgetWarning,
 } from '../tls';
-import { hostOwner, register as registerRoute } from '../edge/routes';
-import { installed as edgeInstalled } from '../edge/spec';
-import { attachNetwork, containerNetwork } from '../edge/networks';
+import {
+  deregister as deregisterRoute,
+  hostOwner,
+  register as registerRoute,
+} from '../edge/routes';
+import { forcedChallenge } from '../edge/types';
+import { installed as edgeInstalled, rewrite as rewriteEdge } from '../edge/spec';
+import { attachNetwork, containerNetwork, releaseVanished } from '../edge/networks';
 import { running as edgeRunning, portHolder } from '../edge/engine';
 import { ensureRunning } from '../edge/runtime';
 import { type IssuerSpec, ensureCertManager } from '../kube/certmanager';
@@ -53,8 +59,11 @@ import {
   ingressEndpoint,
   kindNodeContainer,
 } from '../kube/endpoints';
+import { updateConfig } from '../runner/locks';
 import * as paths from '../runner/paths';
 import { readMeta, recorded } from '../runner/record';
+import { ensureCa, issueLeaf } from '../tls-local';
+import * as fs from 'node:fs';
 
 import {
   PUBLISH_PROOF_PAUSE,
@@ -164,6 +173,14 @@ export function pickChallenge(
   cfg: Record<string, unknown>,
   emit: Emit = nullEmit,
 ): void {
+  // The escape hatch, as the edge honours it. Ignored here, `up --domain` asked for TLS-ALPN
+  // behind a tunnel or a proxy that terminates TLS, and the box's first certificate failed.
+  // A forced dns-01 still needs its credentials, below.
+  const forced = forcedChallenge(cfg);
+  if (forced === 'http' || forced === 'tlsalpn') {
+    req.acmeChallenge = forced;
+    return;
+  }
   if (dnsEnvVars().length === 0) {
     req.acmeChallenge = 'tlsalpn';
     return;
@@ -276,6 +293,14 @@ export async function resolveTls(
   }
 
   const mode = challengeMode(domain, emit, req);
+  // Remembered after the first use, as `serve` remembers it and as the refusal and --email's
+  // help promise: `up` read the box's address and never wrote one, so bringing an HTTPS
+  // workspace back without --email was refused.
+  if (mode === MODE_ACME && !toText(config.loadConfig().acme_email)) {
+    await updateConfig((cfg) => {
+      cfg.acme_email = req.acmeEmail;
+    });
+  }
   const host = domain || (await recordedLocalHost(reproName)) || localHostFor(reproName);
   // Every name answers on the edge's 443. No port is allocated per workspace and no port
   // is probed: this workspace terminates no TLS, so there is nothing to conflict with.
@@ -283,7 +308,20 @@ export async function resolveTls(
 
   // ONE NAME, ONE WORKSPACE. Both runtimes come through here, so this is the single place
   // the collision can be refused.
-  const taken = hostOwner(host, { excluding: exclude || reproName });
+  let taken = hostOwner(host, { excluding: exclude || reproName });
+  // A CLAIM WITH NO WORKSPACE BEHIND IT is released, not obeyed. A route file that outlived
+  // its record blocked every later `up --domain` with advice -- `houston down --name X` --
+  // that answered NOT_FOUND, and `prune` could not see it either: nothing could release it.
+  while (taken && !(await paths.exists(taken))) {
+    deregisterRoute(taken);
+    // And its network: the edge stayed attached, so the vanished workspace's network could
+    // never be removed ("Resource is still in use") and outlived even `edge stop`.
+    await releaseVanished(taken);
+    info(emit, `released ${host} from '${taken}', a workspace that no longer exists`, {
+      phase: 'tls',
+    });
+    taken = hostOwner(host, { excluding: exclude || reproName });
+  }
   if (taken) {
     throw new ConflictError(
       `${host} is already served for workspace '${taken}', and the edge routes by ` +
@@ -305,6 +343,38 @@ export async function resolveTls(
 }
 
 /**
+ * Where the cluster answers plain HTTP, for an ACME name's http-01 challenge, or ''.
+ *
+ * '' for a local-CA name (no challenge), for a cluster holding this host's ports itself
+ * (the challenge reaches it directly), and -- said, not thrown -- when the cluster's :80
+ * cannot be found: the workspace still comes up, only the certificate cannot.
+ */
+async function challengeEndpoint(ktls: KubeTls, emit: Emit): Promise<string> {
+  if (ktls.issuer?.mode !== 'acme' || ktls.clusterOwns443) return '';
+  let http: IngressEndpoint | null;
+  try {
+    http = await ingressEndpoint(String(ktls.context || ''), { port: 80 });
+  } catch (error) {
+    http = null;
+    warn(emit, `could not find where cluster '${ktls.context}' answers :80: ${errorText(error)}`, {
+      phase: 'tls',
+    });
+  }
+  if (http === null) {
+    warn(
+      emit,
+      `no Service in '${ktls.context}' publishes :80 to the outside, so the http-01 ` +
+        `challenge for ${ktls.host} cannot reach cert-manager and its certificate will not ` +
+        'issue. `kubectl get svc -A` — the ingress controller needs :80 as a NodePort or ' +
+        'LoadBalancer.',
+      { phase: 'tls' },
+    );
+    return '';
+  }
+  return endpointString(http);
+}
+
+/**
  * Put the name in front of the cluster. BEFORE the chart, and that is not tidiness.
  *
  * An ACME order starts the moment cert-manager sees the Ingress -- which the chart
@@ -321,8 +391,15 @@ export async function routeKubernetesName(
   ktls: KubeTls,
   { emit = nullEmit }: { emit?: Emit } = {},
 ): Promise<void> {
+  // cert-manager's http-01 challenge comes in on this host's :80, and the edge has to hand
+  // it to the cluster rather than redirect it to HTTPS, where there is no solver.
+  const challengeTo = await challengeEndpoint(ktls, emit);
   if (!ktls.clusterOwns443) {
-    if (!(await edgeRunning())) {
+    // REBUILT FROM THE RECORD when the challenge needs :80: an edge an earlier houston
+    // wrote redirects every :80 request ahead of any route, and `ensureRunning` below
+    // recreates it only if its command changed.
+    if (challengeTo !== '') await rewriteEdge();
+    if (challengeTo !== '' || !(await edgeRunning())) {
       info(emit, 'starting the edge (one Traefik, :80 and :443 for every name)', { phase: 'tls' });
       const started = await ensureRunning();
       if (!started.ok) {
@@ -359,7 +436,10 @@ export async function routeKubernetesName(
         );
       }
     }
-    await registerRoute(name, ktls.host, { passthrough: endpointString(ktls.endpoint) });
+    await registerRoute(name, ktls.host, {
+      passthrough: endpointString(ktls.endpoint),
+      passthroughHttp: challengeTo,
+    });
     info(
       emit,
       `${ktls.host} → ${endpointString(ktls.endpoint)} (${ktls.endpoint.source}), passed ` +
@@ -456,12 +536,37 @@ export async function publishKubernetesName(
   // even exist on a box that has only ever used `--domain`.
   const cafile = (ktls.issuer?.mode ?? 'local') !== 'acme' ? `${caDir()}/${CA_CRT}` : '';
   let seen: Awaited<ReturnType<typeof verify>> | null = null;
+  let fronted = '';
   for (let attempt = 0; attempt < PUBLISH_PROOF_TRIES; attempt += 1) {
     seen = await verify(ktls.host, cafile ? { port: 443, cafile } : { port: 443 });
+    // WHOSE certificate, when the edge passes the name through: a CDN in front answers the
+    // name with its own valid one. Behind Cloudflare this said "serving the cluster's
+    // certificate (Google Trust Services WE1)" while the cluster had issued nothing. The
+    // origin -- the ingress the edge hands the bytes to, asked with the name -- decides; an
+    // origin this machine cannot reach leaves the name's answer standing.
+    if (!ktls.clusterOwns443 && seen.serving && !seen.fallback) {
+      const origin = await verify(ktls.endpoint.address, {
+        port: ktls.endpoint.port,
+        sni: ktls.host,
+        ...(cafile ? { cafile } : {}),
+      });
+      if (origin.serving) {
+        fronted = origin.issuer !== seen.issuer ? seen.issuer : '';
+        seen = origin;
+      }
+    }
     if (seen.serving && !seen.fallback) break;
     if (attempt < PUBLISH_PROOF_TRIES - 1) await sleep(PUBLISH_PROOF_PAUSE);
   }
   reportWhatTheNameServes(certReady, emit, ktls, name, seen ?? {});
+  if (fronted !== '') {
+    info(
+      emit,
+      `${ktls.host} itself answers with ${fronted}: something in front of this machine (a ` +
+        "CDN or proxy) terminates TLS for the name, so browsers see its certificate, not the cluster's",
+      { phase: 'tls' },
+    );
+  }
 }
 
 /** Every reason this name cannot be served, checked before anything is installed. */
@@ -483,8 +588,8 @@ export async function refuseANameThatWillNotReach(
         : claim !== null && (claim.ports ?? []).includes(80)
           ? "the http-01 challenge will reach the cluster's ingress directly " +
             "— it holds this host's :80"
-          : "the http-01 challenge arrives on the edge's :80 and is redirected " +
-            'onto the passthrough, which reaches the cluster',
+          : "the http-01 challenge arrives on the edge's :80 and is routed to the " +
+            "cluster's own :80, ahead of the edge's HTTPS redirect",
       { phase: 'tls' },
     );
   }
@@ -575,7 +680,10 @@ export async function probeTheCluster(
   // the browser will trust". On this machine's own cluster that is the same trust boundary
   // as the box. On somebody else's it is not, and there is a better answer that needs no
   // CA at all.
-  if (spec.mode === 'local' && !isLocalCluster(pre.distribution || plan.distribution)) {
+  if (
+    spec.mode === 'local' &&
+    !(await isLocalCluster(pre.distribution || plan.distribution, context))
+  ) {
     throw new AuthorityGateError(
       "--https would copy houston's CA private key into a Secret in cluster " +
         `'${context}', which is not on this machine ` +
@@ -632,4 +740,17 @@ export async function kubernetesTlsPlan(
     context,
     clusterOwns443: owns,
   });
+}
+
+/**
+ * A certificate for a preset's directory, signed by houston's own CA, the one `trust-ca`
+ * installs: for `--set tls=ldaps|starttls` on the ldap preset. The name is the service name
+ * Rocket.Chat dials on either runtime.
+ */
+export async function issueDirectoryCertificate(
+  host = 'openldap',
+): Promise<{ crt: string; key: string; ca: string }> {
+  const [, caCrt] = await ensureCa();
+  const [crt, key] = await issueLeaf(host, [host]);
+  return { crt, key, ca: fs.readFileSync(caCrt, 'utf8') };
 }

@@ -70,6 +70,7 @@ describe('the rooms a profile holds', () => {
         TEAM_CHANNEL_PRIVATE,
         DISCUSSION,
         DM,
+        'group-dm',
         GENERAL,
       ]) {
         expect({ profile, kind, present: kinds.has(kind) }).toEqual({
@@ -92,7 +93,7 @@ describe('the rooms a profile holds', () => {
     for (let at = 0; at < (room?.messages ?? 0); at += THREAD_EVERY) expected.push(at);
     expect(room?.threads).toEqual(expected);
     expect(totalMessages(room as NonNullable<typeof room>)).toBe(
-      (room?.messages ?? 0) + (room?.threads.length ?? 0),
+      (room?.messages ?? 0) + replies(room as NonNullable<typeof room>) + (room?.files.length ?? 0),
     );
   });
 
@@ -104,10 +105,14 @@ describe('the rooms a profile holds', () => {
     const plain = plan.rooms.find((one) => one.kind === DISCUSSION && one.fromMessage < 0);
     expect(anchored).toBeDefined();
     expect(plain).toBeDefined();
-    expect(
-      totalMessages(anchored as NonNullable<typeof anchored>) -
-        totalMessages(plain as NonNullable<typeof plain>),
-    ).toBe(ANCHOR_MESSAGES);
+    const anchoredRoom = anchored as NonNullable<typeof anchored>;
+    const plainRoom = plain as NonNullable<typeof plain>;
+    expect(totalMessages(anchoredRoom)).toBe(
+      anchoredRoom.messages + replies(anchoredRoom) + anchoredRoom.files.length + ANCHOR_MESSAGES,
+    );
+    expect(totalMessages(plainRoom)).toBe(
+      plainRoom.messages + replies(plainRoom) + plainRoom.files.length,
+    );
     const seen = facts(plan);
     const lost = seen.rooms.find((one) => (one as RoomFacts).spec === anchored) as RoomFacts;
     lost.messages -= ANCHOR_MESSAGES;

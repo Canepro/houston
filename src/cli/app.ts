@@ -38,11 +38,17 @@ export interface Invocation {
   readonly events: EventWriter | null;
 }
 
-/** A successful command may intentionally return nonzero after its success envelope. */
+/**
+ * A command may intentionally return nonzero after its envelope. With `failure`, that
+ * envelope is the error one, carrying `data`: a loadtest that missed its SLO exited 1 under
+ * `ok: true, error: null`, so a script branching on `ok` and one branching on the exit code
+ * read two different answers.
+ */
 export interface CommandOutcome {
   readonly data: unknown;
   readonly exitCode: number;
   readonly commandOutcome: true;
+  readonly failure?: ReproError;
 }
 
 /**
@@ -51,11 +57,17 @@ export interface CommandOutcome {
  * what Node's `process.exitCode = -15` does and what earlier releases exit with too
  * (Kubernetes `logs`).
  */
-export function commandOutcome(data: unknown, exitCode: number): CommandOutcome {
+export function commandOutcome(
+  data: unknown,
+  exitCode: number,
+  failure?: ReproError,
+): CommandOutcome {
   if (!Number.isInteger(exitCode) || exitCode < -255 || exitCode > 255) {
     throw new Error(`invalid process exit code: ${String(exitCode)}`);
   }
-  return { data, exitCode, commandOutcome: true };
+  return failure === undefined
+    ? { data, exitCode, commandOutcome: true }
+    : { data, exitCode, commandOutcome: true, failure };
 }
 
 function isCommandOutcome(value: unknown): value is CommandOutcome {
@@ -294,17 +306,16 @@ function normalizeArguments(
 }
 
 /**
- * Refuse an action the command does not have, in the established wording and with its class.
+ * Refuse an action the command does not have, in the established wording, as a usage error.
  *
  * One place for the positional-action commands that refuse an unknown action FIRST, so it
  * has to say what each of those commands has always said: `edge` lists `delete <host>` rather
- * than a bare `delete`, and `cluster` is a `ValidationError` (exit 2, `VALIDATION` in an
- * envelope) with a sentence of its own, where the others are a plain error (exit 1). An
- * earlier version answered every one of them the same way.
+ * than a bare `delete`, and `cluster` has a sentence of its own. Every one is a
+ * `ValidationError` (exit 2, VALIDATION_FAILED): `edge frob` exited 1 where `cluster frob`
+ * exited 2, one mistake with two codes.
  *
- * Not `users`: `users` asks for the name before it looks at the action, so `users ls` is
- * "`users ls` needs a name" there, and the unknown action is the handler's to refuse once a
- * name is given.
+ * Not `users`: its handler refuses an unknown action itself, before it asks for the name, in
+ * the same words.
  */
 function validateAction(value: unknown, path: string, choices: readonly string[]): void {
   if (typeof value === 'string' && choices.includes(value)) return;
@@ -316,7 +327,7 @@ function validateAction(value: unknown, path: string, choices: readonly string[]
     path === 'edge'
       ? 'status | start | stop | restart | logs | delete <host>'
       : choices.join(' | ');
-  throw new ReproError(`unknown action ${shown} (want: ${want})`);
+  throw new ValidationError(`unknown action ${shown} (want: ${want})`);
 }
 
 /**
@@ -445,7 +456,12 @@ export function buildCli(options: BuildCliOptions): Command {
       validateInvocation(invocation);
       const result = await options.execute(invocation);
       const data = isCommandOutcome(result) ? result.data : result;
-      if (active()) reply(replyKind(invocation), preserveFloatFields(data));
+      const failure = isCommandOutcome(result) ? result.failure : undefined;
+      if (active() && failure !== undefined) {
+        emit(errorEnvelope(failure, { data: preserveFloatFields(data) }));
+      } else if (active()) {
+        reply(replyKind(invocation), preserveFloatFields(data));
+      }
       if (isCommandOutcome(result)) exitCodes.set(root, result.exitCode);
     });
   }
@@ -504,9 +520,10 @@ export async function runCli(argv: readonly string[], options: BuildCliOptions):
   const io = options.io ?? processIo;
   // THE FROZEN VERDICT FIRST. Help, the version and every usage error are decided as the
   // frozen CLI decides them, in its order (`./usage-error`), before commander sees argv. A usage
-  // error is the boxed usage-error panel on stderr, exit 2 and NOTHING on stdout -- no
-  // envelope, even under --json: the argv fails before any command runs, so none is
-  // written, and a caller told "exit 2 is usage" has nothing to parse.
+  // error is the boxed usage-error panel on stderr and exit 2 -- and, under --json, ONE
+  // error envelope on stdout. There was none ("the argv fails before any command runs"),
+  // so a script parsing the last line of `up --json` with a mistyped `--port` read nothing,
+  // where automation.md promises every reply is an envelope.
   try {
     // Inside the try, so a defect in the verdict itself is still reported through the
     // contract -- an envelope under --json, the stack trace on stderr, exit 1.
@@ -528,6 +545,11 @@ export async function runCli(argv: readonly string[], options: BuildCliOptions):
     }
     if (verdict.kind === 'usage') {
       panelUsage = true;
+      if (argv.includes('--json')) {
+        activate();
+        const failure = new ValidationError(verdict.message);
+        emit(errorEnvelope(failure, { warnings: envelopeWarnings(failure) }));
+      }
       io.writeErr(verdict.stderr);
       return 2;
     }

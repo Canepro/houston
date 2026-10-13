@@ -93,6 +93,13 @@ export const PRESET_PORTS: Readonly<Record<string, readonly number[]>> = Object.
 export const MONITOR_PORTS: readonly [number, number] = Object.freeze([9090, 5050]);
 
 /**
+ * Traefik, for the shared HTTPS edge and the multi-instance preset's load balancer: one pin,
+ * so a workspace that uses both runs one version. v3.4 stopped at 3.4.5 in July 2025; v3.7
+ * is the maintained line (3.7.0 in May 2026). Floating on the minor, for its patches.
+ */
+export const TRAEFIK_TAG = 'v3.7';
+
+/**
  * Host interface published ports bind to.
  *
  * LOOPBACK. Repros use weak fixed credentials, so they must not be reachable from the
@@ -138,6 +145,17 @@ export const CLOUD_ACCOUNTS_KEY = 'cluster_approved_accounts';
 
 /** RC's REST rate limiter -- disabled for the duration of a load test, then restored. */
 export const RC_RATE_LIMITER_SETTING = 'API_Enable_Rate_Limiter';
+
+/**
+ * The settings that make Rocket.Chat create new DMs and private rooms encrypted -- off for
+ * the duration of a seed, then restored, because the seeder sends plaintext and Rocket.Chat
+ * refuses plaintext in an encrypted room. The last exists from 8.8.0.
+ */
+export const E2EE_ROOM_DEFAULT_SETTINGS: readonly string[] = Object.freeze([
+  'E2E_Enabled_Default_DirectRooms',
+  'E2E_Enabled_Default_PrivateRooms',
+  'E2E_Force_Encryption_For_Private_Rooms',
+]);
 
 export const ENV_PREFIX = 'HOUSTON_';
 

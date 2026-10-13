@@ -4,7 +4,7 @@ import type * as recoveryNS from '../../src/core/recovery';
 
 /** The handler set earlier releases answered after install, sorted and joined, recorded. */
 const RECORDED_KINDS =
-  'bench_workspace,constraints_applied,email_2fa_off,mongo_profiler_on,' +
+  'bench_workspace,constraints_applied,e2ee_default_off,email_2fa_off,mongo_profiler_on,' +
   'rate_limiter_off,rc_metrics_on,rocketchat_stopped';
 
 describe('the recovery registry', () => {
@@ -17,6 +17,7 @@ describe('the recovery registry', () => {
     expect(journal.repairKinds()).toEqual([
       'bench_workspace',
       'constraints_applied',
+      'e2ee_default_off',
       'email_2fa_off',
       'mongo_profiler_on',
       'rate_limiter_off',

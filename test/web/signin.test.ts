@@ -34,7 +34,35 @@ describe('the server-rendered sign-in document', () => {
         'There are no accounts on this server yet. Create one on the host: ' +
           'houston users add &lt;name&gt;',
       ],
+      // Okta: one per reason `core/sso` refuses with, plus the callback with Okta off and
+      // the person already signed in as somebody else.
+      ...Object.fromEntries(Object.entries(STATES).filter(([state]) => state.startsWith('sso-'))),
     });
+    expect(
+      Object.keys(STATES)
+        .filter((state) => state.startsWith('sso-'))
+        .sort(),
+    ).toEqual(
+      [
+        'admin',
+        'denied',
+        'disabled',
+        'domain',
+        'down',
+        'email',
+        'expired',
+        'gone',
+        'name',
+        'noaccount',
+        'noadmin',
+        'off',
+        'other',
+        'provider',
+        'store',
+        'taken',
+        'token',
+      ].map((code) => `sso-${code}`),
+    );
     for (const [state, [kind, message]] of Object.entries(STATES)) {
       expect(page({ error: state })).toContain(`<p class="signin-banner ${kind}">${message}</p>`);
     }
@@ -59,6 +87,11 @@ describe('the server-rendered sign-in document', () => {
     ['/\\evil.example/path', '/'],
     ['/safe\\later', '/'],
     ['\u001c/wanted\u001c', '/wanted'],
+    // A browser drops tab, CR and LF before it parses a Location: each of these is //evil.
+    ['/\t/evil.example', '/'],
+    ['/\n/evil.example', '/'],
+    ['/\r/evil.example', '/'],
+    ['/a\u007fb', '/'],
   ])('reduces next=%j to %j', (value, expected) => {
     expect(safeNext(value)).toBe(expected);
   });

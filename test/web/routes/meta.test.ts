@@ -336,6 +336,24 @@ describe('the version preview', () => {
   });
 });
 
+describe('the preset list', () => {
+  it('says which presets can be created on Kubernetes', async () => {
+    const app = await appWith();
+    const alice = await signIn(app);
+    const listed = (await app.inject({ url: '/api/presets', headers: as(alice) })).json() as {
+      presets: { name: string; kubernetes: boolean }[];
+    };
+    const k8s = Object.fromEntries(
+      listed.presets.map((preset) => [preset.name, preset.kubernetes]),
+    );
+    expect([k8s.ldap, k8s.email, k8s.saml, k8s.default]).toEqual([true, true, true, true]);
+    // airgapped is settings only, so Kubernetes takes it as it is.
+    expect(k8s.airgapped).toBe(true);
+    // Several instances is the deployment shape, offered as such; not a preset to pick.
+    expect('multi-instance' in k8s).toBe(false);
+  });
+});
+
 describe('/api/doctor', () => {
   it('returns the report the CLI renders, verdict included', async () => {
     jest.mocked(doctor.runChecks).mockResolvedValue({
@@ -394,7 +412,7 @@ describe('the static assets', () => {
     // SIGNED IN, as earlier releases' test client was: signed out, `/` is a redirect to sign-in.
     const app = await appWith();
     const alice = await signIn(app);
-    for (const url of ['/', '/js/boot.js', '/js/main.js', '/app.css']) {
+    for (const url of ['/js/boot.js', '/js/main.js', '/app.css']) {
       const response = await app.inject({ url, headers: as(alice) });
       expect({ url, status: response.statusCode }).toEqual({ url, status: 200 });
       expect({ url, cache: response.headers['cache-control'] }).toEqual({ url, cache: 'no-cache' });
@@ -416,6 +434,24 @@ describe('the static assets', () => {
         'cache-control'
       ],
     ).toBeUndefined();
+  });
+});
+
+describe('the page after signing out', () => {
+  it('is never stored, so Back asks the server and is sent to sign-in', async () => {
+    // Back after signing out showed the cached page, whose modules were then answered with a
+    // redirect to sign-in: a shell with nothing running. `no-cache` lets a browser show its
+    // stored copy on Back without asking; `no-store` leaves it no copy to show.
+    const app = await appWith();
+    const alice = await signIn(app);
+    for (const url of ['/', '/index.html']) {
+      const page = await app.inject({ url, headers: as(alice) });
+      expect({ url, status: page.statusCode }).toEqual({ url, status: 200 });
+      expect({ url, cache: page.headers['cache-control'] }).toEqual({ url, cache: 'no-store' });
+    }
+    const signedOut = await app.inject({ url: '/', headers: { host: 'localhost' } });
+    expect(signedOut.statusCode).toBe(303);
+    expect(String(signedOut.headers.location)).toMatch(/^\/signin\?/u);
   });
 });
 

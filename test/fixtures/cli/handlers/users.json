@@ -41,7 +41,7 @@
   },
   "an admin given": {
     "code": 0,
-    "stdout": "✓ user 'dave' added.\n+- password for dave ---+\n|  Pinned-Minted-16     |\n+-----------------------+\n  Shown once. houston keeps only a scrypt hash, so nobody — including you —\n  can read it back. Send it over something the person can delete afterwards.\n  role: admin  (the first account has to be an admin, or nobody could promote anyone)\n",
+    "stdout": "✓ user 'dave' added.\n+- password for dave ---+\n|  Pinned-Minted-16     |\n+-----------------------+\n  Shown once. houston keeps only a scrypt hash, so nobody — including you —\n  can read it back. Send it over something the person can delete afterwards.\n  role: admin  — change it with `houston users role dave <role>`\n",
     "stderr": ""
   },
   "a two-letter name: the password is the panel's label": {

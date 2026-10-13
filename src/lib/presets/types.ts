@@ -39,6 +39,12 @@ export interface Preset {
   scenarioParams: Record<string, unknown>;
   kubernetesManifests: string[];
   error: string;
+  /**
+   * Env keys this preset sets only as a DEFAULT for what the workspace lacks (email 2FA off,
+   * because there is no mail server): another preset's hard value wins when they are
+   * composed. Absent means every key is hard, as it is for every user YAML preset.
+   */
+  softEnv?: string[];
 }
 
 /** The established defaults, in the established order. */

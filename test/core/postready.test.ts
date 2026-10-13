@@ -4,6 +4,7 @@ import type { Event } from '../../src/lib/events';
 
 import { metadata, type Metadata } from '../../src/core/runner/record';
 import { KUBERNETES, stamp } from '../../src/core/topology';
+import { Interrupted } from '../../src/seams/exec';
 
 import type * as ModNS from '../../src/core/postready';
 import type * as KubeExecNS from '../../src/core/kube/exec';
@@ -38,7 +39,11 @@ const noSleep = () => Promise.resolve();
 /** Load the module with `./rcapi` fully stubbed to one answer. */
 function withRcapi(answers: Record<string, unknown>) {
   jest.resetModules();
-  jest.doMock('../../src/core/rcapi', () => answers);
+  jest.doMock('../../src/core/rcapi', () => ({
+    getSetting: async () => 'keycloak',
+    samlProviderState: async () => 'unloaded',
+    ...answers,
+  }));
   return require('../../src/core/postready') as typeof ModNS;
 }
 
@@ -286,6 +291,24 @@ describe('every handler reports a boolean', () => {
     ]);
   });
 
+  it("keeps Keycloak's login chatter off houston's stderr", async () => {
+    // kcadm's "Logging into http://localhost:8080 as user admin of realm master" is on
+    // stderr, which a Docker exec shares with houston: it landed under `up --json` and on
+    // serve's console.
+    const scripts: string[] = [];
+    jest.doMock('../../src/core/runner/engine', () => ({
+      composeExec: (_name: string, _service: string, argv: string[]) => {
+        scripts.push(argv.join(' '));
+        return Promise.resolve(0);
+      },
+    }));
+    const postready = withRcapi(rcapiAnswering(true));
+    const m = meta();
+    m.extra.post_ready = [{ action: 'keycloak_master_ssl_off' }];
+    await postready.runPostReady(m, AUTH, recorder().emit, { sleep: noSleep });
+    expect(scripts.join('\n')).toMatch(/config credentials [^&]*>\/dev\/null 2>&1 &&/u);
+  });
+
   it('reports none as failed when everything works', async () => {
     jest.doMock('../../src/core/runner/engine', () => ({ composeExec: () => Promise.resolve(0) }));
     const postready = withRcapi(rcapiAnswering(true));
@@ -300,6 +323,423 @@ describe('every handler reports a boolean', () => {
     expect(joined).toContain("Omnichannel: 2 agent(s) available, 'Support' department");
     expect(joined).not.toContain('partly configured');
   });
+});
+
+describe('a SAML provider refreshed after a restart', () => {
+  afterEach(() => {
+    jest.dontMock('../../src/core/rcapi');
+    jest.resetModules();
+  });
+
+  function samlMeta(instances = 1): Metadata {
+    const m = meta({
+      rootUrl: 'http://localhost:3600',
+      hostPort: 3600,
+      extra: { instances },
+    });
+    m.extra.post_ready = [
+      {
+        action: 'saml_idp_cert',
+        descriptor_url: 'http://localhost:8081/descriptor',
+        setting: 'SAML_Custom_Default_cert',
+        enable_setting: 'SAML_Custom_Default',
+      },
+    ];
+    return m;
+  }
+
+  it('keeps an unchanged healthy SAML provider loaded without writing settings again', async () => {
+    const setSetting = jest.fn(async () => true);
+    const observed = new Map<string, number>();
+    const pauses: number[] = [];
+    const postready = withRcapi({
+      fetchSamlIdpCert: async () => 'CERT',
+      getSetting: async (_root: string, _auth: unknown, _pw: string, setting: string) =>
+        setting === 'SAML_Custom_Default_cert' ? 'CERT' : 'keycloak',
+      setSetting,
+      samlProviderReady: async (root: string) => {
+        observed.set(root, (observed.get(root) ?? 0) + 1);
+        return true;
+      },
+    });
+    const { said, emit } = recorder();
+    expect(
+      await postready.runPostReady(samlMeta(2), AUTH, emit, {
+        sleep: async (seconds) => {
+          pauses.push(seconds);
+        },
+      }),
+    ).toEqual([]);
+    expect(setSetting).not.toHaveBeenCalled();
+    expect(pauses).toEqual([3]);
+    expect([...observed.entries()].sort()).toEqual([
+      ['http://localhost:3600', 2],
+      ['http://localhost:3601', 2],
+      ['http://localhost:3602', 2],
+    ]);
+    expect(said.join(' ')).toContain('SAML login button registered');
+  });
+
+  it('says the certificate is already in place, not applied, when nothing was written', async () => {
+    // A healthy `ready` said "IdP cert applied" while every SAML setting kept its
+    // `_updatedAt`: nothing had been applied.
+    const postready = withRcapi({
+      fetchSamlIdpCert: async () => 'CERT',
+      getSetting: async (_root: string, _auth: unknown, _pw: string, setting: string) =>
+        setting === 'SAML_Custom_Default_cert' ? 'CERT' : 'keycloak',
+      setSetting: async () => true,
+      samlProviderReady: async () => true,
+    });
+    const { said, emit } = recorder();
+    await postready.runPostReady(samlMeta(), AUTH, emit, { sleep: noSleep });
+    expect(said).toContain('IdP cert already in place; SAML login button registered.');
+    expect(said.join(' ')).not.toContain('IdP cert applied');
+  });
+
+  it('waits for unchanged SAML settings to finish initial registration without toggling them', async () => {
+    let elapsed = 0;
+    const setSetting = jest.fn(async () => true);
+    const postready = withRcapi({
+      fetchSamlIdpCert: async () => 'CERT',
+      getSetting: async (_root: string, _auth: unknown, _pw: string, setting: string) =>
+        setting === 'SAML_Custom_Default_cert' ? 'CERT' : 'keycloak',
+      setSetting,
+      samlProviderReady: async (root: string) => root !== 'http://localhost:3602' || elapsed >= 6,
+    });
+    expect(
+      await postready.runPostReady(samlMeta(2), AUTH, recorder().emit, {
+        sleep: async (seconds) => {
+          elapsed += seconds;
+        },
+      }),
+    ).toEqual([]);
+    // The slow process answers missing-provider redirects while its initial load is
+    // pending. Two loaded observations are required after it finishes at six seconds.
+    expect(elapsed).toBe(9);
+    expect(setSetting).not.toHaveBeenCalled();
+  });
+
+  it.each(['missing', 'late-loaded'])(
+    'bounds unchanged SAML observation by wall time when the provider is %s',
+    async (state) => {
+      let clock = 0;
+      let repaired = false;
+      let firstWriteAt: number | undefined;
+      const timeouts: number[] = [];
+      const postready = withRcapi({
+        fetchSamlIdpCert: async () => 'CERT',
+        getSetting: async (_root: string, _auth: unknown, _pw: string, setting: string) =>
+          setting === 'SAML_Custom_Default_cert' ? 'CERT' : 'keycloak',
+        setSetting: async (
+          _root: string,
+          _auth: unknown,
+          _pw: string,
+          setting: string,
+          value: unknown,
+        ) => {
+          firstWriteAt ??= clock;
+          if (setting === 'SAML_Custom_Default' && value === true) repaired = true;
+          return true;
+        },
+        samlProviderReady: async (_root: string, { timeoutMs = 3_000 } = {}) => {
+          if (repaired) return true;
+          timeouts.push(timeoutMs);
+          const began = clock;
+          // Two slow requests consume real observation time, rather than only the
+          // polling sleeps. The last pair must fit the remaining one-second budget.
+          clock += Math.min(5_000, timeoutMs * 2);
+          return state === 'late-loaded' && began >= 24_000;
+        },
+      });
+      const now = jest.spyOn(Date, 'now').mockImplementation(() => clock);
+      try {
+        expect(
+          await postready.runPostReady(samlMeta(), AUTH, recorder().emit, {
+            sleep: async (seconds) => {
+              clock += seconds * 1000;
+            },
+          }),
+        ).toEqual([]);
+      } finally {
+        now.mockRestore();
+      }
+      expect(firstWriteAt).toBe(33_000);
+      expect(timeouts).toEqual([3_000, 3_000, 3_000, 3_000, 500]);
+    },
+  );
+
+  it('reloads an unchanged certificate when a replica loses its loaded provider', async () => {
+    const writes: unknown[] = [];
+    let observation = 0;
+    let repaired = false;
+    let elapsed = 0;
+    let firstWriteAt: number | undefined;
+    const postready = withRcapi({
+      fetchSamlIdpCert: async () => 'CERT',
+      getSetting: async (_root: string, _auth: unknown, _pw: string, setting: string) =>
+        setting === 'SAML_Custom_Default_cert' ? 'CERT' : 'keycloak',
+      setSetting: async (
+        _root: string,
+        _auth: unknown,
+        _pw: string,
+        setting: string,
+        value: unknown,
+      ) => {
+        firstWriteAt ??= elapsed;
+        if (setting === 'SAML_Custom_Default') writes.push(value);
+        if (setting === 'SAML_Custom_Default' && value === true) repaired = true;
+        return true;
+      },
+      // The first observation succeeds, but a replica then remains absent until a
+      // real reload repairs it. Waiting is bounded and cannot silently certify it.
+      samlProviderReady: async (root: string) => {
+        observation += 1;
+        return root !== 'http://localhost:3602' || observation <= 3 || repaired;
+      },
+    });
+    expect(
+      await postready.runPostReady(samlMeta(2), AUTH, recorder().emit, {
+        sleep: async (seconds) => {
+          elapsed += seconds;
+        },
+      }),
+    ).toEqual([]);
+    expect(firstWriteAt).toBe(33);
+    expect(writes).toEqual([false, false, false, true, true, true]);
+  });
+
+  it.each([false, true])(
+    'reports a refused enable-setting write (%s) instead of registration',
+    async (refused) => {
+      const postready = withRcapi({
+        fetchSamlIdpCert: async () => 'CERT',
+        setSetting: async (
+          _url: string,
+          _auth: unknown,
+          _pw: string,
+          setting: string,
+          value: unknown,
+        ) => setting !== 'SAML_Custom_Default' || value !== refused,
+        samlProviderReady: async () => true,
+      });
+      const { said, emit } = recorder();
+      expect(await postready.runPostReady(samlMeta(), AUTH, emit, { sleep: noSleep })).toEqual([
+        'saml_idp_cert',
+      ]);
+      expect(said.join(' ')).not.toContain('SAML login button registered');
+      expect(said.join(' ')).toContain('SAML_Custom_Default');
+    },
+  );
+
+  it('does not claim registration while the service list remains empty', async () => {
+    const postready = withRcapi({
+      fetchSamlIdpCert: async () => 'CERT',
+      setSetting: async () => true,
+      samlProviderReady: async () => false,
+    });
+    const { said, emit } = recorder();
+    expect(await postready.runPostReady(samlMeta(), AUTH, emit, { sleep: noSleep })).toEqual([
+      'saml_idp_cert',
+    ]);
+    expect(said.join(' ')).toContain('did not register on every instance');
+    expect(said.join(' ')).not.toContain('SAML login button registered');
+  });
+
+  it('lets the disabled provider reload before enabling it, then observes the registration', async () => {
+    let disabledAt = 0;
+    let elapsed = 0;
+    let registered = false;
+    const postready = withRcapi({
+      fetchSamlIdpCert: async () => 'CERT',
+      setSetting: async (
+        _url: string,
+        _auth: unknown,
+        _pw: string,
+        setting: string,
+        value: unknown,
+      ) => {
+        if (setting === 'SAML_Custom_Default' && value === false) disabledAt = elapsed;
+        if (setting === 'SAML_Custom_Default' && value === true) {
+          // Rocket.Chat debounces SAML reloads for two seconds; the previous one-second
+          // transition could leave a replica completing its disabled reload later.
+          registered = elapsed - disabledAt > 2;
+        }
+        return true;
+      },
+      samlProviderReady: async () => registered,
+    });
+    const sleep = async (seconds: number) => {
+      elapsed += seconds;
+    };
+    expect(await postready.runPostReady(samlMeta(), AUTH, recorder().emit, { sleep })).toEqual([]);
+    expect(registered).toBe(true);
+  });
+
+  it('refreshes each replica cache and waits for its own SAML provider to load', async () => {
+    const writes: { root: string; setting: string; value: unknown }[] = [];
+    const observed = new Map<string, number>();
+    const postready = withRcapi({
+      fetchSamlIdpCert: async () => 'CERT',
+      setSetting: async (
+        root: string,
+        _auth: unknown,
+        _pw: string,
+        setting: string,
+        value: unknown,
+      ) => {
+        writes.push({ root, setting, value });
+        return true;
+      },
+      samlProviderReady: async (root: string) => {
+        const attempt = (observed.get(root) ?? 0) + 1;
+        observed.set(root, attempt);
+        return root !== 'http://localhost:3602' || attempt > 1;
+      },
+    });
+    expect(
+      await postready.runPostReady(samlMeta(2), AUTH, recorder().emit, { sleep: noSleep }),
+    ).toEqual([]);
+    for (const root of [
+      'http://localhost:3600',
+      'http://localhost:3601',
+      'http://localhost:3602',
+    ]) {
+      expect(writes).toContainEqual({ root, setting: 'SAML_Custom_Default_cert', value: 'CERT' });
+      expect(writes).toContainEqual({ root, setting: 'SAML_Custom_Default', value: false });
+      expect(writes).toContainEqual({ root, setting: 'SAML_Custom_Default', value: true });
+      expect(observed.get(root)).toBeGreaterThanOrEqual(2);
+    }
+  });
+
+  it('waits for a slower replica to unload before re-enabling the shared SAML service', async () => {
+    let elapsed = 0;
+    let disabled = false;
+    let enabledTooSoon = false;
+    const observed = new Set<string>();
+    const postready = withRcapi({
+      fetchSamlIdpCert: async () => 'CERT',
+      setSetting: async (
+        _root: string,
+        _auth: unknown,
+        _pw: string,
+        setting: string,
+        value: unknown,
+      ) => {
+        if (setting === 'SAML_Custom_Default' && value === false) disabled = true;
+        if (setting === 'SAML_Custom_Default' && value === true) {
+          enabledTooSoon ||= elapsed < 9;
+          disabled = false;
+        }
+        return true;
+      },
+      samlProviderState: async (root: string) => {
+        observed.add(root);
+        return disabled && (root !== 'http://localhost:3602' || elapsed >= 6)
+          ? 'unloaded'
+          : 'loaded';
+      },
+      samlProviderReady: async () => !disabled && !enabledTooSoon,
+    });
+    const { said, emit } = recorder();
+    expect(
+      await postready.runPostReady(samlMeta(2), AUTH, emit, {
+        sleep: async (seconds) => {
+          elapsed += seconds;
+        },
+      }),
+    ).toEqual([]);
+    expect(enabledTooSoon).toBe(false);
+    expect([...observed].sort()).toEqual([
+      'http://localhost:3600',
+      'http://localhost:3601',
+      'http://localhost:3602',
+    ]);
+    expect(said.join(' ')).toContain('SAML login button registered');
+  });
+
+  it('does not treat an unreachable replica as unloaded, and restores enablement on timeout', async () => {
+    const writes: unknown[] = [];
+    const postready = withRcapi({
+      fetchSamlIdpCert: async () => 'CERT',
+      setSetting: async (
+        _root: string,
+        _auth: unknown,
+        _pw: string,
+        setting: string,
+        value: unknown,
+      ) => {
+        if (setting === 'SAML_Custom_Default') writes.push(value);
+        return true;
+      },
+      samlProviderState: async () => 'unknown',
+      samlProviderReady: async () => true,
+    });
+    const { said, emit } = recorder();
+    expect(await postready.runPostReady(samlMeta(), AUTH, emit, { sleep: noSleep })).toEqual([
+      'saml_idp_cert',
+    ]);
+    expect(writes).toEqual([false, true]);
+    expect(said.join(' ')).toContain('reload did not finish disabling on every instance');
+    expect(said.join(' ')).not.toContain('SAML login button registered');
+  });
+
+  it('restores SAML enablement after one replica refuses the disable write', async () => {
+    const enabled: string[] = [];
+    const postready = withRcapi({
+      fetchSamlIdpCert: async () => 'CERT',
+      setSetting: async (
+        root: string,
+        _auth: unknown,
+        _pw: string,
+        setting: string,
+        value: unknown,
+      ) => {
+        if (setting === 'SAML_Custom_Default' && value === true) enabled.push(root);
+        return setting !== 'SAML_Custom_Default' || value !== false || !root.endsWith(':3602');
+      },
+    });
+    expect(
+      await postready.runPostReady(samlMeta(2), AUTH, recorder().emit, { sleep: noSleep }),
+    ).toEqual(['saml_idp_cert']);
+    expect(enabled.sort()).toEqual([
+      'http://localhost:3600',
+      'http://localhost:3601',
+      'http://localhost:3602',
+    ]);
+  });
+
+  it.each(['observation', 'cancellation'])(
+    'restores SAML enablement when %s interrupts the unload wait',
+    async (failure) => {
+      const problem = failure === 'cancellation' ? new Interrupted() : new Error('probe failed');
+      const writes: unknown[] = [];
+      const postready = withRcapi({
+        fetchSamlIdpCert: async () => 'CERT',
+        setSetting: async (
+          _root: string,
+          _auth: unknown,
+          _pw: string,
+          setting: string,
+          value: unknown,
+        ) => {
+          if (setting === 'SAML_Custom_Default') writes.push(value);
+          return true;
+        },
+        samlProviderState: async () => {
+          if (failure === 'observation') throw problem;
+          return 'loaded';
+        },
+      });
+      await expect(
+        postready.runPostReady(samlMeta(), AUTH, recorder().emit, {
+          sleep: async () => {
+            throw problem;
+          },
+        }),
+      ).rejects.toBe(problem);
+      expect(writes).toEqual([false, true]);
+    },
+  );
 });
 
 describe('an OAuth provider that did not configure is not a success', () => {
@@ -395,6 +835,229 @@ describe('an OAuth provider that did not configure is not a success', () => {
     ]);
     expect(rounds).toBe(4); // one attempt, then three retries
   });
+
+  function oidcMeta(instances = 1): Metadata {
+    const m = meta({ preset: 'oidc', rootUrl: 'http://localhost:3600', hostPort: 3600 });
+    m.extra.instances = instances;
+    m.extra.post_ready = [
+      {
+        action: 'create_oauth_provider',
+        name: 'Keycloak',
+        settings: {
+          'Accounts_OAuth_Custom-Keycloak': true,
+          'Accounts_OAuth_Custom-Keycloak-url': 'http://keycloak:8085/realms/houston',
+          'Accounts_OAuth_Custom-Keycloak-show_button': true,
+        },
+      },
+    ];
+    return m;
+  }
+
+  const registered = () =>
+    Promise.resolve<[number, string]>([
+      200,
+      JSON.stringify({ success: true, configurations: [{ service: 'keycloak' }] }),
+    ]);
+
+  it('sets the URL before enabling so RC cannot poison its initial OAuth constructor', async () => {
+    let url: unknown;
+    let poisoned = false;
+    const writes: string[] = [];
+    const reads: string[] = [];
+    const postready = withRcapi({
+      addOauthService: async () => true,
+      setSetting: async (
+        _root: string,
+        _auth: unknown,
+        _pw: string,
+        sid: string,
+        value: unknown,
+      ) => {
+        writes.push(sid);
+        if (sid.endsWith('-url')) url = value;
+        if (sid === 'Accounts_OAuth_Custom-Keycloak' && value === true && typeof url !== 'string') {
+          poisoned = true;
+        }
+        return true; // The HTTP PATCH still succeeds when RC's asynchronous loader throws.
+      },
+      call: async (root: string) => {
+        reads.push(root);
+        return [200, JSON.stringify({ configurations: poisoned ? [] : [{ service: 'keycloak' }] })];
+      },
+    });
+    expect(
+      await postready.runPostReady(oidcMeta(2), AUTH, recorder().emit, { sleep: noSleep }),
+    ).toEqual([]);
+    expect(poisoned).toBe(false);
+    expect(writes).toEqual([
+      'Accounts_OAuth_Custom-Keycloak-url',
+      'Accounts_OAuth_Custom-Keycloak-show_button',
+      'Accounts_OAuth_Custom-Keycloak',
+    ]);
+    expect(reads).toEqual([
+      'http://localhost:3600',
+      'http://localhost:3601',
+      'http://localhost:3602',
+    ]);
+  });
+
+  it('leaves a new provider disabled when its configuration was refused', async () => {
+    const writes: string[] = [];
+    const postready = withRcapi({
+      addOauthService: async () => true,
+      setSetting: async (_root: string, _auth: unknown, _pw: string, sid: string) => {
+        writes.push(sid);
+        return !sid.endsWith('-url');
+      },
+      call: () => {
+        throw new Error('it observed an incompletely configured provider');
+      },
+    });
+    const { said, emit } = recorder();
+    expect(await postready.runPostReady(oidcMeta(), AUTH, emit, { sleep: noSleep })).toEqual([
+      'create_oauth_provider',
+    ]);
+    expect(writes).not.toContain('Accounts_OAuth_Custom-Keycloak');
+    expect(said.join(' ')).toContain('partly configured');
+    expect(said.join(' ')).not.toContain('login button registered');
+  });
+
+  it('names an enable refusal without retrying or reporting a registered button', async () => {
+    const writes: string[] = [];
+    const postready = withRcapi({
+      addOauthService: async () => true,
+      setSetting: async (_root: string, _auth: unknown, _pw: string, sid: string) => {
+        writes.push(sid);
+        return sid !== 'Accounts_OAuth_Custom-Keycloak';
+      },
+    });
+    const { said, emit } = recorder();
+    expect(await postready.runPostReady(oidcMeta(), AUTH, emit, { sleep: noSleep })).toEqual([
+      'create_oauth_provider',
+    ]);
+    expect(writes.filter((sid) => sid === 'Accounts_OAuth_Custom-Keycloak')).toHaveLength(1);
+    expect(said.join(' ')).toContain('Accounts_OAuth_Custom-Keycloak');
+    expect(said.join(' ')).not.toContain('login button registered');
+  });
+
+  it('waits for every replica registration without repeating the enable write', async () => {
+    let observations = 0;
+    const writes: unknown[] = [];
+    const waits: number[] = [];
+    const postready = withRcapi({
+      addOauthService: async () => true,
+      setSetting: async (
+        _root: string,
+        _auth: unknown,
+        _pw: string,
+        sid: string,
+        value: unknown,
+      ) => {
+        if (sid === 'Accounts_OAuth_Custom-Keycloak') writes.push(value);
+        return true;
+      },
+      call: async (
+        root: string,
+        method: string,
+        apiPath: string,
+        options: { timeoutMs: number },
+      ) => {
+        expect(method).toBe('GET');
+        expect(apiPath).toBe('/api/v1/service.configurations');
+        expect(options.timeoutMs).toBeLessThanOrEqual(3000);
+        observations += 1;
+        if (root.endsWith('3602') && observations <= 3) return [200, '{"configurations":[]}'];
+        return await registered();
+      },
+    });
+    expect(
+      await postready.runPostReady(oidcMeta(2), AUTH, recorder().emit, {
+        sleep: async (seconds) => {
+          waits.push(seconds);
+        },
+      }),
+    ).toEqual([]);
+    expect(observations).toBe(6);
+    expect(waits).toEqual([3]);
+    expect(writes).toEqual([true]);
+  });
+
+  it('reports absent or malformed registration after a bounded observation', async () => {
+    let observations = 0;
+    let waits = 0;
+    const postready = withRcapi({
+      addOauthService: async () => true,
+      setSetting: async () => true,
+      call: async () => {
+        observations += 1;
+        return observations % 2 ? [200, '{"configurations":[]}'] : [200, 'not JSON'];
+      },
+    });
+    const { said, emit } = recorder();
+    expect(
+      await postready.runPostReady(oidcMeta(), AUTH, emit, {
+        sleep: async () => {
+          waits += 1;
+        },
+      }),
+    ).toEqual(['create_oauth_provider']);
+    expect(observations).toBe(12);
+    expect(waits).toBe(11);
+    expect(said.join(' ')).toContain('did not register on every instance');
+    expect(said.join(' ')).toContain('partly configured');
+    expect(said.join(' ')).not.toContain('login button registered');
+  });
+
+  it('does not accept registration that answers after its observation deadline', async () => {
+    let now = 1000;
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const postready = withRcapi({
+      addOauthService: async () => true,
+      setSetting: async () => true,
+      call: async () => {
+        now += 33_001;
+        return await registered();
+      },
+    });
+    const { said, emit } = recorder();
+    try {
+      expect(await postready.runPostReady(oidcMeta(), AUTH, emit, { sleep: noSleep })).toEqual([
+        'create_oauth_provider',
+      ]);
+    } finally {
+      clock.mockRestore();
+    }
+    expect(said.join(' ')).toContain('did not register on every instance');
+    expect(said.join(' ')).not.toContain('login button registered');
+  });
+
+  it('keeps a healthy repeated ready enabled throughout configuration', async () => {
+    let enabled = true;
+    const writes: unknown[] = [];
+    const postready = withRcapi({
+      addOauthService: async () => true,
+      setSetting: async (
+        _root: string,
+        _auth: unknown,
+        _pw: string,
+        sid: string,
+        value: unknown,
+      ) => {
+        expect(enabled).toBe(true);
+        if (sid === 'Accounts_OAuth_Custom-Keycloak') {
+          writes.push(value);
+          enabled = value === true;
+        }
+        return true;
+      },
+      call: registered,
+    });
+    expect(
+      await postready.runPostReady(oidcMeta(), AUTH, recorder().emit, { sleep: noSleep }),
+    ).toEqual([]);
+    expect(writes).toEqual([true]);
+    expect(enabled).toBe(true);
+  });
 });
 
 describe('the livechat action', () => {
@@ -464,6 +1127,58 @@ describe('the livechat action', () => {
   });
 });
 
+describe('the e2ee test users', () => {
+  afterEach(() => {
+    jest.resetModules();
+  });
+
+  function e2eeMeta(): ReturnType<typeof meta> {
+    const m = meta({ preset: 'e2ee' });
+    m.extra.post_ready = [{ action: 'e2ee_users' }];
+    return m;
+  }
+
+  it('creates e2e-alice, e2e-bob and e2e-carol, each with nothing else done for them', async () => {
+    const made: string[] = [];
+    const postready = withRcapi({
+      createUser: (_u: string, _a: unknown, _p: string, username: string) => {
+        made.push(username);
+        return Promise.resolve(true);
+      },
+      getUserId: () => Promise.resolve(null),
+    });
+    const { said, emit } = recorder();
+    expect(await postready.runPostReady(e2eeMeta(), AUTH, emit, { sleep: noSleep })).toEqual([]);
+    expect(made).toEqual(['e2e-alice', 'e2e-bob', 'e2e-carol']);
+    expect(said.join(' ')).toContain('E2EE test users ready: e2e-alice, e2e-bob, e2e-carol');
+  });
+
+  it('keeps a user an earlier `ready` already made, which users.create refuses', async () => {
+    const postready = withRcapi({
+      createUser: (_u: string, _a: unknown, _p: string, username: string) =>
+        Promise.resolve(username !== 'e2e-bob'),
+      getUserId: (_u: string, _a: unknown, username: string) =>
+        Promise.resolve(username === 'e2e-bob' ? 'bob-id' : null),
+    });
+    expect(
+      await postready.runPostReady(e2eeMeta(), AUTH, recorder().emit, { sleep: noSleep }),
+    ).toEqual([]);
+  });
+
+  it('is a failure naming the users that could not be made', async () => {
+    const postready = withRcapi({
+      createUser: (_u: string, _a: unknown, _p: string, username: string) =>
+        Promise.resolve(username === 'e2e-alice'),
+      getUserId: () => Promise.resolve(null),
+    });
+    const { said, emit } = recorder();
+    expect(await postready.runPostReady(e2eeMeta(), AUTH, emit, { sleep: noSleep })).toEqual([
+      'e2ee_users',
+    ]);
+    expect(said.join(' ')).toContain('could not create the E2EE test users e2e-bob, e2e-carol');
+  });
+});
+
 describe('the keycloak action reads its fields the way earlier releases do', () => {
   afterEach(() => {
     jest.resetModules();
@@ -504,5 +1219,33 @@ describe('the keycloak action reads its fields the way earlier releases do', () 
     await postready.runPostReady(m, AUTH, recorder().emit, { sleep: noSleep });
     expect(calls[0]?.service).toBe('keycloak');
     expect(calls[0]?.argv[2]).toContain('http://localhost:8080');
+  });
+});
+
+describe('Keycloak under a path', () => {
+  afterEach(() => {
+    jest.resetModules();
+  });
+
+  it('is configured at that path, where it now answers', async () => {
+    jest.resetModules();
+    const seen: string[][] = [];
+    jest.doMock('../../src/core/runner/engine', () => ({
+      composeExec: (_name: string, _svc: string, argv: string[]) => {
+        seen.push(argv);
+        return Promise.resolve(0);
+      },
+    }));
+    const postready = require('../../src/core/postready') as typeof ModNS;
+    const m = metadata({ name: 'kc', project: 'houston-kc' });
+    const { emit } = recorder();
+    await postready.POST_READY_ACTIONS.keycloak_master_ssl_off?.(
+      m,
+      { base: 'http://localhost:3000', userId: 'u', token: 't' } as never,
+      { action: 'keycloak_master_ssl_off', path: '/keycloak' },
+      emit,
+      noSleep,
+    );
+    expect(seen[0]?.[2]).toContain('--server http://localhost:8080/keycloak ');
   });
 });

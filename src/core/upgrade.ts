@@ -32,6 +32,7 @@ import {
 } from '../lib/errors';
 import { type Emit, info, nullEmit, warn } from '../lib/events';
 import { joinPath } from '../lib/home';
+import { cleanup } from '../seams/exec';
 import { InvalidVersion, compareVersions, parseVersion, type Version } from '../lib/version-spec';
 import {
   floatString,
@@ -42,17 +43,25 @@ import {
   valueKind,
   roundSeconds,
 } from '../lib/format';
-import { InvalidVersionError, type Resolved, resolve as resolveVersion } from '../lib/versions';
+import {
+  InvalidVersionError,
+  type ReleaseFetcher,
+  type Resolved,
+  isBuildTag,
+  resolve as resolveVersion,
+} from '../lib/versions';
 
 import * as audit from './audit';
 import * as backup from './backup';
 import { resolveName } from './lifecycle/naming';
 import { mayDestroy } from './lifecycle/ownership';
 import { requireEngine } from './lifecycle/preconditions';
+import { LAST_BACKUP_KEY, UPGRADE_FROM_KEY } from './lifecycle/types';
+import { releaseFetcher } from './lifecycle/request';
 import { waitAndFinalize } from './lifecycle/ready';
 import { apiInfo } from './rcapi';
-import { composeLogsCapture, stopServices, up } from './runner/engine';
-import { containerDetails, rcState } from './runner/queries';
+import { composeLogsCapture, startServices, up } from './runner/engine';
+import { containerDetails, rcState, runningWriterServices } from './runner/queries';
 import {
   type Metadata,
   readCompose,
@@ -66,9 +75,7 @@ import * as topology from './topology';
 
 type Bag = Record<string, unknown>;
 
-/** Where the automatic pre-upgrade bundle is recorded, so --rollback finds it. */
-export const LAST_BACKUP_KEY = 'last_upgrade_backup';
-export const UPGRADE_FROM_KEY = 'upgraded_from';
+export { LAST_BACKUP_KEY, UPGRADE_FROM_KEY };
 
 function bagOf(value: unknown): Bag {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return {};
@@ -85,15 +92,27 @@ function versionOf(value: unknown): Version | null {
 }
 
 /** `versions.resolve`, its refusal of a version translated to a ValidationError. */
-export function resolveOrRefuse(toVersion: string, offline: boolean): Resolved {
+export function resolveOrRefuse(
+  toVersion: string,
+  offline: boolean,
+  fetcher?: ReleaseFetcher,
+): Resolved {
   try {
-    return resolveVersion(toVersion, { offline });
+    return resolveVersion(toVersion, { offline, ...(fetcher === undefined ? {} : { fetcher }) });
   } catch (error) {
     // `InvalidVersionError` alone. Anything else -- a broken shipped map, a bug in the
     // resolver -- propagates as it always has, rather than being retyped as a caller
     // mistake.
-    if (error instanceof InvalidVersionError) throw new ValidationError(errorText(error));
-    throw error;
+    if (!(error instanceof InvalidVersionError)) throw error;
+    // A CI build's version is read from GitHub. The resolver's own way round names
+    // `--rc-image` and `--version`, which `up` has and `upgrade` does not.
+    if (isBuildTag(toVersion)) {
+      throw new ValidationError(
+        `${quotedText(toVersion)} is a CI build, and its version is read from GitHub, which ` +
+          'needs the network: run the upgrade without --offline, on a box that can reach it',
+      );
+    }
+    throw new ValidationError(errorText(error));
   }
 }
 
@@ -161,6 +180,27 @@ export async function canUpgrade(name: string): Promise<Bag> {
   }
 }
 
+/**
+ * The unit a featureCompatibilityVersion step moves by. Before 5.0 each major.minor is one
+ * (3.6, 4.0, 4.2, 4.4: 4.0 -> 4.4 is two steps); from 5.0 each major is.
+ */
+const PRE_5_SERIES = ['3.0', '3.2', '3.4', '3.6', '4.0', '4.2', '4.4'];
+
+function seriesOf(version: Version): string {
+  const [major = 0, minor = 0] = version.release;
+  return major < 5 ? `${String(major)}.${String(minor)}` : String(major);
+}
+
+/** Every series from `from` up to `to`; none for a move down, which is refused anyway. */
+function seriesSteps(from: Version, to: Version): string[] {
+  const top = to.release[0] ?? 0;
+  const all = [...PRE_5_SERIES];
+  for (let major = 5; major <= top; major += 1) all.push(String(major));
+  const start = all.indexOf(seriesOf(from));
+  const end = all.indexOf(seriesOf(to));
+  return start < 0 || end < start ? [] : all.slice(start, end + 1);
+}
+
 /** Whether the new pairing crosses a MongoDB major, and what to say about it. */
 export function mongoMove(
   blocked: string,
@@ -168,22 +208,33 @@ export function mongoMove(
   name: string,
   resolved: Resolved,
   warnings: string[],
-): { blocked: string; mongoChange: string } {
+): { blocked: string; mongoChange: string; keepMongo: boolean } {
   const curMongo = versionOf(meta.mongoTag);
   const newMongo = versionOf(resolved.mongoTag);
   let mongoChange = '';
+  // KEPT, when the target runs on it. The pairing is what a FRESH workspace of that version
+  // gets; an upgrade only replaces Rocket.Chat, so a MongoDB the target supports stays.
+  // 7.12 -> 7.13 was refused "(7 -> 8)" -- 7.13 is paired with 8.0 and runs on 7.0.
+  const supported = (resolved.supports ?? [])
+    .map((tag) => versionOf(tag))
+    .some((tag) => tag !== null && curMongo !== null && seriesOf(tag) === seriesOf(curMongo));
   if (
     curMongo !== null &&
     newMongo !== null &&
-    (newMongo.release[0] ?? 0) !== (curMongo.release[0] ?? 0)
+    seriesOf(newMongo) !== seriesOf(curMongo) &&
+    supported
   ) {
+    warnings.push(
+      `MongoDB stays at ${meta.mongoTag}: Rocket.Chat ${resolved.rcVersion} runs on it ` +
+        `(a new ${resolved.rcVersion} workspace would get ${resolved.mongoTag})`,
+    );
+    return { blocked, mongoChange, keepMongo: true };
+  }
+  if (curMongo !== null && newMongo !== null && seriesOf(newMongo) !== seriesOf(curMongo)) {
     // Refused, not attempted. Mongo majors must be stepped one at a time with a
     // featureCompatibilityVersion bump between each; doing it in one move is how the
     // data is lost.
-    const steps: string[] = [];
-    for (let major = curMongo.release[0] ?? 0; major <= (newMongo.release[0] ?? 0); major += 1) {
-      steps.push(String(major));
-    }
+    const steps = seriesSteps(curMongo, newMongo);
     mongoChange =
       `Rocket.Chat ${resolved.rcVersion} pairs with MongoDB ${resolved.mongoTag}, ` +
       `but ${quotedText(name)} runs MongoDB ${meta.mongoTag}. MongoDB majors have to be ` +
@@ -196,20 +247,28 @@ export function mongoMove(
         'container keeps its data volume and is not recreated by this upgrade',
     );
   }
-  return { blocked, mongoChange };
+  return { blocked, mongoChange, keepMongo: false };
 }
 
 /** Resolve what an upgrade would do, without doing any of it. */
 export async function plan(
   name: string,
   toVersion: string,
-  { offline = false }: { offline?: boolean } = {},
+  { offline = false, fetcher }: { offline?: boolean; fetcher?: ReleaseFetcher } = {},
 ): Promise<Bag> {
   const meta = await requireRunning(name);
   if (toVersion === '') {
     throw new ValidationError('no target version given, e.g. `--to 8.6.1`');
   }
-  const resolved = resolveOrRefuse(toVersion, offline);
+  // ASKED ONLINE, as `up` asks. Resolved from the shipped map alone, any x.y.z inside a
+  // known series looked real -- the GUI planned and enabled an upgrade to 8.99.0, which
+  // would have taken a backup and then failed on the pull -- and a CI build could never be
+  // resolved at all.
+  const resolved = resolveOrRefuse(
+    toVersion,
+    offline,
+    await releaseFetcher(toVersion, offline, fetcher),
+  );
 
   const cur = versionOf(meta.rcVersion);
   const next = versionOf(resolved.rcVersion);
@@ -217,7 +276,11 @@ export async function plan(
   let direction = 'same';
   const warnings: string[] = [];
 
-  if (resolved.rcVersion === meta.rcVersion) {
+  if (resolved.source === 'map (no such release)') {
+    blocked =
+      `releases.rocket.chat has no ${resolved.rcVersion}, so there is no image to upgrade ` +
+      `to — \`houston versions ${resolved.rcVersion}\` says what it knows`;
+  } else if (resolved.rcVersion === meta.rcVersion) {
     blocked = `${quotedText(name)} is already at ${meta.rcVersion}`;
   } else if (cur !== null && next !== null && compareVersions(next, cur) < 0) {
     direction = 'downgrade';
@@ -234,7 +297,11 @@ export async function plan(
     );
   }
 
-  const { blocked: afterMongo, mongoChange } = mongoMove(blocked, meta, name, resolved, warnings);
+  const {
+    blocked: afterMongo,
+    mongoChange,
+    keepMongo,
+  } = mongoMove(blocked, meta, name, resolved, warnings);
   blocked = afterMongo;
 
   if (isTruthy(bagOf(meta.extra).tls)) {
@@ -250,7 +317,7 @@ export async function plan(
     to_version: resolved.rcVersion,
     rc_image: resolved.rcImage,
     from_mongo: meta.mongoTag,
-    to_mongo: resolved.mongoTag,
+    to_mongo: keepMongo ? meta.mongoTag : resolved.mongoTag,
     mongo_blocked: mongoChange,
     direction,
     allowed: blocked === '',
@@ -280,7 +347,7 @@ export function applyImage(doc: Bag, rcImage: string, tag: string, oplog: boolea
     .sort()) {
     const service = bagOf(services[svc]);
     services[svc] = service;
-    service.image = `${rcImage}:${tag}`;
+    service.image = compose.imageRef(rcImage, tag);
     if (!('environment' in service)) service.environment = {};
     const existing = service.environment;
     const env = Array.isArray(existing)
@@ -563,7 +630,31 @@ export async function runLocked(
   let doc: Bag | null = null;
   if (!kubeFlag) {
     const services = await rcServices(target);
-    await stopServices(target, services);
+    const running = await runningWriterServices(target, services);
+    try {
+      await backup.stopWriters(target, services);
+    } catch (error) {
+      if (running.length > 0) {
+        try {
+          await cleanup(async () => {
+            if ((await startServices(target, running)) !== 0) {
+              warn(
+                emit,
+                `Rocket.Chat did not recover after the failed upgrade stop; run \`houston start --name ${target}\``,
+                { phase: 'upgrade' },
+              );
+            }
+          });
+        } catch (recoveryError) {
+          warn(
+            emit,
+            `Rocket.Chat did not recover after the failed upgrade stop: ${errorText(recoveryError)}`,
+            { phase: 'upgrade' },
+          );
+        }
+      }
+      throw error;
+    }
     doc = await readCompose(target);
     if (applyImage(doc, String(p.rc_image), String(p.to_version), isTruthy(p.oplog)) === 0) {
       throw new DockerError(`${quotedText(target)} has no rocketchat service to upgrade`);
@@ -647,13 +738,13 @@ export async function applyKubernetes(target: string, p: Bag, emit: Emit): Promi
     phase: 'boot',
     pct: 45,
   });
-  const [repo] = splitImage(String(p.rc_image), String(p.to_version));
+  const [repo, tag] = splitImage(String(p.rc_image), String(p.to_version));
   await upgradeImage({
     namespace,
     context,
     chartVersion,
     imageRepo: repo,
-    tag: String(p.to_version),
+    tag,
     oplog: isTruthy(p.oplog),
   });
   // The recorded values.yaml exists so a human can read what was deployed -- and after
@@ -740,7 +831,7 @@ export async function rollbackKubernetes(
   const { upgradeImage } = await import('./kube/release');
   const [context, namespace] = await kubeTarget(target);
   const chartVersion = await resolveChartVersion(previous.rcVersion, emit);
-  const [repo] = splitImage(previous.rcImage, previous.rcVersion);
+  const [repo, tag] = splitImage(previous.rcImage, previous.rcVersion);
   // A recorded version that parses and is below 8: an unparseable recorded version
   // is NOT treated as a pre-8 release -- that would add MONGO_OPLOG_URL to a workspace
   // whose version nobody can name.
@@ -750,7 +841,7 @@ export async function rollbackKubernetes(
     context,
     chartVersion,
     imageRepo: repo,
-    tag: previous.rcVersion,
+    tag,
     oplog: previousVersion !== null && (previousVersion.release[0] ?? 0) < 8,
   });
   await updateMeta(target, (m) => {
@@ -792,7 +883,10 @@ export async function migrationErrors(name: string, tail = 400): Promise<string[
       await logProcess(name, { context, tail, follow: false, onLine: (line) => lines.push(line) });
       text = lines.map((line) => `${line}\n`).join('');
     } else {
-      text = await composeLogsCapture(name, { tail });
+      // Rocket.Chat's own services only: Grafana logs "Executing migration ... error_string
+      // column" at info level on every start, and four of those were reported as migration
+      // errors after a clean upgrade.
+      text = await composeLogsCapture(name, { tail, services: await rcServices(name) });
     }
   } catch {
     // logs are a nicety, never a failure

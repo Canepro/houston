@@ -3,8 +3,8 @@
  */
 import { projectName } from '../runner/record';
 
-import { dockerRun } from './engine';
-import { CONTAINER } from './paths';
+import { dockerRun, repairRootlessIngress } from './engine';
+import { CONTAINER, edgeLock } from './paths';
 
 /** The network compose creates for a workspace: `<project>_default`. */
 export async function workspaceNetwork(name: string): Promise<string> {
@@ -75,11 +75,17 @@ export async function attachedNetworks(): Promise<Set<string>> {
  * attached to both.
  */
 export async function attach(name: string): Promise<boolean> {
-  const net = await workspaceNetwork(name);
-  if ((await attachedNetworks()).has(net)) return true;
-  // A workspace that has never been `up`ed has no network yet; not an error, the attach
-  // simply happens after it is created.
-  return (await dockerRun(['network', 'connect', net, CONTAINER])).returncode === 0;
+  return await edgeLock(async () => {
+    const net = await workspaceNetwork(name);
+    if (!(await attachedNetworks()).has(net)) {
+      // A workspace that has never been `up`ed has no network yet; not an error, the attach
+      // simply happens after it is created.
+      const joined = await dockerRun(['network', 'connect', net, CONTAINER]);
+      if (joined.returncode !== 0) return false;
+    }
+    await repairRootlessIngress();
+    return true;
+  });
 }
 
 /**
@@ -97,8 +103,15 @@ export async function attach(name: string): Promise<boolean> {
  * container-name routing rule readable.
  */
 export async function attachNetwork(net: string): Promise<boolean> {
-  if (net === '' || (await attachedNetworks()).has(net)) return true;
-  return (await dockerRun(['network', 'connect', net, CONTAINER])).returncode === 0;
+  if (net === '') return true;
+  return await edgeLock(async () => {
+    if (!(await attachedNetworks()).has(net)) {
+      const joined = await dockerRun(['network', 'connect', net, CONTAINER]);
+      if (joined.returncode !== 0) return false;
+    }
+    await repairRootlessIngress();
+    return true;
+  });
 }
 
 /**
@@ -120,7 +133,35 @@ export async function containerNetwork(container: string): Promise<string> {
   return names[0] ?? '';
 }
 
-/** Leave `name`'s network. Best-effort -- the network may already be gone. */
+/** Leave `name`'s network. A missing network is harmless; a failed ingress repair raises. */
 export async function detach(name: string): Promise<void> {
-  await dockerRun(['network', 'disconnect', '-f', await workspaceNetwork(name), CONTAINER]);
+  await edgeLock(async () => {
+    const left = await dockerRun([
+      'network',
+      'disconnect',
+      '-f',
+      await workspaceNetwork(name),
+      CONTAINER,
+    ]);
+    if (left.returncode === 0) await repairRootlessIngress();
+  });
+}
+
+/**
+ * Let go of a VANISHED workspace's network: leave it, then remove it once no container of
+ * the workspace is left. With the edge attached, compose could not remove it ("Resource is
+ * still in use") and it outlived even `edge stop`. A container still there keeps it, so a
+ * workspace whose record alone went keeps a network to start on. Best-effort.
+ */
+export async function releaseVanished(name: string): Promise<void> {
+  await detach(name);
+  const project = await projectName(name);
+  const left = await dockerRun([
+    'ps',
+    '-aq',
+    '--filter',
+    `label=com.docker.compose.project=${project}`,
+  ]);
+  if (left.returncode !== 0 || left.stdout.trim() !== '') return;
+  await dockerRun(['network', 'rm', await workspaceNetwork(name)]);
 }

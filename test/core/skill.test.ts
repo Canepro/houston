@@ -2,7 +2,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { AuthorityGateError, ConflictError, EXIT_CODES, NotFoundError } from '../../src/lib/errors';
+import {
+  AuthorityGateError,
+  ConflictError,
+  EXIT_CODES,
+  ValidationError,
+} from '../../src/lib/errors';
 import * as presets from '../../src/lib/presets/index';
 import * as seedPlan from '../../src/seed/plan';
 import { getHoustonVersion } from '../../src/lib/jsonout';
@@ -59,10 +64,12 @@ describe('hosts', () => {
     expect(target('agents')).toBe(path.join(skillHome, '.agents', 'skills', SKILL_DIR, SKILL_FILE));
   });
 
-  it('raises NotFoundError for a host it does not know, naming the ones it does', () => {
-    expect(() => target('emacs')).toThrow(NotFoundError);
+  it('raises a usage error, exit 2, for a host it does not know, naming the ones it does', () => {
+    // `--host bogus` is a bad flag value. It was a NotFoundError, exit 4, which the contract
+    // keeps for a missing workspace (L7-07).
+    expect(() => target('emacs')).toThrow(ValidationError);
     expect(() => target('emacs')).toThrow(/want agents \| claude or all/u);
-    expect(() => hostSkillDir('emacs')).toThrow(NotFoundError);
+    expect(() => hostSkillDir('emacs')).toThrow(ValidationError);
   });
 
   it('refuses an unknown host as earlier releases do: quoted their way, and an own key', () => {
@@ -81,10 +88,10 @@ describe('hosts', () => {
       }
     });
     expect(ours[0]).toEqual([
-      'NotFoundError',
+      'ValidationError',
       'unknown skill host "o\'x" (want agents | claude or all)',
     ]);
-    expect(ours[3]?.[0]).toBe('NotFoundError');
+    expect(ours[3]?.[0]).toBe('ValidationError');
   });
 
   it('owns the DIRECTORY a skill sits in, so a second caller cannot rebuild it wrongly', () => {
@@ -371,7 +378,9 @@ describe('the numbers the skill states', () => {
 
   it('states the standard seed shape the plan builds', () => {
     const match =
-      /`standard` is (\d+) rooms, (\d+) messages, (\d+) threads across (\d+) users/u.exec(text());
+      /`standard` is (\d+) rooms, (\d+) content messages and (\d+) thread replies across (\d+) users/u.exec(
+        text(),
+      );
     expect(match).not.toBeNull();
     const plan = seedPlan.planFrom('standard');
     expect(match?.slice(1).map(Number)).toEqual([
@@ -389,7 +398,9 @@ describe('the numbers the skill states', () => {
     );
     const catalog = new Set(presets.listPresets().map((pre) => pre.name));
     expect([...listed].filter((name) => !catalog.has(name as string))).toEqual([]);
-    expect([...catalog].filter((name) => !listed.has(name))).toEqual(['multi-instance']);
+    // The catalogue no longer lists the deployment axis's old preset name, and neither does
+    // the skill's preset sentence; the skill names the old spelling elsewhere.
+    expect([...catalog].filter((name) => !listed.has(name))).toEqual([]);
     expect(text()).toContain('--preset multi-instance');
   });
 

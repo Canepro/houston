@@ -5,8 +5,11 @@
  * of this shape; when the two drift the panel breaks in production with the entire suite
  * green. One file is what the fixture-vs-real invariant test points at.
  */
+import * as fs from 'node:fs';
+
 import * as config from '../../lib/config';
 import { storedText, toText } from '../../lib/format';
+import { pathExpandUser } from '../../lib/home';
 import { redactEnv } from '../../lib/redact';
 import { CONTEXT as KUBE_CONTEXT } from '../kube/names';
 import { podRows } from '../kube/status';
@@ -18,6 +21,7 @@ import * as topology from '../topology';
 
 import * as inspect from './inspect';
 import * as naming from './naming';
+import { LAST_BACKUP_KEY, UPGRADE_FROM_KEY } from './types';
 
 function bag(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -307,13 +311,33 @@ export async function composeDetail(
 }
 
 /**
+ * The version a rollback of the last upgrade returns to, or "" when none can be made.
+ *
+ * What `upgrade.rollback` needs: the pre-upgrade bundle recorded AND still on disk. A
+ * rollback clears `upgraded_from` and an upgrade without a backup clears the bundle, so
+ * neither leaves one offered; a bundle deleted since is refused there, so it is not offered
+ * here. A path that cannot even be expanded is a hand-edited record, and "" rather than a
+ * panel that will not open.
+ */
+export function rollbackTarget(extra: Record<string, unknown>): string {
+  const from = extra[UPGRADE_FROM_KEY];
+  const bundle = extra[LAST_BACKUP_KEY];
+  if (!isTruthy(from) || typeof bundle !== 'string' || bundle === '') return '';
+  try {
+    return fs.existsSync(pathExpandUser(bundle)) ? String(from) : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
  * Full detail for the GUI panel: summary + state/uptime/health + links + containers +
  * the RC service's env vars.
  */
 export async function detail(name: string): Promise<Record<string, unknown>> {
   const target = await naming.resolveName(name);
   const meta = await readMeta(target);
-  const d = inspect.summary(meta);
+  const d = await inspect.summary(meta);
   // The env tab masks credentials and tells the reader that the workspace's
   // docker-compose.yml is the source of truth for a real value -- but nothing in the GUI
   // said where that workspace is.
@@ -332,6 +356,8 @@ export async function detail(name: string): Promise<Record<string, unknown>> {
   d.owner = owner;
   d.made_by = isTruthy(extra.created_by) ? String(extra.created_by) : '';
   d.owner_history = Array.isArray(extra.owner_history) ? [...extra.owner_history] : [];
+  // The panel offers "Roll back to <version>" only when this is set.
+  d.rollback_to = rollbackTarget(extra);
   // Which address this workspace's ports are bound to. The panel needs it to say anything
   // true about reaching the workspace from ANOTHER machine: every link below is built
   // from `localhost`, which for a browser on a different box than `serve` names that

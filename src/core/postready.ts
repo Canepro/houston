@@ -11,9 +11,12 @@
  * whether SAML actually worked -- the deployment succeeding and the configuration
  * succeeding are different answers to different questions.
  */
+import { namesOf } from '../lib/presets/composite';
+import { E2EE_TEST_USERS } from '../lib/presets/e2ee';
 import * as config from '../lib/config';
 import { quotedText } from '../lib/format';
 import { type Emit, info, warn } from '../lib/events';
+import { cleanup, sleep as interruptibleSleep } from '../seams/exec';
 
 import { kube } from './kube/exec';
 import { APPLY_TIMEOUT, CONTEXT, isOurs } from './kube/names';
@@ -40,10 +43,7 @@ export type Action = Record<string, unknown>;
  */
 export type Sleep = (seconds: number) => Promise<void>;
 
-const realSleep: Sleep = (seconds) =>
-  new Promise((resolve) => {
-    setTimeout(resolve, seconds * 1000);
-  });
+const realSleep: Sleep = (seconds) => interruptibleSleep(seconds * 1000);
 
 export interface Options {
   readonly sleep?: Sleep;
@@ -163,6 +163,147 @@ export async function execIn(
   return res.returncode;
 }
 
+/** The front door and each independently cached Rocket.Chat instance behind it. */
+function providerRoots(meta: Metadata): string[] {
+  const roots = [meta.rootUrl];
+  if (topology.ofMeta(meta) === topology.KUBERNETES) return roots;
+  const count = Number(bagOf(meta.extra).instances ?? 1);
+  for (let i = 1; Number.isInteger(count) && count > 1 && i <= count; i += 1) {
+    const own = new URL(meta.rootUrl);
+    own.port = String(meta.hostPort + i);
+    roots.push(own.origin);
+  }
+  return roots;
+}
+
+async function samlProvidersReady(
+  meta: Metadata,
+  auth: rcapi.Auth,
+  roots: readonly string[],
+  timeoutMs = 3_000,
+): Promise<boolean> {
+  const ready = await Promise.all(
+    roots.map(
+      async (root) =>
+        await rcapi.samlProviderReady(root, {
+          auth,
+          publicUrl: meta.publicUrl || meta.rootUrl,
+          timeoutMs,
+        }),
+    ),
+  );
+  return ready.every((ok) => ok);
+}
+
+async function waitForSamlProviders(
+  meta: Metadata,
+  auth: rcapi.Auth,
+  roots: readonly string[],
+  sleep: Sleep,
+  { maxWaitMs }: { maxWaitMs?: number } = {},
+): Promise<boolean> {
+  const deadline = maxWaitMs === undefined ? undefined : Date.now() + maxWaitMs;
+  let stable = false;
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const remaining = deadline === undefined ? undefined : deadline - Date.now();
+    if (remaining !== undefined && remaining <= 0) return false;
+    // One probe makes two sequential requests; roots are observed in parallel. Keep
+    // their combined request budget inside the pre-mutation observation deadline.
+    const timeoutMs = remaining === undefined ? 3_000 : Math.min(3_000, remaining / 2);
+    const all = await samlProvidersReady(meta, auth, roots, timeoutMs);
+    if (deadline !== undefined && Date.now() >= deadline) return false;
+    // HTTP can answer before Rocket.Chat's initial debounced SAML load completes.
+    // Observe every process across a reload interval, without changing its settings.
+    if (all && stable) return true;
+    stable = all;
+    if (attempt < 11) {
+      const pause = deadline === undefined ? 3 : Math.min(3, (deadline - Date.now()) / 1000);
+      if (pause <= 0) return false;
+      await sleep(pause);
+    }
+  }
+  return false;
+}
+
+async function registerSamlProvider(
+  meta: Metadata,
+  auth: rcapi.Auth,
+  roots: readonly string[],
+  enable: string,
+  emit: Emit,
+  sleep: Sleep,
+): Promise<boolean> {
+  const apply = async (value: boolean): Promise<boolean> => {
+    const applied = await Promise.all(
+      roots.map(async (root) => await rcapi.setSetting(root, auth, adminPass(meta), enable, value)),
+    );
+    return applied.every((ok) => ok);
+  };
+  const provider = await rcapi.getSetting(
+    meta.rootUrl,
+    auth,
+    adminPass(meta),
+    `${enable}_provider`,
+  );
+  if (typeof provider !== 'string' || provider === '') {
+    warn(emit, `could not read ${enable}_provider to refresh the SAML provider`, {
+      phase: 'post_ready',
+    });
+    return false;
+  }
+  // A disabled reload deletes a shared service before updating this process's provider
+  // list. Waiting a fixed debounce interval does not prove slower replicas completed
+  // that reload: one could remove the service after another had enabled it again.
+  let stable = false;
+  let disabled = false;
+  let enabled: boolean;
+  try {
+    if (!(await apply(false))) {
+      warn(emit, `could not disable ${enable} to refresh the SAML provider`, {
+        phase: 'post_ready',
+      });
+      return false;
+    }
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const states = await Promise.all(
+        roots.map(
+          async (root) =>
+            await rcapi.samlProviderState(root, provider, {
+              publicUrl: meta.publicUrl || meta.rootUrl,
+            }),
+        ),
+      );
+      const all = states.every((state) => state === 'unloaded');
+      if (all && stable) {
+        disabled = true;
+        break;
+      }
+      stable = all;
+      if (attempt < 11) await sleep(3);
+    }
+  } finally {
+    // Restore after a partial write, observation failure or interruption, as well as a
+    // timeout. Cleanup can send this compensating request while cancellation unwinds.
+    enabled = await cleanup(async () => await apply(true));
+    if (!enabled)
+      warn(emit, `could not enable ${enable}; the SAML login service is not ready`, {
+        phase: 'post_ready',
+      });
+  }
+  if (!enabled) return false;
+  if (!disabled) {
+    warn(emit, 'SAML provider reload did not finish disabling on every instance', {
+      phase: 'post_ready',
+    });
+    return false;
+  }
+  if (await waitForSamlProviders(meta, auth, roots, sleep)) return true;
+  warn(emit, 'IdP cert applied, but the SAML login service did not register on every instance', {
+    phase: 'post_ready',
+  });
+  return false;
+}
+
 async function prSamlIdpCert(
   meta: Metadata,
   auth: rcapi.Auth,
@@ -183,27 +324,43 @@ async function prSamlIdpCert(
   const cert = await rcapi.fetchSamlIdpCert(String(required(action, 'descriptor_url')), {
     timeout: IDP_CERT_DEADLINE,
   });
+  if (!truthy(cert)) {
+    warn(emit, 'could not fetch/apply IdP cert (is the IdP up?)', { phase: 'post_ready' });
+    return false;
+  }
+  const roots = providerRoots(meta);
+  const setting = String(required(action, 'setting'));
+  const enable = action.enable_setting;
+  // A restarted process can serve HTTP before its initial SAML load finishes. If the
+  // certificate is unchanged, let that registration finish before deciding it needs
+  // repair: a toggle schedules independent async reloads against a shared service.
+  // A provider that stays absent reaches the existing observed reload path below.
   if (
-    truthy(cert) &&
-    (await rcapi.setSetting(
-      meta.rootUrl,
-      auth,
-      adminPass(meta),
-      String(required(action, 'setting')),
-      cert,
-    ))
+    truthy(enable) &&
+    (await rcapi.getSetting(meta.rootUrl, auth, adminPass(meta), setting)) === cert &&
+    (await waitForSamlProviders(meta, auth, roots, sleep, { maxWaitMs: 33_000 }))
   ) {
-    const enable = action.enable_setting;
-    if (truthy(enable)) {
-      await rcapi.setSetting(meta.rootUrl, auth, adminPass(meta), String(enable), false);
-      await sleep(1);
-      await rcapi.setSetting(meta.rootUrl, auth, adminPass(meta), String(enable), true);
-    }
-    info(emit, 'IdP cert applied; SAML login button registered.', { phase: 'post_ready' });
+    // Nothing was written, so nothing was "applied".
+    info(emit, 'IdP cert already in place; SAML login button registered.', {
+      phase: 'post_ready',
+    });
     return true;
   }
-  warn(emit, 'could not fetch/apply IdP cert (is the IdP up?)', { phase: 'post_ready' });
-  return false;
+  const applied = await Promise.all(
+    roots.map(async (root) => await rcapi.setSetting(root, auth, adminPass(meta), setting, cert)),
+  );
+  if (!applied.every((ok) => ok)) {
+    warn(emit, 'could not fetch/apply IdP cert (is the IdP up?)', { phase: 'post_ready' });
+    return false;
+  }
+  if (
+    truthy(enable) &&
+    !(await registerSamlProvider(meta, auth, roots, String(enable), emit, sleep))
+  ) {
+    return false;
+  }
+  info(emit, 'IdP cert applied; SAML login button registered.', { phase: 'post_ready' });
+  return true;
 }
 
 async function prKeycloakMasterSslOff(
@@ -215,10 +372,14 @@ async function prKeycloakMasterSslOff(
 ): Promise<boolean> {
   const svc = String(getOr(action, 'service', 'keycloak'));
   const port = getOr(action, 'port', 8080);
+  // Under the workspace's HTTPS name Keycloak serves from a path (`lib/presets/public.ts`).
+  const base = String(getOr(action, 'path', ''));
   const kcadm = '/opt/keycloak/bin/kcadm.sh';
   const script =
-    `${kcadm} config credentials --server http://localhost:${String(port)} ` +
-    `--realm master --user admin --password admin >/dev/null && ` +
+    `${kcadm} config credentials --server http://localhost:${String(port)}${base} ` +
+    // Both streams: its "Logging into ... as user admin" goes to stderr, which a Docker exec
+    // shares with houston's own -- under `up --json` and on serve's console.
+    `--realm master --user admin --password admin >/dev/null 2>&1 && ` +
     `${kcadm} update realms/master -s sslRequired=NONE`;
   // Through whichever runtime owns this workspace -- see `execIn`.
   if ((await execIn(meta, svc, ['bash', '-lc', script])) === 0) {
@@ -247,21 +408,43 @@ async function applySettings(
   return failed;
 }
 
-/**
- * Create RC's Custom OAuth provider, then CONFIGURE it -- and report either.
- *
- * Both halves used to be unreportable. The handler returned nothing on every path, and
- * `runPostReady` collects a failure only on an explicit false, so the oidc preset's one
- * self-config action could not appear in the "only partly configured" summary that exists
- * precisely for this -- the warning printed, the summary said nothing, and `up` exited 0.
- *
- * Worse, every `setSetting` result was discarded. `addOauthService` creating the provider
- * is not the same as the provider being usable: the settings carry the realm URL, the
- * client id and the secret, and a provider created WITHOUT them renders a login button
- * that points nowhere. That is the failure a support engineer sees as "I click the OIDC
- * button and the page is blank" -- the button is real, the endpoint behind it is empty,
- * and nothing in the create said so.
- */
+/** Observe the public login service on each independently cached RC process. */
+async function oauthProvidersReady(
+  roots: readonly string[],
+  provider: string,
+  auth: rcapi.Auth,
+  timeoutMs: number,
+): Promise<boolean> {
+  const ready = await Promise.all(
+    roots.map(async (root) => {
+      try {
+        const [status, text] = await rcapi.call(root, 'GET', '/api/v1/service.configurations', {
+          auth,
+          timeoutMs,
+        });
+        if (status !== 200) return false;
+        const parsed: unknown = JSON.parse(text);
+        if (parsed === null || typeof parsed !== 'object') return false;
+        const configurations = (parsed as Record<string, unknown>).configurations;
+        return (
+          Array.isArray(configurations) &&
+          configurations.some(
+            (entry: unknown) =>
+              entry !== null &&
+              typeof entry === 'object' &&
+              (entry as Record<string, unknown>).service === provider,
+          )
+        );
+      } catch (error) {
+        if (error instanceof SyntaxError || error instanceof rcapi.RequestFailed) return false;
+        throw error;
+      }
+    }),
+  );
+  return ready.every((ok) => ok);
+}
+
+/** Configure the disabled custom provider before enabling its debounced RC loader. */
 async function prCreateOauthProvider(
   meta: Metadata,
   auth: rcapi.Auth,
@@ -269,22 +452,19 @@ async function prCreateOauthProvider(
   emit: Emit,
   sleep: Sleep,
 ): Promise<boolean> {
-  if (
-    !(await rcapi.addOauthService(
-      meta.rootUrl,
-      auth,
-      adminPass(meta),
-      String(required(action, 'name')),
-    ))
-  ) {
+  const name = String(required(action, 'name'));
+  if (!(await rcapi.addOauthService(meta.rootUrl, auth, adminPass(meta), name))) {
     warn(emit, 'could not create the OAuth provider', { phase: 'post_ready' });
     return false;
   }
   const settings = { ...(required(action, 'settings') as Record<string, unknown>) };
-  // The provider's settings are created BY the method above, and RC's settings are cached
-  // -- so the first PATCH can land before the id exists. Retried rather than slept past: a
-  // fixed sleep is either too short on a loaded box or wasted on a fast one, and this is
-  // the window in which a wrong answer looks like success.
+  const enable = `Accounts_OAuth_Custom-${name}`;
+  const enableValue = settings[enable];
+  const hasEnable = enable in settings;
+  if (hasEnable) delete settings[enable];
+  // RC creates a disabled provider. Enabling before its URL exists can make the
+  // asynchronous CustomOAuth constructor throw, even though every PATCH answers 200.
+  // Keep an existing enabled provider enabled: a healthy ready must not toggle it off.
   let failed = await applySettings(meta, auth, settings);
   for (let attempt = 0; attempt < 3; attempt += 1) {
     if (failed.length === 0) break;
@@ -293,17 +473,53 @@ async function prCreateOauthProvider(
     for (const key of failed) subset[key] = settings[key];
     failed = await applySettings(meta, auth, subset);
   }
+  if (failed.length === 0 && hasEnable) {
+    if (!(await rcapi.setSetting(meta.rootUrl, auth, adminPass(meta), enable, enableValue))) {
+      failed.push(enable);
+    }
+  }
   if (failed.length > 0) {
     const named = [...failed].sort().slice(0, 4).join(', ');
     warn(
       emit,
       `the OAuth provider exists but ${failed.length} of its ` +
-        `${Object.keys(settings).length} settings did not apply: ` +
-        `${named}${failed.length > 4 ? '…' : ''}. Its login button will render ` +
-        `and lead nowhere.`,
+        `${Object.keys(settings).length + (hasEnable ? 1 : 0)} settings did not apply: ` +
+        `${named}${failed.length > 4 ? '…' : ''}. Its login button may be absent ` +
+        `or lead nowhere.`,
       { phase: 'post_ready' },
     );
     return false;
+  }
+  if (enableValue === true) {
+    const roots = providerRoots(meta);
+    const provider = name.toLowerCase().replace(/[^a-z0-9_]/gu, '');
+    const deadline = Date.now() + 33_000;
+    let registered = false;
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      const ready = await oauthProvidersReady(roots, provider, auth, Math.min(3_000, remaining));
+      if (Date.now() > deadline) break;
+      if (ready) {
+        registered = true;
+        break;
+      }
+      if (attempt < 11) {
+        const pause = Math.min(3, (deadline - Date.now()) / 1000);
+        if (pause <= 0) break;
+        await sleep(pause);
+      }
+    }
+    if (!registered) {
+      warn(
+        emit,
+        'OAuth settings applied, but the login service did not register on every instance',
+        {
+          phase: 'post_ready',
+        },
+      );
+      return false;
+    }
   }
   info(emit, 'OIDC provider created and configured; login button registered.', {
     phase: 'post_ready',
@@ -375,6 +591,37 @@ async function prLivechatSetup(
   return true;
 }
 
+/**
+ * The `e2ee` preset's test users. Nothing about encryption is done here: each user's keys are
+ * made in their browser the first time they sign in. Re-run by `ready`, so an existing user
+ * is kept, not an error.
+ */
+async function prE2eeUsers(
+  meta: Metadata,
+  auth: rcapi.Auth,
+  _action: Action,
+  emit: Emit,
+  _sleep: Sleep,
+): Promise<boolean> {
+  const url = meta.rootUrl;
+  const pw = adminPass(meta);
+  const missing: string[] = [];
+  for (const username of E2EE_TEST_USERS) {
+    if (await rcapi.createUser(url, auth, pw, username)) continue;
+    if (!truthy(await rcapi.getUserId(url, auth, username))) missing.push(username);
+  }
+  if (missing.length > 0) {
+    warn(emit, `could not create the E2EE test users ${missing.join(', ')}`, {
+      phase: 'post_ready',
+    });
+    return false;
+  }
+  info(emit, `E2EE test users ready: ${E2EE_TEST_USERS.join(', ')} (password = username)`, {
+    phase: 'post_ready',
+  });
+  return true;
+}
+
 export type Handler = (
   meta: Metadata,
   auth: rcapi.Auth,
@@ -395,6 +642,7 @@ export const POST_READY_ACTIONS: Record<string, Handler> = {
   keycloak_master_ssl_off: prKeycloakMasterSslOff,
   create_oauth_provider: prCreateOauthProvider,
   livechat_setup: prLivechatSetup,
+  e2ee_users: prE2eeUsers,
 };
 
 const BUILTIN_ACTIONS: Readonly<Record<string, Handler>> = Object.freeze({
@@ -447,7 +695,8 @@ export async function runPostReady(
   if (failed.length > 0) {
     warn(
       emit,
-      `the workspace is RUNNING but its ${quotedText(meta.preset)} preset is only ` +
+      `the workspace is RUNNING but its ${quotedText(meta.preset)} ` +
+        `${namesOf(meta.preset).length > 1 ? 'presets are' : 'preset is'} only ` +
         `partly configured — these did not complete: ${failed.join(', ')}`,
       { phase: 'post_ready' },
     );

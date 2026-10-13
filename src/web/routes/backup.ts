@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 
 import { resolveName } from '../../core/lifecycle/naming';
+import { sidecarHolder } from '../../core/lifecycle/ports';
 import { readMeta } from '../../core/runner/record';
 import { ValidationError } from '../../lib/errors';
 import { pathExpandUser, pathResolve, joinPath } from '../../lib/home';
@@ -126,7 +127,13 @@ export function register(app: FastifyInstance): void {
     const bundle = confinedInput(orText(body.bundle));
     const manifest = await backup.readManifest(bundle);
     const name = orText(body.name);
-    if (name === '') return { manifest, compatibility: null };
+    if (name === '') {
+      // AS NEW, which builds the bundle's preset again: its side ports are published once
+      // per box, so while another workspace holds them the create is refused -- from a job
+      // that has already started. Who holds them is said here, before anything starts.
+      const held = await sidecarHolder(String(manifest.preset ?? ''));
+      return { manifest, compatibility: null, held };
+    }
     const meta = await readMeta(await resolveName(name));
     return { manifest, compatibility: backupCompatModule().compatibility(manifest, meta) };
   });

@@ -19,11 +19,14 @@ import * as path from 'node:path';
 import type { FastifyInstance, InjectOptions } from 'fastify';
 
 import type * as AppNS from '../../../src/web/app';
+import type * as ConfigNS from '../../../src/lib/config';
+import type * as RcHttpNS from '../../../src/seams/rc-http';
 import type * as FirstrunNS from '../../../src/core/firstrun';
 import type * as InspectNS from '../../../src/core/lifecycle/inspect';
 import type * as SecurityNS from '../../../src/web/security';
 import type * as SessionsNS from '../../../src/core/sessions';
 import type * as UsersNS from '../../../src/core/users';
+import { CLIENT, FakeIdp, ISSUER, SECRET } from '../../fixtures/core/fake-idp';
 
 const PASSWORD = 'correct-horse-battery';
 /** What a TLS-terminating proxy adds, and the same-origin marker a browser sends. */
@@ -487,5 +490,259 @@ describe('--allow-host *', () => {
       headers: { host: 'anything.example', origin: 'https://anything.example', cookie },
     });
     expect(own.statusCode).not.toBe(403);
+  });
+});
+
+describe('Okta sign-in', () => {
+  /** Where browsers open houston in these tests: `inject` arrives from 127.0.0.1 over http. */
+  const PUBLIC = 'http://localhost';
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  /** Okta set up as an admin would, the provider answering from the fake. */
+  function oktaOn(): FakeIdp {
+    (require('../../../src/lib/config') as typeof ConfigNS).saveConfig({
+      'sso.issuer': ISSUER,
+      'sso.client_id': CLIENT,
+      'sso.public_url': PUBLIC,
+      'sso.email_domains': 'rocket.chat',
+      'sso.provision': 'member',
+    });
+    fs.writeFileSync(path.join(home, 'sso.env'), `HOUSTON_SSO_CLIENT_SECRET=${SECRET}\n`, {
+      mode: 0o600,
+    });
+    const idp = new FakeIdp(`${PUBLIC}/signin`);
+    const { rcHttp } = require('../../../src/seams/rc-http') as typeof RcHttpNS;
+    jest.spyOn(rcHttp, 'request').mockImplementation(async (url, o) => idp.answer(url, o));
+    return idp;
+  }
+
+  /** "Sign in with Okta": where the browser was sent, and the browser cookie it was given. */
+  async function startOkta(
+    app: FastifyInstance,
+    idp: FakeIdp,
+    url = '/signin?sso=1&next=%2Fwanted',
+  ) {
+    const response = await app.inject({ url, headers: { host: 'localhost' } });
+    const target = new URL(String(response.headers.location));
+    const state = target.searchParams.get('state') ?? '';
+    idp.started.set(`code-${state}`, {
+      nonce: target.searchParams.get('nonce') ?? '',
+      challenge: target.searchParams.get('code_challenge') ?? '',
+    });
+    return { response, state, browser: cookieOf(response) };
+  }
+
+  /** Okta's redirect back, carrying whatever cookies the browser holds. */
+  function returnFromOkta(app: FastifyInstance, state: string, cookie: string) {
+    return app.inject({
+      url: `/signin?code=code-${state}&state=${state}`,
+      headers: { host: 'localhost', cookie },
+    });
+  }
+
+  it('leaves the page exactly as it was while it is off', async () => {
+    const app = await anonymous();
+    const plain = await app.inject({ url: '/signin', headers: { host: 'localhost' } });
+    const asked = await app.inject({ url: '/signin?sso=1', headers: { host: 'localhost' } });
+    expect(plain.body).not.toContain('Okta');
+    expect(asked.statusCode).toBe(200);
+    expect(asked.body).toBe(plain.body);
+  });
+
+  it('puts the button above the password form, carrying where to go next', async () => {
+    oktaOn();
+    const page = await (
+      await anonymous()
+    ).inject({ url: '/signin?next=%2Fjobs', headers: { host: 'localhost' } });
+    expect(page.body).toContain(
+      '<a class="btn primary signin-okta" href="/signin?sso=1&amp;next=%2Fjobs">Sign in with Okta</a>',
+    );
+    expect(page.body.indexOf('signin-okta')).toBeLessThan(page.body.indexOf('<form'));
+  });
+
+  it('starts at the provider, uncached, unreferred, tied to this browser', async () => {
+    const idp = oktaOn();
+    const { response } = await startOkta(await anonymous(), idp);
+    expect(response.statusCode).toBe(303);
+    expect(String(response.headers.location)).toMatch(
+      new RegExp(`^${ISSUER}/oauth2/v1/authorize\\?`, 'u'),
+    );
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.headers['referrer-policy']).toBe('no-referrer');
+    expect(String(response.headers['set-cookie'])).toMatch(
+      /^houston_sso=[A-Za-z0-9_-]{43}; HttpOnly; Max-Age=600; Path=\/; SameSite=lax$/u,
+    );
+  });
+
+  it('starts only on the public URL, which is where Okta comes back to', async () => {
+    oktaOn();
+    const response = await (
+      await anonymous()
+    ).inject({ url: '/signin?sso=1&next=%2Fwanted', headers: { host: '127.0.0.1' } });
+    expect(response.headers.location).toBe(`${PUBLIC}/signin?sso=1&canon=1&next=/wanted`);
+    expect(response.headers['set-cookie']).toBeUndefined();
+  });
+
+  it('redirects to the public URL once, never in a loop behind a proxy that hides it', async () => {
+    // A proxy that terminates TLS without --trust-proxy, or rewrites Host: the browser IS on
+    // the public URL, and this server still cannot see it.
+    oktaOn();
+    const response = await (
+      await anonymous()
+    ).inject({ url: '/signin?sso=1&canon=1&next=%2Fwanted', headers: { host: '127.0.0.1' } });
+    expect(String(response.headers.location)).toMatch(
+      new RegExp(`^${ISSUER}/oauth2/v1/authorize\\?`, 'u'),
+    );
+  });
+
+  it('never sends a signed-in person on to another site', async () => {
+    const idp = oktaOn();
+    const app = await anonymous();
+    const { state, browser } = await startOkta(
+      app,
+      idp,
+      '/signin?sso=1&next=%2F%09%2Fevil.example',
+    );
+    expect((await returnFromOkta(app, state, browser)).headers.location).toBe('/');
+    const password = await app.inject({
+      method: 'POST',
+      url: '/signin',
+      payload: `user=alice&password=${PASSWORD}&next=%2F%0A%2Fevil.example`,
+      headers: { host: 'localhost', 'content-type': 'application/x-www-form-urlencoded' },
+    });
+    expect(password.headers.location).toBe('/');
+  });
+
+  it('starts from the tile, which names the issuer, and not for another issuer', async () => {
+    const idp = oktaOn();
+    const app = await anonymous();
+    const tile = await startOkta(app, idp, `/signin?iss=${encodeURIComponent(ISSUER)}`);
+    expect(String(tile.response.headers.location)).toContain('/oauth2/v1/authorize?');
+    const other = await app.inject({
+      url: '/signin?iss=https%3A%2F%2Fevil.example.test',
+      headers: { host: 'localhost' },
+    });
+    expect(other.statusCode).toBe(200);
+  });
+
+  it('comes back signed in as the account the person resolves to', async () => {
+    const idp = oktaOn();
+    const app = await anonymous();
+    const { state, browser } = await startOkta(app, idp);
+    const back = await returnFromOkta(app, state, browser);
+    expect(back.statusCode).toBe(303);
+    expect(back.headers.location).toBe('/wanted');
+    expect(back.headers['cache-control']).toBe('no-store');
+    const session = { host: 'localhost', cookie: cookieOf(back) };
+    expect((await app.inject({ url: '/api/session', headers: session })).json()).toMatchObject({
+      user: 'ana-lopez',
+      role: 'member',
+      origin: 'sso',
+      sso_user: 'ana.lopez@rocket.chat',
+    });
+    // Replayed, the same callback is spent.
+    const again = await returnFromOkta(app, state, browser);
+    expect(again.headers.location).toBe('/signin?e=sso-expired');
+  });
+
+  it('signs nobody in from a callback another browser started', async () => {
+    const idp = oktaOn();
+    const app = await anonymous();
+    const { state } = await startOkta(app, idp);
+    const back = await returnFromOkta(app, state, `houston_sso=${'x'.repeat(43)}`);
+    expect(back.headers.location).toBe('/signin?e=sso-expired');
+    expect(back.headers['set-cookie']).toBeUndefined();
+    expect(users.roleOf('ana-lopez')).toBe('');
+    // Not audited: a made-up state asks for this unthrottled, and a line each would let
+    // anyone rotate the real trail away.
+    const made = await returnFromOkta(app, 'made-up', '');
+    expect(made.headers.location).toBe('/signin?e=sso-expired');
+    expect(fs.readFileSync(path.join(home, 'audit.log'), 'utf8')).not.toContain('okta expired');
+  });
+
+  it('turns a refusal into one fixed banner, with the code left out of every page', async () => {
+    const idp = oktaOn();
+    idp.userinfo = { email: 'ana@gmail.com' };
+    const app = await anonymous();
+    const { state, browser } = await startOkta(app, idp);
+    const back = await returnFromOkta(app, state, browser);
+    expect(back.headers.location).toBe('/signin?e=sso-domain');
+    expect(back.body).toBe('');
+    expect(fs.readFileSync(path.join(home, 'audit.log'), 'utf8')).toMatch(
+      /\t-\tsignin\tokta domain\tattempt\tdenied/u,
+    );
+    const page = await app.inject({ url: '/signin?e=sso-domain', headers: { host: 'localhost' } });
+    expect(page.body).toContain('Your Okta email address is not one this server accepts.');
+  });
+
+  it('refuses to sign in over somebody else, and says so instead of redirecting', async () => {
+    const idp = oktaOn();
+    const app = await anonymous();
+    const { state, browser } = await startOkta(app, idp);
+    const alice = cookieOf(await formSignIn(app, 'alice', PASSWORD));
+    const back = await returnFromOkta(app, state, `${alice}; ${browser}`);
+    expect(back.headers.location).toBe('/signin?e=sso-other');
+    const page = await app.inject({
+      url: '/signin?e=sso-other',
+      headers: { host: 'localhost', cookie: alice },
+    });
+    expect(page.statusCode).toBe(200);
+    expect(page.body).toContain('You are signed in to houston as someone else.');
+    expect(
+      (
+        await app.inject({ url: '/api/session', headers: { host: 'localhost', cookie: alice } })
+      ).json(),
+    ).toMatchObject({ user: 'alice' });
+  });
+
+  it('replaces the session when the person is already signed in as the same account', async () => {
+    const idp = oktaOn();
+    await users.add('ana-lopez', PASSWORD, 'member');
+    const app = await anonymous();
+    const { state, browser } = await startOkta(app, idp);
+    const before = cookieOf(await formSignIn(app, 'ana-lopez', PASSWORD));
+    const back = await returnFromOkta(app, state, `${before}; ${browser}`);
+    expect(back.headers.location).toBe('/wanted');
+    const read = (cookie: string) =>
+      app.inject({ url: '/api/session', headers: { host: 'localhost', cookie } });
+    expect((await read(before)).json()).toMatchObject({ user: '' });
+    expect((await read(cookieOf(back))).json()).toMatchObject({ user: 'ana-lopez', origin: 'sso' });
+  });
+
+  it('drops this browser’s unfinished Okta sign-in at sign-out', async () => {
+    const idp = oktaOn();
+    const app = await anonymous();
+    const { state, browser } = await startOkta(app, idp);
+    await app.inject({
+      method: 'POST',
+      url: '/signout',
+      headers: { host: 'localhost', cookie: browser },
+    });
+    expect((await returnFromOkta(app, state, browser)).headers.location).toBe(
+      '/signin?e=sso-expired',
+    );
+  });
+
+  it('limits starts per address apart from passwords, and never costs the password', async () => {
+    const idp = oktaOn();
+    const app = await anonymous();
+    for (let index = 0; index < security.SSO_MAX_STARTS; index += 1) {
+      expect(String((await startOkta(app, idp)).response.headers.location)).toContain(ISSUER);
+    }
+    const over = await app.inject({ url: '/signin?sso=1', headers: { host: 'localhost' } });
+    expect(over.headers.location).toBe('/signin?e=rate');
+    expect((await formSignIn(app, 'alice', PASSWORD)).headers.location).toBe('/');
+  });
+
+  it('costs the button when the provider is down, never the password', async () => {
+    const idp = oktaOn();
+    idp.down = true;
+    const app = await anonymous();
+    const start = await app.inject({ url: '/signin?sso=1', headers: { host: 'localhost' } });
+    expect(start.headers.location).toBe('/signin?e=sso-down');
+    expect((await formSignIn(app, 'alice', PASSWORD)).headers.location).toBe('/');
   });
 });

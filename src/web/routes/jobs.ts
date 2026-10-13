@@ -6,7 +6,8 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { SSEMessage } from '@fastify/sse';
 
 import type * as UsersNS from '../../core/users';
-import type { Job } from '../jobs';
+import { ConflictError } from '../../lib/errors';
+import { STOPPABLE_KINDS, type Job } from '../jobs';
 import { queryInt } from '../route-deps';
 
 function usersModule(): typeof UsersNS {
@@ -68,7 +69,29 @@ export function register(app: FastifyInstance): void {
       error_kind: job.errorKind,
       result_dropped: job.resultDropped,
       n_events: job.nEvents,
+      stoppable: job.summary().stoppable,
     };
+  });
+
+  // Stop: the job's own owner, or an admin -- the same people who may read it. Anyone else
+  // is told there is no such job, as reading it would tell them.
+  app.post<{ Params: { job_id: string } }>('/api/jobs/:job_id/stop', async (request, reply) => {
+    const job = app.jobs.get(request.params.job_id);
+    if (job === undefined || !mayReadJob(request, job.actor)) {
+      return reply.code(404).send({ error: 'no such job' });
+    }
+    if (!STOPPABLE_KINDS.has(job.kind)) {
+      throw new ConflictError(
+        `a ${job.kind} job cannot be stopped from here: stopping one part way can leave ` +
+          'things half done. Wait for it to finish or fail.',
+      );
+    }
+    if (!app.jobs.stop(job.id, request.houstonActor || '')) {
+      throw new ConflictError(
+        `that job has already ended (${job.status}); there is nothing to stop`,
+      );
+    }
+    return { id: job.id, stopping: true };
   });
 
   app.get<{ Params: { job_id: string } }>(

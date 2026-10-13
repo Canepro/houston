@@ -22,6 +22,7 @@
  * `HOUSTON_HOME`; re-requiring per test is both resets at once.
  */
 import * as fs from 'node:fs';
+import { get, type ClientRequest, type IncomingMessage } from 'node:http';
 import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -31,6 +32,8 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import type * as AppNS from '../../src/web/app';
 import type * as CliNS from '../../src/cli/app';
 import type * as ConfigNS from '../../src/lib/config';
+import type * as EventsNS from '../../src/lib/events';
+import type * as ExecNS from '../../src/seams/exec';
 import type * as HandlersNS from '../../src/cli/handlers';
 import type * as JobsNS from '../../src/web/jobs';
 import type * as MonitorNS from '../../src/core/monitor';
@@ -239,9 +242,10 @@ describe('the front door', () => {
     // The company's Okta tile has both of its URIs set to https://<host>/signin. A click
     // arrives at the Initiate login URI as a cross-site top-level GET carrying
     // `?iss=<issuer>`; the Sign-in redirect URI is where Okta would return `?code=&state=`,
-    // which only happens after an app starts an OIDC login, and houston never does. houston
-    // does not speak OIDC: both must simply render the page, and a signed-in user goes
-    // straight in. A cross-site refusal here would break the tile for everyone on it.
+    // which only happens after an app starts an OIDC login. With Okta sign-in off (no
+    // `sso.issuer`, as here) houston starts none: both must simply render the page, and a
+    // signed-in user goes straight in. A cross-site refusal here would break the tile for
+    // everyone on it. With it on, `test/web/routes/session.test.ts` covers both URLs.
     await users().add('alice', PASSWORD, 'admin');
     const front = await app();
     const cookie = await signIn(front, 'alice');
@@ -521,5 +525,103 @@ describe('the route split', () => {
     expect(await front.jobs.drain()).toEqual([]);
     const monitor = require('../../src/core/monitor') as typeof MonitorNS;
     expect(jest.mocked(monitor.attach)).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('shutdown', () => {
+  it('waits out the job drain past the plugin timeout, then stops the job and closes', async () => {
+    // avvio's 10 s plugin timeout also bounds a preClose hook: the 25 s drain was cut at
+    // 10 s, `close()` rejected "Plugin did not start in time", and the job ran on, neither
+    // waited for nor stopped, with no line saying so.
+    jest.useFakeTimers({
+      doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask', 'performance'],
+    });
+    const stopped: string[] = [];
+    try {
+      const front = await (require('../../src/web/app') as typeof AppNS).createApp({
+        accounts: false,
+        onShutdownStop: (ids) => stopped.push(...ids),
+      });
+      const { sleep } = require('../../src/seams/exec') as typeof ExecNS;
+      const job = front.jobs.submit('up', async () => {
+        for (;;) await sleep(200);
+      });
+      for (let wait = 0; wait < 100 && job.status !== 'running'; wait += 1) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      let outcome = 'pending';
+      const closing = front.close().then(
+        () => {
+          outcome = 'closed';
+        },
+        (error: Error) => {
+          outcome = error.message;
+        },
+      );
+      await jest.advanceTimersByTimeAsync(24_000);
+      expect(outcome).toBe('pending');
+      expect(job.status).toBe('running');
+      await jest.advanceTimersByTimeAsync(2_000);
+      await closing;
+      expect(outcome).toBe('closed');
+      expect(job.errorKind).toBe('Stopped');
+      expect(job.error).toContain('stopped by serve shutdown');
+      expect(stopped).toEqual([job.id]);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('ends an open event stream instead of waiting for it', async () => {
+    // An idle serve stopped with a browser still connected needed the 38 s backstop and
+    // wrote no `end`: `server.close()` waits for every open connection, and nothing ended
+    // them. Here the drain is already over, as it is for an idle serve or a job past it.
+    const { JobManager } = require('../../src/web/jobs') as typeof JobsNS;
+    const manager = new JobManager();
+    manager.drain = async () => [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const front = await (require('../../src/web/app') as typeof AppNS).createApp({
+      accounts: false,
+      jobs: manager,
+    });
+    const { event } = require('../../src/lib/events') as typeof EventsNS;
+    const job = manager.submit('state', async (emit) => {
+      emit(event('waiting on the browser'));
+      await held;
+    });
+    const origin = await front.listen({ host: '127.0.0.1', port: 0 });
+    let request: ClientRequest | undefined;
+    let closing: Promise<void> | undefined;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const response = await new Promise<IncomingMessage>((resolve, reject) => {
+        request = get(
+          `${origin}/api/jobs/${job.id}/stream`,
+          { headers: { accept: 'text/event-stream' } },
+          resolve,
+        );
+        request.once('error', reject);
+      });
+      expect(response.statusCode).toBe(200);
+      response.resume();
+      const ended = new Promise<void>((resolve) => response.once('close', resolve));
+      closing = front.close();
+      const closed = await Promise.race([
+        closing.then(() => true),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), 2000);
+        }),
+      ]);
+      expect(closed).toBe(true);
+      await ended;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      request?.destroy();
+      release();
+      await (closing ?? front.close());
+    }
   });
 });

@@ -5,12 +5,18 @@
  * not, and a seed running into a backup's quiesce fails mid-manifest and reports faults
  * nobody caused. Reentrant, so `up --seed` is unaffected.
  */
-import { NotReadyError, ValidationError } from '../../lib/errors';
+import { ConflictError, NotReadyError, ValidationError } from '../../lib/errors';
 import { type Emit, info, nullEmit, warn } from '../../lib/events';
 import { ResourceMonitor } from '../../perf/resources';
 import { seed as runSeed } from '../../seed/apply';
 import { type Plan, planFrom } from '../../seed/plan';
 import { type Facts, readback, verify } from '../../seed/check';
+import { Receipt, pendingReceipt } from '../../seed/receipt';
+import { applyHistory, verifyHistory } from '../../seed/history';
+import { verifyBatch } from '../../seed/verification';
+import type { PlanOverrides } from '../../seed/plan';
+import { seedDatabase, type SeedDatabase } from '../seed-db';
+import { CREATE_UNFINISHED, clearKind } from '../journal';
 import { adminPass, type Metadata, updateMeta } from '../runner/record';
 import { reproLock } from '../runner/locks';
 
@@ -42,17 +48,53 @@ export async function checkSeed(
   result: Bag,
   emit: Emit = nullEmit,
   tokens: Record<string, { token: string; userId: string }> = {},
+  receipt?: Receipt,
+  database?: SeedDatabase,
 ): Promise<Bag> {
   let verdict: ReturnType<typeof verify>;
   try {
-    const facts: Facts = await readback(meta.rootUrl, auth, plan, { tokens });
-    verdict = verify(plan, facts);
+    if (receipt !== undefined) {
+      verdict = await verifyBatch(meta.rootUrl, auth, plan, receipt, tokens, result);
+      if (database !== undefined) {
+        try {
+          const history = await verifyHistory(receipt, database);
+          const faults = Array.isArray(history.faults)
+            ? (history.faults as typeof verdict.faults)
+            : [];
+          verdict = {
+            ...verdict,
+            faults: [...verdict.faults, ...faults],
+            ok: faults.length > 0 ? false : verdict.ok,
+          };
+        } catch (error) {
+          verdict = {
+            ...verdict,
+            unreadable: [
+              ...verdict.unreadable,
+              { what: 'historical metadata', why: errorText(error) },
+            ],
+            ok: verdict.ok === false ? false : null,
+          };
+        }
+      }
+    } else {
+      const facts: Facts = await readback(meta.rootUrl, auth, plan, { tokens });
+      verdict = verify(plan, facts);
+    }
   } catch (error) {
     // A check must never break the seed.
     warn(emit, `could not read the seed back: ${errorText(error)}`, { phase: 'seed' });
     // `why` travels with the verdict, so a caller rendering from the RETURN VALUE can say
     // what went wrong without also subscribing to the events.
-    return { ok: null, why: errorText(error), faults: [], unreadable: [], checked: 0, rooms: [] };
+    verdict = {
+      ok: null,
+      faults: [],
+      extra: [],
+      unreadable: [{ what: 'seed', why: errorText(error) }],
+      checked: 0,
+      rooms: [],
+    };
+    result.verification_why = errorText(error);
   }
   result.verification = {
     ok: verdict.ok,
@@ -60,8 +102,17 @@ export async function checkSeed(
     extra: verdict.extra,
     unreadable: verdict.unreadable,
     checked: verdict.checked,
+    ...(result.verification_why === undefined ? {} : { why: result.verification_why }),
+    ...('checks_completed' in verdict
+      ? {
+          checks_completed: verdict.checks_completed,
+          features: 'features' in verdict ? verdict.features : {},
+        }
+      : {}),
   };
   result.readback = verdict.rooms;
+  if (receipt !== undefined)
+    receipt.record('verification:latest', 'done', result.verification as Bag);
   if (verdict.faults.length > 0) {
     warn(
       emit,
@@ -111,13 +162,98 @@ export async function checkSeed(
           dms: result.dms ?? null,
         },
         verification: result.verification,
+        scenarios: plan.scenarios,
+        history: result.history ?? null,
+        run_id: result.run_id ?? null,
+        features: {
+          files: result.files ?? 0,
+          total_content: result.total_content ?? null,
+          custom_emoji: result.custom_emoji ?? [],
+        },
+        locations: result.created ?? [],
         at: new Date().toISOString().slice(0, 19) + '+00:00',
       };
     });
   } catch {
-    // A record is not worth failing a good seed.
+    warn(
+      emit,
+      'seed verification could not be projected into workspace metadata; consult the durable seed receipt',
+      { phase: 'seed' },
+    );
   }
-  return verdict as unknown as Bag;
+  return {
+    ...verdict,
+    ...(result.verification_why === undefined ? {} : { why: result.verification_why }),
+  } as unknown as Bag;
+}
+
+/** One prepared driver, used by CLI, GUI, creation and readiness recovery. */
+export async function seedPrepared(
+  meta: Metadata,
+  auth: { token: string; userId: string },
+  plan: Plan,
+  emit: Emit,
+  tokens: Record<string, { token: string; userId: string }>,
+  log?: (message: string) => void,
+): Promise<Bag> {
+  const target = JSON.stringify({
+    runtime: meta.extra.runtime ?? 'docker',
+    project: meta.project,
+    namespace: meta.extra.namespace ?? null,
+    context: meta.extra.context ?? null,
+    admin: auth.userId,
+  });
+  // Database resolution and write privilege checks precede all historical API mutations.
+  const database = plan.historyDays === null ? null : await seedDatabase(meta, auth.userId);
+  const receipt = new Receipt(plan, target, meta.name);
+  if (database !== null) {
+    const prior = receipt.done('database:target');
+    if (prior !== null && prior.target !== database.target)
+      throw new ValidationError('unfinished historical seed has a different database target');
+    receipt.record('database:target', 'done', { target: database.target });
+  }
+  const report = log ?? ((message: string) => info(emit, message.trim(), { phase: 'seed' }));
+  const summary = await runSeed(meta.rootUrl, auth, plan, {
+    tokensOut: tokens,
+    adminPassword: adminPass(meta),
+    workspace: meta.name,
+    receipt,
+    log: report,
+    ...(typeof meta.extra.seed === 'object' && meta.extra.seed !== null
+      ? { legacy: meta.extra.seed as Bag }
+      : {}),
+  });
+  if (
+    database !== null &&
+    ((Array.isArray(summary.failed) && summary.failed.length > 0) ||
+      (Array.isArray(summary.users_failed) && summary.users_failed.length > 0) ||
+      [...receipt.entries.values()].some(
+        (entry) =>
+          entry.state === 'intent' &&
+          !entry.key.startsWith('history:') &&
+          !entry.key.startsWith('probe:'),
+      ))
+  )
+    throw new ValidationError(
+      'historical seed API creation is incomplete; resume the same run before assigning dates',
+    );
+  if (database !== null) summary.history = await applyHistory(plan, receipt, database, report);
+  await checkSeed(
+    meta,
+    auth,
+    plan,
+    summary,
+    emit,
+    tokens,
+    typeof summary.run_id === 'string' ? receipt : undefined,
+    database ?? undefined,
+  );
+  if ([...receipt.entries.values()].some((entry) => entry.state === 'intent'))
+    throw new ValidationError(
+      'seed has unresolved operations; its recovery receipt remains active',
+    );
+  receipt.finish();
+  return summary;
 }
 
 function errorText(error: unknown): string {
@@ -129,6 +265,7 @@ export async function seedInlineLocked(
   profile: string,
   stats: boolean,
   emit: Emit,
+  overrides: PlanOverrides = {},
 ): Promise<Bag> {
   let auth;
   try {
@@ -138,7 +275,7 @@ export async function seedInlineLocked(
   }
   let plan: Plan;
   try {
-    plan = planFrom(profile);
+    plan = planFrom(profile, overrides);
   } catch (error) {
     throw new ValidationError(errorText(error));
   }
@@ -151,18 +288,12 @@ export async function seedInlineLocked(
     resources: null as Awaited<ReturnType<ResourceMonitor['stop']>> | null,
   };
   try {
-    summary = await runSeed(meta.rootUrl, auth, plan, {
-      tokensOut: tokens,
-      adminPassword: adminPass(meta),
-      workspace: meta.name,
-      log: (message) => info(emit, message.trim(), { phase: 'seed' }),
-    });
+    summary = await seedPrepared(meta, auth, plan, emit, tokens);
   } finally {
     if (mon !== null) paused.resources = await mon.stop();
   }
   summary.total_s = (Date.now() - t0) / 1000;
   if (paused.resources !== null) summary.resources_keys = Object.keys(paused.resources).sort();
-  await checkSeed(meta, auth, plan, summary, emit, tokens);
   return summary;
 }
 
@@ -181,10 +312,26 @@ export async function runSeedInline(
   profile: string,
   stats: boolean,
   emit: Emit,
+  overrides: PlanOverrides = {},
+  expectedRun?: string,
+  resumeIf?: () => Promise<boolean>,
 ): Promise<Bag> {
   return await reproLock(
     meta.name,
-    async () => await seedInlineLocked(meta, profile, stats, emit),
+    async () => {
+      if (expectedRun !== undefined) {
+        const pending = pendingReceipt(meta.name);
+        if (pending === null) return { resumed: false };
+        if (pending.run !== expectedRun)
+          throw new ConflictError('the pending seed changed while waiting for its workspace lock');
+      }
+      if (resumeIf !== undefined && !(await resumeIf())) return { resumed: false };
+      const result = await seedInlineLocked(meta, profile, stats, emit, overrides);
+      // A second ready waiter must not see the same abandoned request after a
+      // completed recovery, even if its optional metadata projection was unwritable.
+      if (resumeIf !== undefined) clearKind(CREATE_UNFINISHED, meta.name);
+      return result;
+    },
     {
       timeoutMs: INTERACTIVE_LOCK_WAIT * 1000,
     },

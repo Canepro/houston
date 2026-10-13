@@ -1,8 +1,11 @@
 import { ValidationError } from '../../../src/lib/errors';
+import type { Event } from '../../../src/lib/events';
 import { metadata, writeRecord } from '../../../src/core/runner/record';
 
 import {
   NAME_MAX,
+  DERIVED_MAX,
+  announceName,
   deriveFor,
   deriveName,
   nameCandidates,
@@ -241,5 +244,47 @@ describe('a name made only of symbols', () => {
     // `createRepro` guards this: an all-symbols name would otherwise write into the repros
     // root itself.
     expect(sanitize('!!!')).toBe('');
+  });
+});
+
+describe("a composed workspace's derived name", () => {
+  it('joins its sorted presets with --, so it never matches a user preset called email-ldap', () => {
+    expect(deriveName('8.5.1', 'email+ldap')).toBe('rc8-5-1-email--ldap');
+    expect(deriveName('8.5.1', 'email-ldap')).toBe('rc8-5-1-email-ldap');
+  });
+
+  it('stays short enough for an HTTPS name and a namespace, however many presets', () => {
+    const set = 'email+ldap+livechat+oidc+s3_minio';
+    const five = deriveName('8.5.1', set, 'alice');
+    expect(five).toMatch(/^alice-rc8-5-1-email--ldap-[0-9a-f]{6}$/u);
+    // The longest container the HTTPS edge resolves by name is a 63-character DNS label.
+    expect(`houston-${five}-phpldapadmin-1`.length).toBeLessThanOrEqual(63);
+    // The same set derives the same name, so a re-up finds the workspace...
+    expect(deriveName('8.5.1', set, 'alice')).toBe(five);
+    // ...and another set never derives it.
+    expect(deriveName('8.5.1', 'email+ldap+livechat+s3_minio+saml', 'alice')).not.toBe(five);
+    // The longest username, six presets and a two-digit version.
+    const most = deriveName('10.12.3', `airgapped+${set}`, 'a'.repeat(31));
+    expect(most.length).toBeLessThanOrEqual(DERIVED_MAX);
+    expect(() => requireValidName(most)).not.toThrow();
+    // A set that fits keeps its full name, and one preset is never shortened.
+    expect(deriveName('8.5.1', 'email+ldap', 'alice')).toBe('alice-rc8-5-1-email--ldap');
+    expect(deriveName('8.5.1', 's3_minio', 'a'.repeat(31))).toBe(
+      `${'a'.repeat(31)}-rc8-5-1-s3-minio`,
+    );
+  });
+});
+
+describe('the name a create settled on', () => {
+  it('is said with a code the GUI titles its progress by, only when it is not what was typed', () => {
+    const events: Event[] = [];
+    const emit = (e: Event) => events.push(e);
+    announceName(createReq({ version: '8.5.1' }), 'rc8-5-1', emit);
+    announceName(createReq({ version: '8.5.1', name: 'mine' }), 'mine', emit);
+    announceName(createReq({ version: '8.5.1', name: 'mine', actor: 'alice' }), 'alice-mine', emit);
+    expect(events.map((e) => [e.code, e.phase, e.data.workspace, e.message])).toEqual([
+      ['workspace-name', 'create', 'rc8-5-1', 'workspace name: rc8-5-1'],
+      ['workspace-name', 'create', 'alice-mine', 'workspace name: alice-mine'],
+    ]);
   });
 });

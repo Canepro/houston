@@ -15,6 +15,10 @@ interface Printed {
  * What earlier releases printed for each case of the two tables below, in table order, with
  * the argv each was recorded for: the backup and restore lines (stdout and stderr), and the
  * upgrade lines with their exit code.
+ *
+ * One recorded value is moved on purpose: `upgrade` with no `--to` exited 1 there and is 2
+ * here (L7-07), because a missing argument is a usage error under the exit-code contract and
+ * 1.x parity no longer binds the code. Its lines are unchanged.
  */
 const RECORDED = JSON.parse(
   fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'cli', 'backup-commands.json'), 'utf8'),

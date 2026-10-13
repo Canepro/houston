@@ -260,3 +260,36 @@ describe('the Kubernetes logs command', () => {
     expect(results).toEqual([{ data: { exit_code: 0 }, exitCode: 0, commandOutcome: true }]);
   });
 });
+
+describe("a multi-instance workspace's info", () => {
+  it('names its presets without the deployment, which has its own instances line', async () => {
+    // Compose builds multi-instance through that preset, so the record lists it among the
+    // presets, and `info` printed it as one; the owner settled it is the deployment.
+    const record = require('../../src/core/runner/record') as typeof RecordNS;
+    await record.writeRecord(
+      'mi',
+      record.metadata({
+        name: 'mi',
+        project: 'houston-mi',
+        preset: 'email+multi-instance',
+        extra: { runtime: 'docker', deployment: 'multi-instance', instances: 2 },
+      }),
+    );
+    let out = '';
+    let err = '';
+    const io = {
+      writeOut: (text: string) => void (out += text),
+      writeErr: (text: string) => void (err += text),
+    };
+    const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
+    const code = await runCli(['info', '--name', 'mi'], {
+      io,
+      execute: handlers.createExecutor(io),
+    });
+    expect([code, err]).toEqual([0, '']);
+    const row = out.split('\n').find((line) => line.includes('Preset')) ?? '';
+    expect(row).toContain('email');
+    expect(row).not.toContain('multi-instance');
+    expect(out).toContain('instances (2');
+  });
+});

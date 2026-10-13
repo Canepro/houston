@@ -76,7 +76,7 @@ describe('the requested bind is read in one place', () => {
 });
 
 describe('an in-service seed runs only where the caller has been consulted', () => {
-  /** `runSeedInline` calls whose enclosing function never mentions `seedHere`. */
+  /** Creation consults seedHere; recovery consults the abandoned request journal. */
   function unguardedSeeds(file: SourceFile): string[] {
     const found: string[] = [];
     for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
@@ -91,7 +91,11 @@ describe('an in-service seed runs only where the caller has been consulted', () 
       // A seed inside a callback is guarded by whatever encloses the callback too.
       let consulted = false;
       while (scope !== undefined && !consulted) {
-        consulted = /seedHere|seed_here/u.test(scope.getText());
+        consulted =
+          /seedHere|seed_here/u.test(scope.getText()) ||
+          scope
+            .getDescendantsOfKind(SyntaxKind.CallExpression)
+            .some((c) => c.getExpression().getText() === 'pendingSeed');
         scope = scope.getFirstAncestor(
           (node) =>
             node.getKind() === SyntaxKind.FunctionDeclaration ||
@@ -134,6 +138,19 @@ export async function finish(meta: unknown, req: { seed: boolean }) {
     // The positive control: the walk found the call sites it is about.
     expect(sites.length).toBeGreaterThanOrEqual(4);
     expect(files.flatMap(unguardedSeeds)).toEqual([]);
+  });
+
+  it('accepts recovery that reads the abandoned request after its CLI owner exited', () => {
+    const planted = project().createSourceFile(
+      'recovery-seed.ts',
+      `
+export async function finish(meta: unknown) {
+  const pending = pendingSeed(meta.name);
+  if (pending.seed) await seeding.runSeedInline(meta, pending.seed_profile, false, emit);
+}
+`,
+    );
+    expect(unguardedSeeds(planted)).toEqual([]);
   });
 });
 

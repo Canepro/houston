@@ -18,6 +18,7 @@ import { ACME_FILE, acmeDir } from '../../../src/core/tls';
 
 import { issueLocalCert } from '../../../src/core/edge/acme';
 import {
+  bridgeAddress,
   composeRun,
   down,
   foreignEdge,
@@ -28,8 +29,9 @@ import * as paths from '../../../src/core/edge/paths';
 import { CONTAINER } from '../../../src/core/edge/paths';
 import { register, registered } from '../../../src/core/edge/routes';
 import { adopt, deleteHost, ensureRunning, logs, up } from '../../../src/core/edge/runtime';
-import { write } from '../../../src/core/edge/spec';
+import { current, write } from '../../../src/core/edge/spec';
 import { edge } from '../../../src/core/edge/types';
+import type * as ConfigNS from '../../../src/lib/config';
 
 jest.mock('../../../src/seams/docker-cli', () => ({
   ...jest.requireActual('../../../src/seams/docker-cli'),
@@ -152,6 +154,20 @@ afterEach(() => {
   fs.rmSync(home, { recursive: true, force: true });
 });
 
+describe('the address the GUI listens on behind the edge', () => {
+  it('is the bridge gateway when this host can listen there, else loopback', async () => {
+    // 127.0.0.2 is bindable on Linux (all of 127/8 is local) and stands in for a Docker
+    // host's own gateway; 192.0.2.1 (TEST-NET-1) is no address of this machine, as a VM
+    // engine's bridge is not.
+    scriptDocker([[['network', 'inspect', 'bridge'], { stdout: '127.0.0.2\n' }]]);
+    expect(await bridgeAddress()).toBe('127.0.0.2');
+    scriptDocker([[['network', 'inspect', 'bridge'], { stdout: '192.0.2.1\n' }]]);
+    expect(await bridgeAddress()).toBe('127.0.0.1');
+    scriptDocker([[['network', 'inspect', 'bridge'], { exitCode: 1, stderr: 'no docker' }]]);
+    expect(await bridgeAddress()).toBe('');
+  });
+});
+
 describe('naming what holds :443', () => {
   it('names the container, because "the edge did not start" points at the wrong thing', async () => {
     // The cause is almost always something ELSE on :443 -- hit twice while building this.
@@ -232,6 +248,25 @@ describe('starting the edge', () => {
       .filter((args) => args[0] === 'network' && args[1] === 'connect')
       .map((args) => args[2]);
     expect(joined.sort()).toEqual(['houston-alice-rc8-5-1_default', 'houston-bob-rc8-5-1_default']);
+  });
+
+  it('builds the first edge with the challenge the box was set to, not always TLS-ALPN', async () => {
+    // A box behind a tunnel ran `config set acme.challenge http`, then `up --domain`: the edge
+    // `up` wrote first asked for TLS-ALPN, which the tunnel cannot carry, and its first
+    // certificate never came, seen live. Only `serve`'s edge, and upgrades, read the setting.
+    const config = require('../../../src/lib/config') as typeof ConfigNS;
+    config.updateConfig((cfg) => {
+      cfg.acme_challenge = 'http';
+    });
+    try {
+      scriptDocker([]);
+      expect((await ensureRunning({ acmeEmail: 'a@b.test' })).ok).toBe(true);
+      expect(current()?.acmeChallenge).toBe('http');
+    } finally {
+      config.updateConfig((cfg) => {
+        delete cfg.acme_challenge;
+      });
+    }
   });
 
   it('still applies a changed configuration to an edge that is already running', async () => {

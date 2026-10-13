@@ -33,7 +33,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import * as config from '../lib/config';
-import { ConflictError, NotFoundError } from '../lib/errors';
+import { ConflictError, NotFoundError, ValidationError } from '../lib/errors';
 import { pathHome, joinPath } from '../lib/home';
 import { getHoustonVersion } from '../lib/jsonout';
 import {
@@ -95,10 +95,11 @@ export function hostSkillDir(host: string, dir: string = SKILL_DIR): string {
   // where the established message says `"o'x"`, in stderr and in the envelope's message
   // alike. And the host must be an OWN key: `HOSTS['constructor']` is `Object`, not
   // undefined, so `--host constructor` (or `toString`, `__proto__`) went on to join a
-  // function into the path and died unhandled, exit 1, where the established answer is an
-  // unknown host, exit 4.
+  // function into the path and died unhandled, exit 1. An unknown host is a bad `--host`
+  // value, so a usage error, exit 2: it was a NotFoundError, exit 4, which the contract keeps
+  // for a missing workspace, and a bad flag value is 2 on every other command.
   if (!Object.hasOwn(HOSTS, host)) {
-    throw new NotFoundError(
+    throw new ValidationError(
       `unknown skill host ${quotedText(host)} (want ${Object.keys(HOSTS).sort().join(' | ')} or all)`,
     );
   }

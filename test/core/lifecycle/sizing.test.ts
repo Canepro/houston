@@ -110,6 +110,21 @@ describe('capacity arithmetic', () => {
       WORKSPACE_MB + KUBE_CHART_MB + CLUSTER_MB + MICROSERVICES_MB,
     );
   });
+  it('charges an AD directory by its size and a Keycloak in front, alone or composed', () => {
+    const base = WORKSPACE_MB + (PRESET_MB.ldap ?? 0);
+    const req = (params: Record<string, string>) => createReq({ version: '8.5.1', params });
+    expect(neededMb('ldap', false, req({}))).toBe(base);
+    expect(neededMb('ldap', false, req({ directory: 'openldap', users: '20000' }))).toBe(base);
+    expect(neededMb('ldap', false, req({ directory: 'ad' }))).toBe(base + 63);
+    expect(neededMb('ldap', false, req({ directory: 'ad', users: '20000' }))).toBe(base + 120);
+    expect(
+      neededMb('email+ldap', false, req({ 'ldap.directory': 'ad', 'ldap.users': '1600' })),
+    ).toBe(base + (PRESET_MB.email ?? 0) + 66);
+    // Another preset's `directory` is not the ldap preset's.
+    expect(neededMb('default', false, req({ directory: 'ad' }))).toBe(WORKSPACE_MB);
+    // A Keycloak in front of the directory costs what the saml preset's does.
+    expect(neededMb('ldap', false, req({ idp: 'oidc' }))).toBe(base + (PRESET_MB.saml ?? 0));
+  });
 });
 
 import type * as SizingNS from '../../../src/core/lifecycle/sizing';
@@ -476,5 +491,14 @@ describe('what the host can hold', () => {
     await expect(
       sizing.checkCapacity(types.createReq({ version: '8.5.1' }), 'default'),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("a composed workspace's memory", () => {
+  it('pays for every preset, where its combined name used to cost nothing', () => {
+    const req = createReq({ version: '8.5.1' });
+    expect(neededMb('email+ldap', false, req)).toBe(1100 + 40 + 80);
+    expect(neededMb('oidc+ldap', false, req)).toBe(1100 + 450 + 80);
+    expect(neededMb('saml', false, req)).toBe(1550);
   });
 });

@@ -331,6 +331,15 @@ describe('the two blockers that refuse rather than warn', () => {
     expect(architectureBlocker({ ...pre, architectures: ['arm64', 'amd64'] }, '7.10.0')).toBe('');
     // 8.0.0 is the first multi-arch release, measured with docker manifest inspect.
     expect(architectureBlocker(pre, '8.0.0')).toBe('');
+    // A FIPS CI build is amd64 only whatever its version (measured on ghcr).
+    const fips = 'ghcr.io/rocketchat/rocket.chat:develop-fips';
+    expect(architectureBlocker(pre, '8.10.0.dev0', fips)).toContain('FIPS build');
+    expect(
+      architectureBlocker({ ...pre, architectures: ['arm64', 'amd64'] }, '8.10.0.dev0', fips),
+    ).toBe('');
+    expect(architectureBlocker(pre, '8.10.0.dev0', 'ghcr.io/rocketchat/rocket.chat:develop')).toBe(
+      '',
+    );
     expect(architectureBlocker(pre, '8.5.1')).toBe('');
     // A version this cannot read must not become a refusal.
     expect(architectureBlocker(pre, 'latest')).toBe('');
@@ -473,6 +482,14 @@ describe('choosing a context', () => {
   it('keeps an unreadable kubeconfig apart from one with no contexts', async () => {
     script([], { returncode: 1, stderr: 'error: unable to read kubeconfig' });
     expect(await contexts()).toEqual([[], expect.stringContaining('unable to read kubeconfig')]);
+
+    // THE WHOLE REASON, which names the file twice: cut at 120 characters, a `chmod 000`
+    // kubeconfig's read "permission denie" in the API, on the Clusters page and in create.
+    const denied =
+      'error: error loading config file "/home/laborant/kube-run/config": open ' +
+      '/home/laborant/kube-run/config: permission denied';
+    script([], { returncode: 1, stderr: denied });
+    expect(await contexts()).toEqual([[], denied]);
 
     script([], { stdout: 'default\nkind-houston-local\n' });
     // Both kubeconfigs are read, and the union is deduped and sorted.
@@ -632,13 +649,30 @@ describe('choosing a context', () => {
     expect(await distributionOf('x')).toBe('unknown');
   });
 
-  it('answers false for a distribution it does not recognise', () => {
+  it('answers false for a distribution it does not recognise', async () => {
     // The question this gates is "may the CA private key leave this box".
-    expect(isLocalCluster('kind')).toBe(true);
-    expect(isLocalCluster('K3S')).toBe(true);
-    expect(isLocalCluster('eks')).toBe(false);
-    expect(isLocalCluster('')).toBe(false);
-    expect(isLocalCluster('unknown')).toBe(false);
+    script([[has('config', 'view'), { stdout: 'https://127.0.0.1:6443' }]]);
+    expect(await isLocalCluster('kind')).toBe(true);
+    expect(await isLocalCluster('K3S', 'default')).toBe(true);
+    expect(await isLocalCluster('eks')).toBe(false);
+    expect(await isLocalCluster('')).toBe(false);
+    expect(await isLocalCluster('unknown')).toBe(false);
+  });
+
+  it('asks where a k3s or rke2 server is, since the name does not say', async () => {
+    // A `--context` whose server was another machine passed as local on the name alone, and
+    // `--https` wrote houston's CA private key into that cluster.
+    for (const [server, local] of [
+      ['https://127.0.0.1:6443', true],
+      ['https://localhost:6443', true],
+      ['https://192.0.2.10:6443', false],
+    ] as const) {
+      script([[has('config', 'view'), { stdout: server }]]);
+      expect({ server, local: await isLocalCluster('k3s', 'other') }).toEqual({ server, local });
+    }
+    // Unreadable is not local: the key stays here.
+    script([[has('config', 'view'), { returncode: 1, stderr: 'no context' }]]);
+    expect(await isLocalCluster('rke2', 'gone')).toBe(false);
   });
 
   it('unsets a current-context left pointing at a context it just deleted', async () => {
@@ -1223,6 +1257,8 @@ describe('the pieces a cluster is missing', () => {
         };
       }
       if (joined.startsWith('helm list')) return { stdout: '[]' };
+      // A local k3s: its API server on loopback (`isLocalCluster`).
+      if (joined.includes('config view')) return { stdout: 'https://127.0.0.1:6443' };
       return undefined;
     });
     expect(

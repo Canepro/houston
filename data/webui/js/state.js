@@ -152,6 +152,12 @@ function renderHome() {
   const fresh = !panel.querySelector(".pv.home");
   panel.innerHTML = "";
   const box = ctx.el("div", { class: "pv home" + (fresh ? " anim" : "") });
+  if (!ctx.SERVER_ONLINE) {
+    box.append(ctx.el("h1", {}, "Your workspaces"), ctx.el("p", { class: "banner warn" },
+      "Server unavailable — workspace state and available capacity are unknown."));
+    panel.append(box);
+    return;
+  }
   const hour = new Date().getHours();
   const part = hour < 12 ? "morning" : hour < 18 ? "afternoon" : "evening";
   box.append(ctx.el("h1", {}, ctx.ME ? `Good ${part}, ${ctx.ME}` : "Your workspaces"), ctx.el("p", { class: "sub" }));
@@ -309,7 +315,9 @@ function scenarioCard(d, parsed, shown) {
   const scenario = d.preset && d.preset !== "default" ? d.preset : "";
   const head = ctx.el("div", { class: "panelcard-h" },
     ctx.el("span", { class: "section-label flat" },
-      scenario ? "Scenario · " + scenario : "What is in this workspace"));
+      scenario
+        ? "Scenario · " + (Array.isArray(d.presets) && d.presets.length > 1 ? d.presets.join(" + ") : scenario)
+        : "What is in this workspace"));
   if (scenario) {
     head.append(ctx.el("button", { class: "linkbtn", onclick: openScenarios },
       "About this scenario ↗"));
@@ -403,9 +411,9 @@ function detailShell(r) {
       kube ? `Reading ${r.name} from its cluster…` : `Loading ${r.name}…`),
   ];
 }
-async function selectRepro(name) {
+async function selectRepro(name, tab = "overview") {
+  ctx.SELECTED = name; ctx.dstate.tab = tab; ctx.dstate.points = []; ctx.dstate.statsRefused = "";
   ctx.setView("workspace");
-  ctx.SELECTED = name; ctx.dstate.tab = "overview"; ctx.dstate.points = [];
   // Tear the PREVIOUS repro's panel down first. Leaving it up meant that while the
   // fetch was in flight -- and permanently if it failed -- the list highlighted B
   // while the panel still showed A, with A's destructive Down button wired to A.
@@ -415,17 +423,19 @@ async function selectRepro(name) {
   ctx.render();
   const panel = ctx.$("#detail");
   panel.innerHTML = "";
-  const row = (ctx.ALL_REPROS || []).find((r) => r.name === name);
+  const found = (ctx.ALL_REPROS || []).find((r) => r.name === name);
+  const row = found && ctx.displayRepro(found);
   panel.append(...(row ? detailShell(row) : [ctx.el("div", { class: "placeholder" }, `Loading ${name}…`)]));
   let detail;
   try { detail = await ctx.api(`/api/repros/${name}/detail`); }
   catch (e) {
+    if (ctx.SELECTED !== name || ctx.VIEW !== "workspace") return;
     ctx.toast(e.message);
     panel.innerHTML = "";
     panel.append(ctx.el("div", { class: "placeholder" }, `Could not load ${name}.`));
     return;
   }
-  if (ctx.SELECTED !== name) return;        // a newer selection won the race
+  if (ctx.SELECTED !== name || ctx.VIEW !== "workspace") return;        // a newer view won the race
   ctx.dstate.detail = detail;
   ctx.renderDetail();
 }
@@ -436,7 +446,7 @@ function closeDetail() {
   ctx.closeLogs();
   ctx.render();
 }
-function switchTab(t) { ctx.dstate.tab = t; ctx.renderDetail(); }
+function switchTab(t) { ctx.dstate.tab = t; ctx.saveLocation(); ctx.renderDetail(); }
 
 Object.defineProperties(ctx, {
   "HOME": { enumerable: true, get: () => HOME, set: value => { HOME = value; } },

@@ -6,18 +6,23 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
+import * as YAML from 'yaml';
+
 import type { Preset } from '../../../src/lib/presets/types';
 import type { Resolved } from '../../../src/lib/versions';
 import type * as VersionsNS from '../../../src/lib/versions';
 import type * as PolicyNS from '../../testsetup-policy';
+import type * as ContextNS from '../../../src/lib/context';
 import { openEntries } from '../../../src/core/journal';
 import { type Metadata, adminPass, metadata, writeRecord } from '../../../src/core/runner/record';
 
 import { createPlan } from '../../../src/core/lifecycle/create-docker';
 
 import type * as CreateDockerNS from '../../../src/core/lifecycle/create-docker';
+import type * as CreateK8sNS from '../../../src/core/lifecycle/create-k8s';
 import { MODE_ACME, tlsSpec } from '../../../src/core/tls';
 import { createReq } from '../../../src/core/lifecycle/types';
+import * as users from '../../../src/core/users';
 
 describe('claiming the Compose ports', () => {
   afterEach(() => {
@@ -90,6 +95,107 @@ describe('claiming the Compose ports', () => {
     await createDocker.claimPorts(plan);
     expect(plan.token).toBe('explicit');
     expect(plan.bindHost).toBe('0.0.0.0');
+    // A wildcard includes loopback, so houston still calls it there.
+    expect(plan.root).toBe('http://localhost:3200');
+  });
+
+  it('calls a workspace bound to one address on that address', async () => {
+    // `--bind 172.17.0.1` published nothing on loopback, so readiness polled
+    // `localhost` and `up --wait` always ended exit 5 while Rocket.Chat served on the
+    // bridge -- and the warning said it was published "on every interface".
+    jest.resetModules();
+    jest.doMock('../../../src/core/lifecycle/ports', () => ({
+      ...jest.requireActual('../../../src/core/lifecycle/ports'),
+      checkSidecarPorts: async () => undefined,
+      checkMonitorPorts: async () => undefined,
+      pickHostPort: async () => 3611,
+    }));
+    jest.doMock('../../../src/core/lifecycle/preconditions', () => ({
+      ...jest.requireActual('../../../src/core/lifecycle/preconditions'),
+      guardProjectCollision: async () => undefined,
+    }));
+    jest.doMock('../../../src/core/lifecycle/tlsplan', () => ({
+      ...jest.requireActual('../../../src/core/lifecycle/tlsplan'),
+      resolveTls: async () => null,
+    }));
+    const createDocker =
+      require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+    const said: string[] = [];
+    const plan = createPlan({
+      req: createReq({ version: '8.5.1', bind: '172.17.0.1' }),
+      emit: (event) => said.push(event.message),
+    });
+    plan.cfg = config.loadConfig();
+    plan.pre = presets.load('default', {});
+    await createDocker.claimPorts(plan);
+    expect(plan.root).toBe('http://172.17.0.1:3611');
+    createDocker.warnAboutTheBind(plan);
+    expect(said.join(' ')).toContain('to everyone who can reach 172.17.0.1');
+    expect(said.join(' ')).not.toContain('every interface');
+  });
+
+  it('keeps a rebuilt workspace on its recorded port, unless something else holds it', async () => {
+    // `up --force` allocated afresh, from 3000: a workspace on 3301 came back on 3000 and
+    // every link to it went dead. A Kubernetes re-up already kept its port. But a stopped
+    // workspace's port taken by something else since is not its to keep: the real
+    // `pickHostPort` skips the probe for a workspace's own recorded ports, so compose failed
+    // to bind it.
+    await writeRecord(
+      'moved',
+      metadata({ name: 'moved', project: 'houston-moved', hostPort: 3301 }),
+    );
+    let held = false;
+    let state = 'exited';
+    jest.resetModules();
+    jest.doMock('../../../src/core/runner/ports', () => ({
+      ...jest.requireActual('../../../src/core/runner/ports'),
+      portFree: async (port: number) => !(held && port === 3301),
+      pickPort: async () => 3000,
+    }));
+    jest.doMock('../../../src/core/runner/queries', () => ({
+      ...jest.requireActual('../../../src/core/runner/queries'),
+      rcState: async () => state,
+    }));
+    jest.doMock('../../../src/core/lifecycle/ports', () => ({
+      ...jest.requireActual('../../../src/core/lifecycle/ports'),
+      checkSidecarPorts: async () => undefined,
+      checkMonitorPorts: async () => undefined,
+    }));
+    jest.doMock('../../../src/core/lifecycle/preconditions', () => ({
+      ...jest.requireActual('../../../src/core/lifecycle/preconditions'),
+      guardProjectCollision: async () => undefined,
+    }));
+    jest.doMock('../../../src/core/lifecycle/tlsplan', () => ({
+      ...jest.requireActual('../../../src/core/lifecycle/tlsplan'),
+      resolveTls: async () => null,
+    }));
+    const createDocker =
+      require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+    const got: number[] = [];
+    const said: string[] = [];
+    // Free; held by its own running Rocket.Chat; held by something else while it is stopped.
+    for (const [taken, rc] of [
+      [false, 'exited'],
+      [true, 'running'],
+      [true, 'exited'],
+    ] as const) {
+      held = taken;
+      state = rc;
+      const plan = createPlan({
+        req: createReq({ version: '8.5.1', name: 'moved', force: true }),
+        emit: (event) => {
+          if (event.level === 'warn') said.push(event.message);
+        },
+        reproName: 'moved',
+      });
+      plan.cfg = config.loadConfig();
+      plan.pre = presets.load('default', {});
+      await createDocker.claimPorts(plan);
+      got.push(plan.hostPort);
+    }
+    expect(got).toEqual([3301, 3301, 3000]);
+    // The move is said: every link to the old port stops working.
+    expect(said).toEqual(["port 3301 is no longer free, so 'moved' moves to 3000"]);
   });
 });
 
@@ -115,6 +221,7 @@ describe('the create path end to end, stopped at the write seam', () => {
       '../../../src/core/lifecycle/preconditions',
       '../../../src/lib/versions',
       '../../../src/core/runner/record',
+      '../../../src/core/runner/engine',
     ]) {
       jest.dontMock(id);
     }
@@ -200,6 +307,176 @@ describe('the create path end to end, stopped at the write seam', () => {
     expect(seen.yaml).toContain('admin123');
   });
 
+  it('warns that Rocket.Chat 9 may refuse an unlicensed LDAP login', async () => {
+    // An earlier case leaves a box-wide token, which rightly silences the warning.
+    config.updateConfig((cfg) => {
+      delete cfg.reg_token;
+    });
+    const { createDocker } = capture();
+    const said: string[] = [];
+    await expect(
+      createDocker.createRepro(
+        createReq({ version: '9.0.0', name: 'nine', preset: 'ldap', wait: false, offline: true }),
+        (event) => said.push(event.message),
+      ),
+    ).rejects.toThrow('stopped at the write seam');
+    expect(said.filter((line) => line.includes('Premium plan for LDAP login'))).toHaveLength(1);
+  });
+
+  it('builds several presets as one workspace, recorded under the canonical name', async () => {
+    const { seen, createDocker } = capture();
+    await expect(
+      createDocker.createRepro(
+        createReq({
+          version: '8.5.1',
+          name: 'combo',
+          preset: 'email+ldap',
+          wait: false,
+          offline: true,
+        }),
+      ),
+    ).rejects.toThrow('stopped at the write seam');
+    expect(seen.meta?.preset).toBe('email+ldap');
+    expect(seen.yaml).toContain('mailpit:');
+    expect(seen.yaml).toContain('openldap:');
+    expect(seen.yaml).toMatch(
+      /OVERWRITE_SETTING_Accounts_TwoFactorAuthentication_By_Email_Enabled: '?true'?\n/u,
+    );
+  });
+
+  it("records the set: one preset string, the list and each preset's params in extra", async () => {
+    const { seen, createDocker } = capture();
+    await expect(
+      createDocker.createRepro(
+        createReq({
+          version: '8.5.1',
+          name: 'combo-rec',
+          preset: 'email+ldap',
+          params: { 'ldap.users': '7' },
+          wait: false,
+          offline: true,
+        }),
+      ),
+    ).rejects.toThrow('stopped at the write seam');
+    const extra = seen.meta?.extra ?? {};
+    expect([seen.meta?.preset, extra.presets, extra.preset_params, 'params' in extra]).toEqual([
+      'email+ldap',
+      ['email', 'ldap'],
+      { email: {}, ldap: { users: '7' } },
+      false,
+    ]);
+  });
+
+  it('records one preset exactly as before: flat params, no list', async () => {
+    const { seen, createDocker } = capture();
+    await expect(
+      createDocker.createRepro(
+        createReq({
+          version: '8.5.1',
+          name: 'one-rec',
+          preset: 'ldap',
+          params: { users: '3' },
+          wait: false,
+          offline: true,
+        }),
+      ),
+    ).rejects.toThrow('stopped at the write seam');
+    const extra = seen.meta?.extra ?? {};
+    expect([seen.meta?.preset, extra.params, 'presets' in extra, 'preset_params' in extra]).toEqual(
+      ['ldap', { users: '3' }, false, false],
+    );
+  });
+
+  it('gives every instance of a multi-instance deployment the scenario', async () => {
+    const { seen, createDocker } = capture();
+    await expect(
+      createDocker.createRepro(
+        createReq({
+          version: '8.5.1',
+          name: 'mi-ldap',
+          preset: 'ldap',
+          deployment: 'multi-instance',
+          wait: false,
+          offline: true,
+        }),
+      ),
+    ).rejects.toThrow('stopped at the write seam');
+    expect([seen.meta?.preset, seen.meta?.extra.presets]).toEqual([
+      'ldap+multi-instance',
+      ['ldap', 'multi-instance'],
+    ]);
+    const yaml = seen.yaml ?? '';
+    for (const service of ['rocketchat-1:', 'rocketchat-2:', 'openldap:', 'traefik:']) {
+      expect(yaml).toContain(service);
+    }
+    expect(yaml.split('OVERWRITE_SETTING_LDAP_Enable').length - 1).toBe(2);
+  });
+
+  it("issues an LDAPS directory houston's certificate and hands Rocket.Chat the CA", async () => {
+    const { seen, createDocker } = capture();
+    await expect(
+      createDocker.createRepro(
+        createReq({
+          version: '8.5.1',
+          name: 'ldaps',
+          preset: 'ldap',
+          params: { tls: 'ldaps' },
+          wait: false,
+          offline: true,
+        }),
+      ),
+    ).rejects.toThrow('stopped at the write seam');
+    const yaml = seen.yaml ?? '';
+    expect(yaml).toContain(
+      './ldap/certs/ldap.crt:/container/service/slapd/assets/certs/ldap.crt:ro',
+    );
+    // The PEM survives the document: parsed back, it is the CA houston signs with.
+    const doc = YAML.parse(yaml) as {
+      services: { rocketchat: { environment: Record<string, string> } };
+    };
+    const ca = doc.services.rocketchat.environment.OVERWRITE_SETTING_LDAP_CA_Cert ?? '';
+    expect(ca.startsWith('-----BEGIN CERTIFICATE-----\n')).toBe(true);
+    expect(ca.trimEnd().endsWith('-----END CERTIFICATE-----')).toBe(true);
+    expect(seen.meta?.extra.directory_tls).toBe('ldaps');
+  });
+
+  it('refuses saml + oidc before anything is written', async () => {
+    const { seen, createDocker } = capture();
+    await expect(
+      createDocker.createRepro(
+        createReq({
+          version: '8.5.1',
+          name: 'sso2',
+          preset: 'oidc+saml',
+          wait: false,
+          offline: true,
+        }),
+      ),
+    ).rejects.toThrow('one SSO preset per workspace');
+    expect(seen.yaml).toBeUndefined();
+  });
+
+  it.each([
+    ['e2ee', { policy: 'enforced' }],
+    ['e2ee+email', { 'e2ee.policy': 'enforced' }],
+  ])(
+    'refuses %s with policy=enforced on a Rocket.Chat before 8.8.0, before anything is written',
+    async (preset, params) => {
+      // 8.5.1 has no E2E_Force_Encryption_For_Private_Rooms: it would ignore the setting and
+      // the workspace would enforce nothing while its record said it does.
+      const { seen, createDocker } = capture();
+      const refused = createDocker.createRepro(
+        createReq({ version: '8.5.1', name: 'enf', preset, params, wait: false, offline: true }),
+      );
+      await expect(refused).rejects.toThrow(
+        'e2ee policy=enforced needs Rocket.Chat 8.8.0 or later; 8.5.1 would not enforce it.',
+      );
+      // A usage error: exit 2, before the cluster, the edge or the record is touched.
+      await expect(refused).rejects.toHaveProperty('exitCode', 2);
+      expect(seen.meta).toBeUndefined();
+    },
+  );
+
   it('generates a password for a workspace bound wide', async () => {
     // `--bind 0.0.0.0` removes the same premise by the other mechanism, and it must not
     // be the path left handing `admin123` to the LAN.
@@ -212,9 +489,148 @@ describe('the create path end to end, stopped at the write seam', () => {
     expect(seen.meta?.adminPassword).not.toBe('');
     expect(seen.yaml).not.toContain('admin123');
   });
+
+  /** `up --force -n <name>` as `actor` over a workspace that exists: the record it writes. */
+  async function forcedAs(actor: string, name: string): Promise<string> {
+    jest.doMock('../../../src/core/runner/engine', () => ({
+      ...jest.requireActual('../../../src/core/runner/engine'),
+      down: async () => 0,
+    }));
+    const { seen, createDocker } = capture();
+    await expect(
+      createDocker.createRepro(
+        createReq({ version: '8.5.1', name, actor, force: true, wait: false, offline: true }),
+      ),
+    ).rejects.toThrow('stopped at the write seam');
+    return `${String(seen.meta?.name)} by ${String(seen.meta?.extra.created_by)}`;
+  }
+
+  it('rebuilds the workspace a member was handed, and gives anyone else their own', async () => {
+    // `HOUSTON_USER=mem houston up -n g2 --force` on g2, handed to mem, said "workspace
+    // name: mem-g2" and made a second workspace; g2 was untouched. Every other command
+    // resolves the exact name first. Somebody else's name still gets the actor's prefix.
+    await writeRecord(
+      'g2',
+      metadata({ name: 'g2', project: 'houston-g2', extra: { created_by: 'root', owner: 'mem' } }),
+    );
+    expect([await forcedAs('mem', 'g2'), await forcedAs('mem2', 'g2')]).toEqual([
+      'g2 by root',
+      'mem2-g2 by mem2',
+    ]);
+  });
+
+  it('rebuilds the workspace an admin names, and keeps who made it', async () => {
+    // `HOUSTON_USER=kadmin houston up -n k1` with k1 there made a new `kadmin-k1`. Acting on
+    // k1, the rebuilt record must not make the admin its creator, and so its owner.
+    await users.add('kadmin', 'a-good-enough-password', 'admin');
+    await writeRecord(
+      'k1',
+      metadata({ name: 'k1', project: 'houston-k1', extra: { created_by: 'kmem' } }),
+    );
+    expect(await forcedAs('kadmin', 'k1')).toBe('k1 by kmem');
+  });
+
+  it('asks again under the lock, so a workspace handed away while the request waited is refused', async () => {
+    // `claimTypedName` looks before the workspace lock, and a plain `--force` asks nobody:
+    // a member's create queued behind the lock, then handed to alice, rebuilt alice's
+    // workspace with the member's request.
+    await writeRecord(
+      'g3',
+      metadata({
+        name: 'g3',
+        project: 'houston-g3',
+        extra: { created_by: 'root', owner: 'alice' },
+      }),
+    );
+    const { seen, createDocker } = capture();
+    const context = require('../../../src/lib/context') as typeof ContextNS;
+    const req = createReq({
+      version: '8.5.1',
+      name: 'g3',
+      actor: 'mem',
+      exactName: true,
+      force: true,
+      wait: false,
+      offline: true,
+    });
+    await expect(
+      context.runWithContext({ actor: 'mem' }, () => createDocker.createReproLocked(req)),
+    ).rejects.toThrow('g3 belongs to alice');
+    expect(seen.meta).toBeUndefined();
+  });
 });
 
 describe('rebuilding an existing workspace', () => {
+  it('keeps a handed-over owner when the record is rebuilt', async () => {
+    // `up --force` rebuilt the record from scratch: whoever ran it became the owner of a
+    // workspace that had been handed to someone else.
+    const versions = require('../../../src/lib/versions') as typeof VersionsNS;
+    const createDocker =
+      require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+    const history = [{ from: 'mem2', to: 'mem', by: 'admin', at: '2026-10-12T13:00:00Z' }];
+    await writeRecord(
+      'handed',
+      metadata({
+        name: 'handed',
+        project: 'houston-handed',
+        extra: { created_by: 'mem2', owner: 'mem', owner_history: history },
+      }),
+    );
+    const plan = createDocker.createPlan({
+      req: createReq({ version: '8.5.1', name: 'handed', force: true }),
+      emit: nullEmit,
+      reproName: 'handed',
+      resolved: versions.resolve('8.5.1', { offline: true }),
+      pre: presets.load('default', {}),
+      root: 'http://localhost:3331',
+      hostPort: 3331,
+      bindHost: '127.0.0.1',
+    });
+    await createDocker.buildDocument(plan);
+    createDocker.buildRecord(plan);
+    expect(plan.meta?.extra).toMatchObject({ owner: 'mem', owner_history: history });
+  });
+
+  it('keeps it pinned when the record is rebuilt', async () => {
+    // `up --force` without --pin wrote `pinned: false`, and the next `prune` would delete it.
+    const versions = require('../../../src/lib/versions') as typeof VersionsNS;
+    const createDocker =
+      require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+    await writeRecord(
+      'pinned',
+      metadata({ name: 'pinned', project: 'houston-pinned', pinned: true }),
+    );
+    const plan = createDocker.createPlan({
+      req: createReq({ version: '8.5.1', name: 'pinned', force: true }),
+      emit: nullEmit,
+      reproName: 'pinned',
+      resolved: versions.resolve('8.5.1', { offline: true }),
+      pre: presets.load('default', {}),
+      root: 'http://localhost:3331',
+      hostPort: 3331,
+      bindHost: '127.0.0.1',
+    });
+    await createDocker.buildDocument(plan);
+    createDocker.buildRecord(plan);
+    expect(plan.meta?.pinned).toBe(true);
+  });
+
+  it('keeps its monitoring without --monitor, as a Kubernetes re-up does', async () => {
+    // `up --force` dropped Prometheus and Grafana without a word: `info` went from
+    // monitoring true to null and the Grafana link with it.
+    const createDocker =
+      require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+    await writeRecord(
+      'watched',
+      metadata({ name: 'watched', project: 'houston-watched', extra: { monitoring: true } }),
+    );
+    const plan = createPlan({
+      req: createReq({ version: '8.5.1', name: 'watched', force: true }),
+      emit: nullEmit,
+    });
+    await createDocker.resolveAxesStep(plan);
+    expect(plan.req.monitor).toBe(true);
+  });
   it('Grafana public URL regression: passes the TLS URL into the compose document and notes', async () => {
     const versions = require('../../../src/lib/versions') as typeof VersionsNS;
     const createDocker =
@@ -269,6 +685,58 @@ describe('rebuilding an existing workspace', () => {
     expect(plan.envOverrides).toEqual({ KEEP_ME: 'this run', GONE: null, NEW: '1' });
     createDocker.buildRecord(plan);
     expect(plan.meta?.extra.env).toEqual({ KEEP_ME: 'this run', GONE: null, NEW: '1' });
+  });
+
+  it('keeps the admin password its database holds, and mints one only for --fresh', async () => {
+    // Rocket.Chat reads ADMIN_PASS only when it fills an empty database, so a new password
+    // on a rebuild was recorded and accepted by nothing: every houston login after
+    // `up --force` on an HTTPS workspace answered 401, seen live.
+    const versions = require('../../../src/lib/versions') as typeof VersionsNS;
+    await writeRecord(
+      'pw',
+      metadata({ name: 'pw', project: 'houston-pw', adminPassword: 'Kept-Pass-1' }),
+    );
+    const createDocker =
+      require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+    const passwordFor = async (fresh: boolean) => {
+      const plan = createPlan({
+        req: createReq({ version: '8.5.1', name: 'pw', force: true, fresh }),
+        emit: nullEmit,
+      });
+      plan.reproName = 'pw';
+      plan.resolved = versions.resolve('8.5.1', { offline: true });
+      plan.pre = presets.load('default', {});
+      plan.hostPort = 3000;
+      plan.root = 'http://localhost:3000';
+      plan.bindHost = '0.0.0.0';
+      await createDocker.buildDocument(plan);
+      return plan.adminPassword;
+    };
+    expect(await passwordFor(false)).toBe('Kept-Pass-1');
+    expect(await passwordFor(true)).not.toBe('Kept-Pass-1');
+  });
+
+  it('says so when a workspace made on loopback comes back public with the shared password', async () => {
+    // Its database holds admin123 and keeps it; a generated one would be printed and
+    // refused, so the shared one is kept, and said, now that it is reachable.
+    const versions = require('../../../src/lib/versions') as typeof VersionsNS;
+    await writeRecord('lo', metadata({ name: 'lo', project: 'houston-lo', adminPassword: '' }));
+    const createDocker =
+      require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+    const said: string[] = [];
+    const plan = createPlan({
+      req: createReq({ version: '8.5.1', name: 'lo', force: true }),
+      emit: (event) => said.push(event.message),
+    });
+    plan.reproName = 'lo';
+    plan.resolved = versions.resolve('8.5.1', { offline: true });
+    plan.pre = presets.load('default', {});
+    plan.hostPort = 3000;
+    plan.root = 'http://localhost:3000';
+    plan.bindHost = '0.0.0.0';
+    await createDocker.buildDocument(plan);
+    expect(plan.adminPassword).toBe('');
+    expect(said.join('\n')).toContain('reachable from other machines and keeps the admin password');
   });
 });
 
@@ -450,5 +918,680 @@ describe('the event a create announces itself with', () => {
       },
     ]);
     expect(events).toEqual(recorded);
+  });
+
+  it('names the presets asked for, not the deployment Compose builds with them', async () => {
+    // `up --deployment multi-instance -p saml` said "preset multi-instance+saml", while the
+    // panel's Preset row said `saml`: multi-instance is the deployment, not a preset.
+    jest.resetModules();
+    jest.doMock('../../../src/core/runner/record', () => ({
+      ...jest.requireActual<object>('../../../src/core/runner/record'),
+      write: async () => undefined,
+    }));
+    jest.doMock('../../../src/core/lifecycle/ready', () => ({
+      ...jest.requireActual<object>('../../../src/core/lifecycle/ready'),
+      upCompose: async () => Promise.reject(new Error('stopped at compose')),
+    }));
+    const createDocker =
+      require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+    const said: string[] = [];
+    const plan = createDocker.createPlan({
+      req: createReq({ version: '8.5.1', name: 'd2', noPull: true }),
+      emit: (event) => said.push(event.message),
+    });
+    plan.reproName = 'd2';
+    plan.doc = { name: 'houston-d2', services: {}, volumes: {} };
+    plan.resolved = { rcVersion: '8.8.0', mongoTag: '8.0', mongoFlavor: 'official' } as Resolved;
+    plan.pre = { name: 'multi-instance+saml' } as Preset;
+    await expect(createDocker.startTheWorkspace(plan)).rejects.toThrow('stopped at compose');
+    expect(said).toContain("creating 'd2' - RC 8.8.0, Mongo 8.0 (official), preset saml");
+  });
+});
+
+describe('a rebuild that names no preset', () => {
+  async function axesFor(name: string, recorded: Partial<Metadata>, runtime = '') {
+    await writeRecord(name, metadata({ name, project: `houston-${name}`, ...recorded }));
+    const createDocker =
+      require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+    const said: string[] = [];
+    const plan = createPlan({
+      req: createReq({ version: '8.5.1', name, preset: '', force: true, runtime }),
+      emit: (event) => said.push(event.message),
+    });
+    await createDocker.resolveAxesStep(plan);
+    return { req: plan.req, said };
+  }
+
+  it("keeps a composed workspace's presets and their params, and says so", async () => {
+    const { req, said } = await axesFor('keep-combo', {
+      preset: 'email+ldap',
+      extra: {
+        runtime: 'docker',
+        presets: ['email', 'ldap'],
+        preset_params: { ldap: { users: '7' } },
+      },
+    });
+    expect([req.preset, req.params]).toEqual(['email+ldap', { 'ldap.users': '7' }]);
+    expect(said).toContain("'keep-combo' is a email+ldap workspace — keeping those presets");
+  });
+
+  it('rebuilds a one-preset workspace vanilla, as it always has', async () => {
+    const { req } = await axesFor('keep-one', { preset: 'ldap', extra: { runtime: 'docker' } });
+    expect(req.preset).toBe('default');
+  });
+
+  it('brings a Kubernetes monolith back as a monolith, on its own cluster', async () => {
+    // An empty --deployment resolved to Kubernetes' default, so `up --name X` after `down`
+    // rebuilt a monolith as microservices, seen live on a k3s lane.
+    const { req } = await axesFor('keep-shape', {
+      preset: 'email',
+      extra: { runtime: 'kubernetes', deployment: 'monolith', context: 'lab-cluster' },
+    });
+    expect([req.runtime, req.deployment, req.context]).toEqual([
+      'kubernetes',
+      'monolith',
+      'lab-cluster',
+    ]);
+  });
+
+  it('keeps a MongoDB the operator runs, rather than applying its own over it', async () => {
+    // `up --name X` after `down` on an --mongo-operator workspace applied houston's own
+    // MongoDB over the operator's and failed ("kubectl apply failed"), seen live on k3s.
+    const { req } = await axesFor('keep-operator', {
+      preset: 'default',
+      extra: { runtime: 'kubernetes', deployment: 'monolith', mongo_managed_by: 'operator' },
+    });
+    expect(req.mongoOperator).toBe(true);
+  });
+
+  it('keeps the instance count with the shape, as the GUI’s Start does', async () => {
+    // The count is read from the record with the deployment; without it a three-instance
+    // workspace came back with the shape's default.
+    const { req } = await axesFor('keep-count', {
+      preset: 'multi-instance',
+      extra: { runtime: 'docker', deployment: 'multi-instance', instances: 3 },
+    });
+    expect([req.deployment, req.replicas]).toEqual(['multi-instance', 3]);
+  });
+
+  it('carries nothing onto a runtime the workspace was not recorded on', async () => {
+    // A microservices shape and a cluster mean nothing to Compose: carried, they turned
+    // `--runtime docker` into a refusal naming a --deployment nobody typed.
+    const { req } = await axesFor(
+      'other-runtime',
+      {
+        preset: 'email',
+        extra: { runtime: 'kubernetes', deployment: 'microservices', context: 'c1' },
+      },
+      'docker',
+    );
+    expect([req.deployment, req.context]).toEqual(['monolith', '']);
+  });
+
+  it('says it goes to the recorded cluster, not the box default, when it brings one back', async () => {
+    // The destination was announced before the recorded cluster was carried, so a box whose
+    // saved default is an EKS cluster warned of an hourly bill for a kind workspace.
+    config.updateConfig((cfg) => {
+      cfg[config.KUBE_CONTEXT_KEY] = 'arn:aws:eks:us-east-1:123456789012:cluster/demo';
+    });
+    try {
+      await writeRecord(
+        'back',
+        metadata({
+          name: 'back',
+          project: 'houston-back',
+          extra: { runtime: 'kubernetes', deployment: 'monolith', context: 'kind-houston-local' },
+        }),
+      );
+      const createDocker =
+        require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+      const said: string[] = [];
+      await createDocker
+        .createRepro(
+          createReq({ version: '8.5.1', name: 'back', runtime: 'kubernetes', offline: true }),
+          (event) => said.push(event.message),
+        )
+        .catch(() => undefined);
+      expect(said.join('\n')).not.toContain('costs money by the hour');
+    } finally {
+      config.updateConfig((cfg) => {
+        delete cfg[config.KUBE_CONTEXT_KEY];
+      });
+    }
+  });
+});
+
+describe('a rebuild across MongoDB image families', () => {
+  afterEach(() => {
+    for (const id of [
+      '../../../src/core/runner/engine',
+      '../../../src/core/lifecycle/ports',
+      '../../../src/core/lifecycle/preconditions',
+      '../../../src/core/lifecycle/tlsplan',
+    ]) {
+      jest.dontMock(id);
+    }
+    jest.resetModules();
+  });
+
+  /** `fam` at RC 7.6.1 on Bitnami MongoDB 7.0, and what `up` would tear down or start. */
+  async function existing(): Promise<{ torn: unknown[]; createDocker: typeof CreateDockerNS }> {
+    await writeRecord(
+      'fam',
+      metadata({
+        name: 'fam',
+        project: 'houston-fam',
+        rcVersion: '7.6.1',
+        mongoTag: '7.0',
+        mongoFlavor: 'bitnami-legacy',
+        extra: { runtime: 'docker' },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(config.home(), 'repros', 'fam', 'docker-compose.yml'),
+      'services: {}\n',
+    );
+    const torn: unknown[] = [];
+    jest.resetModules();
+    jest.doMock('../../../src/core/runner/engine', () => ({
+      ...jest.requireActual<object>('../../../src/core/runner/engine'),
+      down: async (...args: unknown[]) => {
+        torn.push(args);
+        return 0;
+      },
+      up: async () => 0,
+    }));
+    jest.doMock('../../../src/core/lifecycle/ports', () => ({
+      ...jest.requireActual('../../../src/core/lifecycle/ports'),
+      checkSidecarPorts: async () => undefined,
+      pickHostPort: async () => 3300,
+    }));
+    jest.doMock('../../../src/core/lifecycle/preconditions', () => ({
+      ...jest.requireActual('../../../src/core/lifecycle/preconditions'),
+      guardProjectCollision: async () => undefined,
+    }));
+    jest.doMock('../../../src/core/lifecycle/tlsplan', () => ({
+      ...jest.requireActual('../../../src/core/lifecycle/tlsplan'),
+      resolveTls: async () => null,
+    }));
+    return {
+      torn,
+      createDocker: require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS,
+    };
+  }
+
+  it('refuses up --force onto the other family before anything is torn down', async () => {
+    // Bitnami keeps its data in /bitnami/mongodb and the official image in /data/db, on the
+    // same `mongodb_data` volume: the rebuild booted Rocket.Chat 8 on an empty database.
+    const { torn, createDocker } = await existing();
+    const refused = createDocker.createRepro(
+      createReq({ version: '8.5.1', name: 'fam', force: true, offline: true }),
+    );
+    await expect(refused).rejects.toThrow(/empty database/u);
+    await expect(
+      createDocker.createRepro(
+        createReq({ version: '8.5.1', name: 'fam', force: true, offline: true }),
+      ),
+    ).rejects.toThrow(/houston backup --name fam/u);
+    expect(torn).toEqual([]);
+  });
+
+  it('lets --fresh and a same-family rebuild through', async () => {
+    const { createDocker } = await existing();
+    const plan = (version: string, fresh: boolean) => {
+      const made = createPlan({
+        req: createReq({ version, name: 'fam', force: true, fresh, offline: true }),
+        emit: nullEmit,
+      });
+      made.reproName = 'fam';
+      made.resolved = (require('../../../src/lib/versions') as typeof VersionsNS).resolve(version, {
+        offline: true,
+      });
+      return made;
+    };
+    await expect(
+      createDocker.refuseMongoFamilyChange(plan('8.5.1', true)),
+    ).resolves.toBeUndefined();
+    await expect(
+      createDocker.refuseMongoFamilyChange(plan('7.6.2', false)),
+    ).resolves.toBeUndefined();
+  });
+});
+
+describe('an Enterprise licence', () => {
+  const LICENSE = 'RCV3_c2VjcmV0LWxpY2VuY2UtdGV4dA==';
+
+  function planFor(name: string, license: string) {
+    const versions = require('../../../src/lib/versions') as typeof VersionsNS;
+    const made = createPlan({
+      req: createReq({ version: '8.5.1', name, license }),
+      emit: nullEmit,
+    });
+    made.reproName = name;
+    made.resolved = versions.resolve('8.5.1', { offline: true });
+    made.pre = presets.load('default', {});
+    made.hostPort = 3320;
+    made.root = 'http://localhost:3320';
+    made.bindHost = '127.0.0.1';
+    return made;
+  }
+
+  it('reaches Rocket.Chat through its own 0600 file, and nowhere a reader looks', async () => {
+    const createDocker =
+      require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+    const plan = planFor('lic', LICENSE);
+    await createDocker.buildDocument(plan);
+    createDocker.buildRecord(plan);
+    const doc = plan.doc as NonNullable<typeof plan.doc>;
+    expect(doc.services.rocketchat?.env_file).toEqual(['.license.env']);
+    expect(JSON.stringify(doc)).not.toContain(LICENSE);
+    expect(JSON.stringify(plan.meta)).not.toContain(LICENSE);
+    expect(plan.meta?.extra.licensed).toBe(true);
+    fs.mkdirSync(path.join(config.home(), 'repros', 'lic'), { recursive: true });
+    await createDocker.writeLicense(plan);
+    const file = path.join(config.home(), 'repros', 'lic', '.license.env');
+    expect(fs.readFileSync(file, 'utf8')).toBe(`ROCKETCHAT_LICENSE=${LICENSE}\n`);
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+  });
+
+  it('is kept by a rebuild that does not name it again', async () => {
+    const createDocker =
+      require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+    fs.mkdirSync(path.join(config.home(), 'repros', 'kept'), { recursive: true });
+    fs.writeFileSync(path.join(config.home(), 'repros', 'kept', '.license.env'), 'x', {
+      mode: 0o600,
+    });
+    const plan = planFor('kept', '');
+    await createDocker.buildDocument(plan);
+    expect(plan.doc?.services.rocketchat?.env_file).toEqual(['.license.env']);
+    const bare = planFor('bare', '');
+    await createDocker.buildDocument(bare);
+    expect('env_file' in (bare.doc?.services.rocketchat ?? {})).toBe(false);
+  });
+
+  it('refuses text that is not a licence, without repeating it', async () => {
+    const createDocker =
+      require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+    const bad = 'line-one\nEVIL=1';
+    const refused = createDocker.createRepro(
+      createReq({ version: '8.5.1', name: 'badlic', license: bad, offline: true }),
+    );
+    await expect(refused).rejects.toThrow('does not hold a Rocket.Chat licence');
+    await expect(
+      createDocker.createRepro(
+        createReq({ version: '8.5.1', name: 'badlic', license: bad, offline: true }),
+      ),
+    ).rejects.not.toThrow(/EVIL/u);
+  });
+});
+
+describe('a name the HTTPS edge could not reach', () => {
+  // The TLS the create DECIDED, as `resolveTls` leaves it: `--https`, `--email` alone and
+  // a record of an HTTPS workspace all come out as a spec, and none of them as a flag here.
+  const planOf = (name: string, preset: string, https = true, actor = '') => {
+    const plan = createPlan({
+      req: createReq({ version: '8.5.1', name, preset, actor }),
+      emit: nullEmit,
+    });
+    plan.reproName = name;
+    plan.pre = presets.load(preset, {});
+    plan.tlsspec = https ? tlsSpec({ host: `${name}.houston.localhost` }) : null;
+    return plan;
+  };
+
+  it('is refused before anything is made, naming the container and the room left', async () => {
+    // `houston-<name>-phpldapadmin-1` must be a 63-character DNS label: at 41 characters it
+    // is 64, does not resolve, and /phpldapadmin/ answered Bad Gateway.
+    const createDocker = jest.requireActual<typeof CreateDockerNS>(
+      '../../../src/core/lifecycle/create-docker',
+    );
+    await expect(
+      createDocker.refuseNamesTheEdgeCannotReach(planOf('a'.repeat(41), 'ldap')),
+    ).rejects.toThrow(
+      /reaches phpldapadmin as houston-a{41}-phpldapadmin-1, 64 characters.*at most 40/u,
+    );
+    await expect(
+      createDocker.refuseNamesTheEdgeCannotReach(planOf('a'.repeat(40), 'ldap')),
+    ).resolves.toBeUndefined();
+    // Rocket.Chat itself is the limit without a preset UI, and plain http routes nothing.
+    await expect(
+      createDocker.refuseNamesTheEdgeCannotReach(planOf('a'.repeat(43), 'default')),
+    ).rejects.toThrow(/rocketchat/u);
+    await expect(
+      createDocker.refuseNamesTheEdgeCannotReach(planOf('a'.repeat(60), 'ldap', false)),
+    ).resolves.toBeUndefined();
+  });
+
+  it('is refused however the create came to HTTPS: --email alone, or the record', async () => {
+    // Keyed on the TLS `resolveTls` decided, not on --https/--domain: `--email` alone means
+    // a local certificate, and an existing HTTPS workspace gets its TLS back from its record.
+    jest.resetModules();
+    jest.doMock('../../../src/core/lifecycle/ports', () => ({
+      ...jest.requireActual('../../../src/core/lifecycle/ports'),
+      checkSidecarPorts: async () => undefined,
+      checkMonitorPorts: async () => undefined,
+      pickHostPort: async () => 3300,
+    }));
+    jest.doMock('../../../src/core/lifecycle/preconditions', () => ({
+      ...jest.requireActual('../../../src/core/lifecycle/preconditions'),
+      guardProjectCollision: async () => undefined,
+    }));
+    jest.doMock('../../../src/core/lifecycle/tlsplan', () => ({
+      ...jest.requireActual('../../../src/core/lifecycle/tlsplan'),
+      resolveTls: async () => tlsSpec({ host: `${'a'.repeat(41)}.houston.localhost` }),
+    }));
+    const createDocker =
+      require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+    const plan = createPlan({
+      req: createReq({
+        version: '8.5.1',
+        name: 'a'.repeat(41),
+        preset: 'ldap',
+        acmeEmail: 'a@b.c',
+      }),
+      emit: nullEmit,
+    });
+    plan.cfg = config.loadConfig();
+    plan.reproName = 'a'.repeat(41);
+    plan.pre = presets.load('ldap', {});
+    await expect(createDocker.claimPorts(plan)).rejects.toThrow(/phpldapadmin-1, 64 characters/u);
+    jest.resetModules();
+  });
+
+  it('says how long a name the person may type when houston adds their prefix', async () => {
+    const createDocker = jest.requireActual<typeof CreateDockerNS>(
+      '../../../src/core/lifecycle/create-docker',
+    );
+    // alice typed 36 characters; the workspace is `alice-<36>`, 42, one container 65.
+    await expect(
+      createDocker.refuseNamesTheEdgeCannotReach(
+        planOf(`alice-${'a'.repeat(36)}`, 'ldap', true, 'alice'),
+      ),
+    ).rejects.toThrow(/at most 34 characters, as houston puts 'alice-' in front of it/u);
+  });
+});
+
+describe('a combination given a bad input', () => {
+  it('is a usage error, as the same input to one preset is', () => {
+    // A member's own refusal escaped as "unhandled": exit 1 and a stack trace for a typo,
+    // where the single preset says exit 2, VALIDATION_FAILED. Nothing is created either way.
+    const { loadPreset } =
+      require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+    const { ValidationError } = require('../../../src/lib/errors') as {
+      ValidationError: new (...args: unknown[]) => Error;
+    };
+    const refused = (preset: string, params: Record<string, unknown>): unknown => {
+      try {
+        loadPreset(
+          createPlan({ req: createReq({ version: '8.5.1', preset, params }), emit: nullEmit }),
+        );
+      } catch (error) {
+        return error instanceof ValidationError ? 'usage' : String(error);
+      }
+      return 'accepted';
+    };
+    expect([
+      refused('email+ldap', { 'ldap.users': 'abc' }),
+      refused('email+ldap', { 'ldap.tls': 'bogus' }),
+      refused('email+ldap', { 'ldap.mfa': 'on' }),
+      refused('ldap+nosuch', {}),
+    ]).toEqual(['usage', 'usage', 'usage', 'usage']);
+  });
+});
+
+describe('up --pin on a workspace that exists', () => {
+  afterEach(() => {
+    jest.dontMock('../../../src/core/runner/queries');
+    jest.dontMock('../../../src/core/lifecycle/ready');
+    jest.dontMock('../../../src/core/lifecycle/inspect');
+    jest.resetModules();
+  });
+
+  it('pins it, so the next prune keeps it, and makes it the default', async () => {
+    // It was not even among the flags said to be ignored: `pinned: false`, no warning, and
+    // `prune --yes` then deleted the one workspace its owner had just asked to keep.
+    jest.resetModules();
+    jest.doMock('../../../src/core/runner/queries', () => ({
+      ...jest.requireActual('../../../src/core/runner/queries'),
+      rcState: async () => 'running',
+    }));
+    jest.doMock('../../../src/core/lifecycle/ready', () => ({
+      ...jest.requireActual('../../../src/core/lifecycle/ready'),
+      restoreRoute: async () => undefined,
+    }));
+    jest.doMock('../../../src/core/lifecycle/inspect', () => ({
+      ...jest.requireActual('../../../src/core/lifecycle/inspect'),
+      summary: async () => ({}),
+    }));
+    const record = require('../../../src/core/runner/record') as {
+      writeRecord: typeof writeRecord;
+      metadata: typeof metadata;
+      readMeta: (name: string) => Promise<Metadata>;
+    };
+    await record.writeRecord('kept', record.metadata({ name: 'kept', project: 'houston-kept' }));
+    const createDocker =
+      require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+    await createDocker.reuse(
+      'kept',
+      false,
+      createReq({ version: '8.5.1', name: 'kept', pin: true }),
+      nullEmit,
+    );
+    expect((await record.readMeta('kept')).pinned).toBe(true);
+    const cfg = require('../../../src/lib/config') as typeof config;
+    expect(cfg.loadConfig().default_repro).toBe('kept');
+  });
+});
+
+describe('a hosts line on Podman', () => {
+  afterEach(() => {
+    // The guard put back, never taken away: `runner/host` is the suite's stated engine.
+    jest.doMock('../../../src/core/runner/host', () =>
+      (require('../../testsetup-policy') as typeof PolicyNS).healthyHost(),
+    );
+    jest.resetModules();
+  });
+
+  it('is warned about where the notes ask for one, and only on Podman', async () => {
+    // Podman copies /etc/hosts into every container, so `127.0.0.1 minio` made minio-init and
+    // Rocket.Chat resolve minio to themselves: no bucket, every upload ECONNREFUSED.
+    for (const [kind, expected] of [
+      ['podman', true],
+      ['docker', false],
+    ] as const) {
+      jest.resetModules();
+      jest.doMock('../../../src/core/runner/host', () => ({
+        ...jest.requireActual('../../../src/core/runner/host'),
+        engine: async () => ({ kind, version: '4.9.3', rootless: true }),
+      }));
+      const createDocker =
+        require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+      const said: string[] = [];
+      const plan = createDocker.createPlan({
+        req: createReq({ version: '8.5.1', preset: 's3_minio' }),
+        emit: (event) => said.push(event.message),
+      });
+      plan.pre = presets.load('s3_minio', { presigned: 'true' });
+      await createDocker.warnAboutHostsOnPodman(plan);
+      expect({ kind, warned: said.some((line) => line.includes('Podman copies')) }).toEqual({
+        kind,
+        warned: expected,
+      });
+    }
+  });
+});
+
+describe('a seed profile that does not exist', () => {
+  it('is refused before anything is resolved or made', async () => {
+    // The planner refused `--seed-profile huge` only after the workspace was pulled, built
+    // and started: exit 1 over a running workspace, for a typo.
+    const createDocker =
+      require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+    const { ValidationError } = require('../../../src/lib/errors') as {
+      ValidationError: new (...args: unknown[]) => Error;
+    };
+    const refusal = createDocker.createRepro(
+      createReq({ version: '8.5.1', seed: true, seedProfile: 'huge', offline: true }),
+    );
+    await expect(refusal).rejects.toBeInstanceOf(ValidationError);
+    await expect(
+      createDocker.createRepro(
+        createReq({ version: '8.5.1', seed: true, seedProfile: 'huge', offline: true }),
+      ),
+    ).rejects.toThrow("unknown seed profile 'huge' (want small | standard | large)");
+  });
+});
+
+describe('Kubernetes-only flags on Docker', () => {
+  it('are said to be ignored, rather than silently dropped', async () => {
+    // `up --mongo-operator` or `--ingress-class nginx` on Docker built a full workspace
+    // with no word that either was ignored.
+    const createDocker =
+      require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+    const warned: string[] = [];
+    await createDocker
+      .createRepro(
+        createReq({
+          version: '8.5.1',
+          offline: true,
+          runtime: 'docker',
+          mongoOperator: true,
+          ingressClass: 'nginx',
+        }),
+        (event) => {
+          if (event.level === 'warn') warned.push(event.message);
+        },
+      )
+      .catch(() => undefined);
+    expect(warned).toContain(
+      '--mongo-operator and --ingress-class: Kubernetes only, ignored on Docker',
+    );
+  });
+});
+
+describe('a qualified --set on a single preset', () => {
+  it.each(['docker', 'kubernetes'])(
+    "is that preset's parameter on %s, and its value is checked as one",
+    async (runtime) => {
+      // `-p ldap --set ldap.users=abc` was refused as an unknown param on both runtimes,
+      // while `-p ldap -p email` took the same key and checked its value.
+      const createDocker =
+        require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+      const refused = createDocker.createRepro(
+        createReq({
+          version: '8.5.1',
+          name: 'kbad',
+          preset: 'ldap',
+          params: { 'ldap.users': 'abc' },
+          runtime,
+          offline: true,
+        }),
+      );
+      await expect(refused).rejects.toThrow("--set users='abc' expects a whole number");
+      await expect(refused).rejects.toHaveProperty('exitCode', 2);
+    },
+  );
+});
+
+describe("a combination's IdP on a non-loopback bind", () => {
+  it('is warned about as the single preset is', () => {
+    // Looked up by the combined name (`email+saml`), the warning never fired for a set:
+    // the SAML button bounced off the visitor's own machine with nothing said.
+    const createDocker =
+      require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+    const said: string[] = [];
+    const plan = createDocker.createPlan({
+      req: createReq({ version: '8.5.1', preset: 'email+saml', bind: '0.0.0.0' }),
+      emit: (event) => said.push(event.message),
+    });
+    plan.bindHost = '0.0.0.0';
+    plan.hostPort = 3611;
+    createDocker.warnAboutTheBrowserHost(plan);
+    expect(said.join(' ')).toContain("this 'saml' workspace is bound to 0.0.0.0");
+    expect(said.join(' ')).toContain('--set saml.idp_host=<host>');
+  });
+
+  it('is said for a URL given over plain http, and not for an HTTPS name or proxied MinIO', () => {
+    // A `--domain` workspace with oidc and s3_minio was told OIDC "opens a blank window" and
+    // previews fail, and to re-create on 0.0.0.0: over HTTPS the browser signs in through
+    // <name>/keycloak/ and Rocket.Chat proxies the downloads, and both worked.
+    const warned = (https: boolean): string => {
+      const said: string[] = [];
+      const plan = createPlan({
+        req: createReq({
+          version: '8.5.1',
+          preset: 'oidc+s3_minio',
+          ...(https ? { domain: 'd1.example.com' } : { rootUrl: 'http://d1.example.com:3301' }),
+        }),
+        emit: (event) => said.push(event.message),
+      });
+      plan.pre = presets.loadMany(['oidc', 's3_minio'], {}, 'docker');
+      plan.bindHost = '127.0.0.1';
+      plan.hostPort = 3301;
+      if (https) {
+        plan.tlsspec = tlsSpec({ mode: MODE_ACME, host: 'd1.example.com', acmeEmail: 'o@e.com' });
+      }
+      createDocker.warnAboutTheBrowserHost(plan);
+      return said.join(' ');
+    };
+    const createDocker =
+      require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+    expect(warned(true)).not.toContain('names that browser');
+    // The case it was written for: an http URL with the ports on loopback.
+    expect(warned(false)).toContain("this 'oidc' workspace advertises http://d1.example.com:3301");
+    // MinIO in its default proxy mode is never the browser's to reach.
+    expect(warned(false)).not.toContain("'s3_minio'");
+  });
+});
+
+describe('presigned uploads on an HTTPS workspace', () => {
+  it('are warned about when the workspace is created, not only in its notes', async () => {
+    // The browser fetches presigned URLs from MinIO over http, which an https page blocks as
+    // mixed content. The notes said so; the create-time warning had no test of its own, so
+    // dropping the emit left every test green.
+    const versions = require('../../../src/lib/versions') as typeof VersionsNS;
+    const createDocker =
+      require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+    const said: string[] = [];
+    const plan = createPlan({
+      req: createReq({ version: '8.5.1', name: 'p3', preset: 's3_minio' }),
+      emit: (event) => said.push(event.message),
+    });
+    plan.reproName = 'p3';
+    plan.resolved = versions.resolve('8.5.1', { offline: true });
+    plan.pre = presets.load('s3_minio', { presigned: 'true' });
+    plan.hostPort = 3000;
+    plan.root = 'http://localhost:3000';
+    plan.bindHost = '127.0.0.1';
+    plan.tlsspec = tlsSpec({ mode: MODE_ACME, host: 'p3.example.com', acmeEmail: 'o@e.com' });
+    await createDocker.buildDocument(plan);
+    expect(said.some((line) => line.includes('mixed content'))).toBe(true);
+  });
+});
+
+describe('the name a create settles on', () => {
+  it('is announced by both runtimes, for the GUI to title its progress by', async () => {
+    // Only `announceName` itself was tested; the jobs and repros tests inject the event by
+    // mock, so a create that stopped calling it left every test green.
+    const createDocker =
+      require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+    const createK8s = require('../../../src/core/lifecycle/create-k8s') as typeof CreateK8sNS;
+    const { missingMonitorAttach } = require('../../../src/core/lifecycle/request') as {
+      missingMonitorAttach: never;
+    };
+    const codes: string[] = [];
+    const emit = (event: { code?: string; data?: unknown }): void => {
+      if (event.code === 'workspace-name') codes.push(JSON.stringify(event.data));
+    };
+    const plan = createPlan({ req: createReq({ version: '8.5.1', preset: 'email' }), emit });
+    plan.reproName = 'rc8-5-1-email';
+    await createDocker.settleName(plan).catch(() => undefined);
+    const job = createK8s.kubeCreate({
+      req: createReq({ version: '8.5.1', preset: 'email', runtime: 'kubernetes' }),
+      emit,
+      monitorAttach: missingMonitorAttach,
+    });
+    await createK8s.settleName(job).catch(() => undefined);
+    expect(codes).toHaveLength(2);
   });
 });

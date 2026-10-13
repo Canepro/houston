@@ -23,7 +23,14 @@ import type * as AppNS from '../../../src/cli/app';
 import type * as HandlersNS from '../../../src/cli/handlers';
 import type * as ExecNS from '../../../src/seams/exec';
 
-/** The recorded runs, by scenario label: every `edge`/`tls-status` one, and every `trust-ca`. */
+/**
+ * The recorded runs, by scenario label: every `edge`/`tls-status` one, and every `trust-ca`.
+ *
+ * Two recorded exit codes are moved on purpose: `edge bogus` and `edge delete` with no host
+ * exited 1 there and are 2 here (L7-07). An unknown action and a missing argument are usage
+ * errors under the exit-code contract -- `cluster bogus` was already 2 -- and 1.x parity no
+ * longer binds the code. Their lines are unchanged.
+ */
 const RECORDED = JSON.parse(
   fs.readFileSync(
     path.join(__dirname, '..', '..', 'fixtures', 'cli', 'handlers', 'https.json'),
@@ -499,6 +506,21 @@ describe('edge status with nothing on the edge', () => {
   });
 });
 
+describe('edge delete with no host', () => {
+  it('is a usage error whether or not this home has an edge', async () => {
+    // With no edge it said "nothing to delete" and exited 0; with one, exit 2.
+    const recorded = inHome(RECORDED.edge['edge delete, no host']);
+    for (const world of [{}, { edge: { installed: true } }]) {
+      const ours = await typescript(world, ['edge', 'delete', '--yes']);
+      expect({ code: ours.code, stdout: ours.stdout, stderr: ours.stderr }).toEqual({
+        code: 2,
+        stdout: '',
+        stderr: recorded.stderr,
+      });
+    }
+  });
+});
+
 // --- trust-ca -------------------------------------------------------------------------
 
 /**
@@ -581,6 +603,13 @@ describe('trust-ca, against earlier releases', () => {
     // PATH holds the stand-in and nothing else, so a missing one is missing, as it was for
     // the recorded run.
     const recorded = inHome(RECORDED.trust[label]);
+    // A home that HAS a CA: `--show` reads one now and no longer mints it (the case below
+    // this block), and what earlier releases printed is the show of an existing CA.
+    if (argv.includes('--show')) {
+      fs.mkdirSync(path.join(home, 'ca'), { recursive: true });
+      fs.writeFileSync(path.join(home, 'ca', 'ca.crt'), '');
+      fs.writeFileSync(path.join(home, 'ca', 'ca.key'), '');
+    }
 
     jest.resetModules();
     const calls: [string, boolean][] = [];
@@ -615,5 +644,30 @@ describe('trust-ca, against earlier releases', () => {
     };
     const code = await app.runCli(argv, { execute: handlers.createExecutor(io, {}), io });
     expect({ code, stdout, stderr, calls, openssl: handed() }).toEqual(recorded);
+  });
+});
+
+describe('trust-ca --show', () => {
+  it('only reads: on a fresh home it says there is no CA, and makes none', async () => {
+    // "Just print the CA path" minted a CA -- a key that can sign for any name -- on a home
+    // that had none.
+    const { trustCa } = require('../../../src/cli/handlers/https') as {
+      trustCa: (io: AppNS.CliIo, uninstall: boolean, show: boolean) => Promise<number>;
+    };
+    const { caDir } = require('../../../src/core/tls-local') as { caDir: () => string };
+    let out = '';
+    const code = await trustCa(
+      {
+        writeOut: (text) => {
+          out += text;
+        },
+        writeErr: () => undefined,
+      },
+      false,
+      true,
+    );
+    expect(code).toBe(0);
+    expect(out).toContain('no local CA yet');
+    expect(fs.existsSync(caDir())).toBe(false);
   });
 });

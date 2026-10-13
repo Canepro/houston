@@ -211,6 +211,19 @@ export async function sweepOrphanNamespaces(
         );
         continue;
       }
+      // NO OWNER IS NOBODY'S, NOT YOURS. A namespace made with no accounts and no
+      // HOUSTON_USER carries an empty owner, and so does the caller in the same setup -- so
+      // '' matched '' and another home's LIVE workspace was swept, PVC and all, without
+      // --force. It cannot be attributed, which is what --force is for.
+      if (owner === '' && !force) {
+        warn(
+          emit,
+          `namespace ${ns} records no owner, so it may be another home's workspace — ` +
+            'left alone. `--force` sweeps it',
+          { phase: 'done' },
+        );
+        continue;
+      }
       if (owner !== null && owner !== '' && owner !== me && !force) {
         warn(
           emit,
@@ -277,13 +290,13 @@ export async function pruneKubernetes(name: string, emit: Emit, removed: string[
   const forwards = bag(extra.scenario_forwards);
   for (const uiPid of Object.values(forwards)) {
     try {
-      stopPortForward(Number(uiPid), { namespace: ns });
+      await stopPortForward(Number(uiPid), { namespace: ns });
     } catch {
       // malformed recorded pid
     }
   }
   const pid = extra.port_forward_pid;
-  if (isTruthy(pid)) stopPortForward(Number(pid), { namespace: ns });
+  if (isTruthy(pid)) await stopPortForward(Number(pid), { namespace: ns });
   // THE ANSWER IS READ, exactly as `teardown` reads it. This discarded it and then
   // removed the local record and reported the workspace pruned regardless.
   if (!(await deleteNamespace(name, { context, volumes: true, emit }))) {
@@ -302,7 +315,7 @@ export async function pruneKubernetes(name: string, emit: Emit, removed: string[
   if (isTruthy(extra.tls)) await removeGrafanaIngress(name, { context, emit });
   const grafanaPid = extra.grafana_pid;
   if (isTruthy(grafanaPid))
-    stopPortForward(Number(grafanaPid), { namespace: MONITORING_NAMESPACE });
+    await stopPortForward(Number(grafanaPid), { namespace: MONITORING_NAMESPACE });
   if (isTruthy(extra.monitoring)) await removeMonitoring({ context, excluding: ns, emit });
   deregisterRoute(name);
   await paths.remove(name);
@@ -341,6 +354,12 @@ export async function removeOneWorkspace(
           // `pruneKubernetes` does its own reporting: it knows whether the namespace is
           // confirmed gone and says so on the path that keeps the record.
           await pruneKubernetes(name, emit, removed);
+          return false;
+        }
+        // Close the backend's pooled edge connections before removing its endpoint,
+        // just as teardownCompose does. A failed stop must leave this project attached.
+        if ((await engine.stop(name)) !== 0) {
+          warn(emit, `could not stop '${name}' - skipping`, { phase: 'done' });
           return false;
         }
         // Detach BEFORE `down`: compose cannot remove a network that still has an active

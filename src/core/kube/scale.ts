@@ -7,7 +7,7 @@ import { dumps } from '../../lib/json-text';
 
 import { why } from './ask';
 import { kube } from './exec';
-import { APPLY_TIMEOUT, MONGO_SERVICE, RELEASE, isOurs } from './names';
+import { APPLICATION_SELECTOR, APPLY_TIMEOUT, MONGO_SERVICE, RELEASE, isOurs } from './names';
 import { namespaceFor } from './namespace';
 import { initReplicaSet, type Sleep } from './replicaset';
 
@@ -310,7 +310,12 @@ export async function startWorkspace(
  */
 export async function scaleRocketchat(
   name: string,
-  { replicas, context }: { replicas: number; context: string },
+  {
+    replicas,
+    context,
+    sleep = realSleep,
+    selector = APPLICATION_SELECTOR,
+  }: { replicas: number; context: string; sleep?: Sleep; selector?: string },
 ): Promise<number> {
   const namespace = await namespaceFor(name);
   const listed = await kube.run(
@@ -323,17 +328,20 @@ export async function scaleRocketchat(
       'get',
       'deployment',
       '-l',
-      'app.kubernetes.io/name=rocketchat',
+      selector,
       '-o',
       'name',
     ],
     { own: isOurs(context) },
   );
+  if (listed.returncode !== 0) {
+    throw new DockerError(`could not list Rocket.Chat deployments for '${name}': ${why(listed)}`);
+  }
   const targets = listed.stdout
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line !== '');
-  if (targets.length === 0) return 0;
+  if (targets.length === 0) throw new NotFoundError(`'${name}' has no Rocket.Chat deployments`);
   const res = await kube.run(
     [
       'kubectl',
@@ -347,5 +355,145 @@ export async function scaleRocketchat(
     ],
     { timeout: APPLY_TIMEOUT, own: isOurs(context) },
   );
-  return res.returncode;
+  if (res.returncode !== 0 || replicas !== 0) return res.returncode;
+  await waitForRocketchatPodsGone(namespace, context, name, sleep, selector);
+  return 0;
+}
+
+/** Desired counts before quiescence, including already stopped deployments. */
+export async function rocketchatReplicas(
+  name: string,
+  { context }: { context: string },
+): Promise<Record<string, number>> {
+  const res = await kube.run(
+    [
+      'kubectl',
+      '--context',
+      context,
+      '-n',
+      await namespaceFor(name),
+      'get',
+      'deployment',
+      '-l',
+      APPLICATION_SELECTOR,
+      '-o',
+      'json',
+    ],
+    { own: isOurs(context) },
+  );
+  if (res.returncode !== 0) {
+    throw new DockerError(`could not read Rocket.Chat replicas for '${name}': ${why(res)}`);
+  }
+  let doc: unknown;
+  try {
+    doc = JSON.parse(res.stdout);
+  } catch {
+    throw new DockerError(
+      `could not read Rocket.Chat replicas for '${name}': invalid deployment list`,
+    );
+  }
+  const rows =
+    typeof doc === 'object' && doc !== null && !Array.isArray(doc)
+      ? (doc as Record<string, unknown>).items
+      : undefined;
+  if (!Array.isArray(rows) || rows.length === 0) {
+    throw new DockerError(`could not read Rocket.Chat replicas for '${name}': no deployment list`);
+  }
+  const counts: Record<string, number> = {};
+  for (const row of rows as unknown[]) {
+    const item = typeof row === 'object' && row !== null ? (row as Record<string, unknown>) : {};
+    const metadata = item.metadata as { name?: unknown } | undefined;
+    const spec = item.spec as { replicas?: unknown } | undefined;
+    const deployment = metadata?.name;
+    const count = spec?.replicas;
+    if (
+      typeof deployment !== 'string' ||
+      !/^[a-z0-9][a-z0-9.-]*$/u.test(deployment) ||
+      typeof count !== 'number' ||
+      !Number.isInteger(count) ||
+      count < 0
+    ) {
+      throw new DockerError(
+        `could not read Rocket.Chat replicas for '${name}': invalid deployment count`,
+      );
+    }
+    const target = `deployment.apps/${deployment}`;
+    if (Object.hasOwn(counts, target)) {
+      throw new DockerError(
+        `could not read Rocket.Chat replicas for '${name}': duplicate deployment`,
+      );
+    }
+    counts[target] = count;
+  }
+  return counts;
+}
+
+/** Restore the same deployment set; an uncertain or changed set is not safe to guess. */
+export async function restoreRocketchatReplicas(
+  name: string,
+  counts: Readonly<Record<string, number>>,
+  { context }: { context: string },
+): Promise<number> {
+  const current = await rocketchatReplicas(name, { context });
+  if (
+    Object.keys(current).sort().join('\n') !== Object.keys(counts).sort().join('\n') ||
+    Object.values(counts).some((count) => !Number.isInteger(count) || count < 0)
+  ) {
+    throw new DockerError(
+      `cannot restore Rocket.Chat replicas for '${name}': deployment shape changed`,
+    );
+  }
+  const namespace = await namespaceFor(name);
+  for (const [target, count] of Object.entries(counts)) {
+    const res = await kube.run(
+      [
+        'kubectl',
+        '--context',
+        context,
+        '-n',
+        namespace,
+        'scale',
+        `--replicas=${String(count)}`,
+        target,
+      ],
+      { timeout: APPLY_TIMEOUT, own: isOurs(context) },
+    );
+    if (res.returncode !== 0) return res.returncode;
+  }
+  return 0;
+}
+
+async function waitForRocketchatPodsGone(
+  namespace: string,
+  context: string,
+  name: string,
+  sleep: Sleep,
+  selector: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < POD_GONE_TRIES; attempt += 1) {
+    const res = await kube.run(
+      [
+        'kubectl',
+        '--context',
+        context,
+        '-n',
+        namespace,
+        'get',
+        'pods',
+        '-l',
+        selector,
+        '-o',
+        'name',
+      ],
+      { own: isOurs(context) },
+    );
+    if (res.returncode !== 0) {
+      throw new DockerError(`could not verify Rocket.Chat termination for '${name}': ${why(res)}`);
+    }
+    if (res.stdout.trim() === '') return;
+    if (attempt + 1 < POD_GONE_TRIES) await sleep(POD_GONE_INTERVAL);
+  }
+  throw new DockerError(
+    `Rocket.Chat pods did not terminate for '${name}'; refusing to access the database`,
+  );
 }

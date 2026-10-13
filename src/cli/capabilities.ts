@@ -1,3 +1,4 @@
+import { seedCatalogue } from '../lib/seed-options';
 import { state as skillState } from '../core/skill';
 import { DEPLOYMENTS, DOCKER, REGISTERED } from '../core/topology';
 import { DEFAULT_BIND_HOST } from '../lib/config';
@@ -71,6 +72,7 @@ export function capabilities(): Record<string, unknown> {
     ),
     presets,
     seed_profiles: Object.keys(PROFILES).sort(),
+    seed_options: seedCatalogue(),
     runtimes: Object.entries(DEPLOYMENTS).map(([name, deployments]) => ({
       name,
       deployments: [...deployments],

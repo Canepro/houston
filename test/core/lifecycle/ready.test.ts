@@ -271,3 +271,327 @@ describe('a tick whose elapsed time is not a number', () => {
     expect(ours).toEqual(recorded);
   });
 });
+
+describe("a Kubernetes workspace's preset forwards, after a stop/start", () => {
+  afterEach(() => {
+    jest.dontMock('../../../src/core/kube/forward');
+    jest.resetModules();
+  });
+
+  it('are re-established when one died with its pod, and recorded again', async () => {
+    // Only the Rocket.Chat forward was ever repaired: the SAML IdP on :8081 answered
+    // nothing after a stop/start, post_ready could not re-read its certificate, and every
+    // SAML sign-in was refused as an invalid signature.
+    jest.resetModules();
+    const stopped: number[] = [];
+    jest.doMock('../../../src/core/kube/forward', () => ({
+      ...jest.requireActual('../../../src/core/kube/forward'),
+      forwardAlive: async (pid: number) => pid !== 5151,
+      stopForward: async (pid: number) => {
+        stopped.push(pid);
+        return true;
+      },
+      scenarioUiForwards: async () => ({ 8081: 6161, 8082: 6262 }),
+    }));
+    const record = require('../../../src/core/runner/record') as typeof RecordNS;
+    const extra = { scenario_forwards: { 8081: 5151, 8082: 5252 } };
+    await record.writeRecord('ks', record.metadata({ name: 'ks', project: 'houston-ks', extra }));
+    const ready = require('../../../src/core/lifecycle/ready') as typeof ReadyNS;
+    const meta = await record.readMeta('ks');
+    await ready.repairTheScenarioForwards(meta, () => undefined, extra, 'houston-ks', 'c');
+    expect(stopped.sort()).toEqual([5151, 5252]);
+    expect((await record.readMeta('ks')).extra.scenario_forwards).toEqual({
+      8081: 6161,
+      8082: 6262,
+    });
+  });
+});
+
+describe('a multi-instance workspace, ready', () => {
+  afterEach(() => {
+    for (const module of ['../../../src/core/runner/queries', '../../../src/core/rcapi'])
+      jest.dontMock(module);
+    jest.resetModules();
+  });
+
+  it('waits for one-shot setup to finish, and names one that failed', async () => {
+    // Rocket.Chat does not wait for minio-init, so on rootless Podman `up --wait` returned
+    // while the bucket did not exist yet. A setup that exits non-zero is said, not hidden.
+    jest.resetModules();
+    const answers: { service: string; status: string; exitCode: number }[][] = [
+      [{ service: 'minio-init', status: 'running', exitCode: 0 }],
+      [{ service: 'minio-init', status: 'exited', exitCode: 0 }],
+      [{ service: 'minio-init', status: 'exited', exitCode: 1 }],
+    ];
+    jest.doMock('../../../src/core/runner/queries', () => ({
+      ...jest.requireActual<object>('../../../src/core/runner/queries'),
+      oneShotSetups: async () => answers.shift() ?? [],
+    }));
+    const ready = require('../../../src/core/lifecycle/ready') as typeof ReadyNS;
+    const { metadata } = require('../../../src/core/runner/record') as typeof RecordNS;
+    const meta = metadata({ name: 's3', project: 'houston-s3' });
+    const said: string[] = [];
+    const paused: number[] = [];
+    await ready.waitForOneShotSetup(
+      meta,
+      (event) => void said.push(event.message),
+      60,
+      async (s) => {
+        paused.push(s);
+      },
+    );
+    expect(paused).toEqual([2]);
+    expect(said).toEqual(['Rocket.Chat answers; waiting for minio-init to finish']);
+    await expect(ready.waitForOneShotSetup(meta, () => undefined, 60)).rejects.toThrow(
+      "minio-init exited 1 before it finished setting up 's3'",
+    );
+    jest.dontMock('../../../src/core/runner/queries');
+  });
+
+  it('does not hold a serving workspace on a mongo-init re-run that missed a lookup', async () => {
+    // `restart` re-runs mongo-init; on rootless Podman its connect missed `mongodb` and it
+    // exited 1, and a workspace whose replica set was PRIMARY and serving read as not ready.
+    // Rocket.Chat serving is what proves the replica set.
+    jest.resetModules();
+    jest.doMock('../../../src/core/runner/queries', () => ({
+      ...jest.requireActual<object>('../../../src/core/runner/queries'),
+      oneShotSetups: async () => [{ service: 'mongo-init', status: 'exited', exitCode: 1 }],
+    }));
+    const ready = require('../../../src/core/lifecycle/ready') as typeof ReadyNS;
+    const { metadata } = require('../../../src/core/runner/record') as typeof RecordNS;
+    await expect(
+      ready.waitForOneShotSetup(metadata({ name: 'm', project: 'houston-m' }), () => undefined, 5),
+    ).resolves.toBeUndefined();
+    jest.dontMock('../../../src/core/runner/queries');
+  });
+
+  it('is not ready while the bucket setup has failed, though Rocket.Chat answers', async () => {
+    jest.resetModules();
+    jest.doMock('../../../src/core/runner/queries', () => ({
+      ...jest.requireActual<object>('../../../src/core/runner/queries'),
+      rcState: async () => 'running',
+      servicesByProject: async () => ({}),
+      oneShotSetups: async () => [{ service: 'minio-init', status: 'exited', exitCode: 1 }],
+    }));
+    jest.doMock('../../../src/core/rcapi', () => ({
+      ...jest.requireActual<typeof RcapiNS>('../../../src/core/rcapi'),
+      waitReady: async () => ({ version: '8.5.1' }),
+      apiInfo: async () => ({ version: '8.5.1' }),
+    }));
+    const ready = require('../../../src/core/lifecycle/ready') as typeof ReadyNS;
+    const { metadata } = require('../../../src/core/runner/record') as typeof RecordNS;
+    const meta = metadata({
+      name: 's3w',
+      project: 'houston-s3w',
+      rcVersion: '8.5.1',
+      rootUrl: 'http://localhost:3601',
+      hostPort: 3601,
+    });
+    await expect(ready.waitServing(meta, () => undefined, 60)).rejects.toThrow(
+      'minio-init exited 1',
+    );
+    jest.dontMock('../../../src/core/runner/queries');
+    jest.dontMock('../../../src/core/rcapi');
+  });
+
+  it('is ready when every instance answers, not when the front door first does', async () => {
+    // The workspace's Traefik starts every server healthy and checks every 10 s, so the
+    // first instance to answer made `ready` return while the others booted: 9-10 of 20
+    // requests answered 502 right after it, and the admin login failed.
+    jest.resetModules();
+    const asked: string[] = [];
+    jest.doMock('../../../src/core/runner/queries', () => ({
+      ...jest.requireActual<object>('../../../src/core/runner/queries'),
+      rcState: async () => 'running',
+      servicesByProject: async () => ({}),
+    }));
+    jest.doMock('../../../src/core/rcapi', () => ({
+      ...jest.requireActual<typeof RcapiNS>('../../../src/core/rcapi'),
+      waitReady: async (url: string) => {
+        asked.push(url);
+        return { version: '8.5.1' };
+      },
+      // No database to refuse over: the subject is which addresses were waited on.
+      apiInfo: async () => ({ version: '8.5.1' }),
+    }));
+    const ready = require('../../../src/core/lifecycle/ready') as typeof ReadyNS;
+    const { metadata } = require('../../../src/core/runner/record') as typeof RecordNS;
+    const meta = metadata({
+      name: 'mi',
+      project: 'houston-mi',
+      rcVersion: '8.5.1',
+      rootUrl: 'http://localhost:3600',
+      hostPort: 3600,
+      extra: { instances: 2 },
+    });
+    await ready.waitServing(meta, () => undefined, 60).catch(() => undefined);
+    expect(asked).toEqual([
+      'http://localhost:3600',
+      'http://localhost:3601',
+      'http://localhost:3602',
+    ]);
+  });
+
+  it('names the instance that is not serving', async () => {
+    // One replica stopped, the front door answering: `ready` exited 5 with only "did not
+    // become ready within 59s", and which of the instances was down was left to find.
+    jest.resetModules();
+    jest.doMock('../../../src/core/runner/queries', () => ({
+      ...jest.requireActual<object>('../../../src/core/runner/queries'),
+      rcState: async () => 'running',
+      servicesByProject: async () => ({}),
+    }));
+    jest.doMock('../../../src/core/rcapi', () => {
+      const actual = jest.requireActual<typeof RcapiNS>('../../../src/core/rcapi');
+      return {
+        ...actual,
+        waitReady: async (url: string, { timeout = 0 }: { timeout?: number } = {}) => {
+          if (url === 'http://localhost:3602') {
+            throw new actual.NotReady(
+              `Rocket.Chat did not become ready within ${String(Math.trunc(timeout))}s`,
+            );
+          }
+          return { version: '8.5.1' };
+        },
+      };
+    });
+    jest.doMock('../../../src/core/diagnose', () => ({
+      ...jest.requireActual<object>('../../../src/core/diagnose'),
+      diagnoseFailure: async () => null,
+    }));
+    try {
+      const ready = require('../../../src/core/lifecycle/ready') as typeof ReadyNS;
+      const { metadata } = require('../../../src/core/runner/record') as typeof RecordNS;
+      const meta = metadata({
+        name: 'd2',
+        project: 'houston-d2',
+        rcVersion: '8.5.1',
+        rootUrl: 'http://localhost:3600',
+        hostPort: 3600,
+        extra: { instances: 2 },
+      });
+      await expect(ready.waitServing(meta, () => undefined, 60)).rejects.toThrow(
+        /did not become ready within \d+s: rocketchat-2 at http:\/\/localhost:3602 is not serving/u,
+      );
+    } finally {
+      jest.dontMock('../../../src/core/runner/queries');
+      jest.dontMock('../../../src/core/rcapi');
+      jest.dontMock('../../../src/core/diagnose');
+    }
+  });
+});
+
+describe('readiness through the owned HTTPS origin', () => {
+  afterEach(() => {
+    for (const module of [
+      '../../../src/core/runner/queries',
+      '../../../src/core/rcapi',
+      '../../../src/core/tls',
+    ])
+      jest.dontMock(module);
+    jest.resetModules();
+  });
+
+  it('refuses internal success when the restored origin does not serve HTTP', async () => {
+    jest.resetModules();
+    jest.doMock('../../../src/core/runner/queries', () => ({
+      ...jest.requireActual<object>('../../../src/core/runner/queries'),
+      rcState: async () => 'running',
+      oneShotSetups: async () => [],
+      servicesByProject: async () => ({}),
+    }));
+    const asked: string[] = [];
+    jest.doMock('../../../src/core/rcapi', () => {
+      const actual = jest.requireActual<typeof RcapiNS>('../../../src/core/rcapi');
+      return {
+        ...actual,
+        waitReady: async (url: string) => {
+          asked.push(url);
+          if (url.startsWith('https:')) throw new actual.NotReady('origin HTTP timeout');
+          return { version: '8.5.1' };
+        },
+      };
+    });
+    const ready = require('../../../src/core/lifecycle/ready') as typeof ReadyNS;
+    const { metadata } = require('../../../src/core/runner/record') as typeof RecordNS;
+    await expect(
+      ready.waitServing(
+        metadata({
+          name: 'restored',
+          project: 'houston-restored',
+          rootUrl: 'http://localhost:3500',
+          publicUrl: 'https://workspace.example.test',
+          extra: { edge: true, tls: 'acme' },
+        }),
+        () => undefined,
+        60,
+      ),
+    ).rejects.toThrow('its HTTPS origin https://workspace.example.test is not serving');
+    expect(asked).toEqual(['http://localhost:3500', 'https://workspace.example.test']);
+  });
+
+  it('checks a complete page on loopback with the advertised SNI and a per-observation pin', async () => {
+    jest.resetModules();
+    jest.doMock('../../../src/core/runner/queries', () => ({
+      ...jest.requireActual<object>('../../../src/core/runner/queries'),
+      rcState: async () => 'running',
+      oneShotSetups: async () => [],
+      servicesByProject: async () => ({}),
+    }));
+    const observations: unknown[] = [];
+    jest.doMock('../../../src/core/tls', () => ({
+      ...jest.requireActual<object>('../../../src/core/tls'),
+      originCertificate: async (host: string, options: unknown) => {
+        observations.push({ host, options });
+        return { pem: 'OWNED-DEFAULT-CERTIFICATE', fallback: true, error: '' };
+      },
+    }));
+    const requests: unknown[] = [];
+    jest.doMock('../../../src/core/rcapi', () => ({
+      ...jest.requireActual<object>('../../../src/core/rcapi'),
+      waitReady: async (
+        url: string,
+        options: {
+          page?: boolean;
+          requestOptions?: (remaining: number) => Promise<unknown>;
+        },
+      ) => {
+        if (options.requestOptions !== undefined)
+          requests.push({ url, page: options.page, options: await options.requestOptions(1200) });
+        return { version: '8.5.1' };
+      },
+    }));
+    const ready = require('../../../src/core/lifecycle/ready') as typeof ReadyNS;
+    const { metadata } = require('../../../src/core/runner/record') as typeof RecordNS;
+    await ready.waitServing(
+      metadata({
+        name: 'pending',
+        project: 'houston-pending',
+        rootUrl: 'http://localhost:3500',
+        publicUrl: 'https://workspace.example.test:3443',
+        extra: { edge: true, tls: 'acme' },
+      }),
+      () => undefined,
+      60,
+    );
+    expect(observations).toEqual([
+      {
+        host: 'workspace.example.test',
+        options: { port: 3443, timeout: 1.2 },
+      },
+    ]);
+    expect(requests).toEqual([
+      {
+        url: 'https://workspace.example.test:3443',
+        page: true,
+        options: {
+          followRedirects: false,
+          loopbackOrigin: {
+            certificate: 'OWNED-DEFAULT-CERTIFICATE',
+            allowCertificateNameMismatch: true,
+          },
+        },
+      },
+    ]);
+  });
+});

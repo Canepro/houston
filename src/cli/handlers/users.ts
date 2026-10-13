@@ -16,10 +16,12 @@
  * password as the panel's LABEL, which is two columns wider for a one- or two-letter name.
  *
  * `json: none`, so what this prints and the code it exits with are the whole contract. Every
- * prose line is stdout, as the CLI has always written it off a terminal; a plain refusal is a
- * `ReproError` (exit 1) and a service refusal propagates with its own class.
+ * prose line is stdout, as the CLI has always written it off a terminal; a call that is wrong
+ * (a missing name or role, an unknown action) is a `ValidationError` (exit 2), a typed password
+ * that does not match its repeat a plain `ReproError` (exit 1), and a service refusal
+ * propagates with its own class.
  */
-import { ReproError } from '../../lib/errors';
+import { ReproError, ValidationError } from '../../lib/errors';
 import { quotedText } from '../../lib/format';
 import type { CliIo } from '../app';
 import { say, writePanel } from '../render';
@@ -27,6 +29,8 @@ import { say, writePanel } from '../render';
 import { hiddenPrompt } from './prompt';
 
 import type * as SessionsNS from '../../core/sessions';
+import type * as SsoNS from '../../core/sso';
+import type * as SsoIdentitiesNS from '../../core/sso-identities';
 import type * as UsersNS from '../../core/users';
 
 /** How a password is asked for, as `HandlerDependencies.prompt` asks: hidden, by default. */
@@ -58,14 +62,20 @@ function listGuiUsers(io: CliIo): void {
   }
   // The role read per row, as the service reads it: the EFFECTIVE role of the name
   // normalised, so a column the service reads as admin shows as admin, and a stored name
-  // that is not in normalised form finds no account and shows `[]`.
+  // that is not in normalised form finds no account and shows `[]`. An account linked to
+  // Okta says which Okta email signs in as it.
+  const okta = (require('../../core/sso-identities') as typeof SsoIdentitiesNS).linked();
   writePanel(
     io,
     'GUI users',
-    rows.map((user) => [
-      user.name,
-      `${user.createdAt}  [${users.roleOf(user.name)}${user.role ? '' : ' (implicit)'}]`,
-    ]),
+    rows.map((user) => {
+      const email = okta.get(user.name)?.email;
+      return [
+        user.name,
+        `${user.createdAt}  [${users.roleOf(user.name)}${user.role ? '' : ' (implicit)'}]` +
+          (email === undefined ? '' : `  okta ${email}`),
+      ];
+    }),
   );
   const implicit = users.implicitAdmins();
   if (implicit.length > 0) {
@@ -82,7 +92,7 @@ function listGuiUsers(io: CliIo): void {
 async function changeGuiUserRole(io: CliIo, name: string, role: string): Promise<void> {
   const users = usersService();
   if (!role)
-    throw new ReproError(`\`users role ${name}\` needs a role (${users.ROLES.join(' | ')})`);
+    throw new ValidationError(`\`users role ${name}\` needs a role (${users.ROLES.join(' | ')})`);
   const user = await users.setRole(name, role);
   // A role change signs the account out everywhere once its role is written, under
   // `locks/sessions.lock`, so a demotion reaches a browser that is already open rather than
@@ -105,6 +115,25 @@ async function removeGuiUser(io: CliIo, name: string): Promise<void> {
   const ended = await usersService().remove(name);
   say(io, `✓ user ${quotedText(name)} removed.`);
   if (ended) say(io, `  ${ended} active session(s) signed out.`);
+}
+
+/** `link-sso`: approve the exact-name Okta link an admin account never makes on its own. */
+async function linkSso(io: CliIo, name: string): Promise<void> {
+  await (require('../../core/sso') as typeof SsoNS).approveLink(name);
+  say(io, `✓ the Okta user whose username is ${quotedText(name)} may now sign in as it.`);
+  say(
+    io,
+    '  The link is made at their next Okta sign-in. Only that exact name links: a\n' +
+      '  different Okta username is a different houston account.',
+  );
+}
+
+/** `unlink-sso`: the Okta link becomes a tombstone; the account and its password stay. */
+async function unlinkSso(io: CliIo, name: string): Promise<void> {
+  const ended = await (require('../../core/sso') as typeof SsoNS).unlink(name);
+  say(io, `✓ ${quotedText(name)} no longer signs in with Okta; its houston password still works.`);
+  if (ended) say(io, `  ${ended} active session(s) signed out.`);
+  say(io, `  to allow it again: houston users link-sso ${name}`);
 }
 
 /**
@@ -142,7 +171,7 @@ async function passwordForUser(
     minted = true;
   }
   if (request.role && request.action === 'passwd') {
-    throw new ReproError(
+    throw new ValidationError(
       '`users passwd` takes no role — change one with ' +
         `\`houston users role ${name} ${request.role}\``,
     );
@@ -174,14 +203,17 @@ function reportGuiPassword(
   }
   if (action === 'passwd' && ended) say(io, `  ${ended} active session(s) signed out.`);
   if (action === 'add' && added !== null) {
+    // Only the FIRST account is made an admin regardless: a later admin was told the same,
+    // as if it had been forced on it.
+    const first = usersService().listUsers().length === 1;
     say(
       io,
       `  role: ${added.role}` +
-        (added.role === 'admin'
+        (first
           ? '  (the first account has to be an admin, or nobody could promote anyone)'
           : `  — change it with \`houston users role ${name} <role>\``),
     );
-    if (usersService().listUsers().length === 1) {
+    if (first) {
       say(io, '  `houston serve` will now ask for this login, and the first-run link is spent.');
     }
   }
@@ -211,6 +243,8 @@ async function setGuiPassword(
   reportGuiPassword(io, request.action, added, ended, minted, name, password);
 }
 
+const USERS_ACTIONS = ['list', 'add', 'passwd', 'remove', 'role', 'link-sso', 'unlink-sso'];
+
 /**
  * `users`, in its established order: the TYPED name is tested for emptiness, then normalised,
  * then each action checks what it checks.
@@ -218,10 +252,12 @@ async function setGuiPassword(
  * An earlier version tested the NORMALISED name, so `users remove '!!!'` said "needs a name"
  * (exit 1) where the established answer looks up '' and is NOT_FOUND (exit 4); it validated
  * the name only inside `add`, so `users passwd` with a 33-character name was "no user" (exit
- * 4), not the length refusal (exit 2); it prompted before validating anything, so `add <33
- * chars> --ask-password` asked for a password it was going to refuse; and `app.ts` refused an
- * unknown action before this ran, so `users ls` was "unknown action" where the established
- * answer first asks for the name.
+ * 4), not the length refusal (exit 2); and it prompted before validating anything, so `add <33
+ * chars> --ask-password` asked for a password it was going to refuse.
+ *
+ * An unknown action is refused as unknown before any of that, naming the actions, as
+ * `cluster`, `edge` and `config` refuse theirs: `users frob` said "`users frob` needs a name,
+ * e.g. `houston users frob alice`", which then answered "unknown action".
  *
  * One normalisation for every branch, so `role`, `remove` and `passwd` find the account that
  * `add` created and every line printed names it the way the file spells it -- the service
@@ -234,22 +270,24 @@ export async function usersCommand(
   prompt: Prompt = (question) => hiddenPrompt(question),
 ): Promise<void> {
   const { action } = request;
+  if (!USERS_ACTIONS.includes(action)) {
+    throw new ValidationError(
+      `unknown action ${quotedText(action)} (want: ${USERS_ACTIONS.join(' | ')})`,
+    );
+  }
   if (action === 'list') {
     listGuiUsers(io);
     return;
   }
   if (!request.name) {
-    throw new ReproError(
+    throw new ValidationError(
       `\`users ${action}\` needs a name, e.g. \`houston users ${action} alice\``,
     );
   }
   const name = usersService().normalizeName(request.name);
   if (action === 'role') return await changeGuiUserRole(io, name, request.role);
   if (action === 'remove') return await removeGuiUser(io, name);
-  if (action === 'add' || action === 'passwd') {
-    return await setGuiPassword(io, request, name, prompt);
-  }
-  throw new ReproError(
-    `unknown action ${quotedText(action)} (want: list | add | passwd | remove | role)`,
-  );
+  if (action === 'link-sso') return await linkSso(io, name);
+  if (action === 'unlink-sso') return await unlinkSso(io, name);
+  return await setGuiPassword(io, request, name, prompt);
 }

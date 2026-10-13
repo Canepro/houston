@@ -15,10 +15,14 @@ import type * as EdgeSpecNS from '../core/edge/spec';
 import type * as EdgeTypesNS from '../core/edge/types';
 import type { Edge, StartResult } from '../core/edge/types';
 import type * as FirstrunNS from '../core/firstrun';
+import type * as ForwardNS from '../core/kube/forward';
 import type * as AdminNS from '../core/lifecycle/admin';
 import type * as PreconditionsNS from '../core/lifecycle/preconditions';
 import type * as PromoteNS from '../core/promote';
 import type * as RecoveryNS from '../core/recovery';
+import type * as SsoNS from '../core/sso';
+import type * as SsoIdentitiesNS from '../core/sso-identities';
+import type * as HostNS from '../core/runner/host';
 import type * as SessionsNS from '../core/sessions';
 import type * as TlsNS from '../core/tls';
 import type * as AcmeNS from '../core/edge/acme';
@@ -61,6 +65,8 @@ export interface ServeDependencies {
   readonly normalizeDomain: (value: string) => readonly [string, string];
   readonly servedDomain: () => string;
   readonly bridgeAddress: () => Promise<string>;
+  /** `podman`, `docker`, or '' when nothing answers. */
+  readonly engineKind: () => Promise<string>;
   readonly resolveEdge: (domain: string, email: string, overrides: Partial<Edge>) => Edge;
   readonly requireDocker: () => Promise<void>;
   readonly writeEdge: (value: Edge) => Promise<void>;
@@ -92,6 +98,8 @@ export interface ServeDependencies {
   readonly tightenPrivateState: (say: (line: string) => void) => void;
   readonly writePid: (target: string, pid: number) => boolean;
   readonly removeOwnedPid: (target: string, pid: number) => void;
+  /** The pid a pid file records, while that process lives and is not this one. */
+  readonly livePid: (target: string) => number | null;
 }
 
 export interface RunningServe {
@@ -170,6 +178,13 @@ function waitForSignal(_app: FastifyInstance): Promise<void> {
     const done = () => {
       process.off('SIGINT', done);
       process.off('SIGTERM', done);
+      // Closing Fastify does not prove that a log-follow child or another handle
+      // has gone. Keep the process bound after close returns, even with no jobs.
+      // An unreferenced timer lets a fully drained server exit naturally.
+      setTimeout(() => {
+        process.stderr.write('  ⚠ serve shutdown exceeded 38 seconds; ending the process\n');
+        process.exit();
+      }, 38_000).unref();
       resolve();
     };
     process.once('SIGINT', done);
@@ -201,6 +216,7 @@ function tightenPrivateState(say: (line: string) => void): void {
   const users = require('../core/users') as typeof UsersNS;
   const sessions = require('../core/sessions') as typeof SessionsNS;
   const audit = require('../core/audit') as typeof AuditNS;
+  const ssoIdentities = require('../core/sso-identities') as typeof SsoIdentitiesNS;
   const home = config.home();
   try {
     // The home made with its parents and NO mode, then the chmod: a recursive mkdir at
@@ -213,7 +229,12 @@ function tightenPrivateState(say: (line: string) => void): void {
   } catch {
     return;
   }
-  for (const target of [users.usersFile(), sessions.sessionsFile(), audit.auditPath()]) {
+  for (const target of [
+    users.usersFile(),
+    sessions.sessionsFile(),
+    audit.auditPath(),
+    ssoIdentities.identitiesFile(),
+  ]) {
     try {
       if (fs.existsSync(target) && (fs.statSync(target).mode & 0o077) !== 0) {
         fs.chmodSync(target, 0o600);
@@ -243,6 +264,24 @@ function writePid(target: string, pid: number): boolean {
     } catch {
       // Already renamed or the directory is unwritable.
     }
+  }
+}
+
+function livePid(target: string): number | null {
+  const fs = require('node:fs') as typeof FsNS;
+  let pid: number;
+  try {
+    pid = Number.parseInt(fs.readFileSync(target, 'utf8').trim(), 10);
+  } catch {
+    return null;
+  }
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return null;
+  try {
+    process.kill(pid, 0);
+    return pid;
+  } catch (error) {
+    // Alive, and somebody else's to signal.
+    return (error as NodeJS.ErrnoException).code === 'EPERM' ? pid : null;
   }
 }
 
@@ -295,6 +334,7 @@ function defaultDependencies(): ServeDependencies {
   const web = require('../web/app') as typeof WebAppNS;
   const recovery = require('../core/recovery') as typeof RecoveryNS;
   const admin = require('../core/lifecycle/admin') as typeof AdminNS;
+  const host = require('../core/runner/host') as typeof HostNS;
   return {
     home: config.home,
     loadConfig: () => config.loadConfig(false),
@@ -303,6 +343,7 @@ function defaultDependencies(): ServeDependencies {
     normalizeDomain: tls.normalizeDomain,
     servedDomain: edgeSpec.servedDomain,
     bridgeAddress: edgeEngine.bridgeAddress,
+    engineKind: async () => (await host.engine())?.kind ?? '',
     resolveEdge: edgeTypes.resolveEdge,
     requireDocker: preconditions.requireDocker,
     writeEdge: edgeSpec.write,
@@ -331,6 +372,7 @@ function defaultDependencies(): ServeDependencies {
     tightenPrivateState,
     writePid,
     removeOwnedPid,
+    livePid,
   };
 }
 
@@ -469,6 +511,26 @@ function bindRefusal(error: unknown, bind: string, port: number): string | null 
   return `cannot listen on ${where}: ${strerror}`;
 }
 
+/**
+ * What to do about a port in use. Commonly the holder is an earlier `houston serve` -- one
+ * left running under nohup, a service unit, or a 1.x serve -- and the bare "address already
+ * in use" did not say so. Named exactly when this home's pid file records a live serve.
+ */
+function inUseHint(earlier: number | null, port: number): string {
+  if (earlier !== null) {
+    return (
+      `an earlier houston serve from this home is still running (pid ${String(earlier)}): ` +
+      `stop it (\`kill ${String(earlier)}\`, or \`sudo systemctl stop houston\` if it runs ` +
+      'as the service), or choose another --port'
+    );
+  }
+  const { holderCommand } = require('../core/kube/forward') as typeof ForwardNS;
+  return (
+    `an older houston serve may still hold it: \`${holderCommand(port)}\` names what does; ` +
+    'stop that, or choose another --port'
+  );
+}
+
 function actualPort(app: FastifyInstance, fallback: number): number {
   const address = app.server.address();
   return address !== null && typeof address !== 'string' ? (address as AddressInfo).port : fallback;
@@ -564,6 +626,14 @@ function announce(
       say(`    narrow one with: houston users role ${implicit[0] ?? ''} member`);
     }
     say('  every action is recorded against the account that took it.');
+    // Said, never fatal: a provider that is misconfigured or down must not take the GUI
+    // with it, and password sign-in is the way back in.
+    const okta = (require('../core/sso') as typeof SsoNS).readiness();
+    if (okta.state === 'ready') {
+      say(`  Okta sign-in: on, from ${okta.settings.issuer}, back at ${okta.settings.publicUrl}`);
+    } else if (okta.state === 'broken') {
+      say(`  ⚠ Okta sign-in is set up but off: ${okta.why}`);
+    }
   } else if (values.setupKey !== '') {
     say('  this link creates the first account. It is single-use and expires in 15 minutes.');
     say('  the part after # never reaches the server, so it cannot appear in a log.');
@@ -642,7 +712,7 @@ export async function serve(
     const remembered = String(config.acme_email ?? '');
     email = email || remembered;
     if (email === '') {
-      throw new ReproError(
+      throw new ValidationError(
         "a Let's Encrypt certificate needs a contact email:\n" +
           `  houston serve --domain ${domain} --email you@example.com\n` +
           'It is remembered after the first use, or set it once with:\n' +
@@ -656,6 +726,16 @@ export async function serve(
       // TypeScript-only: `--port 0` exists here for tests and has no stable backend port.
       throw new ValidationError(
         '--port 0 cannot be used with --domain because the edge needs a stable backend port',
+      );
+    }
+    // Podman's containers reach the host by a different road from Docker's, rootless most
+    // of all, so the bridge gateway is a guess there: refuse rather than publish the GUI
+    // where the edge cannot see it.
+    if (bind === '' && (await dependencies.engineKind()) === 'podman') {
+      throw new ValidationError(
+        '`serve --domain` on Podman needs --bind <an address of this host the HTTPS edge can ' +
+          "reach>, such as the host's own IP: Podman's containers reach the host differently " +
+          'from Docker’s, and the gateway houston would guess may be unreachable.',
       );
     }
     bind = bind || (await dependencies.bridgeAddress());
@@ -809,6 +889,11 @@ export async function serve(
     publicHttps: domain !== '',
     firstRun: setupKey !== '',
     trustedProxies,
+    onShutdownStop: (jobIds) =>
+      io.writeErr(
+        `  ⚠ ${String(jobIds.length)} job(s) still running at shutdown — stopping them, as ` +
+          'Stop does; what they had done stays done\n',
+      ),
   });
   if (!options.noOpen && loopback) {
     try {
@@ -819,6 +904,8 @@ export async function serve(
   }
 
   const pidPath = dependencies.servePidPath(dependencies.home());
+  // Read before this serve writes its own over it, to name in a refusal.
+  const earlier = dependencies.livePid(pidPath);
   const pidWritten = dependencies.writePid(pidPath, process.pid);
   try {
     await recoverInterruptedWork(io, dependencies);
@@ -828,15 +915,42 @@ export async function serve(
       const refusal = bindRefusal(error, bind, options.port);
       if (refusal === null) throw error;
       // The startup failure: ONE `error:` line on stderr and exit 3, the preflight code --
-      // the server refusing to start, said once.
+      // the server refusing to start, said once -- and for a port in use, what to do.
       io.writeErr(`error: ${refusal}\n`);
+      if ((error as { code?: unknown }).code === 'EADDRINUSE')
+        io.writeErr(`  ${inUseHint(earlier, options.port)}\n`);
+      // The earlier serve's record, put back: this one wrote over it and removes its own.
+      if (earlier !== null) dependencies.writePid(pidPath, earlier);
       return { printed: false, refused: true, exitCode: 3 };
     }
     await dependencies.waitForShutdown(app);
     return { printed: false, bind, port: actualPort(app, options.port), domain, url };
   } finally {
     if (pidWritten) dependencies.removeOwnedPid(pidPath, process.pid);
-    await app.close();
+    // Arm the bound before close: active HTTP streams can keep Fastify's close
+    // pending. The job hook has 25s to drain and 10s to unwind a stop request.
+    const shutdownDeadline = setTimeout(() => {
+      io.writeErr('  ⚠ serve shutdown exceeded 38 seconds; ending the process\n');
+      process.exit();
+    }, 38_000);
+    shutdownDeadline.unref();
+    try {
+      await app.close();
+    } finally {
+      clearTimeout(shutdownDeadline);
+    }
+    // BOUNDED. A job that would not stop kept this process alive with its listener closed --
+    // neither serving nor gone, for as long as a capacity search runs -- after the event log
+    // had already written `end`. The timer is unref'd: it ends only a process something
+    // abandoned is still holding, and lets one that is done exit by itself.
+    const left = (app.jobs as { active?: () => number } | undefined)?.active?.() ?? 0;
+    if (left > 0) {
+      io.writeErr(
+        `  ⚠ ${String(left)} job(s) did not finish and could not be stopped — ` +
+          'serve ends without them; what they had done stays done\n',
+      );
+      setTimeout(() => process.exit(), 2000).unref();
+    }
   }
 }
 

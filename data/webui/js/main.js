@@ -8,6 +8,7 @@ import "./jobs.js";
 import "./create.js";
 import "./people.js";
 import "./clusters.js";
+import "./options.js";
 import "./perf.js";
 import "./theme.js";
 import "./clusters-tail.js";

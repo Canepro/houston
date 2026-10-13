@@ -1010,6 +1010,9 @@ describe('who reads the shared loopback password', () => {
     // fallback `adminPass(meta)` makes -- the workspace's own first.
     'core/lifecycle/notes.ts',
     'core/lifecycle/inspect.ts',
+    // Names the shared password in the warning that a rebuild made public keeps it; it
+    // authenticates with nothing.
+    'core/lifecycle/request.ts',
   ]);
 
   function readers(): string[] {

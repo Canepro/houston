@@ -4,6 +4,7 @@
  * Tier k2, read-only. Storage classes, API groups, nodes and the versions behind them. A
  * cluster that cannot be asked yields a refusal, never an empty list -- see `ask.ts`.
  */
+import { isAmd64Only } from '../../lib/compose';
 import { askList, items, refused } from './ask';
 import { kube } from './exec';
 import { CONTEXT, OWNER_SELECTOR, isOurs } from './names';
@@ -196,8 +197,15 @@ function atLeast(left: readonly number[], right: readonly number[]): boolean {
  * run the image -- Kubernetes will schedule it there, and pinning it with a nodeSelector
  * would trade a fast, legible `ErrImagePull` for a silent `Pending`.
  */
-export function architectureBlocker(pre: Preflight, rcVersion: string): string {
+export function architectureBlocker(pre: Preflight, rcVersion: string, rcImage = ''): string {
   if (!pre.clusterReachable || pre.architectures.length === 0) return '';
+  if (isAmd64Only(rcImage) && !pre.architectures.includes(AMD64)) {
+    return (
+      `${rcImage} is a FIPS build, published for ${AMD64} only, and every node in this ` +
+      `cluster is ${[...pre.architectures].sort().join(', ')}. Add an ${AMD64} node group, ` +
+      'or use the build without -fips.'
+    );
+  }
   const key = versionKey(rcVersion);
   // A VERSION THIS CANNOT READ MUST NOT BECOME A REFUSAL. `versionKey` answers [-1] for
   // anything non-numeric, which sorts BELOW every real release -- so a version it could

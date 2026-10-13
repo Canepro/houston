@@ -92,7 +92,8 @@ export function build(params: Params): Preset {
     description:
       "Mailpit mailcatcher wired to RC's SMTP. Every email RC sends — " +
       'password resets, invites, verification, notification and 2FA mail — ' +
-      `is captured at ${mailpitUrl} instead of leaving the machine. ` +
+      `is captured at ${mailpitUrl} (at /mailpit/ on an HTTPS workspace) instead of ` +
+      'leaving the machine. ' +
       'Pair with --seed for users with verified emails.',
     env: smtpSettings(verification),
     services: mailpitService(),
