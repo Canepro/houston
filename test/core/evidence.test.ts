@@ -594,6 +594,48 @@ describe('the bundle', () => {
     expect(out.files).not.toContain('logs/compose.log');
   });
 
+  it('redacts URL userinfo before treating a Compose value as KEY=VALUE', async () => {
+    const name = 'e7-compose-url-userinfo';
+    await workspaceNamed(name);
+    fs.writeFileSync(
+      path.join(workspace(name), 'docker-compose.yml'),
+      [
+        'x-reference:',
+        '  "https://reader:ComposeKeySentinel@example.test?mode=read": diagnostic',
+        COMPOSE.replace(
+          'MONGO_URL: mongodb://rocket:MongoUrlSecret@mongodb:27017/rocketchat',
+          [
+            'MONGO_URL: mongodb://rocket:ComposeQuerySentinel@mongodb:27017/rocketchat?replicaSet=rs0',
+            '      SERVICE_URL: postgresql://reader:Compose=PasswordSentinel@db:5432/rocketchat',
+          ].join('\n'),
+        ),
+        '',
+      ].join('\n'),
+    );
+    const rec = await record(name);
+    const dest = path.join(workspace(name), 'out', 'bundle');
+
+    await writeBundle(name, dest, rec);
+
+    const artifact = fs.readFileSync(path.join(dest, 'docker-compose.yml'), 'utf8');
+    expect(artifact).not.toContain('ComposeQuerySentinel');
+    expect(artifact).not.toContain('Compose=PasswordSentinel');
+    expect(artifact).not.toContain('ComposeKeySentinel');
+    const rendered = YAML.parse(artifact) as {
+      services: { rocketchat: { environment: Record<string, string> } };
+      'x-reference': Record<string, string>;
+    };
+    expect(rendered.services.rocketchat.environment.MONGO_URL).toBe(
+      'mongodb://rocket:********@mongodb:27017/rocketchat?replicaSet=rs0',
+    );
+    expect(rendered.services.rocketchat.environment.SERVICE_URL).toBe(
+      'postgresql://reader:********@db:5432/rocketchat',
+    );
+    expect(Object.keys(rendered['x-reference'])).toEqual([
+      'https://reader:********@example.test?mode=read',
+    ]);
+  });
+
   it('uses the public URL and retains the quoted cleanup command in the README', async () => {
     const name = 'e7-public\n';
     await workspaceNamed(name, {}, { publicUrl: 'https://support.example.test/case?ticket=1234' });
@@ -620,7 +662,9 @@ describe('the bundle', () => {
         '  - name: ADMIN_PASS',
         '    value: KubeAdminSecret',
         '  - name: MONGO_URL',
-        '    value: mongodb://rocket:KubeMongoUrlSecret@mongodb:27017/rocketchat',
+        '    value: mongodb://rocket:KubeMongoUrlSecret@mongodb:27017/rocketchat?replicaSet=rs0',
+        'x-reference:',
+        '  "https://reader:KubeKeySentinel@example.test?mode=read": diagnostic',
         'scriptedCommand:',
         '  - /bin/sh',
         '  - -c',
@@ -642,16 +686,46 @@ describe('the bundle', () => {
     expect(artifact).toContain('********');
     expect(artifact).not.toContain('KubeAdminSecret');
     expect(artifact).not.toContain('KubeMongoUrlSecret');
+    expect(artifact).not.toContain('KubeKeySentinel');
     expect(artifact).not.toContain('S3cretPass');
     const rendered = YAML.parse(artifact) as {
       scriptedCommand: string[];
       supportNote: string;
       extraSecret: { stringData: Record<string, string> };
+      'x-reference': Record<string, string>;
     };
     expect(rendered.scriptedCommand).toEqual(['/bin/sh', '-c', 'echo ********']);
     expect(rendered.supportNote).toBe('********');
     expect(rendered.extraSecret.stringData.ordinary).toBe('********');
+    expect(Object.keys(rendered['x-reference'])).toEqual([
+      'https://reader:********@example.test?mode=read',
+    ]);
   });
+
+  it.each([
+    ['numeric', '246813579', 'supportNote', '246813579'],
+    ['boolean', 'true', 'featureEnabled', 'true'],
+  ] as const)(
+    'redacts a known %s YAML scalar and mapping key',
+    async (_kind, adminPassword, field, scalar) => {
+      const name = `e7-known-${field}`;
+      await workspaceNamed(name, {}, { adminPassword });
+      fs.writeFileSync(
+        path.join(workspace(name), 'docker-compose.yml'),
+        [`${scalar}: named-value`, `${field}: ${scalar}`, ''].join('\n'),
+      );
+      const rec = await record(name);
+      const dest = path.join(workspace(name), 'out', 'bundle');
+
+      await writeBundle(name, dest, rec);
+
+      const rendered = YAML.parse(
+        fs.readFileSync(path.join(dest, 'docker-compose.yml'), 'utf8'),
+      ) as Record<string, unknown>;
+      expect(rendered[field]).toBe('********');
+      expect(rendered['********']).toBe('********');
+    },
+  );
 
   it('refuses to replace an existing bundle root', async () => {
     await workspaceNamed('e8');

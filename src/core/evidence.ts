@@ -522,18 +522,28 @@ function redactKnownSecrets(value: string, knownSecrets: readonly string[]): str
     .reduce((masked, secret) => masked.replaceAll(secret, REDACTED), value);
 }
 
+function matchesKnownSecret(value: string, knownSecrets: readonly string[]): boolean {
+  return redactKnownSecrets(value, knownSecrets) !== value;
+}
+
 function redactArtifactText(
   value: string,
   secret: boolean,
   knownSecrets: readonly string[],
 ): string {
   if (secret) return REDACTED;
-  const equals = value.indexOf('=');
+  // A URL password or query can contain `=`. Mask userinfo in the complete string before
+  // treating an equals sign as a list-form environment assignment.
+  const urlRedacted = redactEnv('', value);
+  const equals = urlRedacted.indexOf('=');
   if (equals > 0) {
-    const key = value.slice(0, equals);
-    return redactKnownSecrets(`${key}=${redactEnv(key, value.slice(equals + 1))}`, knownSecrets);
+    const key = urlRedacted.slice(0, equals);
+    return redactKnownSecrets(
+      `${key}=${redactEnv(key, urlRedacted.slice(equals + 1))}`,
+      knownSecrets,
+    );
   }
-  return redactKnownSecrets(redactEnv('', value), knownSecrets);
+  return redactKnownSecrets(urlRedacted, knownSecrets);
 }
 
 /** Redact standard credential fields and the workspace's known secret values in parsed YAML. */
@@ -546,16 +556,19 @@ function redactArtifactValue(
   if (typeof value === 'string') return redactArtifactText(value, secret, knownSecrets);
   if (Array.isArray(value))
     return value.map((item) => redactArtifactValue(item, knownSecrets, secret, seen));
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return secret || matchesKnownSecret(String(value), knownSecrets) ? REDACTED : value;
+  }
   if (typeof value !== 'object' || value === null) return secret ? REDACTED : value;
   if (seen.has(value)) return REDACTED;
   seen.add(value);
 
   const fields = value as Record<string, unknown>;
   const name = toText(fields.name);
-  const namedSecret = secretKey(name) || redactKnownSecrets(name, knownSecrets) !== name;
+  const namedSecret = secretKey(name) || matchesKnownSecret(name, knownSecrets);
   const out: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(fields)) {
-    const safeKey = redactKnownSecrets(key, knownSecrets);
+    const safeKey = redactArtifactText(key, false, knownSecrets);
     out[safeKey] = redactArtifactValue(
       item,
       knownSecrets,

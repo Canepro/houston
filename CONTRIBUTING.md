@@ -124,7 +124,7 @@ Go through this list for every change:
 
 **The command surface is a contract.** Every command, flag, default, help text, exit
 code and `--json` schema is what 1.x users and their scripts rely on.
-`test/cli/invariants/command-surface.test.ts` counts the 40 declared commands. A new
+`test/cli/invariants/command-surface.test.ts` counts the declared commands. A new
 command or flag is a contract change: ask first, and expect those pins to move on
 purpose.
 
