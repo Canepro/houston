@@ -91,9 +91,9 @@ const ROOT = path.resolve(__dirname, '..');
 // Eighteen evidence-closeout regressions cover bundle help, Kubernetes ownership proof,
 // runtime-correct artifact selection, registration-token provenance, normalized presets,
 // public URL plus byte-preserved cleanup rendering, artifact URL and scalar redaction,
-// metadata-only Docker records, legacy catalogue uncertainty in both licence-output paths,
-// and provisional licensing.
-const FLOOR = 4540;
+// metadata-only Docker records, legacy catalogue uncertainty, and provisional licensing.
+// Capture adds nineteen cases; the final collection-only measurement follows the repairs.
+const FLOOR = 4560;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

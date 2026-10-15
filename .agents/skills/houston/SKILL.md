@@ -1,6 +1,6 @@
 ---
 name: houston
-description: Use when someone asks to create, spin up, boot or start a Rocket.Chat workspace or server on a given version ("a workspace on 7.4.1"), reproduce a support ticket or reported behaviour, check whether a bug is version-specific, or compare two versions; with LDAP, SAML, OIDC, email, S3/MinIO, livechat, E2EE or air-gapped; to seed sample data, list what is running, read logs, back up, restore or upgrade a workspace, or tear it down. Drives the `houston` CLI, which runs a version-matched Rocket.Chat and MongoDB on Docker or Kubernetes.
+description: Use when someone asks to create, spin up, boot or start a Rocket.Chat workspace or server on a given version ("a workspace on 7.4.1"), reproduce a support ticket or reported behaviour, record a scripted browser capture, check whether a bug is version-specific, or compare two versions; with LDAP, SAML, OIDC, email, S3/MinIO, livechat, E2EE or air-gapped; to seed sample data, list what is running, read logs, back up, restore or upgrade a workspace, or tear it down. Drives the `houston` CLI, which runs a version-matched Rocket.Chat and MongoDB on Docker or Kubernetes.
 ---
 
 # houston
@@ -31,6 +31,7 @@ command takes it and read the last line (see [The output contract](#the-output-c
 | put some data in it                      | `houston seed --name <n> --profile standard --verify-seed`                                                                                              | exit 0 means the readback matched ([Sample data](#sample-data))                                                                                                                                                                                                                                                                                                      |
 | 50k users, a huge room                   | `houston seed --name <n> --scale users=50000,messages=800000@general`                                                                                   | undo with `houston seed --name <n> --clear-scale`; Docker only                                                                                                                                                                                                                                                                                                       |
 | evidence for the case                    | `houston evidence --name <n> --json`, or `--bundle <dir>` for a folder with `manifest.json`, `README.md` and any available redacted deployment artifact | raw logs stay in the workspace; the record omits the login block and keeps only the URL origin. The optional artifact redacts the workspace admin password, credential-shaped fields and URL userinfo, but unknown credentials under arbitrary custom YAML keys can remain. Review it before sharing; `info --json` carries the admin login and is NOT for attaching |
+| browser proof of the reproduction        | `houston capture --name <n> --workload smoke --json`                                                                                                    | it needs optional Playwright and Chromium; inspect the PNG frames and video before attaching. Exit 9 keeps a partial bundle, which is not proof                                                                                 |
 | what's running                           | `houston list --json`                                                                                                                                   | `data.repros[]`: `name`, `owner`, `rc_version`, `state`, `links[0].url`; every workspace on the machine                                                                                                                                                                                                                                                              |
 | show the logs                            | `houston logs --name <n> --tail 200`                                                                                                                    | never `-f`: it does not return                                                                                                                                                                                                                                                                                                                                       |
 | is it up yet                             | `houston ready --name <n> --json`                                                                                                                       | one call waits up to `--timeout` seconds (300); on exit 5 read `houston logs --name <n> --tail 200` before asking again                                                                                                                                                                                                                                              |
@@ -116,13 +117,15 @@ From `houston info --name <n> --json`:
      PERSON to run, not something you may run yourself.
    - `7` create failed — known dead. Stop; do not retry in a loop.
    - `8` conflict — the name or port is taken. Pick another.
+   - `9` capture failed — a scripted browser capture stopped, or its artifacts do not hold up.
+     `error.details.bundle` is the partial bundle; read its README, do not attach it as proof.
 
    `capabilities.exit_codes` is the whole table, and `capabilities.error_codes` says
    which are advertised.
 
 3. **Never import houston's internals and never scrape human output.**
    Use `--json` on the commands that have it — `capabilities.commands[].json` says
-   which, and it is a minority, not all of them: `capabilities`, `capacity`, `cluster`, `doctor`, `down`, `evidence`, `info`, `list`, `loadtest`, `ready`, `skill install`, `skill status`, `up` (`capabilities` prints
+   which, and it is a minority, not all of them: `capabilities`, `capacity`, `capture`, `cluster`, `doctor`, `down`, `evidence`, `info`, `list`, `loadtest`, `ready`, `skill install`, `skill status`, `up` (`capabilities` prints
    JSON without the flag). For the rest (`seed`, `logs`,
    `env`, `backup`, `restore`, `upgrade`, `prune`, `tls-status`, …) the **exit code** is
    the machine-readable part. stdout is the document; anything on stderr is for a
