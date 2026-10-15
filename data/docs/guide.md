@@ -21,7 +21,7 @@ Every command also explains itself: `houston <command> --help`.
 | Group | Commands |
 |---|---|
 | lifecycle | `up` `start` `stop` `restart` `down` `prune` |
-| inspect | `list` `info` `logs` `ready` `stats` |
+| inspect | `list` `info` `logs` `ready` `stats` `evidence` |
 | settings | `use` `config` `env` |
 | data | `seed` `config-import` `backup` `backups` `restore` `upgrade` |
 | performance (Docker only) | `loadtest` `capacity` |

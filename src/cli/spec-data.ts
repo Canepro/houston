@@ -733,6 +733,58 @@ export const COMMAND_SPECS = [
     },
   }),
   defineCommand({
+    id: 'evidence',
+    path: 'evidence',
+    description:
+      'Emit a secret-safe record of what was deployed and how it is behaving.\n\nSafe to attach to a support case: the root URL is reduced to its origin and no\ntoken, licence or password appears anywhere. `info --json` is not that: it\ncarries the admin login.\n\n\b\n    houston evidence --name TICKET-1234 --json\n    houston evidence --name TICKET-1234 --bundle ./TICKET-1234-evidence\n\b\nA bundle adds the rendered compose file or chart values and the logs, one file\nper pod on Kubernetes, and a README a person can read.',
+    arguments: [],
+    options: [
+      {
+        key: 'name',
+        long: '--name',
+        short: '-n',
+        value: 'string',
+        required: false,
+        repeatable: false,
+        defaultValue: '',
+        description: '',
+        hidden: false,
+        negatablePair: false,
+      },
+      {
+        key: 'bundle',
+        long: '--bundle',
+        value: 'string',
+        required: false,
+        repeatable: false,
+        defaultValue: '',
+        description: 'also write the logs and the rendered artifact to this directory',
+        hidden: false,
+        negatablePair: false,
+      },
+      {
+        key: 'retain_for_task',
+        long: '--retain-for-task',
+        value: 'boolean',
+        required: false,
+        repeatable: false,
+        defaultValue: false,
+        description: 'record that the current task explicitly requires keeping this workspace',
+        hidden: false,
+        negatablePair: false,
+      },
+    ],
+    json: {
+      mode: 'flag',
+      schema: 'houston.evidence.v1',
+      streams: false,
+      option: {
+        index: 3,
+        description: 'print the record as one JSON envelope on stdout; prose moves to stderr',
+      },
+    },
+  }),
+  defineCommand({
     id: 'users',
     path: 'users',
     description:

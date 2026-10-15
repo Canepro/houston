@@ -30,6 +30,7 @@ command takes it and read the last line (see [The output contract](#the-output-c
 | several Rocket.Chat instances | `houston up --version 7.4.1 --name <n> --deployment multi-instance --replicas 3 --wait --json` | Docker only |
 | put some data in it | `houston seed --name <n> --profile standard --verify-seed` | exit 0 means the readback matched ([Sample data](#sample-data)) |
 | 50k users, a huge room | `houston seed --name <n> --scale users=50000,messages=800000@general` | undo with `houston seed --name <n> --clear-scale`; Docker only |
+| evidence for the case | `houston evidence --name <n> --json`, or `--bundle <dir>` for a folder to attach | secret-safe: the URL is an origin and no login or token is in it; `info --json` carries the admin login and is NOT for attaching |
 | what's running | `houston list --json` | `data.repros[]`: `name`, `owner`, `rc_version`, `state`, `links[0].url`; every workspace on the machine |
 | show the logs | `houston logs --name <n> --tail 200` | never `-f`: it does not return |
 | is it up yet | `houston ready --name <n> --json` | one call waits up to `--timeout` seconds (300); on exit 5 read `houston logs --name <n> --tail 200` before asking again |
@@ -120,7 +121,7 @@ From `houston info --name <n> --json`:
    which are advertised.
 3. **Never import houston's internals and never scrape human output.**
    Use `--json` on the commands that have it — `capabilities.commands[].json` says
-   which, and it is a minority, not all of them: `capabilities`, `capacity`, `cluster`, `doctor`, `down`, `info`, `list`, `loadtest`, `ready`, `skill install`, `skill status`, `up` (`capabilities` prints
+   which, and it is a minority, not all of them: `capabilities`, `capacity`, `cluster`, `doctor`, `down`, `evidence`, `info`, `list`, `loadtest`, `ready`, `skill install`, `skill status`, `up` (`capabilities` prints
    JSON without the flag). For the rest (`seed`, `logs`,
    `env`, `backup`, `restore`, `upgrade`, `prune`, `tls-status`, …) the **exit code** is
    the machine-readable part. stdout is the document; anything on stderr is for a

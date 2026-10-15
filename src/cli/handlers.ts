@@ -24,6 +24,7 @@ import type * as AdminNS from '../core/lifecycle/admin';
 import type * as CreateDockerNS from '../core/lifecycle/create-docker';
 import type * as DestroyNS from '../core/lifecycle/destroy';
 import type * as InspectNS from '../core/lifecycle/inspect';
+import type * as EvidenceNS from '../core/evidence';
 import type * as NamingNS from '../core/lifecycle/naming';
 import type * as OwnershipNS from '../core/lifecycle/ownership';
 import type * as PayloadNS from '../core/lifecycle/payload';
@@ -988,6 +989,18 @@ async function dispatch(
       }
       const payload = require('../core/lifecycle/payload') as typeof PayloadNS;
       return await payload.detail(name);
+    }
+    case 'evidence': {
+      const evidence = require('../core/evidence') as typeof EvidenceNS;
+      const name = await target(text(o.name));
+      const retain = bool(o.retain_for_task);
+      const payload = await evidence.record(name, {
+        retained: retain ? true : null,
+        reason: retain ? 'explicit task' : '',
+      });
+      const bundle = text(o.bundle);
+      if (bundle !== '') payload.bundle = await evidence.writeBundle(name, bundle, payload);
+      return payload;
     }
     case 'users':
       // Printed as it goes (`handlers/users.ts`): it is `json: none`, so what it prints and
@@ -3036,6 +3049,29 @@ export async function renderHuman(
       io.writeOut(`  api  : houston api --name ${meta.name} GET /api/v1/me\n`);
       io.writeOut(`  curl : ${meta.rootUrl}/api/info\n`);
       await printNotes(meta, io);
+      return;
+    }
+    case 'evidence': {
+      const repro = bag(result.repro);
+      const artifact = bag(result.artifact);
+      const license = bag(result.license);
+      const retention = bag(result.retention);
+      io.writeOut(
+        `${display(repro.name)}  ${display(repro.rc_version)}  ${display(repro.runtime)}  ` +
+          `${display(bag(result.runtime).state)}\n`,
+      );
+      io.writeOut(
+        `  artifact  ${display(artifact.name)} sha256:${display(artifact.sha256).slice(0, 12)}\n`,
+      );
+      io.writeOut(
+        `  licensed  required=${display(license.required)} supplied=${display(license.supplied)}\n`,
+      );
+      io.writeOut(
+        `  retained  ${display(retention.retained)}` +
+          `${isTruthy(retention.reason) ? ` (${display(retention.reason)})` : ''}\n`,
+      );
+      io.writeOut(`  cleanup   ${display(retention.cleanup)}\n`);
+      if (isTruthy(result.bundle)) io.writeOut(`  bundle    ${display(bag(result.bundle).path)}\n`);
       return;
     }
     case 'users':
