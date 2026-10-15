@@ -598,9 +598,7 @@ describe('the bundle', () => {
     const readme = fs.readFileSync(path.join(dest, 'README.md'), 'utf8');
     expect(readme).toContain('| URL | https://support.example.test |');
     expect(readme).not.toContain('| URL | http://localhost:3000 |');
-    expect(readme).toContain(
-      `\`\`\`bash\nhouston capture --name 'e7-public\n' --workload smoke\n\`\`\``,
-    );
+    expect(readme).not.toContain('houston capture');
     expect(readme).toContain(`\`\`\`bash\n${cleanupCommand(name)}\n\`\`\``);
   });
 

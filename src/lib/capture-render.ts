@@ -24,12 +24,6 @@ function markdownCode(value: unknown): string {
   return markdownText(value).replaceAll('`', '\\`');
 }
 
-/** A shell argument kept literal in the README's copy-and-run capture instruction. */
-function shellArgument(value: string): string {
-  if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(value)) return value;
-  return `'${value.replaceAll("'", "'\\\\''")}'`;
-}
-
 /** A capture artifact must remain relative to its capture directory before becoming a link. */
 function captureArtifact(value: unknown): string {
   return toText(value)
@@ -197,14 +191,11 @@ export function renderMarkdown(payloadValue: unknown, captureValue?: unknown): s
     '',
   );
   if (Object.keys(capture).length === 0) {
-    const command = `houston capture --name ${shellArgument(toText(repro.name))} --workload smoke`;
     lines.push(
       'No scripted capture was run, so this bundle proves what was deployed but not what was done to it. ' +
         'Include a scripted capture with a later collection when that proof is needed.',
       '',
     );
-    if (/[\r\n]/u.test(command)) lines.push('Add one with:', '', '```bash', command, '```', '');
-    else lines.push(`Add one with \`${markdownCode(command)}\`.`, '');
   } else {
     lines.push(...renderCaptureSection(capture));
   }
