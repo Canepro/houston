@@ -109,16 +109,16 @@ function pick(options: Record<string, unknown>, keys: string[]): Record<string, 
 }
 
 describe('the declarative command foundation', () => {
-  test('registers all 40 unique paths and all 182 logical flags from one source', () => {
+  test('registers all 41 unique paths and all 184 logical flags from one source', () => {
     const specs: readonly CommandSpec[] = COMMAND_SPECS;
     const root = buildCli({ execute: async () => null });
     const paths = specs.map((spec) => spec.path);
-    expect(paths).toHaveLength(40);
-    expect(new Set(paths).size).toBe(40);
-    expect(specs.reduce((total, spec) => total + spec.options.length, 0)).toBe(171);
+    expect(paths).toHaveLength(41);
+    expect(new Set(paths).size).toBe(41);
+    expect(specs.reduce((total, spec) => total + spec.options.length, 0)).toBe(172);
     const described = describeCommands();
-    expect(described.reduce((total, command) => total + command.flags.length, 0)).toBe(182);
-    expect(described.filter((command) => command.json)).toHaveLength(12);
+    expect(described.reduce((total, command) => total + command.flags.length, 0)).toBe(184);
+    expect(described.filter((command) => command.json)).toHaveLength(13);
     expect(described.filter((command) => command.streams).map((command) => command.name)).toEqual([
       'ready',
       'up',

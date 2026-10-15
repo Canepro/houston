@@ -31,6 +31,7 @@ command takes it and read the last line (see [The output contract](#the-output-c
 | put some data in it | `houston seed --name <n> --profile standard --verify-seed` | exit 0 means the readback matched ([Sample data](#sample-data)) |
 | 50k users, a huge room | `houston seed --name <n> --scale users=50000,messages=800000@general` | undo with `houston seed --name <n> --clear-scale`; Docker only |
 | what's running | `houston list --json` | `data.repros[]`: `name`, `owner`, `rc_version`, `state`, `links[0].url`; every workspace on the machine |
+| what runs inside a workspace and how it is reachable | `houston inspect --name <n> --json` | read `data.kubernetes` or `data.docker`; keep any warnings, because an unreadable resource is unknown rather than empty |
 | show the logs | `houston logs --name <n> --tail 200` | never `-f`: it does not return |
 | is it up yet | `houston ready --name <n> --json` | one call waits up to `--timeout` seconds (300); on exit 5 read `houston logs --name <n> --tail 200` before asking again |
 | upgrade it to 8.0.0 | `houston upgrade --name <n> --to 8.0.0 --dry-run`, then without `--dry-run` | it must be running; if the dry-run refuses, stop and tell the person what it said, otherwise go ahead; it backs up first; `houston upgrade --name <n> --rollback` undoes it; a version needing another MongoDB major is refused |
@@ -232,6 +233,11 @@ runtime and deployment, links, and on Kubernetes the namespace and the pods, wit
 reason any cannot start. Credentials in its env listing are masked, but `data.login`
 carries the admin password, generated for any workspace reachable beyond loopback. Drop it
 before attaching: `houston info --name <n> --json | jq 'del(.data.login.password)' > case.json`.
+
+Attach `houston inspect --name <n> --json` when the case needs the secret-safe topology:
+Kubernetes nodes, Services and pods, or Docker containers, published port bindings,
+networks and volumes. Keep its warnings with the result. An empty array with a warning
+means the resource could not be read, not that none exists.
 
 ### Tear it down
 

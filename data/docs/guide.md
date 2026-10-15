@@ -21,7 +21,7 @@ Every command also explains itself: `houston <command> --help`.
 | Group | Commands |
 |---|---|
 | lifecycle | `up` `start` `stop` `restart` `down` `prune` |
-| inspect | `list` `info` `logs` `ready` `stats` |
+| inspect | `list` `info` `inspect` `logs` `ready` `stats` |
 | settings | `use` `config` `env` |
 | data | `seed` `config-import` `backup` `backups` `restore` `upgrade` |
 | performance (Docker only) | `loadtest` `capacity` |
@@ -38,6 +38,7 @@ Every command also explains itself: `houston <command> --help`.
 ```bash
 houston list                          # every workspace: version, MongoDB, runtime, port, state, URL
 houston info  --name ticket-1234      # URL, login, links, notes
+houston inspect --name ticket-1234    # nodes, services and pods, or containers and their published ports; no login
 houston logs  --name ticket-1234 -f   # follow the logs (Ctrl-C to stop)
 houston ready --name ticket-1234      # wait until Rocket.Chat is serving
 ```
