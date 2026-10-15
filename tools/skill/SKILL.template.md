@@ -104,7 +104,7 @@ From `houston info --name <n> --json`:
    code means. Do not assume a flag exists because it did in another version.
 2. **Branch on the exit code and `error.code`, never on prose.** Messages get
    reworded between releases; codes do not.
-   {{exit_codes}}
+{{exit_codes}}
 
    `capabilities.exit_codes` is the whole table, and `capabilities.error_codes` says
    which are advertised.

@@ -526,6 +526,57 @@ function matchesKnownSecret(value: string, knownSecrets: readonly string[]): boo
   return redactKnownSecrets(value, knownSecrets) !== value;
 }
 
+/** YAML's canonical scalar spelling can differ from JavaScript's `String`, such as `-0`. */
+function matchesKnownScalar(
+  value: number | boolean | null,
+  knownSecrets: readonly string[],
+): boolean {
+  return (
+    matchesKnownSecret(String(value), knownSecrets) ||
+    matchesKnownSecret(YAML.stringify(value).replace(/\n$/u, ''), knownSecrets)
+  );
+}
+
+/**
+ * `toJS()` erases the original spelling of mapping keys such as `-0`, `.inf` and `null`.
+ * Mask known scalar source before that conversion so the later object walk cannot lose a
+ * credential that YAML would otherwise render again.
+ */
+function redactKnownScalarNodes(
+  node: unknown,
+  knownSecrets: readonly string[],
+  forceValue = false,
+  mapKey = false,
+  seen = new WeakSet<object>(),
+): boolean {
+  if (typeof node !== 'object' || node === null || seen.has(node)) return false;
+  seen.add(node);
+  if (YAML.isScalar(node)) {
+    const source = (node as { source?: unknown }).source;
+    const knownScalar =
+      typeof node.value !== 'string' &&
+      typeof source === 'string' &&
+      matchesKnownSecret(source, knownSecrets);
+    if ((!mapKey && forceValue) || knownScalar) {
+      node.value = REDACTED;
+      return true;
+    }
+    return false;
+  }
+  if (YAML.isMap(node)) {
+    for (const pair of node.items) {
+      const maskedKey = redactKnownScalarNodes(pair.key, knownSecrets, false, true, seen);
+      redactKnownScalarNodes(pair.value, knownSecrets, forceValue || maskedKey, false, seen);
+    }
+    return false;
+  }
+  if (YAML.isSeq(node)) {
+    for (const item of node.items)
+      redactKnownScalarNodes(item, knownSecrets, forceValue, false, seen);
+  }
+  return false;
+}
+
 function redactArtifactText(
   value: string,
   secret: boolean,
@@ -556,10 +607,10 @@ function redactArtifactValue(
   if (typeof value === 'string') return redactArtifactText(value, secret, knownSecrets);
   if (Array.isArray(value))
     return value.map((item) => redactArtifactValue(item, knownSecrets, secret, seen));
-  if (typeof value === 'number' || typeof value === 'boolean') {
-    return secret || matchesKnownSecret(String(value), knownSecrets) ? REDACTED : value;
+  if (typeof value === 'number' || typeof value === 'boolean' || value === null) {
+    return secret || matchesKnownScalar(value, knownSecrets) ? REDACTED : value;
   }
-  if (typeof value !== 'object' || value === null) return secret ? REDACTED : value;
+  if (typeof value !== 'object') return secret ? REDACTED : value;
   if (seen.has(value)) return REDACTED;
   seen.add(value);
 
@@ -589,7 +640,10 @@ function redactedArtifact(
     const docs = YAML.parseAllDocuments(artifact.bytes.toString('utf8'), { uniqueKeys: false });
     if (docs.length === 0 || docs.some((doc) => doc.errors.length > 0)) return null;
     return docs
-      .map((doc) => YAML.stringify(redactArtifactValue(doc.toJS() as unknown, knownSecrets)))
+      .map((doc) => {
+        redactKnownScalarNodes(doc.contents, knownSecrets);
+        return YAML.stringify(redactArtifactValue(doc.toJS() as unknown, knownSecrets));
+      })
       .join('---\n');
   } catch {
     return null;

@@ -602,11 +602,19 @@ describe('the bundle', () => {
       [
         'x-reference:',
         '  "https://reader:ComposeKeySentinel@example.test?mode=read": diagnostic',
+        '  "https://:EmptyUserKeySentinel@example.test?mode=read": diagnostic',
+        '  "https://reader:Raw@AtKeySentinel@example.test?mode=read": diagnostic',
+        'list-environment:',
+        '  - APP_URL=https://reader:ListRaw@AtValueSentinel@example.test/?q=a=b',
+        '  - PORT=3000',
+        '  - MONGO_URL=https://reader:ListMongoUrlSentinel@example.test/?q=a=b',
         COMPOSE.replace(
           'MONGO_URL: mongodb://rocket:MongoUrlSecret@mongodb:27017/rocketchat',
           [
             'MONGO_URL: mongodb://rocket:ComposeQuerySentinel@mongodb:27017/rocketchat?replicaSet=rs0',
             '      SERVICE_URL: postgresql://reader:Compose=PasswordSentinel@db:5432/rocketchat',
+            '      EMPTY_USER_URL: https://:EmptyUserValueSentinel@example.test/?q=a=b',
+            '      RAW_AT_URL: https://reader:Raw@AtValueSentinel@example.test/?q=a=b',
           ].join('\n'),
         ),
         '',
@@ -621,9 +629,16 @@ describe('the bundle', () => {
     expect(artifact).not.toContain('ComposeQuerySentinel');
     expect(artifact).not.toContain('Compose=PasswordSentinel');
     expect(artifact).not.toContain('ComposeKeySentinel');
+    expect(artifact).not.toContain('EmptyUserKeySentinel');
+    expect(artifact).not.toContain('Raw@AtKeySentinel');
+    expect(artifact).not.toContain('EmptyUserValueSentinel');
+    expect(artifact).not.toContain('Raw@AtValueSentinel');
+    expect(artifact).not.toContain('ListRaw@AtValueSentinel');
+    expect(artifact).not.toContain('ListMongoUrlSentinel');
     const rendered = YAML.parse(artifact) as {
       services: { rocketchat: { environment: Record<string, string> } };
       'x-reference': Record<string, string>;
+      'list-environment': string[];
     };
     expect(rendered.services.rocketchat.environment.MONGO_URL).toBe(
       'mongodb://rocket:********@mongodb:27017/rocketchat?replicaSet=rs0',
@@ -631,8 +646,20 @@ describe('the bundle', () => {
     expect(rendered.services.rocketchat.environment.SERVICE_URL).toBe(
       'postgresql://reader:********@db:5432/rocketchat',
     );
-    expect(Object.keys(rendered['x-reference'])).toEqual([
+    expect(rendered.services.rocketchat.environment.EMPTY_USER_URL).toBe(
+      'https://:********@example.test/?q=a=b',
+    );
+    expect(rendered.services.rocketchat.environment.RAW_AT_URL).toBe(
+      'https://reader:********@example.test/?q=a=b',
+    );
+    expect(Object.keys(rendered['x-reference']).sort()).toEqual([
+      'https://:********@example.test?mode=read',
       'https://reader:********@example.test?mode=read',
+    ]);
+    expect(rendered['list-environment']).toEqual([
+      'APP_URL=https://reader:********@example.test/?q=a=b',
+      'PORT=3000',
+      'MONGO_URL=https://reader:********@example.test/?q=a=b',
     ]);
   });
 
@@ -705,10 +732,14 @@ describe('the bundle', () => {
   it.each([
     ['numeric', '246813579', 'supportNote', '246813579'],
     ['boolean', 'true', 'featureEnabled', 'true'],
+    ['negative-zero numeric', '-0', 'negativeZero', '-0'],
+    ['infinite numeric', '.inf', 'infiniteValue', '.inf'],
+    ['not-a-number numeric', '.nan', 'notANumberValue', '.nan'],
+    ['null', 'null', 'emptyScalarValue', 'null'],
   ] as const)(
     'redacts a known %s YAML scalar and mapping key',
     async (_kind, adminPassword, field, scalar) => {
-      const name = `e7-known-${field}`;
+      const name = `e7-known-${field.toLowerCase()}`;
       await workspaceNamed(name, {}, { adminPassword });
       fs.writeFileSync(
         path.join(workspace(name), 'docker-compose.yml'),

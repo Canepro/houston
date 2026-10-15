@@ -104,7 +104,7 @@ From `houston info --name <n> --json`:
    code means. Do not assume a flag exists because it did in another version.
 2. **Branch on the exit code and `error.code`, never on prose.** Messages get
    reworded between releases; codes do not.
-      - `1` internal — an unhandled failure. There is still an envelope on stdout;
+   - `1` internal — an unhandled failure. There is still an envelope on stdout;
      the stack trace is on stderr. Retrying unchanged will not help.
    - `2` usage — fix the call; retrying unchanged will not help.
    - `3` preflight — the environment is not usable. Run `houston doctor --json`.

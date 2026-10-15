@@ -91,7 +91,7 @@ const ROOT = path.resolve(__dirname, '..');
 // Twelve evidence-closeout regressions cover bundle help, Kubernetes ownership proof,
 // runtime-correct artifact selection, registration-token provenance, normalized presets,
 // public URL plus byte-preserved cleanup rendering, and artifact URL and scalar redaction.
-const FLOOR = 4533;
+const FLOOR = 4534;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

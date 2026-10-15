@@ -70,9 +70,17 @@ describe('redactEnv', () => {
   it('masks a credential embedded in URL userinfo, whatever the key is called', () => {
     // `MONGO_URL` reveals nothing about the password inside it, so this has to inspect
     // the VALUE.
-    expect(redactEnv('MONGO_URL', 'mongodb://rc:s3cret@mongo:27017/rocketchat')).toBe(
+    expect([
+      redactEnv('MONGO_URL', 'mongodb://rc:s3cret@mongo:27017/rocketchat'),
+      redactEnv('URL', 'https://:EmptyUserPasswordSentinel@example.test/?q=a=b'),
+      redactEnv('URL', 'https://reader:Raw@AtPasswordSentinel@example.test/?q=a=b'),
+      redactEnv('URL', 'https://reader:password@example.test/?notify=@support'),
+    ]).toEqual([
       `mongodb://rc:${REDACTED}@mongo:27017/rocketchat`,
-    );
+      `https://:${REDACTED}@example.test/?q=a=b`,
+      `https://reader:${REDACTED}@example.test/?q=a=b`,
+      `https://reader:${REDACTED}@example.test/?notify=@support`,
+    ]);
   });
 
   it('masks EVERY userinfo in a value, not just the first', () => {
@@ -116,15 +124,16 @@ describe('redactEnv', () => {
     expect(recorded.redacted).toBe(REDACTED);
   });
 
-  it('matches the same substrings the earlier pattern matches, on a corpus', () => {
-    // The pattern is TRANSCRIBED, so it has to be checked -- but not by comparing source
-    // text. `[a-zA-Z0-9+.\\-]` and `[a-zA-Z0-9+.-]` are the same character class spelled
-    // two ways, and a test that compares spelling fails on a lint fix while a genuine
-    // change of meaning could still slip past. So compare what the two actually MATCH.
+  it('matches complete passwords inside URL authorities on a corpus', () => {
+    // Compare what the matcher actually finds rather than its spelling. A raw `@` remains
+    // part of a valid password until the final authority delimiter, and an empty username
+    // does not make a following password safe to print.
     const corpus = [
       'mongodb://rc:s3cret@mongo:27017/rocketchat',
       'https://user:pw@example.com/path',
       'a://u:p@h1 b://u2:p2@h2',
+      'https://:empty-user-password@example.com/path',
+      'https://user:raw@at@example.com/path',
       'https://example.com/a:b@c',
       'rc:s3cret@mongo',
       'ldaps://cn=admin:pw@dc.example.com',
@@ -133,11 +142,12 @@ describe('redactEnv', () => {
       'http://nopassword@host',
       '',
     ];
-    // What earlier releases' pattern made of each corpus entry, with `<M>` for a match.
     const recorded = [
       '<M>mongo:27017/rocketchat',
       '<M>example.com/path',
       '<M>h1 <M>h2',
+      '<M>example.com/path',
+      '<M>example.com/path',
       'https://example.com/a:b@c',
       'rc:s3cret@mongo',
       '<M>dc.example.com',
@@ -213,10 +223,10 @@ describe('redactArgv', () => {
 });
 
 describe("the userinfo pattern's whitespace", () => {
-  // `[^/\s@]` decides where a password ENDS, and `\s` is not one set everywhere:
-  // JavaScript's holds the BOM and not `\x1c`-`\x1f` or NEL, earlier releases' the
-  // reverse. Written with JavaScript's, a `MONGO_URL` password holding a BOM was masked by
-  // earlier releases and printed in the clear by `env` here.
+  // Whitespace ends a URL authority, and `\s` is not one set everywhere: JavaScript's holds
+  // the BOM and not `\x1c`-`\x1f` or NEL, earlier releases' the reverse. Written with
+  // JavaScript's, a `MONGO_URL` password holding a BOM was masked by earlier releases and
+  // printed in the clear by `env` here.
 
   it("is built from the set earlier releases' \\s matches, measured over every code point", () => {
     // `STRIP_CHARS` is the whitespace set earlier releases strip with; their pattern's `\s`
@@ -236,8 +246,9 @@ describe("the userinfo pattern's whitespace", () => {
       }
       return out;
     };
-    // Recorded over every code point, in both halves: the whitespace set, plus `/` and `@`.
-    const unmaskedAt = [...RECORDED_WHITESPACE, 0x2f, 0x40].sort((a, b) => a - b);
+    // URL authority ends at whitespace, `/`, `?`, or `#`. A raw `@` before the final
+    // delimiter stays part of valid userinfo and must be masked.
+    const unmaskedAt = [...RECORDED_WHITESPACE, 0x23, 0x2f, 0x3f].sort((a, b) => a - b);
     const recorded = [unmaskedAt, unmaskedAt];
     const sub = (s: string) => s.replace(URL_USERINFO, '<M>');
     expect([

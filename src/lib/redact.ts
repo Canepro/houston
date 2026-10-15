@@ -45,14 +45,16 @@ const SPACE_CLASS = [...STRIP_CHARS]
   .join('');
 
 /**
- * A credential embedded in a URL: `scheme://user:password@host`.
+ * A credential embedded in a URL authority: `scheme://user:password@host`.
  *
  * This must inspect VALUES rather than names, because a name such as `MONGO_URL` reveals
- * nothing about the secret inside it. Global, because every occurrence is replaced and a
- * value can hold more than one URL.
+ * nothing about the secret inside it. The username can be empty and raw `@` bytes remain in
+ * userinfo until the final authority delimiter, so the password capture extends to that
+ * delimiter rather than stopping at the first `@`. Global, because every occurrence is
+ * replaced and a value can hold more than one URL.
  */
 export const URL_USERINFO = new RegExp(
-  `([a-zA-Z][a-zA-Z0-9+.-]*://[^/${SPACE_CLASS}:@]+):([^/${SPACE_CLASS}@]+)@`,
+  `([a-zA-Z][a-zA-Z0-9+.-]*://[^/${SPACE_CLASS}:?#]*):([^/${SPACE_CLASS}/?#]+)@`,
   'gu',
 );
 
