@@ -310,8 +310,9 @@ describe('the create path end to end, stopped at the write seam', () => {
   it('renders final registration and licence environment consistently with create warnings', async () => {
     // The flag and the box-wide config are trimmed; a preset's env, `--env`, or either
     // final Compose patch can supply or remove the token. The final winning value is
-    // normalised before Compose sees it, and both licence warnings must agree with that
-    // rendered document rather than with an earlier input to it.
+    // normalised before Compose sees it; an unresolved Compose variable cannot hide a
+    // warning because only the engine knows its ambient value. Both licence warnings use the
+    // final document rather than an earlier input to it.
     const cases = [
       { label: 'config spaces', config: '   ', expected: '' },
       { label: 'flag spaces', flag: '   ', expected: '' },
@@ -345,6 +346,23 @@ describe('the create path end to end, stopped at the write seam', () => {
         preset: 'ldap+token-licensed',
         version: '9.0.0',
       },
+      {
+        label: 'empty final licence overrides file',
+        env: { ROCKETCHAT_LICENSE: '' },
+        expected: '',
+        license: 'fixture-license',
+        expectedLicense: '',
+        licensed: false,
+        warns: true,
+        preset: 'ldap+token-licensed',
+        version: '9.0.0',
+      },
+      {
+        label: 'unresolved token interpolation',
+        env: { REG_TOKEN: '${UNSET_REG_TOKEN}' },
+        expected: '${UNSET_REG_TOKEN}',
+        warns: true,
+      },
     ] as const;
     for (const one of cases) {
       config.updateConfig((cfg) => {
@@ -372,6 +390,7 @@ describe('the create path end to end, stopped at the write seam', () => {
             name: `token-${one.label.replace(/ /gu, '-')}`,
             preset: 'preset' in one ? one.preset : 'token-licensed',
             regToken: 'flag' in one ? one.flag : '',
+            license: 'license' in one ? one.license : '',
             env: 'env' in one ? one.env : {},
             wait: false,
             offline: true,
@@ -390,14 +409,13 @@ describe('the create path end to end, stopped at the write seam', () => {
         one.expected,
       ]);
       expect(doc.services.rocketchat.environment.ROCKETCHAT_LICENSE ?? '').toBe(
-        'license' in one ? one.license : '',
+        'expectedLicense' in one ? one.expectedLicense : 'license' in one ? one.license : '',
       );
-      expect(seen.meta?.extra.licensed === true).toBe('license' in one);
-      expect([one.label, codes.includes('LICENSE_ABSENT_EE_PRESET')]).toEqual([
-        one.label,
-        one.expected === '' && !('license' in one),
-      ]);
-      if ('license' in one) {
+      const licensed = 'licensed' in one ? one.licensed : 'license' in one;
+      const warns = 'warns' in one ? one.warns : one.expected === '' && !licensed;
+      expect(seen.meta?.extra.licensed === true).toBe(licensed);
+      expect([one.label, codes.includes('LICENSE_ABSENT_EE_PRESET')]).toEqual([one.label, warns]);
+      if (!warns) {
         expect(messages.some((message) => message.includes('Premium plan for LDAP login'))).toBe(
           false,
         );

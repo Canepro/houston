@@ -135,7 +135,7 @@ export interface CreatePlan {
   adminPassword: string;
   spec: compose.Spec | null;
   doc: compose.ComposeDoc | null;
-  /** `buildDocument`: a licence file or final Rocket.Chat environment supplies one. */
+  /** `buildDocument`: the final Rocket.Chat environment or licence file supplies one. */
   effectiveLicense: boolean;
   /** `buildRecord` */
   meta: record.Metadata | null;
@@ -950,8 +950,11 @@ export async function buildDocument(plan: CreatePlan): Promise<void> {
   const effectiveToken = compose.hasEffectiveRegToken(plan.doc, (plan.pre as Preset).instances)
     ? 'present'
     : '';
-  plan.effectiveLicense =
-    plan.spec.licensed || compose.hasEffectiveLicense(plan.doc, (plan.pre as Preset).instances);
+  plan.effectiveLicense = compose.hasEffectiveLicense(
+    plan.doc,
+    (plan.pre as Preset).instances,
+    plan.spec.licensed,
+  );
   const premium = request.premiumAuthWarning(
     [(plan.pre as Preset).name],
     resolved.rcVersion,

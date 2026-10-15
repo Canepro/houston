@@ -145,22 +145,58 @@ function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
-/** Whether one final Compose environment gives Rocket.Chat a supplied non-blank value. */
-function environmentHasValue(environment: unknown, name: string): boolean {
+interface EnvironmentEntry {
+  present: boolean;
+  value: unknown;
+}
+
+/** The final explicit value for one Compose environment name, if it has one. */
+function environmentEntry(environment: unknown, name: string): EnvironmentEntry {
   if (isPlainObject(environment)) {
-    const value = environment[name];
-    return value !== null && value !== undefined && String(value).trim() !== '';
+    return Object.prototype.hasOwnProperty.call(environment, name)
+      ? { present: true, value: environment[name] }
+      : { present: false, value: undefined };
   }
-  if (!Array.isArray(environment)) return false;
+  if (!Array.isArray(environment)) return { present: false, value: undefined };
   // Compose also accepts `environment: [NAME=value]`. A bare name inherits an ambient host
   // value, which is not a value Houston can claim it supplied.
-  let value = '';
-  for (const entry of environment) {
-    if (typeof entry !== 'string') return false;
-    if (entry === name) value = '';
-    else if (entry.startsWith(`${name}=`)) value = entry.slice(name.length + 1);
+  let result: EnvironmentEntry = { present: false, value: undefined };
+  for (const item of environment) {
+    if (typeof item !== 'string') return { present: true, value: undefined };
+    if (item === name) result = { present: true, value: undefined };
+    else if (item.startsWith(`${name}=`)) {
+      result = { present: true, value: item.slice(name.length + 1) };
+    }
   }
-  return value.trim() !== '';
+  return result;
+}
+
+/**
+ * Compose resolves unescaped `$NAME` and `${NAME}` only when it starts the service. Houston
+ * deliberately does not inherit ambient values into its warning path, so only a known literal
+ * can suppress a missing-token or missing-licence warning. `$$` is Compose's literal-dollar
+ * escape and remains a supplied value.
+ */
+function isKnownNonBlankComposeValue(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  const text = String(value).trim();
+  if (text === '') return false;
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] !== '$') continue;
+    if (text[index + 1] === '$') {
+      index += 1;
+      continue;
+    }
+    const next = text[index + 1] ?? '';
+    if (next === '{' || /[A-Za-z_]/u.test(next)) return false;
+  }
+  return true;
+}
+
+/** Whether one final Compose environment gives Rocket.Chat a known supplied non-blank value. */
+function environmentHasKnownValue(environment: unknown, name: string): boolean {
+  const entry = environmentEntry(environment, name);
+  return entry.present && isKnownNonBlankComposeValue(entry.value);
 }
 
 /** Trim an explicit registration token in its final Compose environment. */
@@ -185,15 +221,34 @@ function normalizeRegToken(environment: unknown): void {
  */
 export function hasEffectiveRegToken(doc: ComposeDoc, instances: number): boolean {
   return rcServiceNames(instances).every((name) =>
-    environmentHasValue(doc.services[name]?.environment, 'REG_TOKEN'),
+    environmentHasKnownValue(doc.services[name]?.environment, 'REG_TOKEN'),
   );
 }
 
-/** Whether every final Rocket.Chat service gets a licence outside its private env file. */
-export function hasEffectiveLicense(doc: ComposeDoc, instances: number): boolean {
-  return rcServiceNames(instances).every((name) =>
-    environmentHasValue(doc.services[name]?.environment, 'ROCKETCHAT_LICENSE'),
+/** Whether an explicit final Compose environment entry overrides the private licence file. */
+function hasLicenseFile(service: Service | undefined, licensed: boolean): boolean {
+  if (!licensed) return false;
+  const files = service?.env_file;
+  if (typeof files === 'string') return files === LICENSE_ENV_FILE;
+  if (!Array.isArray(files)) return false;
+  return files.some(
+    (file) => file === LICENSE_ENV_FILE || (isPlainObject(file) && file.path === LICENSE_ENV_FILE),
   );
+}
+
+/** Whether every final Rocket.Chat service gets a known licence from its environment or file. */
+export function hasEffectiveLicense(
+  doc: ComposeDoc,
+  instances: number,
+  licensed: boolean,
+): boolean {
+  return rcServiceNames(instances).every((name) => {
+    const service = doc.services[name];
+    const entry = environmentEntry(service?.environment, 'ROCKETCHAT_LICENSE');
+    return entry.present
+      ? isKnownNonBlankComposeValue(entry.value)
+      : hasLicenseFile(service, licensed);
+  });
 }
 
 function rcEnvironment(s: Spec): Record<string, string> {
