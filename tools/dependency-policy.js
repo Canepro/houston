@@ -64,7 +64,7 @@ const RANKS = [
   // (rank 0) for absolute paths and on `format` (rank 1) for the quoting of its refusal, and only
   // `core/` calls it.
   [
-    '^src/lib/(config|ui|eventlog|journal|tempdir)\\.ts$',
+    '^src/lib/(config|ui|eventlog|journal|tempdir|capture-render)\\.ts$',
     '^src/lib/presets/types\\.ts$',
     '^src/lib/seed-profiles\\.ts$',
   ],
