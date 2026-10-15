@@ -417,18 +417,16 @@ describe('a whole prune', () => {
     expect(out.removed).toEqual(['compose']);
     expect(out.cluster).toBe(false);
     expect(world.reclaimed).toEqual([]);
-    expect(events.some((event) => event.message.includes('the cluster was left alone'))).toBe(
-      true,
-    );
+    expect(events.some((event) => event.message.includes('the cluster was left alone'))).toBe(true);
   });
 
   it('stops a confirmed reclaim before auditing or removing a compose target without the grant', async () => {
     const world = load({ reclaimable: true, deleteCluster: async () => true });
     await composeRecords(world.record, 'compose');
 
-    await expect(
-      world.pruning.prune({ confirm: true, only: ['compose'] }),
-    ).rejects.toMatchObject({ code: 'GATE_NOT_ONBOARDED' });
+    await expect(world.pruning.prune({ confirm: true, only: ['compose'] })).rejects.toMatchObject({
+      code: 'GATE_NOT_ONBOARDED',
+    });
 
     expect(world.audited).toEqual([]);
     expect(world.reclaimed).toEqual([]);

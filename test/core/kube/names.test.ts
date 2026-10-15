@@ -421,17 +421,22 @@ describe('the cluster houston makes for itself', () => {
 
     await expect(ensureCluster()).resolves.toBe(CONTEXT);
 
-    const exports = calls.filter(({ argv }) => argv.includes('export') && argv.includes('kubeconfig'));
+    const exports = calls.filter(
+      ({ argv }) => argv.includes('export') && argv.includes('kubeconfig'),
+    );
     expect(exports).toHaveLength(3);
     for (const call of exports.slice(0, -1)) {
-      expect(String(call.argv[call.argv.indexOf('--kubeconfig') + 1])).not.toBe(
-        ownedKubeconfig(),
-      );
+      expect(String(call.argv[call.argv.indexOf('--kubeconfig') + 1])).not.toBe(ownedKubeconfig());
     }
-    expect(String(exports.at(-1)?.argv[exports.at(-1)?.argv.indexOf('--kubeconfig') + 1])).toBe(
+    const durableExport = exports.at(-1);
+    expect(durableExport).toBeDefined();
+    if (durableExport === undefined) throw new Error('durable kubeconfig export was not recorded');
+    expect(String(durableExport.argv[durableExport.argv.indexOf('--kubeconfig') + 1])).toBe(
       ownedKubeconfig(),
     );
-    const markerReads = calls.filter(({ argv }) => argv.includes('get') && argv.includes('configmap'));
+    const markerReads = calls.filter(
+      ({ argv }) => argv.includes('get') && argv.includes('configmap'),
+    );
     expect(markerReads).toHaveLength(2);
     expect(markerReads.every((call) => call.options.env?.KUBECONFIG !== ownedKubeconfig())).toBe(
       true,
@@ -460,14 +465,21 @@ describe('the cluster houston makes for itself', () => {
 
     await expect(ensureCluster()).rejects.toBeInstanceOf(ConflictError);
 
-    const exports = calls.filter(({ argv }) => argv.includes('export') && argv.includes('kubeconfig'));
+    const exports = calls.filter(
+      ({ argv }) => argv.includes('export') && argv.includes('kubeconfig'),
+    );
     expect(exports.length).toBeGreaterThan(1);
     expect(
       exports.every(
-        (call) => String(call.argv[call.argv.indexOf('--kubeconfig') + 1]) !== ownedKubeconfig()),
+        (call) => String(call.argv[call.argv.indexOf('--kubeconfig') + 1]) !== ownedKubeconfig(),
+      ),
     ).toBe(true);
-    expect(calls.some(({ argv }) => argv.includes('apply') && argv.includes('--filename'))).toBe(false);
-    expect(calls.some(({ argv }) => argv.includes('get') && argv.includes('namespace'))).toBe(false);
+    expect(calls.some(({ argv }) => argv.includes('apply') && argv.includes('--filename'))).toBe(
+      false,
+    );
+    expect(calls.some(({ argv }) => argv.includes('get') && argv.includes('namespace'))).toBe(
+      false,
+    );
   });
 
   it('refuses an unmarked same-named cluster even when it has a Houston-labelled namespace', async () => {

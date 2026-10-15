@@ -542,5 +542,10 @@ export async function prune({
   const removed: string[] = [];
   await removeEachWorkspace(emit, removed, targets);
   const swept = await sweepOrphanNamespaces(emit, force, stray, orphanCtx);
-  return { targets, removed, orphans: swept, cluster: await reclaimPlannedCluster(clusterPlan, emit) };
+  return {
+    targets,
+    removed,
+    orphans: swept,
+    cluster: await reclaimPlannedCluster(clusterPlan, emit),
+  };
 }
