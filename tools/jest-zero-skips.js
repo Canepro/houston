@@ -89,7 +89,9 @@ const ROOT = path.resolve(__dirname, '..');
 // monitoring, pin and port, the operator password off every argv, the operator's memory and
 // PodMonitor, serve's shutdown, and the usage and wording answers it found untrue.
 // Eight onboarding-grant and local-Kind lifecycle boundary cases complete the port.
-const FLOOR = 4508;
+// A later ownership follow-up adds one adoption case, then replaces it and adds four
+// label-forgery and rollback cases. The measured registered suite is 4513 tests.
+const FLOOR = 4513;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [
