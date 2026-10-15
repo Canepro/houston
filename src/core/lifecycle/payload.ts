@@ -344,7 +344,14 @@ export function rollbackTarget(extra: Record<string, unknown>): string {
  */
 export async function detail(name: string): Promise<Record<string, unknown>> {
   const target = await naming.resolveName(name);
-  const meta = await readMeta(target);
+  return await detailOf(target, await readMeta(target));
+}
+
+/**
+ * The detail for a record already in hand, so a caller adding to the payload (the CLI's
+ * access advice) works from the same snapshot rather than a second read that may differ.
+ */
+export async function detailOf(target: string, meta: Metadata): Promise<Record<string, unknown>> {
   const d = await inspect.summary(meta);
   // The env tab masks credentials and tells the reader that the workspace's
   // docker-compose.yml is the source of truth for a real value -- but nothing in the GUI

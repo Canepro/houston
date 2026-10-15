@@ -845,11 +845,20 @@ async function dispatch(
   switch (invocation.spec.path) {
     case 'capabilities':
       return capabilities();
-    case 'up':
+    case 'up': {
       // A session override that cannot make a working tunnel is refused here, before the
-      // create, rather than reported over a workspace that already exists.
-      (require('../core/lifecycle/access') as typeof AccessNS).validateEnvironment(process.env);
+      // create, rather than reported over a workspace that already exists. Only for a
+      // workspace that will be loopback-bound: the flag, else the box-wide setting, else
+      // the default, which is loopback.
+      const bindAsked =
+        text(o.bind) ||
+        toText((require('../lib/config') as typeof ConfigNS).loadConfig().bind_host);
+      (require('../core/lifecycle/access') as typeof AccessNS).validateEnvironment(
+        process.env,
+        bindAsked,
+      );
       return await runUp(invocation, io);
+    }
     case 'ready': {
       const ready = require('../core/lifecycle/ready') as typeof ReadyNS;
       // `requireEngine` BEFORE the first poll. Without it a stopped daemon went straight
@@ -993,10 +1002,13 @@ async function dispatch(
       const payload = require('../core/lifecycle/payload') as typeof PayloadNS;
       const record = require('../core/runner/record') as typeof RecordNS;
       const access = require('../core/lifecycle/access') as typeof AccessNS;
-      const d = await payload.detail(name);
+      // One snapshot for both: a second read of the record during a rebuild could
+      // advertise one port and forward another.
+      const meta = await record.readMeta(name);
+      const d = await payload.detailOf(name, meta);
       // Advice for THIS session: `detail()` also serves the GUI, where the server's own
       // environment says nothing about the browser's, so the handoff is computed here.
-      d.access = access.handoff(await record.readMeta(name), process.env, String(d.bind_host));
+      d.access = access.handoff(meta, process.env, String(d.bind_host));
       return d;
     }
     case 'users':

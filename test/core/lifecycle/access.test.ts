@@ -146,6 +146,30 @@ describe('SSH access handoff', () => {
     expect(answer?.note).toContain('side services are forwarded on their own ports (8025, 8081)');
   });
 
+  it("forwards monitoring's ports too, and refuses an override that lands on a side port", () => {
+    const answer = handoff(
+      workspace({ extra: { sidecar_ports: [8025], monitoring_ports: [9090, 5050] } }),
+      { SSH_CONNECTION: '198.51.100.20 55100 203.0.113.8 22', USER: 'operator' },
+    );
+    expect(answer?.side_ports).toEqual([5050, 8025, 9090]);
+    expect(answer?.tunnel_command).toContain('-L 127.0.0.1:9090:127.0.0.1:9090');
+    // Two -L on one local port cannot both listen, and ExitOnForwardFailure would end
+    // the tunnel over it; refused before a command that cannot work is printed.
+    expect(() =>
+      handoff(workspace({ extra: { sidecar_ports: [8081] } }), {
+        SSH_CONNECTION: '198.51.100.20 55100 203.0.113.8 22',
+        HOUSTON_SSH_LOCAL_PORT: '8081',
+      }),
+    ).toThrow("HOUSTON_SSH_LOCAL_PORT 8081 is one of this workspace's side ports");
+  });
+
+  it('validates a session override only for a workspace that will be loopback-bound', () => {
+    const env = { SSH_TTY: '/dev/ttys001', HOUSTON_SSH_LOCAL_PORT: '80' };
+    expect(() => validateEnvironment(env, '')).toThrow(ValidationError);
+    expect(() => validateEnvironment(env, '127.0.0.1')).toThrow(ValidationError);
+    expect(() => validateEnvironment(env, '0.0.0.0')).not.toThrow();
+  });
+
   it('keeps the HTTPS address the edge serves beside the tunnel, and says the tunnel is plain HTTP', () => {
     const answer = handoff(workspace({ publicUrl: 'https://rc.example.test' }), {
       SSH_CONNECTION: '198.51.100.20 55100 203.0.113.8 22',

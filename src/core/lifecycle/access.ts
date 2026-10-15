@@ -64,7 +64,7 @@ function rootHost(rootUrl: string): string {
   }
 }
 
-function loopback(value: string): boolean {
+export function loopback(value: string): boolean {
   const host = value
     .trim()
     .replace(/^\[|\]$/gu, '')
@@ -148,8 +148,11 @@ function localPort(remotePort: number, env: AccessEnvironment): number {
  * `up` prints the handoff after the workspace exists; failing there reported a failure
  * over a create that had completed, and skipped the seed `up --seed` had been asked for.
  */
-export function validateEnvironment(env: AccessEnvironment = process.env): void {
-  if (!sshSession(env)) return;
+export function validateEnvironment(env: AccessEnvironment = process.env, bind = ''): void {
+  // Only a loopback workspace ever gets a handoff, so a workspace bound elsewhere must not
+  // be refused over a tunnel override it will never read. An empty bind is the default,
+  // which is loopback.
+  if (!sshSession(env) || (bind !== '' && !loopback(bind))) return;
   localPort(1024, env);
   remoteSshPort(env);
 }
@@ -173,10 +176,17 @@ function bindOf(meta: AccessRecord, resolvedBindHost: string): string {
   return recorded || rootHost(meta.rootUrl);
 }
 
-/** The preset's recorded side ports (phpLDAPadmin, Keycloak, Mailpit), as numbers. */
+/**
+ * The workspace's recorded browser-facing side ports, as numbers: the preset's
+ * (phpLDAPadmin, Keycloak, Mailpit) and monitoring's (Prometheus, Grafana), whose URLs
+ * `info` advertises and which a tunnel that forwards Rocket.Chat alone leaves unreachable.
+ */
 function sidePorts(meta: AccessRecord, remotePort: number): number[] {
-  const recorded = extraOf(meta).sidecar_ports;
-  const ports = (Array.isArray(recorded) ? recorded : [])
+  const extra = extraOf(meta);
+  const recorded = [extra.sidecar_ports, extra.monitoring_ports].flatMap((value) =>
+    Array.isArray(value) ? value : [],
+  );
+  const ports = recorded
     .map((value) => Number(value))
     .filter(
       (port) => Number.isSafeInteger(port) && port >= 1 && port <= 65535 && port !== remotePort,
@@ -210,6 +220,14 @@ export function handoff(
   }
 
   const selectedPort = localPort(remotePort, env);
+  if (sides.includes(selectedPort)) {
+    // Two -L on one local port cannot both listen, and ExitOnForwardFailure then ends the
+    // tunnel: refuse here, naming the clash, rather than print a command that cannot work.
+    throw new ValidationError(
+      `HOUSTON_SSH_LOCAL_PORT ${String(selectedPort)} is one of this workspace's side ports ` +
+        `(${sides.join(', ')}), which the tunnel forwards on their own numbers; choose another`,
+    );
+  }
   const sshPort = remoteSshPort(env);
   const user = safeDestinationPart(remoteUser(env), 'HOUSTON_SSH_USER');
   const host = safeDestinationPart(remoteHost(env), 'HOUSTON_SSH_HOST');

@@ -91,7 +91,7 @@ const ROOT = path.resolve(__dirname, '..');
 // Eleven SSH access-handoff cases cover local and remote guidance, IPv6, option safety,
 // invalid local ports, wildcard binds, legacy Compose recovery, and the CLI's JSON and
 // human consumers. The legacy IPv6 repair adds one direct assertion for each renderer.
-const FLOOR = 4511;
+const FLOOR = 4518;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [
