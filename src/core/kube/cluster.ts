@@ -128,11 +128,14 @@ async function rollbackUnmarkedCluster(): Promise<string> {
     : `; rollback also failed: ${why(result)}`;
 }
 
-/** Create the shared kind cluster, with one process doing it at a time. */
-async function createUnderLock(emit: Emit, kubeconfig: string): Promise<boolean> {
-  return await reproLock(
-    CLUSTER_LOCK,
-    async () => {
+/**
+ * Create the shared kind cluster if it is not there. The caller holds the cluster lock
+ * around this AND the marker that follows: a waiter released at this return saw the new
+ * cluster, found no marker yet, and refused the cluster its sibling was still marking.
+ */
+async function createIfAbsent(emit: Emit, kubeconfig: string): Promise<boolean> {
+  {
+    {
       // Reuse still exports this home's private kubeconfig and is therefore the same scoped
       // local lifecycle action as creation. Check before the existing-cluster return.
       requireOnboarded();
@@ -161,9 +164,20 @@ async function createUnderLock(emit: Emit, kubeconfig: string): Promise<boolean>
         }
       }
       return res.returncode === 0;
-    },
-    { timeoutMs: CREATE_TIMEOUT * 1000 },
-  );
+    }
+  }
+}
+
+/**
+ * Whether a same-named cluster with no marker is one an earlier houston made. Releases
+ * before the marker left none, and a person upgrading must not have to delete a cluster
+ * holding their workspaces and volumes. The proof is the workspaces themselves: a
+ * namespace carrying houston's owner label is written by nothing else. A refused read
+ * is not a proof either way, so it adopts nothing.
+ */
+async function madeByAnEarlierHouston(context: string): Promise<boolean> {
+  const owned = await workspaceNamespaces(context);
+  return owned !== null && owned.length > 0;
 }
 
 /**
@@ -185,8 +199,14 @@ export async function ensureCluster(emit: Emit = nullEmit): Promise<string> {
         'kubectl at a cluster you already have.',
     );
   }
+  return await reproLock(CLUSTER_LOCK, async () => await ensureClusterLocked(emit), {
+    timeoutMs: CREATE_TIMEOUT * 1000,
+  });
+}
+
+async function ensureClusterLocked(emit: Emit): Promise<string> {
   const kubeconfig = ownedKubeconfig();
-  const createdHere = await createUnderLock(emit, kubeconfig);
+  const createdHere = await createIfAbsent(emit, kubeconfig);
   // ALWAYS export, not only after creating. `kind get clusters` reads Docker, so it sees a
   // cluster that houston's OWN kubeconfig knows nothing about -- which happens whenever
   // the cluster outlives the kubeconfig: a different or fresh HOUSTON_HOME, a deleted
@@ -219,10 +239,22 @@ export async function ensureCluster(emit: Emit = nullEmit): Promise<string> {
       throw error;
     }
   } else if (!(await clusterIsOurs(context))) {
-    throw new ConflictError(
-      `a Kind cluster named '${CLUSTER_NAME}' exists without Houston's ownership marker; ` +
-        'refusing to reuse or delete it. Remove or rename that cluster yourself, then retry.',
+    if (!(await madeByAnEarlierHouston(context))) {
+      throw new ConflictError(
+        `a Kind cluster named '${CLUSTER_NAME}' exists without Houston's ownership marker; ` +
+          'refusing to reuse or delete it. Remove or rename that cluster yourself, then retry.',
+      );
+    }
+    // Adopted, not refused: the grant just checked is the authority to own this cluster,
+    // and its houston workspaces are the proof an earlier release made it.
+    info(
+      emit,
+      `adopting cluster ${CLUSTER_NAME}: an earlier houston made it, and it holds houston workspaces`,
+      {
+        phase: 'provision',
+      },
     );
+    await markClusterOwned(context);
   }
   info(emit, `cluster ${CLUSTER_NAME} ready at ${context}`, { phase: 'provision' });
   return context;

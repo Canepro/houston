@@ -391,9 +391,34 @@ describe('the cluster houston makes for itself', () => {
     expect(calls.some(({ argv }) => argv.includes('create'))).toBe(false);
   });
 
+  it('adopts a same-named cluster an earlier houston made, by the workspaces it holds', async () => {
+    // Releases before the marker left none. A person upgrading must not delete a cluster
+    // holding their workspaces; a namespace with houston's owner label is proof enough.
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
+    route((joined) => {
+      if (joined.includes('get clusters')) return { stdout: `${CLUSTER_NAME}\n` };
+      if (joined.includes('current-context')) return { stdout: CONTEXT };
+      if (joined.includes('/readyz')) return { stdout: 'ok' };
+      if (joined.includes(`get configmap ${CLUSTER_OWNER_CONFIGMAP}`)) return { stdout: '' };
+      if (joined.includes('get namespace')) {
+        return { stdout: JSON.stringify({ items: [{ metadata: { name: 'houston-ticket-1' } }] }) };
+      }
+      return undefined;
+    });
+    expect(await ensureCluster()).toBe(CONTEXT);
+    expect(calls.some(({ argv }) => argv.includes('create'))).toBe(false);
+    const marker = calls.find(({ argv }) => argv.includes('apply') && argv.includes('--filename'));
+    expect(JSON.parse(String(marker?.options.input))).toMatchObject({
+      data: { cluster: CLUSTER_NAME },
+    });
+  });
+
   it('refuses a same-named cluster without Houston’s ConfigMap, even when force is requested', async () => {
     // `kind-houston-local` says only that someone used the same name. The marker is the
-    // proof that lets Houston export its kubeconfig, use the cluster, or delete it.
+    // proof that lets Houston export its kubeconfig, use the cluster, or delete it. With
+    // no houston workspace in it, nothing says an earlier houston made it either.
     config.updateConfig((stored) => {
       grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
     });
@@ -404,6 +429,7 @@ describe('the cluster houston makes for itself', () => {
       if (joined.includes(`get configmap ${CLUSTER_OWNER_CONFIGMAP}`)) {
         return { stdout: '' };
       }
+      if (joined.includes('get namespace')) return { stdout: '{"items": []}' };
       return undefined;
     });
     await expect(ensureCluster()).rejects.toThrow(/ownership marker/u);
