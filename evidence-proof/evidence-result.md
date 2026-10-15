@@ -22,10 +22,11 @@ Remote PR head before this closeout: `e366bb9c8cec4accf93b6d2d9a1531ddf904bcab`
 - `node tools/depcruise.js` passed with no dependency violations.
 - `node tools/lint-truthiness.js` passed all five guard checks.
 - Fresh isolated `HOUSTON_HOME` and `HOUSTON_SKILL_HOME` ran `node tools/skill-generate.js` and `--check`; all three shipped skill copies match the build.
-- An isolated real CLI check ran `bin/houston capabilities` followed by `bin/houston evidence --help`. It confirmed the evidence JSON and `--bundle` contract, the safe bundle-file description, and the raw-log boundary.
+- The retained local CLI receipt records a synthetic `evidence --json --bundle` run that returned the evidence envelope, a redacted deployment artifact, and a passing sentinel-absence check. It does not record a source revision, `capabilities`, or `evidence --help`, so it does not prove those broader CLI claims.
+- The parent-owned exact-head verifier at `verifier-evidence-a1ae155-r2/summary.json` independently reports `PASS_SCOPED` for `a1ae1555da8866771d5e3857f310b8629f1d1c20`: it exercised the real checkout CLI against a synthetic workspace, checked offline JSON evidence and sanitized bundle digests/sentinels, and left source and fixture state unchanged.
 
 ## Limits
 
 No Docker containers, Kubernetes clusters, namespace mutations, or credential-bearing workspace were started. The Kubernetes result is covered by mocked owner-boundary tests; a live cluster label read remains untested. The full Jest suite is intentionally deferred to the fork's Linux CI. `node tools/zero-skips-selftest.js` remains incomplete on macOS because its conditional-firing fixture hard-codes Linux; it fails before evaluating the floor and was not changed by this closeout.
 
-Proof: branch 4, targeted repository tests and an isolated direct CLI check on `20f0bc8c799572b5431869186ca58120a67001fe` demonstrated the changed evidence and help contracts; live Docker and Kubernetes behavior remain untested.
+Proof: branch 4, targeted repository tests demonstrated the changed evidence and help contracts on the current candidate. The parent-owned exact-head verifier separately reported `PASS_SCOPED` for a synthetic offline evidence JSON/bundle path at `a1ae1555da8866771d5e3857f310b8629f1d1c20`; live Docker and Kubernetes behavior remain untested.
