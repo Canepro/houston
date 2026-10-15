@@ -307,22 +307,43 @@ describe('the create path end to end, stopped at the write seam', () => {
     expect(seen.yaml).toContain('admin123');
   });
 
-  it('warns about the registration token the container will see, wherever it came from', async () => {
+  it('renders final registration and licence environment consistently with create warnings', async () => {
     // The flag and the box-wide config are trimmed; a preset's env, `--env`, or either
-    // final Compose patch can supply or remove the token. The warning must agree with the
-    // rendered document, rather than with an earlier input to it.
+    // final Compose patch can supply or remove the token. The final winning value is
+    // normalised before Compose sees it, and both licence warnings must agree with that
+    // rendered document rather than with an earlier input to it.
     const cases = [
       { label: 'config spaces', config: '   ', expected: '' },
       { label: 'flag spaces', flag: '   ', expected: '' },
       { label: 'flag padded', flag: '  registration-fixture  ', expected: 'registration-fixture' },
       { label: 'preset env', presetEnv: 'preset-token', expected: 'preset-token' },
+      { label: 'preset env padded', presetEnv: '  preset-token  ', expected: 'preset-token' },
       { label: 'user env', env: { REG_TOKEN: 'user-token' }, expected: 'user-token' },
+      { label: 'user env padded', env: { REG_TOKEN: '  user-token  ' }, expected: 'user-token' },
       { label: 'flag removed by env', flag: 'flag-token', env: { REG_TOKEN: null }, expected: '' },
-      { label: 'service patch removes flag', flag: 'flag-token', servicePatch: "''", expected: '' },
+      { label: 'service patch removes flag', flag: 'flag-token', servicePatch: '', expected: '' },
+      {
+        label: 'service patch padded',
+        servicePatch: '  service-token  ',
+        expected: 'service-token',
+      },
       {
         label: 'Rocket.Chat patch supplies token',
         rocketchatPatch: 'patch-token',
         expected: 'patch-token',
+      },
+      {
+        label: 'Rocket.Chat patch padded',
+        rocketchatPatch: '  patch-token  ',
+        expected: 'patch-token',
+      },
+      {
+        label: 'final environment licence',
+        env: { ROCKETCHAT_LICENSE: 'fixture-license' },
+        expected: '',
+        license: 'fixture-license',
+        preset: 'ldap+token-licensed',
+        version: '9.0.0',
       },
     ] as const;
     for (const one of cases) {
@@ -333,28 +354,32 @@ describe('the create path end to end, stopped at the write seam', () => {
       fs.writeFileSync(
         path.join(config.presetDir(), 'token-licensed.yaml'),
         'name: token-licensed\nrequires_license: true\n' +
-          ('presetEnv' in one ? `env:\n  REG_TOKEN: ${one.presetEnv}\n` : '') +
+          ('presetEnv' in one ? `env:\n  REG_TOKEN: ${JSON.stringify(one.presetEnv)}\n` : '') +
           ('servicePatch' in one
-            ? `services:\n  rocketchat:\n    environment:\n      REG_TOKEN: ${one.servicePatch}\n`
+            ? `services:\n  rocketchat:\n    environment:\n      REG_TOKEN: ${JSON.stringify(one.servicePatch)}\n`
             : '') +
           ('rocketchatPatch' in one
-            ? `rocketchat:\n  environment:\n    REG_TOKEN: ${one.rocketchatPatch}\n`
+            ? `rocketchat:\n  environment:\n    REG_TOKEN: ${JSON.stringify(one.rocketchatPatch)}\n`
             : ''),
       );
       const { seen, createDocker } = capture();
       const codes: string[] = [];
+      const messages: string[] = [];
       await expect(
         createDocker.createRepro(
           createReq({
-            version: '8.5.1',
+            version: 'version' in one ? one.version : '8.5.1',
             name: `token-${one.label.replace(/ /gu, '-')}`,
-            preset: 'token-licensed',
+            preset: 'preset' in one ? one.preset : 'token-licensed',
             regToken: 'flag' in one ? one.flag : '',
             env: 'env' in one ? one.env : {},
             wait: false,
             offline: true,
           }),
-          (event) => codes.push(event.code),
+          (event) => {
+            codes.push(event.code);
+            messages.push(event.message);
+          },
         ),
       ).rejects.toThrow('stopped at the write seam');
       const doc = YAML.parse(seen.yaml as string) as {
@@ -364,10 +389,19 @@ describe('the create path end to end, stopped at the write seam', () => {
         one.label,
         one.expected,
       ]);
+      expect(doc.services.rocketchat.environment.ROCKETCHAT_LICENSE ?? '').toBe(
+        'license' in one ? one.license : '',
+      );
+      expect(seen.meta?.extra.licensed === true).toBe('license' in one);
       expect([one.label, codes.includes('LICENSE_ABSENT_EE_PRESET')]).toEqual([
         one.label,
-        one.expected === '',
+        one.expected === '' && !('license' in one),
       ]);
+      if ('license' in one) {
+        expect(messages.some((message) => message.includes('Premium plan for LDAP login'))).toBe(
+          false,
+        );
+      }
     }
   });
 

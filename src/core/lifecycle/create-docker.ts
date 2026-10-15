@@ -135,6 +135,8 @@ export interface CreatePlan {
   adminPassword: string;
   spec: compose.Spec | null;
   doc: compose.ComposeDoc | null;
+  /** `buildDocument`: a licence file or final Rocket.Chat environment supplies one. */
+  effectiveLicense: boolean;
   /** `buildRecord` */
   meta: record.Metadata | null;
   /** The record a rebuild replaces, read by `buildDocument`; null on a first create. */
@@ -165,6 +167,7 @@ export function createPlan(
     adminPassword: '',
     spec: null,
     doc: null,
+    effectiveLicense: false,
     meta: null,
     previousMeta: null,
     files: [],
@@ -943,21 +946,23 @@ export async function buildDocument(plan: CreatePlan): Promise<void> {
     throw new ValidationError(error instanceof Error ? error.message : String(error));
   }
   // The completed document is the source of truth: a preset's service and Rocket.Chat
-  // patches apply after the base environment, so an earlier token is not enough.
+  // patches apply after the base environment, so an earlier token or licence is not enough.
   const effectiveToken = compose.hasEffectiveRegToken(plan.doc, (plan.pre as Preset).instances)
     ? 'present'
     : '';
+  plan.effectiveLicense =
+    plan.spec.licensed || compose.hasEffectiveLicense(plan.doc, (plan.pre as Preset).instances);
   const premium = request.premiumAuthWarning(
     [(plan.pre as Preset).name],
     resolved.rcVersion,
-    plan.spec.licensed,
+    plan.effectiveLicense,
     effectiveToken,
   );
   if (premium !== '') warn(plan.emit, premium, { phase: 'create' });
   const unlicensed = request.licenceAbsentWarning(
     plan.pre as Preset,
     false,
-    plan.spec.licensed,
+    plan.effectiveLicense,
     effectiveToken,
   );
   if (unlicensed !== '') {
@@ -1015,7 +1020,7 @@ export function buildRecord(plan: CreatePlan): void {
   if (Object.keys(pre.extra).length > 0) Object.assign(plan.meta.extra, pre.extra);
   if (pre.ports.length > 0) plan.meta.extra.sidecar_ports = pre.ports;
   if (Object.keys(plan.envOverrides).length > 0) plan.meta.extra.env = plan.envOverrides;
-  if (spec.licensed) plan.meta.extra.licensed = true;
+  if (plan.effectiveLicense) plan.meta.extra.licensed = true;
   if (plan.req.actor) {
     // Who owns this. Shown by `list` and the GUI card.
     plan.meta.extra.created_by = plan.req.actor;

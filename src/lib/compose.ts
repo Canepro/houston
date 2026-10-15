@@ -145,22 +145,38 @@ function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
-/** Whether one final Compose environment gives Rocket.Chat a supplied registration token. */
-function environmentHasRegToken(environment: unknown): boolean {
+/** Whether one final Compose environment gives Rocket.Chat a supplied non-blank value. */
+function environmentHasValue(environment: unknown, name: string): boolean {
   if (isPlainObject(environment)) {
-    const token = environment.REG_TOKEN;
-    return token !== null && token !== undefined && String(token).trim() !== '';
+    const value = environment[name];
+    return value !== null && value !== undefined && String(value).trim() !== '';
   }
   if (!Array.isArray(environment)) return false;
-  // Compose also accepts `environment: [REG_TOKEN=value]`. A bare REG_TOKEN inherits an
-  // ambient host value, which is not a token houston can claim it supplied.
-  let token = '';
+  // Compose also accepts `environment: [NAME=value]`. A bare name inherits an ambient host
+  // value, which is not a value Houston can claim it supplied.
+  let value = '';
   for (const entry of environment) {
     if (typeof entry !== 'string') return false;
-    if (entry === 'REG_TOKEN') token = '';
-    else if (entry.startsWith('REG_TOKEN=')) token = entry.slice('REG_TOKEN='.length);
+    if (entry === name) value = '';
+    else if (entry.startsWith(`${name}=`)) value = entry.slice(name.length + 1);
   }
-  return token.trim() !== '';
+  return value.trim() !== '';
+}
+
+/** Trim an explicit registration token in its final Compose environment. */
+function normalizeRegToken(environment: unknown): void {
+  if (isPlainObject(environment)) {
+    const token = environment.REG_TOKEN;
+    if (token !== null && token !== undefined) environment.REG_TOKEN = String(token).trim();
+    return;
+  }
+  if (!Array.isArray(environment)) return;
+  for (let index = 0; index < environment.length; index += 1) {
+    const entry = environment[index];
+    if (typeof entry === 'string' && entry.startsWith('REG_TOKEN=')) {
+      environment[index] = `REG_TOKEN=${entry.slice('REG_TOKEN='.length).trim()}`;
+    }
+  }
 }
 
 /**
@@ -169,7 +185,14 @@ function environmentHasRegToken(environment: unknown): boolean {
  */
 export function hasEffectiveRegToken(doc: ComposeDoc, instances: number): boolean {
   return rcServiceNames(instances).every((name) =>
-    environmentHasRegToken(doc.services[name]?.environment),
+    environmentHasValue(doc.services[name]?.environment, 'REG_TOKEN'),
+  );
+}
+
+/** Whether every final Rocket.Chat service gets a licence outside its private env file. */
+export function hasEffectiveLicense(doc: ComposeDoc, instances: number): boolean {
+  return rcServiceNames(instances).every((name) =>
+    environmentHasValue(doc.services[name]?.environment, 'ROCKETCHAT_LICENSE'),
   );
 }
 
@@ -583,6 +606,9 @@ export function build(s: Spec): ComposeDoc {
     if (Object.keys(s.preset.rocketchat).length > 0) deepMerge(svc, clone(s.preset.rocketchat));
     addDepends(svc, s.preset.dependsOn);
   }
+  // Presets and `--env` can win over the flag-derived token. Trim that final value before
+  // Compose reads it, so the deployed token and the create-time warning describe one state.
+  for (const name of rcServiceNames(n)) normalizeRegToken(doc.services[name]?.environment);
 
   publishThroughEntryService(doc, rcServices, s);
 
