@@ -307,19 +307,27 @@ describe('the create path end to end, stopped at the write seam', () => {
     expect(seen.yaml).toContain('admin123');
   });
 
-  it('uses the same trimmed registration token for deployment and the licence warning', async () => {
-    for (const [source, raw, expected] of [
-      ['config', '   ', ''],
-      ['flag', '   ', ''],
-      ['flag', '  registration-fixture  ', 'registration-fixture'],
-    ] as const) {
+  it('warns about the registration token the container will see, wherever it came from', async () => {
+    // The flag and the box-wide config are trimmed; a preset's env or `--env` can supply
+    // the token instead; and `--env REG_TOKEN` (null) removes the one the flag gave, so
+    // the warning fires then even though a flag was passed.
+    const cases = [
+      { label: 'config spaces', config: '   ', expected: '' },
+      { label: 'flag spaces', flag: '   ', expected: '' },
+      { label: 'flag padded', flag: '  registration-fixture  ', expected: 'registration-fixture' },
+      { label: 'preset env', presetEnv: 'preset-token', expected: 'preset-token' },
+      { label: 'user env', env: { REG_TOKEN: 'user-token' }, expected: 'user-token' },
+      { label: 'flag removed by env', flag: 'flag-token', env: { REG_TOKEN: null }, expected: '' },
+    ] as const;
+    for (const one of cases) {
       config.updateConfig((cfg) => {
-        cfg.reg_token = source === 'config' ? raw : '';
+        cfg.reg_token = 'config' in one ? one.config : '';
       });
       fs.mkdirSync(config.presetDir(), { recursive: true });
       fs.writeFileSync(
         path.join(config.presetDir(), 'token-licensed.yaml'),
-        'name: token-licensed\nrequires_license: true\n',
+        'name: token-licensed\nrequires_license: true\n' +
+          ('presetEnv' in one ? `env:\n  REG_TOKEN: ${one.presetEnv}\n` : ''),
       );
       const { seen, createDocker } = capture();
       const codes: string[] = [];
@@ -327,9 +335,10 @@ describe('the create path end to end, stopped at the write seam', () => {
         createDocker.createRepro(
           createReq({
             version: '8.5.1',
-            name: 'token-case',
+            name: `token-${one.label.replace(/ /gu, '-')}`,
             preset: 'token-licensed',
-            regToken: source === 'flag' ? raw : '',
+            regToken: 'flag' in one ? one.flag : '',
+            env: 'env' in one ? one.env : {},
             wait: false,
             offline: true,
           }),
@@ -339,8 +348,14 @@ describe('the create path end to end, stopped at the write seam', () => {
       const doc = YAML.parse(seen.yaml as string) as {
         services: { rocketchat: { environment: Record<string, string> } };
       };
-      expect(doc.services.rocketchat.environment.REG_TOKEN ?? '').toBe(expected);
-      expect(codes.includes('LICENSE_ABSENT_EE_PRESET')).toBe(expected === '');
+      expect([one.label, doc.services.rocketchat.environment.REG_TOKEN ?? '']).toEqual([
+        one.label,
+        one.expected,
+      ]);
+      expect([one.label, codes.includes('LICENSE_ABSENT_EE_PRESET')]).toEqual([
+        one.label,
+        one.expected === '',
+      ]);
     }
   });
 

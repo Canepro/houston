@@ -936,18 +936,21 @@ export async function buildDocument(plan: CreatePlan): Promise<void> {
     envOverrides: plan.envOverrides,
   });
   plan.spec.adminPassword = plan.adminPassword;
+  // The token the container will see, not the flag: a preset's env or `--env` can supply
+  // one, and `--env REG_TOKEN` removes the one `--reg-token` gave.
+  const effectiveToken = compose.effectiveRegToken(plan.spec);
   const premium = request.premiumAuthWarning(
     [(plan.pre as Preset).name],
     resolved.rcVersion,
     plan.spec.licensed,
-    plan.token,
+    effectiveToken,
   );
   if (premium !== '') warn(plan.emit, premium, { phase: 'create' });
   const unlicensed = request.licenceAbsentWarning(
     plan.pre as Preset,
     false,
     plan.spec.licensed,
-    plan.token,
+    effectiveToken,
   );
   if (unlicensed !== '') {
     warn(plan.emit, unlicensed, { phase: 'create', code: request.LICENSE_ABSENT_EE_PRESET });

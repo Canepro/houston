@@ -145,6 +145,16 @@ function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
+/**
+ * The REG_TOKEN Rocket.Chat will actually see, after the preset's env and the user's
+ * `--env` have had their say: a preset can supply one, `--env REG_TOKEN=` can replace
+ * one, and `--env REG_TOKEN` (null) removes the one `--reg-token` gave. A warning about
+ * a missing token has to look here, not at the flag.
+ */
+export function effectiveRegToken(s: Spec): string {
+  return (rcEnvironment(s).REG_TOKEN ?? '').trim();
+}
+
 function rcEnvironment(s: Spec): Record<string, string> {
   const env: Record<string, string> = {
     ROOT_URL: s.rootUrl,
