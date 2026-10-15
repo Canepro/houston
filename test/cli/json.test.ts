@@ -782,4 +782,38 @@ describe('goal-first setup CLI', () => {
       (require('../../src/lib/config') as typeof ConfigNS).loadConfig(false).reg_token,
     ).toBeUndefined();
   });
+  it('shows facts and gates before a no-op interactive confirmation without claiming a write', async () => {
+    const cfg = require('../../src/lib/config') as typeof ConfigNS;
+    cfg.saveConfig({
+      default_deployment: 'microservices',
+      default_scenarios: [],
+      preferences: { seed_profile: 'standard', retain_runs: false },
+      grants: { owned_cluster: false },
+      onboarding: { completed_at: '2026-10-15T00:00:00Z', rc_repro_version: '2.1.1' },
+    });
+    const before = fs.readFileSync(path.join(home, 'config.yaml'));
+    const confirm = jest.fn(async () => {
+      const printed = (process.stdout.write as unknown as jest.Mock).mock.calls
+        .map(([chunk]) => String(chunk))
+        .join('');
+      expect(printed).toContain('GATE_OWNED_CLUSTER');
+      return true;
+    });
+    jest.doMock('../../src/cli/handlers/prompt', () => ({
+      ...jest.requireActual('../../src/cli/handlers/prompt'),
+      confirm,
+      setupAnswer: jest.fn(async () => 'unused'),
+    }));
+    try {
+      const result = await run(['onboard', 'setup']);
+      expect(confirm).toHaveBeenCalledWith('Apply these setup choices?');
+      for (const label of ['engine', 'capacity', 'tools', 'kernel', 'licence', 'seed deferred'])
+        expect(result.stdout).toContain(label);
+      expect(result.stdout).toContain('Setup choices unchanged.');
+      expect(result.stdout).not.toContain('Setup choices recorded.');
+      expect(fs.readFileSync(path.join(home, 'config.yaml'))).toEqual(before);
+    } finally {
+      jest.dontMock('../../src/cli/handlers/prompt');
+    }
+  });
 });

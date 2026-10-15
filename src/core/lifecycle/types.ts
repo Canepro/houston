@@ -79,6 +79,12 @@ export interface CreateReq {
    * it can point a colleague's workspace at a cluster they cannot see.
    */
   context: string;
+  /**
+   * Internal only: setup selected microservices without a runtime or context flag. That
+   * selection may use Houston's own local Kind plan, but it must never adopt an ambient
+   * or saved remote cluster. The API request whitelist deliberately cannot set this.
+   */
+  implicitOwnedLocal: boolean;
   /** Kubernetes only. The operator brings SCRAM auth and owns the MongoDB bootstrap. */
   mongoOperator: boolean;
   https: boolean;
@@ -132,6 +138,7 @@ export function createReq(values: Partial<CreateReq> & Pick<CreateReq, 'version'
     deployment: '',
     replicas: 0,
     context: '',
+    implicitOwnedLocal: false,
     mongoOperator: false,
     https: false,
     domain: '',

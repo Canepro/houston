@@ -27,19 +27,20 @@ const PROFILES = ['none', 'small', 'standard', 'large'];
 const PREFERENCES = { retain_runs: false, kubernetes_target: 'owned-local', seed_profile: 'small' };
 const FIRST_VERSION = '8.6.1';
 
+/** Config mappings are plain objects; YAML timestamps and tagged collections are not writable maps. */
+function mapping(value: unknown): config.Config | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null ? (value as config.Config) : null;
+}
 function map(value: unknown): config.Config {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? (value as config.Config)
-    : {};
+  return mapping(value) ?? {};
 }
 function own(value: object, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
 }
 function writable(cfg: config.Config, key: string): config.Config {
-  if (
-    cfg[key] !== undefined &&
-    (cfg[key] === null || typeof cfg[key] !== 'object' || Array.isArray(cfg[key]))
-  )
+  if (cfg[key] !== undefined && mapping(cfg[key]) === null)
     throw new ValidationError(`${key} must be a mapping before setup can change it`);
   return map(cfg[key]);
 }
@@ -87,9 +88,8 @@ export interface SetupPatch {
   grants?: Record<string, boolean>;
 }
 function validatedPatch(input: unknown): SetupPatch {
-  if (input === null || typeof input !== 'object' || Array.isArray(input))
-    throw new ValidationError('setup patch must be a mapping');
-  const raw = input as Record<string, unknown>;
+  const raw = mapping(input);
+  if (raw === null) throw new ValidationError('setup patch must be a mapping');
   const allowed = [
     'deployment',
     'scenarios',
@@ -121,10 +121,10 @@ function validatedPatch(input: unknown): SetupPatch {
     out.kubernetes_target = raw.kubernetes_target;
   }
   if (own(raw, 'grants')) {
-    if (raw.grants === null || typeof raw.grants !== 'object' || Array.isArray(raw.grants))
-      throw new ValidationError('grants must be a mapping');
+    const grants = mapping(raw.grants);
+    if (grants === null) throw new ValidationError('grants must be a mapping');
     out.grants = {};
-    for (const [key, value] of Object.entries(raw.grants)) {
+    for (const [key, value] of Object.entries(grants)) {
       const id = key.replaceAll('_', '-');
       onboarding.checkGrantId(id);
       if (typeof value !== 'boolean') throw new ValidationError(`grant ${key} must be boolean`);
@@ -179,6 +179,10 @@ export async function detectEnvironment() {
     /* Home may not exist yet. */
   }
   const missing = ['kubectl', 'helm', 'kind'].filter((name) => tools[name] !== true);
+  const enoughCapacity =
+    engine !== null &&
+    engine.cpus >= ENGINE_FLOOR_CPUS &&
+    engine.memBytes / 1024 ** 3 >= ENGINE_FLOOR_MEMORY_GIB;
   return {
     os: os.platform(),
     os_version: os.release(),
@@ -193,7 +197,7 @@ export async function detectEnvironment() {
     engine_memory_gib: (engine?.memBytes ?? 0) / 1024 ** 3,
     engine_kernel_version: engine?.kernel ?? '',
     missing_kubernetes_tools: missing,
-    microservices_ready: engine !== null && missing.length === 0,
+    microservices_ready: engine !== null && missing.length === 0 && enoughCapacity,
     engine_resize_supported: false,
   };
 }
@@ -324,7 +328,7 @@ export async function snapshot(
   question(
     'scenarios',
     'scenarios',
-    'Optional scenarios, separated by commas. Empty means none.',
+    'Optional scenarios, separated by commas. Enter retains the current choice; type none to clear it.',
     'multi_choice',
     view.scenarios,
     choices(view.deployment),

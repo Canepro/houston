@@ -3096,18 +3096,16 @@ export async function renderHuman(
           io,
           result.action === 'setup'
             ? 'Setup choices recorded.'
-            : result.action === 'cancelled'
-              ? 'No changes written.'
-              : 'Setup choices',
+            : result.action === 'unchanged'
+              ? 'Setup choices unchanged.'
+              : result.action === 'cancelled'
+                ? 'No changes written.'
+                : 'Setup choices',
         );
-        const selection = bag(result.selection);
-        say(io, `deployment  ${display(selection.deployment)}`);
-        say(io, `scenarios   ${strings(selection.scenarios).join(', ') || '(none)'}`);
-        say(io, `seed        ${display(selection.seed_profile)}`);
-        say(io, `retain runs ${String(selection.retain_runs)}`);
-        for (const gate of bags(result.gates))
-          say(io, `  ${display(gate.code)}: ${display(gate.message)}`);
-        say(io, `first run   ${display(result.first_run_command, '(blocked)')}`);
+        for (const line of setupHandler.humanLines(
+          result as Parameters<typeof setupHandler.humanLines>[0],
+        ))
+          say(io, line);
         return;
       }
       const available = bags(result.grants_available);

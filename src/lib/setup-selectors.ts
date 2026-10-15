@@ -30,6 +30,44 @@ export function scenarios(value: unknown): string[] {
   ];
 }
 
+/**
+ * Saved config predates the TypeScript names. Keep accepting its established aliases at the
+ * persistence boundary, while explicit setup input stays on the current public vocabulary.
+ */
+function savedDeployment(value: unknown): string {
+  const raw = String(value ?? '')
+    .trim()
+    .toLowerCase();
+  const aliases: Readonly<Record<string, string>> = {
+    default: 'monolith',
+    compose: 'monolith',
+    docker: 'monolith',
+    k8s: 'microservices',
+    kubernetes: 'microservices',
+  };
+  return deployment((aliases[raw] ?? raw) || 'monolith');
+}
+
+/** Frozen config accepted comma-separated, mixed-case scenario defaults. */
+function savedScenarios(value: unknown): string[] {
+  if (value === null || value === undefined) return [];
+  const values =
+    typeof value === 'string'
+      ? [value]
+      : Array.isArray(value)
+        ? value
+        : value instanceof Set
+          ? [...value]
+          : [value];
+  return scenarios(
+    values.flatMap((item) =>
+      String(item)
+        .split(',')
+        .map((name) => name.trim().toLowerCase()),
+    ),
+  );
+}
+
 /** The legacy precedence is shared with setup and CLI creation defaults. */
 export function savedSelectors(cfg: config.Config = config.loadConfig()): {
   deployment: string;
@@ -41,10 +79,17 @@ export function savedSelectors(cfg: config.Config = config.loadConfig()): {
   const dep = [cfg.default_deployment, cfg.deployment, defaults.deployment].find(
     (value: unknown) => value !== undefined && value !== null && value !== '',
   );
-  const scen = cfg.default_scenarios ?? cfg.scenarios ?? defaults.scenarios;
+  // Presence is meaningful: a deliberate `default_scenarios: null` clears legacy scenarios.
+  const scen = own(cfg, 'default_scenarios')
+    ? cfg.default_scenarios
+    : own(cfg, 'scenarios')
+      ? cfg.scenarios
+      : own(defaults, 'scenarios')
+        ? defaults.scenarios
+        : [];
   return {
-    deployment: deployment(dep ?? 'monolith'),
-    scenarios: scenarios(scen ?? []),
+    deployment: savedDeployment(dep),
+    scenarios: savedScenarios(scen),
     answered_deployment: dep !== undefined,
     answered_scenarios:
       own(cfg, 'default_scenarios') || own(cfg, 'scenarios') || own(defaults, 'scenarios'),

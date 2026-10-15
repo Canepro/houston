@@ -303,7 +303,6 @@ export async function createRepro(
   // ONCE, HERE, before anything reads it. `runtime` is consulted at a dozen places
   // downstream and inferring it at each would be a dozen chances to disagree; after this
   // `req.runtime` means what the caller meant rather than only what they typed.
-  const typedRuntime = String(req.runtime).trim();
   // Before the first `deriveFor`: a typed name that is an existing workspace this actor may
   // act on means that workspace, not a new `<actor>-<name>` beside it.
   await ownership.claimTypedName(req);
@@ -311,20 +310,6 @@ export async function createRepro(
   // where this is going, or that would name the box's default instead.
   await carryRecordedAxes(req, naming.deriveFor(req));
   req.runtime = request.inferRuntime(req);
-  request.sayWhereThisIsGoing(req, typedRuntime, emit);
-  // SAID, not dropped: these two mean nothing to Compose, and a Docker workspace came up
-  // without a word that the operator (or the ingress class) asked for was not there.
-  if (req.runtime !== topology.KUBERNETES) {
-    const ignored = [
-      req.mongoOperator ? '--mongo-operator' : '',
-      req.ingressClass !== '' ? '--ingress-class' : '',
-    ].filter((flag) => flag !== '');
-    if (ignored.length > 0) {
-      warn(emit, `${ignored.join(' and ')}: Kubernetes only, ignored on Docker`, {
-        phase: 'plan',
-      });
-    }
-  }
 
   const name = naming.deriveFor(req);
   if (!name) {
@@ -487,6 +472,7 @@ export async function resolveAxesStep(plan: CreatePlan): Promise<void> {
     if (saved.answered_deployment || saved.answered_scenarios) {
       plan.req.deployment = saved.deployment;
       plan.req.preset = compositeName(saved.scenarios);
+      plan.req.implicitOwnedLocal = saved.deployment === 'microservices';
     }
   }
   if (!plan.req.runtime && existing && (await paths.exists(existing))) {
@@ -1399,7 +1385,22 @@ export async function createReproLocked(
   // Before anything, on either runtime: the format check is also what keeps the licence to
   // one line of the env file it is written to.
   if (req.license !== '') req.license = request.requireLicense(req.license);
+  const typedRuntime = String(req.runtime).trim();
   await resolveAxesStep(plan);
+  request.sayWhereThisIsGoing(req, typedRuntime, emit);
+  // SAID, not dropped: these two mean nothing to Compose, and a Docker workspace came up
+  // without a word that the operator (or the ingress class) asked for was not there.
+  if (req.runtime !== topology.KUBERNETES) {
+    const ignored = [
+      req.mongoOperator ? '--mongo-operator' : '',
+      req.ingressClass !== '' ? '--ingress-class' : '',
+    ].filter((flag) => flag !== '');
+    if (ignored.length > 0) {
+      warn(emit, `${ignored.join(' and ')}: Kubernetes only, ignored on Docker`, {
+        phase: 'plan',
+      });
+    }
+  }
 
   if (req.runtime === topology.KUBERNETES) {
     // A PARALLEL path, not a branch woven through this function. Everything below is

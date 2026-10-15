@@ -5,6 +5,44 @@ import { ValidationError } from '../../lib/errors';
 import type { Invocation } from '../app';
 import { confirm, setupAnswer } from './prompt';
 
+type SetupSnapshot = Awaited<ReturnType<typeof setup.snapshot>>;
+
+/** The same facts shown by `onboard --show` and an interactive pre-confirm review. */
+export function humanLines(view: SetupSnapshot): string[] {
+  const { selection, environment, capacity, compatibility, license } = view;
+  const tools = Object.entries(environment.tools)
+    .map(([name, available]) => `${name} ${available ? 'yes' : 'no'}`)
+    .join(', ');
+  const capacityFact = capacity.applicable
+    ? `${capacity.status}: ${String(capacity.observed_cpu)} CPU / ` +
+      `${String(capacity.observed_memory_gib)} GiB (needs ${String(capacity.required_cpu)} CPU / ` +
+      `${String(capacity.required_memory_gib)} GiB)` +
+      (capacity.remediation !== '' ? ` — ${capacity.remediation}` : '')
+    : 'not applicable';
+  const licenseFact = `${license.status}${license.required ? ` (token ${license.supplied ? 'supplied' : 'absent'})` : ''}`;
+  const seedDeferred = license.seed_deferred ? `yes — ${license.remediation}` : 'no';
+  return [
+    `deployment  ${selection.deployment}`,
+    `scenarios   ${selection.scenarios.join(', ') || '(none)'}`,
+    `seed        ${selection.seed_profile}`,
+    `retain runs ${String(selection.retain_runs)}`,
+    `host        ${environment.os} ${environment.os_version} · ${environment.architecture} · ` +
+      `${String(environment.cpus)} CPU · ${String(environment.memory_gib)} GiB`,
+    `engine      ${environment.engine_provider} · ${String(environment.engine_cpus)} CPU · ` +
+      `${String(environment.engine_memory_gib)} GiB · microservices ready ` +
+      `${environment.microservices_ready ? 'yes' : 'no'}`,
+    `capacity    ${capacityFact}`,
+    `tools       ${tools}`,
+    `kernel      ${environment.engine_kernel_version || 'unavailable'} · MongoDB ` +
+      `${compatibility.mongo_version}: ${compatibility.status}` +
+      (compatibility.remediation !== '' ? ` — ${compatibility.remediation}` : ''),
+    `licence     ${licenseFact}`,
+    `seed deferred ${seedDeferred}`,
+    ...view.gates.map((gate) => `  ${gate.code}: ${gate.message}`),
+    `first run   ${view.first_run_command || '(blocked)'}`,
+  ];
+}
+
 export async function run(invocation: Invocation) {
   const o = invocation.options;
   const patch: setup.SetupPatch = {};
@@ -48,16 +86,19 @@ export async function run(invocation: Invocation) {
           if (q.grant !== undefined) patch.grants = { ...patch.grants, [q.grant]: value };
           else patch.retain_runs = value;
         } else if (q.id === 'deployment') patch.deployment = answer;
-        else if (q.id === 'scenarios') patch.scenarios = answer === 'none' ? [] : answer;
+        else if (q.id === 'scenarios')
+          patch.scenarios = answer.toLowerCase() === 'none' ? [] : answer;
         else if (q.id === 'seed_profile') patch.seed_profile = answer;
       }
     }
     const review = await setup.snapshot({ draft: patch, section });
-    process.stdout.write(
-      `First run: ${review.first_run_command || review.compatibility.remediation}\n`,
-    );
+    process.stdout.write(`${humanLines(review).join('\n')}\n`);
     if (!(await confirm('Apply these setup choices?')))
       return { ...(await setup.snapshot({ section })), action: 'cancelled' };
   }
-  return { ...(await setup.applyPatch(patch, { defaults, section })), action: 'setup' };
+  const changed = defaults || Object.keys(patch).length > 0;
+  return {
+    ...(await setup.applyPatch(patch, { defaults, section })),
+    action: changed ? 'setup' : 'unchanged',
+  };
 }

@@ -186,6 +186,38 @@ afterEach(() => {
 });
 
 describe('a Kubernetes create', () => {
+  it('refuses an unowned plan selected only by saved microservices defaults before writing', async () => {
+    config.saveConfig({
+      default_deployment: 'microservices',
+      default_scenarios: [],
+      [config.KUBE_CONTEXT_KEY]: 'shared-k3s',
+    });
+    mockPlan = adopted('shared-k3s', 'k3s');
+    const said: string[] = [];
+    await expect(
+      createRepro(
+        createReq({ version: '8.6.1', name: 'implicit-remote', preset: '', offline: true }),
+        (event) => said.push(event.message),
+      ),
+    ).rejects.toThrow(/saved microservices default/u);
+    expect(said.join('\n')).not.toContain('going to Docker');
+    expect(mockCreated).toEqual([]);
+    expect(await exists('implicit-remote')).toBe(false);
+
+    await expect(
+      createRepro(
+        createReq({
+          version: '8.6.1',
+          name: 'explicit-remote',
+          runtime: 'kubernetes',
+          context: 'shared-k3s',
+          offline: true,
+        }),
+      ),
+    ).resolves.toMatchObject({ runtime: 'kubernetes' });
+    expect(mockCreated).toHaveLength(1);
+  });
+
   it('gates local Kind setup before it exports a kubeconfig or writes a provisional record', async () => {
     // `ensureKubeconfig` writes Houston's owned kubeconfig for an existing Kind cluster, and
     // the record reserves the workspace name. Both must remain untouched until onboarding

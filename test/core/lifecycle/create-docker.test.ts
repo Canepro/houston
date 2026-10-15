@@ -1609,6 +1609,7 @@ it('uses saved setup selectors for new workspaces and keeps existing or explicit
     runtime: 'kubernetes',
     deployment: 'microservices',
     preset: 'email',
+    implicitOwnedLocal: true,
   });
   const explicit = createPlan({
     req: createReq({ version: '8.6.1', name: 'explicit-setup', runtime: 'docker', preset: '' }),
@@ -1619,6 +1620,7 @@ it('uses saved setup selectors for new workspaces and keeps existing or explicit
     runtime: 'docker',
     deployment: 'monolith',
     preset: 'default',
+    implicitOwnedLocal: false,
   });
   await writeRecord(
     'old-setup',
