@@ -171,6 +171,70 @@ export function nodeRecord(item: Record<string, unknown>): NodeRecord {
   };
 }
 
+function hasOwn(value: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function nonBlankText(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() !== '' ? value : null;
+}
+
+interface ServiceAddresses {
+  external: string[];
+  malformed: boolean;
+}
+
+/**
+ * The addresses the Service response explicitly supplies. Preserve readable parts of a mixed
+ * response, but leave a warning for any malformed collection or consumed entry so `[]` never
+ * claims the API confirmed no externally reachable address.
+ */
+function serviceAddresses(item: Record<string, unknown>): ServiceAddresses {
+  const spec = mapOf(item.spec);
+  const external: string[] = [];
+  let malformed = false;
+  if (hasOwn(spec, 'externalIPs')) {
+    if (!Array.isArray(spec.externalIPs)) malformed = true;
+    else {
+      for (const entry of spec.externalIPs) {
+        const address = nonBlankText(entry);
+        if (address === null) malformed = true;
+        else external.push(address);
+      }
+    }
+  }
+
+  const status = item.status;
+  if (status === undefined || status === null) return { external, malformed };
+  if (!isMapping(status)) return { external, malformed: true };
+  if (!hasOwn(status, 'loadBalancer')) return { external, malformed };
+  const loadBalancer = status.loadBalancer;
+  if (!isMapping(loadBalancer)) return { external, malformed: true };
+  if (!hasOwn(loadBalancer, 'ingress')) return { external, malformed };
+  const ingress = loadBalancer.ingress;
+  if (!Array.isArray(ingress)) return { external, malformed: true };
+
+  for (const entry of ingress) {
+    if (!isMapping(entry)) {
+      malformed = true;
+      continue;
+    }
+    const hasIp = hasOwn(entry, 'ip');
+    const hasHostname = hasOwn(entry, 'hostname');
+    const ip = hasIp ? nonBlankText(entry.ip) : null;
+    const hostname = hasHostname ? nonBlankText(entry.hostname) : null;
+    if ((hasIp && ip === null) || (hasHostname && hostname === null)) malformed = true;
+    if (ip !== null) external.push(ip);
+    else if (hostname !== null) external.push(hostname);
+    else malformed = true;
+  }
+  return { external, malformed };
+}
+
+function hasMalformedServiceAddresses(item: Record<string, unknown>): boolean {
+  return serviceAddresses(item).malformed;
+}
+
 /** One Service of a `kubectl get services -o json` document, as the inspection shows it. */
 export function serviceRecord(item: Record<string, unknown>): ServiceRecord {
   const metadata = mapOf(item.metadata);
@@ -183,11 +247,7 @@ export function serviceRecord(item: Record<string, unknown>): ServiceRecord {
       port.targetPort === undefined || port.targetPort === null ? '' : String(port.targetPort),
     node_port: typeof port.nodePort === 'number' ? port.nodePort : null,
   }));
-  const external = Array.isArray(spec.externalIPs) ? spec.externalIPs.map(String) : [];
-  for (const entry of listOf(mapOf(mapOf(item.status).loadBalancer).ingress)) {
-    const address = String(entry.ip ?? entry.hostname ?? '');
-    if (address !== '') external.push(address);
-  }
+  const { external } = serviceAddresses(item);
   return {
     name: String(metadata.name ?? ''),
     type: String(spec.type ?? 'ClusterIP'),
@@ -233,6 +293,7 @@ async function captured<T>(
   sort: (row: T) => string,
   refusedWarning: string,
   malformedWarning: string,
+  hasMalformedPartial: (record: Record<string, unknown>) => boolean = () => false,
 ): Promise<{ rows: T[]; warning: string | null }> {
   try {
     const answer = await ask();
@@ -242,8 +303,10 @@ async function captured<T>(
     const accepted: T[] = [];
     let malformed = false;
     for (const record of records) {
-      if (valid(record)) accepted.push(map(record));
-      else malformed = true;
+      if (valid(record)) {
+        accepted.push(map(record));
+        if (hasMalformedPartial(record)) malformed = true;
+      } else malformed = true;
     }
     return {
       rows: by(accepted, sort),
@@ -312,6 +375,7 @@ export async function inventory({
       (service) => service.name,
       'could not inspect repro services',
       'Kubernetes returned invalid service JSON',
+      hasMalformedServiceAddresses,
     ),
     captured(
       () => askList('pods', { context, namespace }),

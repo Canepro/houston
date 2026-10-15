@@ -205,6 +205,50 @@ describe('the Kubernetes inspection rows', () => {
     );
   });
 
+  it('keeps valid service addresses but warns when address collections are malformed', async () => {
+    clusters.mockResolvedValue([[CLUSTER_NAME], '']);
+    askList.mockImplementation(async (kind) => {
+      if (kind !== 'services') return answer(PRESENT, { items: [] });
+      return answer(PRESENT, {
+        items: [
+          {
+            metadata: { name: 'partial-addresses' },
+            spec: {
+              ports: [{ port: 3000 }],
+              externalIPs: ['203.0.113.10', { malformed: true }],
+            },
+            status: {
+              loadBalancer: {
+                ingress: [
+                  { hostname: 'lb.example.test' },
+                  { ip: 42, hostname: 'fallback.example.test' },
+                ],
+              },
+            },
+          },
+          {
+            metadata: { name: 'malformed-collections' },
+            spec: { ports: [{ port: 3001 }], externalIPs: { malformed: true } },
+            status: { loadBalancer: { ingress: { malformed: true } } },
+          },
+        ],
+      });
+    });
+
+    await expect(inventory({ context: CONTEXT, namespace: 'houston-ticket' })).resolves.toEqual(
+      expect.objectContaining({
+        services: [
+          expect.objectContaining({ name: 'malformed-collections', external_ips: [] }),
+          expect.objectContaining({
+            name: 'partial-addresses',
+            external_ips: ['203.0.113.10', 'lb.example.test', 'fallback.example.test'],
+          }),
+        ],
+        warnings: ['Kubernetes returned invalid service JSON'],
+      }),
+    );
+  });
+
   it('does not select a default context or namespace when the workspace lacks one', async () => {
     await expect(inventory({ context: '', namespace: 'houston-ticket' })).resolves.toEqual({
       context: '',
