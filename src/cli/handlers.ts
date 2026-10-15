@@ -846,6 +846,9 @@ async function dispatch(
     case 'capabilities':
       return capabilities();
     case 'up':
+      // A session override that cannot make a working tunnel is refused here, before the
+      // create, rather than reported over a workspace that already exists.
+      (require('../core/lifecycle/access') as typeof AccessNS).validateEnvironment(process.env);
       return await runUp(invocation, io);
     case 'ready': {
       const ready = require('../core/lifecycle/ready') as typeof ReadyNS;
@@ -988,7 +991,13 @@ async function dispatch(
         return withMeta({}, await record.readMeta(name));
       }
       const payload = require('../core/lifecycle/payload') as typeof PayloadNS;
-      return await payload.detail(name);
+      const record = require('../core/runner/record') as typeof RecordNS;
+      const access = require('../core/lifecycle/access') as typeof AccessNS;
+      const d = await payload.detail(name);
+      // Advice for THIS session: `detail()` also serves the GUI, where the server's own
+      // environment says nothing about the browser's, so the handoff is computed here.
+      d.access = access.handoff(await record.readMeta(name), process.env, String(d.bind_host));
+      return d;
     }
     case 'users':
       // Printed as it goes (`handlers/users.ts`): it is `json: none`, so what it prints and
@@ -2355,7 +2364,16 @@ function summaryPanel(
 async function printAccessHandoff(meta: RecordNS.Metadata, io: CliIo): Promise<void> {
   const access = require('../core/lifecycle/access') as typeof AccessNS;
   const payload = require('../core/lifecycle/payload') as typeof PayloadNS;
-  const handoff = access.handoff(meta, process.env, await payload.bindHostOf(meta));
+  let handoff: AccessNS.AccessHandoff | null;
+  try {
+    handoff = access.handoff(meta, process.env, await payload.bindHostOf(meta));
+  } catch (error) {
+    // Advice only: a session override that cannot make a command must not turn a create
+    // that completed into a failure. `up` refuses the override before creating anything.
+    if (!(error instanceof ValidationError)) throw error;
+    io.writeErr(`  remote access: ${error.message}\n`);
+    return;
+  }
   if (handoff === null || handoff.tunnel_command === null) return;
   io.writeOut('  remote access (workspace is loopback-only on the server):\n');
   io.writeOut(`    tunnel : ${handoff.tunnel_command}\n`);

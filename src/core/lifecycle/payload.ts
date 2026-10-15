@@ -19,7 +19,6 @@ import { type Metadata, readCompose, readMeta } from '../runner/record';
 import * as paths from '../runner/paths';
 import * as topology from '../topology';
 
-import * as access from './access';
 import * as inspect from './inspect';
 import * as naming from './naming';
 import { LAST_BACKUP_KEY, UPGRADE_FROM_KEY } from './types';
@@ -140,13 +139,16 @@ export async function bindHostOf(meta: Metadata): Promise<string> {
   const rc = bag(services.rocketchat ?? services['rocketchat-1']);
   const ports = Array.isArray(rc.ports) ? rc.ports : [];
   for (const port of ports) {
-    const published = String(port);
-    // Compose brackets IPv6 hosts, so splitting `[::1]:3123:3000` on colons yields only `[`.
-    // Decode that address before retaining the existing short IPv4/wildcard recovery below.
-    const ipv6 = /^\[([^\]]+)\]:[^:]+:[^:]+(?:\/[^:]+)?$/u.exec(published);
-    if (ipv6 !== null) return ipv6[1] as string;
+    // The two rightmost fields are the ports; whatever stands before them is the address,
+    // bracketed or not: `bindPorts` writes `::1:3001:3000` with no brackets.
+    const published = String(port).replace(/\/[a-z]+$/iu, '');
     const parts = published.split(':');
-    if (parts.length >= 3 && parts[0]) return parts[0] as string;
+    if (parts.length < 3) continue;
+    const address = parts
+      .slice(0, -2)
+      .join(':')
+      .replace(/^\[|\]$/gu, '');
+    if (address !== '') return address;
   }
   return '';
 }
@@ -369,8 +371,6 @@ export async function detail(name: string): Promise<Record<string, unknown>> {
   // from `localhost`, which for a browser on a different box than `serve` names that
   // browser's own machine.
   d.bind_host = await bindHostOf(meta);
-  // This is advice only. It neither opens an SSH connection nor changes the workspace bind.
-  d.access = access.handoff(meta, process.env, String(d.bind_host));
   // The panel keys its HTTPS row and its "Check TLS" action off these.
   d.public_url = meta.publicUrl;
   d.tls = isTruthy(extra.tls) ? String(extra.tls) : '';

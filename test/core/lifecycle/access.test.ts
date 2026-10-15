@@ -1,6 +1,7 @@
 import { ValidationError } from '../../../src/lib/errors';
-import { handoff } from '../../../src/core/lifecycle/access';
-import { metadata } from '../../../src/core/runner/record';
+import { handoff, validateEnvironment } from '../../../src/core/lifecycle/access';
+import { bindHostOf } from '../../../src/core/lifecycle/payload';
+import { metadata, write } from '../../../src/core/runner/record';
 
 const REMOTE_NOTE =
   'The workspace listens on loopback on the remote host only. Run the tunnel command on your ' +
@@ -24,7 +25,9 @@ describe('SSH access handoff', () => {
       bind: 'loopback',
       host_port: 3123,
       local_port: 3123,
+      side_ports: [],
       browser_url: 'http://localhost:3123',
+      public_url: null,
       tunnel_command: null,
       note: null,
     });
@@ -41,8 +44,11 @@ describe('SSH access handoff', () => {
       bind: 'loopback',
       host_port: 3123,
       local_port: 3123,
+      side_ports: [],
       browser_url: 'http://127.0.0.1:3123',
-      tunnel_command: 'ssh -N -L 127.0.0.1:3123:127.0.0.1:3123 -- operator@203.0.113.8',
+      tunnel_command:
+        'ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:3123:127.0.0.1:3123 -- operator@203.0.113.8',
+      public_url: null,
       note: REMOTE_NOTE,
     });
   });
@@ -60,10 +66,13 @@ describe('SSH access handoff', () => {
       bind: 'loopback',
       host_port: 3123,
       local_port: 4311,
+      side_ports: [],
       browser_url: 'http://127.0.0.1:4311',
+      public_url: null,
       tunnel_command:
-        "ssh -N -L '127.0.0.1:4311:[::1]:3123' -- 'operator'\\''s team@repro; echo unsafe'",
-      note: REMOTE_NOTE,
+        "ssh -N -o ExitOnForwardFailure=yes -L '127.0.0.1:4311:[::1]:3123' -- 'operator'\\''s team@repro; echo unsafe'",
+      // A different local port is not transparent: ROOT_URL still names the server's.
+      note: expect.stringContaining("Rocket.Chat's ROOT_URL still names port 3123"),
     });
   });
 
@@ -76,8 +85,8 @@ describe('SSH access handoff', () => {
       );
       expect(answer?.tunnel_command).toBe(
         bind === '::1'
-          ? "ssh -N -L '127.0.0.1:3123:[::1]:3123' -- operator@server"
-          : 'ssh -N -L 127.0.0.1:3123:127.0.0.2:3123 -- operator@server',
+          ? "ssh -N -o ExitOnForwardFailure=yes -L '127.0.0.1:3123:[::1]:3123' -- operator@server"
+          : 'ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:3123:127.0.0.2:3123 -- operator@server',
       );
     }
   });
@@ -92,7 +101,7 @@ describe('SSH access handoff', () => {
     ).toMatchObject({
       browser_url: 'http://127.0.0.1:3123',
       tunnel_command:
-        'ssh -N -L 127.0.0.1:3123:127.0.0.1:3123 -- -oProxyCommand=unsafe@ssh-proof.invalid',
+        'ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:3123:127.0.0.1:3123 -- -oProxyCommand=unsafe@ssh-proof.invalid',
     });
   });
 
@@ -111,6 +120,54 @@ describe('SSH access handoff', () => {
     ).toThrow('HOUSTON_SSH_LOCAL_PORT must be an integer between 1024 and 65535');
   });
 
+  it('reconnects on the port the session came in on, and exits when a forward fails', () => {
+    const answer = handoff(workspace(), {
+      SSH_CONNECTION: '198.51.100.20 55100 203.0.113.8 2222',
+      USER: 'operator',
+    });
+    expect(answer?.tunnel_command).toBe(
+      'ssh -N -o ExitOnForwardFailure=yes -p 2222 -L 127.0.0.1:3123:127.0.0.1:3123 -- operator@203.0.113.8',
+    );
+    expect(() =>
+      handoff(workspace(), { SSH_TTY: '/dev/ttys001', HOUSTON_SSH_PORT: '70000' }),
+    ).toThrow('HOUSTON_SSH_PORT must be an integer between 1 and 65535');
+  });
+
+  it("forwards the preset's side ports on their own numbers, and says so", () => {
+    const answer = handoff(workspace({ extra: { sidecar_ports: [8081, 8025, '8081', 3123, 0] } }), {
+      SSH_CONNECTION: '198.51.100.20 55100 203.0.113.8 22',
+      USER: 'operator',
+    });
+    expect(answer?.side_ports).toEqual([8025, 8081]);
+    expect(answer?.tunnel_command).toBe(
+      'ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:3123:127.0.0.1:3123 ' +
+        '-L 127.0.0.1:8025:127.0.0.1:8025 -L 127.0.0.1:8081:127.0.0.1:8081 -- operator@203.0.113.8',
+    );
+    expect(answer?.note).toContain('side services are forwarded on their own ports (8025, 8081)');
+  });
+
+  it('keeps the HTTPS address the edge serves beside the tunnel, and says the tunnel is plain HTTP', () => {
+    const answer = handoff(workspace({ publicUrl: 'https://rc.example.test' }), {
+      SSH_CONNECTION: '198.51.100.20 55100 203.0.113.8 22',
+      USER: 'operator',
+    });
+    expect(answer?.public_url).toBe('https://rc.example.test');
+    expect(answer?.browser_url).toBe('http://127.0.0.1:3123');
+    expect(answer?.note).toContain(
+      'also answers at https://rc.example.test through the shared HTTPS edge',
+    );
+    expect(handoff(workspace({ publicUrl: 'https://rc.example.test' }), {})?.public_url).toBe(
+      'https://rc.example.test',
+    );
+  });
+
+  it('refuses a bad session override before a create, and ignores one outside SSH', () => {
+    expect(() =>
+      validateEnvironment({ SSH_TTY: '/dev/ttys001', HOUSTON_SSH_LOCAL_PORT: '80' }),
+    ).toThrow(ValidationError);
+    expect(() => validateEnvironment({ HOUSTON_SSH_LOCAL_PORT: '80' })).not.toThrow();
+  });
+
   it('gives no client-side loopback guidance for a non-loopback workspace', () => {
     expect(
       handoff(
@@ -121,5 +178,28 @@ describe('SSH access handoff', () => {
         { SSH_CONNECTION: '198.51.100.20 55100 203.0.113.8 22', USER: 'operator' },
       ),
     ).toBeNull();
+  });
+});
+
+describe('the bind address read back from a legacy compose file', () => {
+  it('reads the address left of the two port fields, bracketed or not', async () => {
+    for (const [spelling, expected] of [
+      ['"[::1]:3001:3000"', '::1'],
+      ['"::1:3001:3000"', '::1'],
+      ['"127.0.0.2:3001:3000/tcp"', '127.0.0.2'],
+      ['"3001:3000"', ''],
+    ] as const) {
+      const name = `legacy-${expected.replace(/[^a-z0-9]/gu, '') || 'none'}`;
+      await write(
+        name,
+        `services:\n  rocketchat:\n    ports: [${spelling}]\n`,
+        metadata({ name, rootUrl: 'http://localhost:3001', hostPort: 3001 }),
+      );
+      expect(
+        await bindHostOf(
+          await import('../../../src/core/runner/record').then((m) => m.readMeta(name)),
+        ),
+      ).toBe(expected);
+    }
   });
 });

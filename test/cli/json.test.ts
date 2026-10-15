@@ -162,8 +162,11 @@ describe('a command that fails', () => {
         bind: 'loopback',
         host_port: 3001,
         local_port: 3001,
+        side_ports: [],
         browser_url: 'http://127.0.0.1:3001',
-        tunnel_command: 'ssh -N -L 127.0.0.1:3001:127.0.0.1:3001 -- operator@203.0.113.8',
+        public_url: null,
+        tunnel_command:
+          'ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:3001:127.0.0.1:3001 -- operator@203.0.113.8',
         note:
           'The workspace listens on loopback on the remote host only. Run the tunnel command on your ' +
           'machine, then open the browser URL there. Credentials stay private to that tunnel. If the ' +
@@ -210,8 +213,11 @@ describe('a command that fails', () => {
         bind: 'loopback',
         host_port: 3001,
         local_port: 3001,
+        side_ports: [],
         browser_url: 'http://127.0.0.1:3001',
-        tunnel_command: "ssh -N -L '127.0.0.1:3001:[::1]:3001' -- operator@203.0.113.8",
+        public_url: null,
+        tunnel_command:
+          "ssh -N -o ExitOnForwardFailure=yes -L '127.0.0.1:3001:[::1]:3001' -- operator@203.0.113.8",
         note:
           'The workspace listens on loopback on the remote host only. Run the tunnel command on your ' +
           'machine, then open the browser URL there. Credentials stay private to that tunnel. If the ' +
