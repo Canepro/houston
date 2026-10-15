@@ -580,6 +580,77 @@ export function build(s: Spec): ComposeDoc {
 const PORT_RE = /^\d+(-\d+)?$/;
 
 /**
+ * Positions of a separator outside Compose interpolation and bracketed IPv6 literals.
+ *
+ * A port mapping's address and both port fields may use Compose variables. Their default
+ * forms commonly contain `:`, so splitting the string at every colon turns a valid mapping
+ * such as `${BIND_IP:-127.0.0.1}:${HOST_PORT:-8080}:${CONTAINER_PORT:-80}` into nonsense.
+ */
+function topLevelPositions(text: string, separator: string): number[] {
+  const positions: number[] = [];
+  let interpolationDepth = 0;
+  let bracketDepth = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index] ?? '';
+    if (interpolationDepth > 0) {
+      if (character === '{') interpolationDepth += 1;
+      else if (character === '}') interpolationDepth -= 1;
+      continue;
+    }
+    if (character === '$' && text[index + 1] === '{') {
+      interpolationDepth = 1;
+      index += 1;
+      continue;
+    }
+    if (character === '[') {
+      bracketDepth += 1;
+      continue;
+    }
+    if (character === ']' && bracketDepth > 0) {
+      bracketDepth -= 1;
+      continue;
+    }
+    if (character === separator && bracketDepth === 0) positions.push(index);
+  }
+  return positions;
+}
+
+/** A whole Compose variable expression, including its default or required form. */
+function composeVariable(value: string): boolean {
+  if (/^\$[A-Za-z_][A-Za-z0-9_]*$/u.test(value)) return true;
+  if (!value.startsWith('${')) return false;
+  let depth = 0;
+  let close = -1;
+  for (let index = 1; index < value.length; index += 1) {
+    const character = value[index] ?? '';
+    if (character === '{') depth += 1;
+    else if (character === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        close = index;
+        break;
+      }
+    }
+  }
+  if (close !== value.length - 1) return false;
+  const expression = value.slice(2, -1);
+  const name = /^[A-Za-z_][A-Za-z0-9_]*/u.exec(expression);
+  if (name === null) return false;
+  const suffix = expression.slice(name[0].length);
+  return suffix === '' || /^(?::-|:\?|-|\?)/u.test(suffix);
+}
+
+function portField(value: string): boolean {
+  return PORT_RE.test(value) || composeVariable(value);
+}
+
+function addressField(value: string): boolean {
+  const ip = value.startsWith('[') && value.endsWith(']') ? value.slice(1, -1) : value;
+  // Docker rejects scope IDs, though Node's isIP accepts them.
+  return composeVariable(value) || (isIP(ip) !== 0 && !ip.includes('%'));
+}
+
+/**
  * Bind every published port to ONE host address. Applied to ALL services in one pass --
  * RC, multi-instance direct ports, the load balancer, and preset sidecars -- mirroring the
  * official rocketchat-compose `${BIND_IP}:${HOST_PORT}:${PORT}` pattern.
@@ -640,20 +711,22 @@ export function bindPorts(doc: ComposeDoc, bind: string): void {
  * preceding address must be a valid IP literal before `bind` replaces it.
  */
 function shortPort(entry: string): { host: string; container: string; protocol: string } | null {
-  const slash = entry.lastIndexOf('/');
+  const slashes = topLevelPositions(entry, '/');
+  const slash = slashes.length === 0 ? -1 : (slashes[slashes.length - 1] ?? -1);
   // Docker lowercases the protocol before it validates it, so `/UDP` is `/udp`.
   const protocol = slash === -1 ? '' : entry.slice(slash).toLowerCase();
   const rest = slash === -1 ? entry : entry.slice(0, slash);
   if (protocol !== '' && !/^\/[a-z]+$/u.test(protocol)) return null;
-  const fields = rest.split(':');
-  const address = fields.slice(0, -2).join(':');
-  const ip = address.startsWith('[') && address.endsWith(']') ? address.slice(1, -1) : address;
-  // Docker rejects scope IDs, though Node's isIP accepts them.
-  if (address !== '' && (isIP(ip) === 0 || ip.includes('%'))) return null;
-  const container = fields[fields.length - 1] ?? '';
-  const host = fields.length >= 2 ? (fields[fields.length - 2] ?? '') : '';
-  if (!PORT_RE.test(container)) return null;
-  if (host !== '' && !PORT_RE.test(host)) return null;
+  const colons = topLevelPositions(rest, ':');
+  const last = colons.length - 1;
+  const containerStart = last < 0 ? 0 : (colons[last] ?? -1) + 1;
+  const container = rest.slice(containerStart);
+  const hostStart = last < 1 ? 0 : (colons[last - 1] ?? -1) + 1;
+  const host = last < 0 ? '' : rest.slice(hostStart, colons[last] ?? rest.length);
+  const address = last < 1 ? '' : rest.slice(0, colons[last - 1] ?? 0);
+  if (address !== '' && !addressField(address)) return null;
+  if (!portField(container)) return null;
+  if (host !== '' && !portField(host)) return null;
   return { host, container, protocol };
 }
 

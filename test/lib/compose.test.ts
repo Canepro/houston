@@ -296,6 +296,22 @@ describe('binding', () => {
     expect(bound(['8025:8025'])).toEqual(['127.0.0.1:8025:8025']);
   });
 
+  it('replaces an interpolated address while preserving interpolated ports', () => {
+    expect(
+      bound([
+        '${BIND_IP}:8080:80',
+        '${BIND_IP:-127.0.0.1}:${HOST_PORT:-8080}:${CONTAINER_PORT:-80}',
+        '${BIND_IP?set it}:${HOST_PORT?set it}:${CONTAINER_PORT?set it}/UDP',
+        '${CONTAINER_PORT:-80}',
+      ]),
+    ).toEqual([
+      '127.0.0.1:8080:80',
+      '127.0.0.1:${HOST_PORT:-8080}:${CONTAINER_PORT:-80}',
+      '127.0.0.1:${HOST_PORT?set it}:${CONTAINER_PORT?set it}/udp',
+      '127.0.0.1::${CONTAINER_PORT:-80}',
+    ]);
+  });
+
   it('REPLACES a host address the entry already names, rather than keeping it', () => {
     // The bind host is the one posture `info` reports and `detectBind` reads back. A
     // custom preset writing `0.0.0.0:9000:9000` published that sidecar on every interface
