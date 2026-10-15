@@ -89,7 +89,9 @@ export function renderCaptureSection(value: unknown): string[] {
         }. The retained PNG frames and video show that cover instead of the direct control value.`,
     );
   } else {
-    lines.push('No masked input was recorded. That does not prove the visual artifacts are safe to attach.');
+    lines.push(
+      'No masked input was recorded. That does not prove the visual artifacts are safe to attach.',
+    );
   }
   lines.push(
     'The trace has no screenshots or DOM snapshots. Byte-level redaction checks known secret values in text artifacts, but it cannot prove that the page did not echo a value somewhere else.',

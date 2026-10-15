@@ -994,13 +994,13 @@ async function dispatch(
       const evidence = require('../core/evidence') as typeof EvidenceNS;
       const name = await target(text(o.name));
       const retain = bool(o.retain_for_task);
-      const payload = await evidence.record(name, {
-        retained: retain ? true : null,
-        reason: retain ? 'explicit task' : '',
+      return await evidence.collect(name, {
+        retention: {
+          retained: retain ? true : null,
+          reason: retain ? 'explicit task' : '',
+        },
+        bundle: text(o.bundle),
       });
-      const bundle = text(o.bundle);
-      if (bundle !== '') payload.bundle = await evidence.writeBundle(name, bundle, payload);
-      return payload;
     }
     case 'users':
       // Printed as it goes (`handlers/users.ts`): it is `json: none`, so what it prints and

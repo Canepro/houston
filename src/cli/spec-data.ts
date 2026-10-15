@@ -736,7 +736,7 @@ export const COMMAND_SPECS = [
     id: 'evidence',
     path: 'evidence',
     description:
-      'Emit a secret-safe record of what was deployed and how it is behaving.\n\nSafe to attach to a support case: the root URL is reduced to its origin and no\ntoken, licence or password appears anywhere. `info --json` is not that: it\ncarries the admin login.\n\n\b\n    houston evidence --name TICKET-1234 --json\n    houston evidence --name TICKET-1234 --bundle ./TICKET-1234-evidence\n\b\nA bundle adds the rendered compose file or chart values and the logs, one file\nper pod on Kubernetes, and a README a person can read.',
+      'Emit a record of what was deployed and how it is behaving.\n\nThe record reduces the root URL to its origin and omits the stored login and environment\nvalues. `info --json` is not that: it carries the admin login.\n\n\b\n    houston evidence --name TICKET-1234 --json\n    houston evidence --name TICKET-1234 --bundle ./TICKET-1234-evidence\n\b\nA bundle adds a deployment file with the workspace admin password, credential-named fields,\nand URL userinfo masked, plus a README a person can read. Houston cannot infer unknown\ncredentials in arbitrary custom YAML values. Raw logs stay in the workspace because they can\ncontain credentials.',
     arguments: [],
     options: [
       {
