@@ -398,6 +398,32 @@ describe('a Kubernetes create', () => {
     },
   );
 
+  it('passes the trimmed token to Kubernetes and warns only when it is absent', async () => {
+    for (const [index, source, raw, expected] of [
+      [0, 'config', '   ', ''],
+      [1, 'flag', '   ', ''],
+      [2, 'flag', '  registration-fixture  ', 'registration-fixture'],
+    ] as const) {
+      config.updateConfig((cfg) => {
+        cfg.reg_token = source === 'config' ? raw : '';
+      });
+      const codes: string[] = [];
+      await createKubernetes(
+        createReq({
+          version: '8.5.1',
+          name: `token-${String(index)}`,
+          runtime: 'kubernetes',
+          deployment: 'microservices',
+          regToken: source === 'flag' ? raw : '',
+          offline: true,
+        }),
+        (event) => codes.push(event.code),
+      );
+      expect(mockCreated.at(-1)?.regToken).toBe(expected);
+      expect(codes.includes('LICENSE_ABSENT_EE_PRESET')).toBe(expected === '');
+    }
+  });
+
   it('does not call LDAP an Enterprise feature on a monolith', async () => {
     // The Kubernetes LDAP adapter's `requiresLicense` is a marker of the microservices
     // topology, not of LDAP; a monolith with LDAP and no licence gets no licence warning.

@@ -679,7 +679,7 @@ export async function claimPorts(plan: CreatePlan): Promise<void> {
   // ...on the address the port is published on, which is loopback unless one other
   // address was asked for (`request.callHost`).
   plan.root = `http://${request.callHost(plan.bindHost)}:${String(plan.hostPort)}`;
-  plan.token = plan.req.regToken || toText(plan.cfg.reg_token);
+  plan.token = (plan.req.regToken || toText(plan.cfg.reg_token)).trim();
   plan.tlsspec = await tlsplan.resolveTls(
     plan.req,
     plan.reproName,

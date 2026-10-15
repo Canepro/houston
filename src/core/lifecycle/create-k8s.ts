@@ -447,7 +447,7 @@ export function settleAddressing(job: KubeCreate): void {
   // Same resolution order Compose uses: the flag, then the box-level config, then
   // loopback. This was dropped entirely on the Kubernetes path.
   job.cfg = config.loadConfig();
-  job.regToken = job.req.regToken || toText(job.cfg.reg_token);
+  job.regToken = (job.req.regToken || toText(job.cfg.reg_token)).trim();
   if (job.req.bind) job.bindHost = String(job.req.bind);
   else if (isTruthy(job.cfg.bind_host)) job.bindHost = String(job.cfg.bind_host);
   else job.bindHost = config.DEFAULT_BIND_HOST;

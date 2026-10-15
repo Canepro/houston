@@ -307,6 +307,43 @@ describe('the create path end to end, stopped at the write seam', () => {
     expect(seen.yaml).toContain('admin123');
   });
 
+  it('uses the same trimmed registration token for deployment and the licence warning', async () => {
+    for (const [source, raw, expected] of [
+      ['config', '   ', ''],
+      ['flag', '   ', ''],
+      ['flag', '  registration-fixture  ', 'registration-fixture'],
+    ] as const) {
+      config.updateConfig((cfg) => {
+        cfg.reg_token = source === 'config' ? raw : '';
+      });
+      fs.mkdirSync(config.presetDir(), { recursive: true });
+      fs.writeFileSync(
+        path.join(config.presetDir(), 'token-licensed.yaml'),
+        'name: token-licensed\nrequires_license: true\n',
+      );
+      const { seen, createDocker } = capture();
+      const codes: string[] = [];
+      await expect(
+        createDocker.createRepro(
+          createReq({
+            version: '8.5.1',
+            name: 'token-case',
+            preset: 'token-licensed',
+            regToken: source === 'flag' ? raw : '',
+            wait: false,
+            offline: true,
+          }),
+          (event) => codes.push(event.code),
+        ),
+      ).rejects.toThrow('stopped at the write seam');
+      const doc = YAML.parse(seen.yaml as string) as {
+        services: { rocketchat: { environment: Record<string, string> } };
+      };
+      expect(doc.services.rocketchat.environment.REG_TOKEN ?? '').toBe(expected);
+      expect(codes.includes('LICENSE_ABSENT_EE_PRESET')).toBe(expected === '');
+    }
+  });
+
   it('warns that Rocket.Chat 9 may refuse an unlicensed LDAP login', async () => {
     // An earlier case leaves a box-wide token, which rightly silences the warning.
     config.updateConfig((cfg) => {
