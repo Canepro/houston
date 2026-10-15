@@ -188,8 +188,13 @@ async function artifactOf(meta: Metadata): Promise<CapturedArtifact> {
       sha256: sha256(bytes),
       bytes,
     };
-  } catch {
-    return { name: '', sha256: '', bytes: null };
+  } catch (error) {
+    // A record-first Docker create can be interrupted before its optional Compose artifact.
+    // Other filesystem failures still make the snapshot unsafe to claim as complete evidence.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { name: '', sha256: '', bytes: null };
+    }
+    throw error;
   }
 }
 
@@ -232,31 +237,40 @@ async function ownershipOf(meta: Metadata, runtime: string): Promise<Record<stri
  * were supplied. Both markers are booleans only; no credential value reaches the record.
  *
  * `required` is read from the record when the create wrote it (`license_required`), so an
- * edited or removed preset does not rewrite history; the catalog answers only for a record
- * from before that was written. `supplied` is `null` when the record cannot say: a
- * Kubernetes record from before `reg_token_supplied` existed put the token in a Secret
- * this reader does not open. A Docker record of that age is asked through its compose
- * file, which is where the token went.
+ * edited or removed preset does not rewrite history. For a legacy record, a known
+ * microservices deployment remains true; an unavailable preset makes the requirement unknown
+ * unless another recorded component establishes that it was required. `supplied` is `null`
+ * when the record cannot say: a Kubernetes record from before `reg_token_supplied` existed put
+ * the token in a Secret this reader does not open. A Docker record of that age is asked through
+ * its compose file, which is where the token went.
  */
 async function licenseOf(meta: Metadata, deployment: string): Promise<Record<string, unknown>> {
   const extra = bag(meta.extra);
-  let required: boolean;
+  let required: boolean | null;
   if (typeof extra.license_required === 'boolean') {
     required = extra.license_required;
+  } else if (deployment === topology.MICROSERVICES) {
+    // A microservices deployment needs a licence independently of any scenario preset.
+    required = true;
   } else {
-    // A microservices deployment needs a licence independently of its preset.
-    required = deployment === topology.MICROSERVICES;
+    let unavailable = false;
+    required = false;
     for (const name of namesOf(meta.preset).filter((item) => item !== 'default')) {
       try {
         // A runtime adapter may carry a topology marker: Kubernetes LDAP's `requiresLicense`
         // does. The catalog is the semantic source for a preset's own requirement, whether it
         // is user YAML, a scenario, or built in.
-        required ||= presets.load(name).requiresLicense;
+        if (presets.load(name).requiresLicense) {
+          required = true;
+          break;
+        }
       } catch {
-        // A preset this install no longer has must not break the evidence for a workspace
-        // that was built from it. Other components of the recorded composite still count.
+        // A removed or unreadable legacy preset must not be relabelled as unlicensed. Keep
+        // checking because another component can still prove the OR'd requirement was true.
+        unavailable = true;
       }
     }
+    if (!required && unavailable) required = null;
   }
   if (extra.licensed === true) return { required, supplied: true, source: 'license' };
   if (extra.reg_token_supplied === true) return { required, supplied: true, source: 'reg_token' };
@@ -427,10 +441,17 @@ async function snapshotOf(
   retention: { retained?: boolean | null; reason?: string },
 ): Promise<Snapshot> {
   const meta = await readMeta(target);
-  const d = await detail(target);
   const runtime = topology.ofMeta(meta);
   const axes = topology.axesOfMeta(meta);
-  const deployment = toText(d.deployment);
+  const artifact = await artifactOf(meta);
+  // `write()` makes repro.json visible before docker-compose.yml. That incomplete but valid
+  // workspace still has attachable metadata; do not call detail(), whose Docker path reads the
+  // absent file. A present artifact still takes the normal detail path, including every error.
+  const d =
+    runtime === topology.DOCKER && artifact.bytes === null
+      ? { deployment: toText(axes.deployment), bind_host: '', state: '?', containers: [] }
+      : await detail(target);
+  const deployment = toText(d.deployment) || toText(axes.deployment);
   const extra = bag(meta.extra);
 
   let engine: Record<string, unknown>;
@@ -449,7 +470,6 @@ async function snapshotOf(
     };
   }
 
-  const artifact = await artifactOf(meta);
   const keep = retentionOf(meta, retention);
   const payload: Record<string, unknown> = {
     // Identical shape on both runtimes, so a consumer never branches here.

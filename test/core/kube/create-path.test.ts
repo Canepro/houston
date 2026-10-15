@@ -7,6 +7,9 @@
  * reach outside, and the orchestration between them is the real one. Nothing reaches a cluster,
  * the network or Docker.
  */
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+
 import type * as ClusterNS from '../../../src/core/kube/cluster';
 import type * as ContextNS from '../../../src/core/kube/context';
 import type * as NamespaceNS from '../../../src/core/kube/namespace';
@@ -338,6 +341,45 @@ describe('a Kubernetes create', () => {
     const final = await readMeta('ktoken-evidence');
     expect(final.extra.reg_token_supplied).toBe(true);
     expect(JSON.stringify(final)).not.toContain(token);
+  });
+
+  it('captures a catalog licence requirement before a Kubernetes create can change it', async () => {
+    const preset = 'provisional-license';
+    const presetFile = path.join(config.presetDir(), `${preset}.yaml`);
+    fs.mkdirSync(config.presetDir(), { recursive: true });
+    fs.writeFileSync(presetFile, `name: ${preset}\nrequires_license: true\n`);
+    let provisional: Record<string, unknown> | undefined;
+    mockCreate = async (options) => {
+      provisional = (await readMeta(String(options.name))).extra;
+      fs.rmSync(presetFile);
+      return {
+        context: CONTEXT,
+        namespace: `houston-${String(options.name)}`,
+        chart_version: '7.0.0',
+        release: 'rocketchat',
+        port_forward_pid: 0,
+        bind_host: '',
+        microservices: false,
+      };
+    };
+
+    try {
+      await createRepro(
+        createReq({
+          version: '8.5.1',
+          name: 'kprovisional-license',
+          preset,
+          runtime: 'kubernetes',
+          deployment: 'monolith',
+          offline: true,
+        }),
+      );
+    } finally {
+      fs.rmSync(presetFile, { force: true });
+    }
+
+    expect(provisional?.license_required).toBe(true);
+    expect((await readMeta('kprovisional-license')).extra.license_required).toBe(true);
   });
 
   it('retires its own forwards on a re-up, and keeps them findable while it runs', async () => {

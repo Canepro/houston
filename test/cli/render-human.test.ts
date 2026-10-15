@@ -73,6 +73,20 @@ describe('explicit human command renderers', () => {
     }
   });
 
+  test('evidence leaves an unreconstructable licence requirement unknown', async () => {
+    const out = (
+      await render('evidence', {
+        repro: { name: 'legacy', rc_version: '8.5.1', runtime: 'docker' },
+        runtime: { state: '?' },
+        artifact: { name: '', sha256: '' },
+        license: { required: null, supplied: false },
+        retention: { retained: false, cleanup: 'houston down --name legacy --volumes --yes' },
+      })
+    ).out;
+
+    expect(out).toContain('licensed  required=unknown supplied=false');
+  });
+
   test('list preserves the empty guidance and the stable human columns', async () => {
     expect((await render('list', { repros: [], count: 0 })).out).toBe(
       'No repros yet. Create one with `houston up --version <X.Y.Z>`.\n',

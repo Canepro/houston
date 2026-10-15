@@ -3064,7 +3064,7 @@ export async function renderHuman(
         `  artifact  ${display(artifact.name)} sha256:${display(artifact.sha256).slice(0, 12)}\n`,
       );
       io.writeOut(
-        `  licensed  required=${display(license.required)} supplied=${display(license.supplied)}\n`,
+        `  licensed  required=${display(license.required, 'unknown')} supplied=${display(license.supplied, 'unknown')}\n`,
       );
       io.writeOut(
         `  retained  ${display(retention.retained)}` +

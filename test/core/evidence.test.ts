@@ -26,6 +26,7 @@ import {
   cleanupCommand,
   collect,
   record,
+  renderMarkdown,
   resolveRetention,
   safeOrigin,
   writeBundle,
@@ -185,6 +186,50 @@ describe('the record', () => {
     expect((rec.retention as Record<string, unknown>).created_at).toBe(repro.created_at);
   });
 
+  it('keeps a Docker record attachable when a killed create wrote only metadata', async () => {
+    const name = 'e1-metadata-only';
+    await workspaceNamed(name);
+    fs.unlinkSync(path.join(workspace(name), 'docker-compose.yml'));
+    const detail = lifecyclePayload.detail as jest.MockedFunction<typeof lifecyclePayload.detail>;
+    detail.mockClear();
+
+    const rec = await record(name);
+
+    expect(rec.repro).toMatchObject({
+      runtime: 'docker',
+      deployment: 'monolith',
+      bind_host: '',
+    });
+    expect(rec.runtime).toEqual({
+      state: '?',
+      services: [],
+      engine: {
+        kind: 'compose',
+        docker_version: expect.any(String),
+        compose_version: expect.any(String),
+      },
+    });
+    expect(rec.artifact).toEqual({ name: '', sha256: '' });
+    expect(detail).not.toHaveBeenCalled();
+  });
+
+  it('does not relabel an invalid Docker artifact as absent metadata', async () => {
+    const name = 'e1-invalid-artifact';
+    await workspaceNamed(name);
+    const artifact = path.join(workspace(name), 'docker-compose.yml');
+    fs.unlinkSync(artifact);
+    fs.mkdirSync(artifact);
+    const detail = lifecyclePayload.detail as jest.MockedFunction<typeof lifecyclePayload.detail>;
+    detail.mockResolvedValueOnce({
+      deployment: 'monolith',
+      bind_host: '127.0.0.1',
+      state: 'down',
+      containers: [],
+    });
+
+    await expect(record(name)).rejects.toMatchObject({ code: 'EISDIR' });
+  });
+
   it('never contains a password, a token, or the URL userinfo', async () => {
     await workspaceNamed('e2');
     const blob = JSON.stringify(await record('e2'));
@@ -248,6 +293,34 @@ describe('the record', () => {
       supplied: true,
       source: 'license',
     });
+  });
+
+  it('reports an unknown requirement when a legacy preset is no longer available', async () => {
+    await workspaceNamed(
+      'e3-removed-preset',
+      { reg_token_supplied: false },
+      { preset: 'removed-evidence-preset' },
+    );
+
+    const rec = await record('e3-removed-preset');
+
+    expect(rec.license).toEqual({ required: null, supplied: false, source: null });
+    expect(renderMarkdown(rec)).toContain('none supplied (requirement unknown)');
+  });
+
+  it('keeps an unknown legacy requirement visible with a supplied licence', async () => {
+    await workspaceNamed(
+      'e3-removed-licensed-preset',
+      { licensed: true },
+      { preset: 'removed-licensed-evidence-preset' },
+    );
+
+    const rec = await record('e3-removed-licensed-preset');
+
+    expect(rec.license).toEqual({ required: null, supplied: true, source: 'license' });
+    expect(renderMarkdown(rec)).toContain(
+      'credential supplied (licence file); acceptance not verified; requirement unknown',
+    );
   });
 
   it('evaluates every member of a composite preset from the catalog', async () => {

@@ -134,6 +134,8 @@ export interface KubeCreate {
   bindHost: string;
   root: string;
   microservices: boolean;
+  /** The catalog requirement captured before the write-ahead record becomes visible. */
+  licenseRequired: boolean | null;
   presetForNotes: Preset | null;
   /** Local Grafana claims are published before its later monitoring attachment. */
   monitoringPorts: number[];
@@ -172,6 +174,7 @@ export function kubeCreate(
     bindHost: '',
     root: '',
     microservices: false,
+    licenseRequired: null,
     presetForNotes: null,
     monitoringPorts: [],
     pre: null,
@@ -656,6 +659,7 @@ export async function writeProvisionalRecord(job: KubeCreate): Promise<void> {
   // A killed create leaves this record behind, so it needs the same value-free token proof as
   // the final one. `job.regToken` is already the normalized deployment value.
   job.provisional.extra.reg_token_supplied = job.regToken !== '';
+  job.provisional.extra.license_required = licenseRequirementOf(job);
   // Still recorded while the create runs, so a create killed part-way leaves `down` able to
   // stop them.
   if (job.previous.pid !== 0) job.provisional.extra.port_forward_pid = job.previous.pid;
@@ -863,9 +867,21 @@ export function recordTheRequest(job: KubeCreate): void {
   if (Object.keys(job.envOverrides).length > 0) meta.extra.env = job.envOverrides;
   if (job.licensed) meta.extra.licensed = true;
   meta.extra.reg_token_supplied = job.regToken !== '';
+  meta.extra.license_required = licenseRequirementOf(job);
+  // A preset's self-configuration actions, recorded exactly as the Compose path records
+  // them. Without this the OIDC preset would create no OAuth provider and the SAML preset
+  // no provider settings -- both recorded and neither applied.
+  const postReady = (job.presetForNotes as Preset | null)?.postReady;
+  if (postReady !== undefined && postReady.length > 0) meta.extra.post_ready = postReady;
+  ownership.carryOwnership(job.provisional ?? job.previousMeta, meta);
+}
+
+/** The requirement the create knew, captured once for both its write-ahead and completed records. */
+function licenseRequirementOf(job: KubeCreate): boolean {
+  if (typeof job.licenseRequired === 'boolean') return job.licenseRequired;
   // From the catalog, not the runtime adapter: the Kubernetes LDAP adapter's flag marks
   // the microservices topology, which is recorded through `job.microservices` instead.
-  meta.extra.license_required =
+  job.licenseRequired =
     job.microservices ||
     namesOf(job.req.preset || 'default').some((name) => {
       try {
@@ -874,12 +890,7 @@ export function recordTheRequest(job: KubeCreate): void {
         return false;
       }
     });
-  // A preset's self-configuration actions, recorded exactly as the Compose path records
-  // them. Without this the OIDC preset would create no OAuth provider and the SAML preset
-  // no provider settings -- both recorded and neither applied.
-  const postReady = (job.presetForNotes as Preset | null)?.postReady;
-  if (postReady !== undefined && postReady.length > 0) meta.extra.post_ready = postReady;
-  ownership.carryOwnership(job.provisional ?? job.previousMeta, meta);
+  return job.licenseRequired;
 }
 
 /** The notes a reader needs, then the record -- and no compose file, because it is not one. */

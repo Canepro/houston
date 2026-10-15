@@ -180,12 +180,16 @@ export function renderMarkdown(payloadValue: unknown, captureValue?: unknown): s
       [
         'Licence',
         license.supplied === true
-          ? `credential supplied (${license.source === 'license' ? 'licence file' : 'registration token'}); acceptance not verified`
+          ? `credential supplied (${license.source === 'license' ? 'licence file' : 'registration token'}); acceptance not verified${license.required === true || license.required === false ? '' : '; requirement unknown'}`
           : license.supplied === false
             ? license.required === true
               ? 'none supplied (required)'
-              : 'none supplied (not required)'
-            : 'unknown (the record predates the marker)',
+              : license.required === false
+                ? 'none supplied (not required)'
+                : 'none supplied (requirement unknown)'
+            : license.required === true || license.required === false
+              ? 'unknown (the record predates the marker)'
+              : 'unknown (the record predates the marker; requirement unknown)',
       ],
       ['State', markdownText(runtime.state)],
     ]),
