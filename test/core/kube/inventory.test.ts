@@ -159,8 +159,24 @@ describe('the Kubernetes inspection rows', () => {
       if (kind === 'services') {
         return answer(PRESENT, {
           items: [
-            { metadata: { name: 'rocketchat' }, spec: { ports: [{ port: 3000 }] } },
+            {
+              metadata: { name: 'rocketchat' },
+              spec: { ports: [{ port: 3000, targetPort: 'http' }] },
+            },
             { metadata: { name: 'broken' }, spec: { ports: { malformed: true } } },
+            {
+              metadata: { name: 'nested-target' },
+              spec: { ports: [{ port: 80, targetPort: { malformed: true } }] },
+            },
+            {
+              metadata: { name: 'nested-node' },
+              spec: { ports: [{ port: 80, nodePort: { malformed: true } }] },
+            },
+            {
+              metadata: { name: 'unknown-protocol' },
+              spec: { ports: [{ port: 80, protocol: 'ICMP' }] },
+            },
+            { metadata: { name: 'out-of-range' }, spec: { ports: [{ port: 65536 }] } },
           ],
         });
       }
@@ -176,7 +192,7 @@ describe('the Kubernetes inspection rows', () => {
         services: [
           expect.objectContaining({
             name: 'rocketchat',
-            ports: [expect.objectContaining({ port: 3000 })],
+            ports: [expect.objectContaining({ port: 3000, target_port: 'http', node_port: null })],
           }),
         ],
         pods: [expect.objectContaining({ service: 'rocketchat-0' })],

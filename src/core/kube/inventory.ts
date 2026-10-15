@@ -35,12 +35,40 @@ function validNode(item: Record<string, unknown>): boolean {
   return hasName(item);
 }
 
+const SERVICE_PORT_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
+
+function validPortNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 65535;
+}
+
+function validTargetPort(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  return (
+    validPortNumber(value) ||
+    (typeof value === 'string' &&
+      value.length <= 15 &&
+      /[a-z]/u.test(value) &&
+      SERVICE_PORT_NAME.test(value))
+  );
+}
+
+function validProtocol(value: unknown): boolean {
+  return (
+    value === undefined || value === null || value === 'TCP' || value === 'UDP' || value === 'SCTP'
+  );
+}
+
+function validNodePort(value: unknown): boolean {
+  return value === undefined || value === null || validPortNumber(value);
+}
+
 function validServicePort(value: unknown): boolean {
   return (
     isMapping(value) &&
-    typeof value.port === 'number' &&
-    Number.isInteger(value.port) &&
-    value.port > 0
+    validPortNumber(value.port) &&
+    validTargetPort(value.targetPort) &&
+    validProtocol(value.protocol) &&
+    validNodePort(value.nodePort)
   );
 }
 
