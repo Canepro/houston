@@ -96,6 +96,67 @@ describe('the Docker inspection rows', () => {
     });
   });
 
+  it('keeps valid partial bindings and warns when Compose cannot describe a container or port', async () => {
+    compose.mockResolvedValue(
+      result({
+        stdout: JSON.stringify([
+          {
+            Service: 'rocketchat',
+            Name: 'ticket-rc',
+            State: 'running',
+            Status: 'Up 1 minute',
+            Publishers: { malformed: true },
+          },
+          {
+            Service: 'mongo',
+            Name: 'ticket-mongo',
+            State: 'exited',
+            Status: 'Exited (0)',
+            Publishers: null,
+          },
+          {
+            Service: 'sidecar',
+            Name: 'ticket-sidecar',
+            State: 'running',
+            Status: 'Up 1 minute',
+            Publishers: [
+              { URL: '127.0.0.1', PublishedPort: 3001, TargetPort: 3001 },
+              { URL: '127.0.0.1', PublishedPort: 'not-a-port', TargetPort: 3002 },
+            ],
+          },
+          { State: 'running', Status: 'Up 1 minute' },
+        ]),
+      }) as Awaited<ReturnType<typeof compose>>,
+    );
+
+    await expect(containerRecords('ticket')).resolves.toEqual({
+      rows: [
+        {
+          service: 'mongo',
+          name: 'ticket-mongo',
+          state: 'exited',
+          status: 'Exited (0)',
+          ports: [],
+        },
+        {
+          service: 'rocketchat',
+          name: 'ticket-rc',
+          state: 'running',
+          status: 'Up 1 minute',
+          ports: [],
+        },
+        {
+          service: 'sidecar',
+          name: 'ticket-sidecar',
+          state: 'running',
+          status: 'Up 1 minute',
+          ports: [{ host_ip: '127.0.0.1', host_port: 3001, container_port: 3001, protocol: 'tcp' }],
+        },
+      ],
+      warning: 'Docker returned invalid container JSON',
+    });
+  });
+
   it('uses Compose labels rather than a name prefix for networks and volumes', async () => {
     docker
       .mockResolvedValueOnce(

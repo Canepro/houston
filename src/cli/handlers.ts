@@ -2881,7 +2881,7 @@ function renderInspection(io: CliIo, result: Bag): void {
     ['Preset', display(result.preset)],
     ['Runtime', runtime],
     ['URL', display(result.url)],
-    ['Bind', display(result.bind_host, '127.0.0.1')],
+    ['Bind', display(result.bind_host, 'unknown')],
   ]);
   const section = (title: string, rows: (readonly [string, string])[], unknown = false): void => {
     writePanel(io, title, rows.length > 0 ? rows : [['', unknown ? 'unknown' : 'none']]);

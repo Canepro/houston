@@ -85,6 +85,63 @@ export interface DockerInventory {
   warnings: string[];
 }
 
+interface ParsedBindings {
+  bindings: PortBinding[];
+  malformed: boolean;
+}
+
+function portNumber(value: unknown): number | null {
+  if (typeof value !== 'number' && typeof value !== 'string') return null;
+  if (typeof value === 'string' && value.trim() === '') return null;
+  const port = Number(value);
+  return Number.isInteger(port) ? port : null;
+}
+
+function parsedBindings(publishers: unknown): ParsedBindings {
+  // Compose omits Publishers for stopped containers and can emit null for a container with no
+  // published ports. Both are known empty values, unlike any other non-array value.
+  if (publishers === undefined || publishers === null) return { bindings: [], malformed: false };
+  if (!Array.isArray(publishers)) return { bindings: [], malformed: true };
+
+  const bindings: PortBinding[] = [];
+  let malformed = false;
+  for (const entry of publishers) {
+    if (!isMapping(entry)) {
+      malformed = true;
+      continue;
+    }
+    const published = portNumber(entry.PublishedPort);
+    // PublishedPort 0 is Compose's exposed-only port. It is a real, known empty host binding.
+    if (published === 0) continue;
+    const target = portNumber(entry.TargetPort);
+    const host = entry.URL;
+    const protocol = entry.Protocol;
+    if (
+      published === null ||
+      published < 0 ||
+      target === null ||
+      target <= 0 ||
+      typeof host !== 'string' ||
+      host === '' ||
+      (protocol !== undefined && protocol !== null && typeof protocol !== 'string') ||
+      protocol === ''
+    ) {
+      malformed = true;
+      continue;
+    }
+    bindings.push({
+      host_ip: host,
+      host_port: published,
+      container_port: target,
+      protocol: protocol ?? 'tcp',
+    });
+  }
+  return {
+    bindings: bindings.sort((left, right) => left.host_port - right.host_port),
+    malformed,
+  };
+}
+
 /**
  * The published ports of one `compose ps` row, from its `Publishers`.
  *
@@ -93,20 +150,7 @@ export interface DockerInventory {
  * left out. What remains is exactly what `docker ps` prints as `host->container`.
  */
 export function portBindings(publishers: unknown): PortBinding[] {
-  if (!Array.isArray(publishers)) return [];
-  const bindings: PortBinding[] = [];
-  for (const entry of publishers) {
-    if (!isMapping(entry)) continue;
-    const published = Number(entry.PublishedPort ?? 0);
-    if (!Number.isInteger(published) || published <= 0) continue;
-    bindings.push({
-      host_ip: String(entry.URL ?? ''),
-      host_port: published,
-      container_port: Number(entry.TargetPort ?? 0),
-      protocol: String(entry.Protocol ?? 'tcp'),
-    });
-  }
-  return bindings.sort((left, right) => left.host_port - right.host_port);
+  return parsedBindings(publishers).bindings;
 }
 
 /** One `compose ps --format json` row, as the inspection shows it. */
@@ -117,6 +161,31 @@ export function containerRecord(row: Record<string, unknown>): ContainerRecord {
     state: String(row.State ?? ''),
     status: String(row.Status ?? ''),
     ports: portBindings(row.Publishers),
+  };
+}
+
+function parsedContainer(row: Record<string, unknown>): {
+  record: ContainerRecord | null;
+  malformed: boolean;
+} {
+  const bindings = parsedBindings(row.Publishers);
+  if (
+    typeof row.Service !== 'string' ||
+    row.Service === '' ||
+    typeof row.Name !== 'string' ||
+    row.Name === ''
+  ) {
+    return { record: null, malformed: true };
+  }
+  return {
+    record: {
+      service: row.Service,
+      name: row.Name,
+      state: String(row.State ?? ''),
+      status: String(row.Status ?? ''),
+      ports: bindings.bindings,
+    },
+    malformed: bindings.malformed,
   };
 }
 
@@ -137,13 +206,18 @@ export async function containerRecords(name: string): Promise<InspectionRows<Con
       return { rows: [], warning: 'could not inspect workspace containers' };
     const rows = rowsOf(String(result.stdout ?? ''));
     if (rows === null) return { rows: [], warning: 'Docker returned invalid container JSON' };
+    let malformed = false;
+    const containers: ContainerRecord[] = [];
+    for (const row of rows) {
+      const parsed = parsedContainer(row);
+      if (parsed.record !== null) containers.push(parsed.record);
+      if (parsed.malformed) malformed = true;
+    }
     return {
-      rows: rows
-        .map(containerRecord)
-        .sort((left, right) =>
-          left.service < right.service ? -1 : left.service > right.service ? 1 : 0,
-        ),
-      warning: null,
+      rows: containers.sort((left, right) =>
+        left.service < right.service ? -1 : left.service > right.service ? 1 : 0,
+      ),
+      warning: malformed ? 'Docker returned invalid container JSON' : null,
     };
   } catch (error) {
     if (error instanceof Interrupted) throw error;

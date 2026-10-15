@@ -1,7 +1,7 @@
 import * as ask from '../../../src/core/kube/ask';
 import * as context from '../../../src/core/kube/context';
 import { PRESENT, REFUSED, answer } from '../../../src/core/kube/ask';
-import { CLUSTER_NAME } from '../../../src/core/kube/names';
+import { CLUSTER_NAME, CONTEXT } from '../../../src/core/kube/names';
 import { Interrupted } from '../../../src/seams/exec';
 import { inventory, nodeRecord, serviceRecord } from '../../../src/core/kube/inventory';
 
@@ -108,11 +108,9 @@ describe('the Kubernetes inspection rows', () => {
       return answer(PRESENT, { items: { malformed: true } });
     });
 
-    await expect(
-      inventory({ context: 'kind-houston', namespace: 'houston-ticket' }),
-    ).resolves.toEqual(
+    await expect(inventory({ context: CONTEXT, namespace: 'houston-ticket' })).resolves.toEqual(
       expect.objectContaining({
-        context: 'kind-houston',
+        context: CONTEXT,
         namespace: 'houston-ticket',
         cluster_exists: true,
         nodes: [expect.objectContaining({ name: 'a' }), expect.objectContaining({ name: 'z' })],
@@ -121,15 +119,74 @@ describe('the Kubernetes inspection rows', () => {
         warnings: ['could not inspect repro services', 'Kubernetes returned invalid pod JSON'],
       }),
     );
-    expect(askList).toHaveBeenNthCalledWith(1, 'nodes', { context: 'kind-houston' });
+    expect(askList).toHaveBeenNthCalledWith(1, 'nodes', { context: CONTEXT });
     expect(askList).toHaveBeenNthCalledWith(2, 'services', {
-      context: 'kind-houston',
+      context: CONTEXT,
       namespace: 'houston-ticket',
     });
     expect(askList).toHaveBeenNthCalledWith(3, 'pods', {
-      context: 'kind-houston',
+      context: CONTEXT,
       namespace: 'houston-ticket',
     });
+  });
+
+  it('does not use the local Kind cluster as an answer about another recorded context', async () => {
+    clusters.mockResolvedValue([[CLUSTER_NAME], '']);
+    askList.mockResolvedValue(answer(PRESENT, { items: [] }));
+
+    await expect(
+      inventory({ context: 'shared-cluster', namespace: 'houston-ticket' }),
+    ).resolves.toEqual({
+      context: 'shared-cluster',
+      namespace: 'houston-ticket',
+      cluster_exists: null,
+      nodes: [],
+      services: [],
+      pods: [],
+      warnings: [],
+    });
+    expect(clusters).not.toHaveBeenCalled();
+  });
+
+  it('keeps valid resource rows and warns when an item loses its identity or port structure', async () => {
+    clusters.mockResolvedValue([[CLUSTER_NAME], '']);
+    askList.mockImplementation(async (kind) => {
+      if (kind === 'nodes') {
+        return answer(PRESENT, {
+          items: [{ metadata: { name: 'worker-a' }, status: {} }, {}],
+        });
+      }
+      if (kind === 'services') {
+        return answer(PRESENT, {
+          items: [
+            { metadata: { name: 'rocketchat' }, spec: { ports: [{ port: 3000 }] } },
+            { metadata: { name: 'broken' }, spec: { ports: { malformed: true } } },
+          ],
+        });
+      }
+      return answer(PRESENT, {
+        items: [{ metadata: { name: 'rocketchat-0' }, status: {} }, {}],
+      });
+    });
+
+    await expect(inventory({ context: CONTEXT, namespace: 'houston-ticket' })).resolves.toEqual(
+      expect.objectContaining({
+        cluster_exists: true,
+        nodes: [expect.objectContaining({ name: 'worker-a' })],
+        services: [
+          expect.objectContaining({
+            name: 'rocketchat',
+            ports: [expect.objectContaining({ port: 3000 })],
+          }),
+        ],
+        pods: [expect.objectContaining({ service: 'rocketchat-0' })],
+        warnings: [
+          'Kubernetes returned invalid node JSON',
+          'Kubernetes returned invalid service JSON',
+          'Kubernetes returned invalid pod JSON',
+        ],
+      }),
+    );
   });
 
   it('does not select a default context or namespace when the workspace lacks one', async () => {
@@ -151,7 +208,7 @@ describe('the Kubernetes inspection rows', () => {
     askList.mockRejectedValue(new Interrupted());
 
     await expect(
-      inventory({ context: 'kind-houston', namespace: 'houston-ticket' }),
+      inventory({ context: CONTEXT, namespace: 'houston-ticket' }),
     ).rejects.toBeInstanceOf(Interrupted);
   });
 });

@@ -10,17 +10,50 @@ import { Interrupted } from '../../seams/exec';
 
 import { askList, present, type Answer } from './ask';
 import { clusters } from './context';
-import { CLUSTER_NAME } from './names';
+import { CLUSTER_NAME, CONTEXT } from './names';
 import { podRow, type PodRow } from './status';
 
+function isMapping(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function mapOf(value: unknown): Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
+  return isMapping(value) ? value : {};
 }
 
 function listOf(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value) ? value.map(mapOf) : [];
+}
+
+function hasName(item: Record<string, unknown>): boolean {
+  return (
+    isMapping(item.metadata) && typeof item.metadata.name === 'string' && item.metadata.name !== ''
+  );
+}
+
+function validNode(item: Record<string, unknown>): boolean {
+  return hasName(item);
+}
+
+function validServicePort(value: unknown): boolean {
+  return (
+    isMapping(value) &&
+    typeof value.port === 'number' &&
+    Number.isInteger(value.port) &&
+    value.port > 0
+  );
+}
+
+function validService(item: Record<string, unknown>): boolean {
+  if (!hasName(item) || !isMapping(item.spec)) return false;
+  const ports = item.spec.ports;
+  return (
+    ports === undefined || ports === null || (Array.isArray(ports) && ports.every(validServicePort))
+  );
+}
+
+function validPod(item: Record<string, unknown>): boolean {
+  return hasName(item);
 }
 
 export interface NodeRecord {
@@ -168,6 +201,7 @@ function listDocument(answer: Answer): Record<string, unknown>[] | null {
 async function captured<T>(
   ask: () => Promise<Answer>,
   map: (record: Record<string, unknown>) => T,
+  valid: (record: Record<string, unknown>) => boolean,
   sort: (row: T) => string,
   refusedWarning: string,
   malformedWarning: string,
@@ -175,9 +209,18 @@ async function captured<T>(
   try {
     const answer = await ask();
     const records = listDocument(answer);
-    return records === null
-      ? { rows: [], warning: present(answer) ? malformedWarning : refusedWarning }
-      : { rows: by(records.map(map), sort), warning: null };
+    if (records === null)
+      return { rows: [], warning: present(answer) ? malformedWarning : refusedWarning };
+    const accepted: T[] = [];
+    let malformed = false;
+    for (const record of records) {
+      if (valid(record)) accepted.push(map(record));
+      else malformed = true;
+    }
+    return {
+      rows: by(accepted, sort),
+      warning: malformed ? malformedWarning : null,
+    };
   } catch (error) {
     if (error instanceof Interrupted) throw error;
     return { rows: [], warning: refusedWarning };
@@ -212,17 +255,24 @@ export async function inventory({
     return result;
   }
 
-  const kind = clusters().then(
-    ([names, reason]) => ({ exists: reason === '' ? names.includes(CLUSTER_NAME) : null, reason }),
-    (error: unknown) => {
-      if (error instanceof Interrupted) throw error;
-      return { exists: null, reason: 'could not inspect Kind cluster names' };
-    },
-  );
+  const kind =
+    context === CONTEXT
+      ? clusters().then(
+          ([names, reason]) => ({
+            exists: reason === '' ? names.includes(CLUSTER_NAME) : null,
+            reason,
+          }),
+          (error: unknown) => {
+            if (error instanceof Interrupted) throw error;
+            return { exists: null, reason: 'could not inspect Kind cluster names' };
+          },
+        )
+      : Promise.resolve({ exists: null, reason: '' });
   const [nodes, services, pods, local] = await Promise.all([
     captured(
       () => askList('nodes', { context }),
       nodeRecord,
+      validNode,
       (node) => node.name,
       'could not inspect cluster nodes',
       'Kubernetes returned invalid node JSON',
@@ -230,6 +280,7 @@ export async function inventory({
     captured(
       () => askList('services', { context, namespace }),
       serviceRecord,
+      validService,
       (service) => service.name,
       'could not inspect repro services',
       'Kubernetes returned invalid service JSON',
@@ -237,6 +288,7 @@ export async function inventory({
     captured(
       () => askList('pods', { context, namespace }),
       podRow,
+      validPod,
       (pod) => pod.service,
       'could not inspect repro pods',
       'Kubernetes returned invalid pod JSON',

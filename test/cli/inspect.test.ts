@@ -208,6 +208,17 @@ describe('inspect through the CLI', () => {
     }
   });
 
+  it('renders an unrecorded bind as unknown instead of assuming loopback', async () => {
+    await writeKubernetesWorkspace();
+
+    const ran = await runInspect([]);
+    expect(ran.code).toBe(0);
+    const summary = ran.stdout.slice(0, ran.stdout.indexOf('cluster'));
+    expect(summary).toContain('Bind');
+    expect(summary).toContain('unknown');
+    expect(summary).not.toContain('127.0.0.1');
+  });
+
   it('renders a missing Kubernetes location as unknown for every unreadable resource section', async () => {
     await writeKubernetesWorkspace();
     const noLocation: KubernetesInventory = {
