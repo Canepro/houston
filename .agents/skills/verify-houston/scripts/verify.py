@@ -65,11 +65,16 @@ def main():
                   'root_url': f'http://user:{sentinel}@127.0.0.1:39999/private?token={sentinel}',
                   'public_url': '', 'host_port': 39999, 'version_source': 'synthetic',
                   'created_at': '2026-01-01T00:00:00+00:00', 'pinned': False,
-                  'admin_password': sentinel, 'extra': {'bind_host': '127.0.0.1'}}
+                  'admin_password': sentinel, 'extra': {'bind_host': '127.0.0.1', 'seed': {
+                      'profile': 'standard', 'planned': {'users': 1, 'unrecognised': sentinel},
+                      'actual': {'users': 1}, 'history': {'private': sentinel},
+                      'locations': [sentinel], 'run_id': sentinel, 'unknown': sentinel}}}
         (workspace / 'repro.json').write_text(json.dumps(record))
         (workspace / 'docker-compose.yml').write_text(
             'services:\n  rocketchat:\n    image: rocketchat/rocket.chat:8.5.1\n'
-            f'    environment:\n      ADMIN_PASS: {sentinel}\n')
+            f'    environment:\n      ADMIN_PASS: {sentinel}\n'
+            f'    command: echo {sentinel}\n    labels:\n      support-note: {sentinel}\n'
+            f'      {sentinel}: neutral-value\n')
         kube_workspace = workspace.parent / 'verify-kube-fixture'
         kube_workspace.mkdir()
         kube_record = dict(record, name='verify-kube-fixture', project='houston-verify-kube-fixture',
@@ -169,6 +174,11 @@ def main():
                           schema='houston.evidence.v1')['data']
             require(payload['repro']['root_url'] == 'http://127.0.0.1:39999', 'Evidence URL is not origin-only')
             require('login' not in payload and 'env' not in payload, 'Evidence contains private sections')
+            seed = payload['seed']
+            require(seed['profile'] == 'standard' and seed['planned']['users'] == 1
+                    and seed['actual']['users'] == 1, 'Evidence lost allowed seed counts')
+            require(not {'history', 'locations', 'run_id', 'unknown'}.intersection(seed)
+                    and 'unrecognised' not in seed['planned'], 'Evidence copied unapproved seed fields')
             bundle = out / 'bundle'
             run('evidence-bundle', ['evidence', '--name', 'verify-fixture', '--bundle', str(bundle), '--json'],
                 schema='houston.evidence.v1')
@@ -176,10 +186,18 @@ def main():
                 require((bundle / name).is_file(), f'Missing bundle file: {name}')
             manifest = json.loads((bundle / 'manifest.json').read_text())
             require(manifest['repro']['name'] == 'verify-fixture', 'Bundle names another workspace')
+            artifact = manifest['artifact']
+            raw_hash = hashlib.sha256((workspace / 'docker-compose.yml').read_bytes()).hexdigest()
+            require(artifact['sha256'] == raw_hash, 'Evidence source digest differs from workspace bytes')
+            sanitized = artifact['sanitized']
+            require(sanitized['name'] == 'docker-compose.yml', 'Unexpected sanitized attachment name')
+            attached_hash = hashlib.sha256((bundle / sanitized['name']).read_bytes()).hexdigest()
+            require(sanitized['sha256'] == attached_hash and attached_hash != raw_hash,
+                    'Sanitized attachment digest must match its bytes and differ from secret-bearing source')
             for file in [out / 'evidence-json.stdout', out / 'evidence-bundle.stdout', *bundle.rglob('*')]:
                 if file.is_file():
                     require(sentinel.encode() not in file.read_bytes(), f'Synthetic secret leaked: {file.name}')
-            summary['features']['evidence'] = 'PENDING: JSON and bundle sentinel checks passed; sanitized attachment contract and live logs pending'
+            summary['features']['evidence'] = 'PASS: offline JSON, seed allowlist, sanitized bundle digests and sentinel checks; live runtime pending'
         capture = commands.get('capture')
         if capture is None:
             summary['features']['capture'] = 'PENDING: command absent from capabilities'
