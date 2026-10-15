@@ -1595,3 +1595,48 @@ describe('the name a create settles on', () => {
     expect(codes).toHaveLength(2);
   });
 });
+
+it('uses saved setup selectors for new workspaces and keeps existing or explicit choices', async () => {
+  const createDocker =
+    require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+  config.saveConfig({ default_deployment: 'microservices', default_scenarios: ['email'] });
+  const fresh = createPlan({
+    req: createReq({ version: '8.6.1', name: 'new-setup', preset: '' }),
+    emit: nullEmit,
+  });
+  await createDocker.resolveAxesStep(fresh);
+  expect(fresh.req).toMatchObject({
+    runtime: 'kubernetes',
+    deployment: 'microservices',
+    preset: 'email',
+  });
+  const explicit = createPlan({
+    req: createReq({ version: '8.6.1', name: 'explicit-setup', runtime: 'docker', preset: '' }),
+    emit: nullEmit,
+  });
+  await createDocker.resolveAxesStep(explicit);
+  expect(explicit.req).toMatchObject({
+    runtime: 'docker',
+    deployment: 'monolith',
+    preset: 'default',
+  });
+  await writeRecord(
+    'old-setup',
+    metadata({
+      name: 'old-setup',
+      project: 'houston-old-setup',
+      preset: 'ldap',
+      extra: { runtime: 'kubernetes', deployment: 'monolith' },
+    }),
+  );
+  const existing = createPlan({
+    req: createReq({ version: '8.6.1', name: 'old-setup', preset: '' }),
+    emit: nullEmit,
+  });
+  await createDocker.resolveAxesStep(existing);
+  expect(existing.req).toMatchObject({
+    runtime: 'kubernetes',
+    deployment: 'monolith',
+    preset: 'ldap',
+  });
+});

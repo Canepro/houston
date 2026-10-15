@@ -556,3 +556,21 @@ describe('shutdown', () => {
     expect(drain).toHaveBeenCalledTimes(1);
   });
 });
+
+it('serves the shared secret-free setup snapshot to readonly users without persisting answers', async () => {
+  const app = await appWith();
+  const cookie = await signIn(app, 'setup-reader', 'readonly');
+  config.saveConfig({ reg_token: 'private-setup-token', default_deployment: 'microservices' });
+  const before = fs.readFileSync(path.join(home, 'config.yaml'));
+  const denied = await app.inject({ url: '/api/setup', headers: { host: 'localhost' } });
+  expect(denied.statusCode).toBe(401);
+  const result = await app.inject({ url: '/api/setup', headers: as(cookie) });
+  expect(result.statusCode).toBe(200);
+  expect(result.json()).toMatchObject({
+    schema: 'houston.setup.v1',
+    selection: { deployment: 'microservices' },
+    license: { required: true, supplied: true },
+  });
+  expect(result.body).not.toContain('private-setup-token');
+  expect(fs.readFileSync(path.join(home, 'config.yaml'))).toEqual(before);
+});

@@ -695,3 +695,91 @@ describe('up --json', () => {
     expect(seen.streamOutput).toBe(false);
   });
 });
+
+describe('goal-first setup CLI', () => {
+  it('shows transient facts and applicable questions without creating config or exposing a token', async () => {
+    process.env.HOUSTON_REG_TOKEN = 'setup-private-sentinel';
+    try {
+      const result = await run(['onboard', '--show', '--json']);
+      expect(result.code).toBe(0);
+      expect(result.envelope.data).toMatchObject({
+        schema: 'houston.setup.v1',
+        selection: { deployment: 'monolith', seed_profile: 'small', retain_runs: false },
+      });
+      const data = result.envelope.data as Record<string, unknown>;
+      expect((data.questions as { section: string }[]).map((q) => q.section)).not.toContain(
+        'authority',
+      );
+      expect(result.stdout).not.toContain('setup-private-sentinel');
+      expect(fs.existsSync(path.join(home, 'config.yaml'))).toBe(false);
+    } finally {
+      delete process.env.HOUSTON_REG_TOKEN;
+    }
+  });
+  it('fills only unanswered defaults and preserves settled authority and unknown mappings', async () => {
+    const cfg = require('../../src/lib/config') as typeof ConfigNS;
+    cfg.saveConfig({
+      grants: { owned_cluster: true, engine_resize: false, clusters: ['houston-local', 'future'] },
+      preferences: { seed_profile: 'large', future: 'keep' },
+      onboarding: { marker: 'keep' },
+    });
+    const result = await run(['onboard', '--accept-defaults', '--json']);
+    expect(result.code).toBe(0);
+    expect(cfg.loadConfig(false)).toMatchObject({
+      default_deployment: 'monolith',
+      default_scenarios: [],
+      grants: { owned_cluster: true, engine_resize: false, clusters: ['houston-local', 'future'] },
+      preferences: { seed_profile: 'large', retain_runs: false, future: 'keep' },
+      onboarding: { marker: 'keep', completed_at: expect.any(String) },
+    });
+    expect((result.envelope.data as Record<string, unknown>).first_run_command).toContain(
+      '--seed-profile large',
+    );
+  });
+  it('limits defaults to a requested section and never grants unanswered authority', async () => {
+    const result = await run(['onboard', '--accept-defaults', '--section', 'seed', '--json']);
+    expect(result.code).toBe(0);
+    const cfg = (require('../../src/lib/config') as typeof ConfigNS).loadConfig(false);
+    expect(cfg.preferences).toEqual({ seed_profile: 'small' });
+    expect(cfg.default_deployment).toBeUndefined();
+    expect(cfg.default_scenarios).toBeUndefined();
+    expect(cfg.grants).toBeUndefined();
+  });
+  it('refuses an incompatible explicit scenario without changing stored bytes', async () => {
+    const cfg = require('../../src/lib/config') as typeof ConfigNS;
+    cfg.saveConfig({ default_deployment: 'monolith', preferences: { seed_profile: 'none' } });
+    const before = fs.readFileSync(path.join(home, 'config.yaml'));
+    const result = await run([
+      'onboard',
+      '--deployment',
+      'microservices',
+      '--scenario',
+      'not-a-preset',
+      '--json',
+    ]);
+    expect(result.code).toBe(2);
+    expect(fs.readFileSync(path.join(home, 'config.yaml'))).toEqual(before);
+  });
+  it('renders valid Kubernetes flags, hides deferred seed and does not persist an environment token', async () => {
+    const result = await run([
+      'onboard',
+      '--deployment',
+      'microservices',
+      '--seed-profile',
+      'standard',
+      '--json',
+    ]);
+    expect(result.code).toBe(0);
+    expect(result.envelope.data).toMatchObject({
+      selection: { deployment: 'microservices' },
+      license: { required: true, supplied: false, seed_deferred: true },
+      first_run_command: expect.stringContaining('--runtime kubernetes --deployment microservices'),
+    });
+    expect(
+      String((result.envelope.data as Record<string, unknown>).first_run_command),
+    ).not.toContain('--seed');
+    expect(
+      (require('../../src/lib/config') as typeof ConfigNS).loadConfig(false).reg_token,
+    ).toBeUndefined();
+  });
+});

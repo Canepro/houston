@@ -379,3 +379,15 @@ else, saying a certificate failed when it had not arrived yet, or telling somebo
 costs nothing because the pointer file was lost. Most of this document applies that idea in
 different places. Say what you know, say what you could not find out, and never let the
 second turn into the first.
+
+### Goal-first setup
+
+`core/setup.ts` owns the shared `houston.setup.v1` snapshot and partial config
+writer. `cli/handlers/setup.ts` asks progressive questions through that snapshot;
+`GET /api/setup` reads it under the readonly route role. There is no GUI writer or
+setup panel. Host and engine facts are read at request time. Configuration writes
+use the existing cross-process config lock and omit environment token values.
+`lib/setup-selectors.ts` reads saved deployment and scenario defaults with the
+legacy key precedence. The lifecycle planner applies them to new workspaces only
+when no runtime, context, deployment or preset was explicitly selected. Existing
+workspaces keep their recorded choices.

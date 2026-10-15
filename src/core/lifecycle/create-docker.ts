@@ -9,6 +9,7 @@
  * comment saying what broke when it was somewhere else. Each step names what it does, and
  * the order is visible in one screen at the bottom of this module.
  */
+import { savedSelectors } from '../../lib/setup-selectors';
 import { seedSelection } from '../../lib/seed-options';
 import * as fs from 'node:fs/promises';
 
@@ -473,6 +474,21 @@ export async function resolveAxesStep(plan: CreatePlan): Promise<void> {
   // Read BEFORE resolveAxes: it normalises an empty --runtime to "docker", after which
   // `!req.runtime` is never true and this could not fire.
   const existing = naming.deriveFor(plan.req);
+  // Saved choices apply only to a new workspace with no explicit topology/scenario.
+  // Reusing a record must keep its recorded axes, even after setup defaults change.
+  if (
+    !(existing && (await paths.exists(existing))) &&
+    plan.req.runtime === '' &&
+    plan.req.context === '' &&
+    plan.req.deployment === '' &&
+    plan.req.preset === ''
+  ) {
+    const saved = savedSelectors();
+    if (saved.answered_deployment || saved.answered_scenarios) {
+      plan.req.deployment = saved.deployment;
+      plan.req.preset = compositeName(saved.scenarios);
+    }
+  }
   if (!plan.req.runtime && existing && (await paths.exists(existing))) {
     plan.req.runtime = await topology.ofRepro(existing);
   }

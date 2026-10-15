@@ -270,3 +270,17 @@ export async function hiddenPrompt(question: string): Promise<string> {
     if (line !== '') return line;
   }
 }
+
+/** Visible setup answer using the same buffered stdin and interrupt contract. */
+export async function setupAnswer(question: string, fallback: string): Promise<string> {
+  process.stdout.write(`${question} [${fallback}]: `);
+  const lines = (stdinLines ??= new StdinLines());
+  let line: string | null;
+  try {
+    line = await interruptible(null, lines.next(), false);
+  } finally {
+    lines.stop();
+  }
+  if (line === null) throw new Aborted();
+  return stripText(line) || fallback;
+}

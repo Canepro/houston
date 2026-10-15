@@ -40,6 +40,7 @@ import type * as RcapiNS from '../core/rcapi';
 import type * as RunnerEngineNS from '../core/runner/engine';
 import type * as RunnerQueriesNS from '../core/runner/queries';
 import type * as LocksNS from '../core/runner/locks';
+import * as setupHandler from './handlers/setup';
 import type * as OnboardingNS from '../lib/onboarding';
 import type * as RecordNS from '../core/runner/record';
 import type * as ScaleseedNS from '../core/scaleseed';
@@ -1077,6 +1078,23 @@ async function dispatch(
       const id = text(a.id);
       if (['status', 'complete', 'setup'].includes(action) && id !== '')
         throw new ValidationError(`\`onboard ${action}\` does not take a grant ID`);
+      const setupRequested =
+        action === 'setup' ||
+        o.show === true ||
+        o.accept_defaults === true ||
+        o.reconfigure === true ||
+        text(o.section) !== '' ||
+        text(o.deployment) !== '' ||
+        strings(o.scenario).length > 0 ||
+        text(o.seed_profile) !== '' ||
+        typeof o.retain_runs === 'boolean';
+      if (setupRequested) {
+        if (!['status', 'setup'].includes(action))
+          throw new ValidationError(
+            'setup options cannot be combined with grant, revoke, or complete',
+          );
+        return await setupHandler.run(invocation);
+      }
       if (action === 'status') return { ...onboarding.state(), action };
       if (!['grant', 'revoke', 'complete'].includes(action))
         throw new ValidationError(
@@ -3073,6 +3091,25 @@ export async function renderHuman(
       // Printed by the handler as it went (`handlers/https.ts`): nothing is left to render.
       return;
     case 'onboard': {
+      if (result.schema === 'houston.setup.v1') {
+        say(
+          io,
+          result.action === 'setup'
+            ? 'Setup choices recorded.'
+            : result.action === 'cancelled'
+              ? 'No changes written.'
+              : 'Setup choices',
+        );
+        const selection = bag(result.selection);
+        say(io, `deployment  ${display(selection.deployment)}`);
+        say(io, `scenarios   ${strings(selection.scenarios).join(', ') || '(none)'}`);
+        say(io, `seed        ${display(selection.seed_profile)}`);
+        say(io, `retain runs ${String(selection.retain_runs)}`);
+        for (const gate of bags(result.gates))
+          say(io, `  ${display(gate.code)}: ${display(gate.message)}`);
+        say(io, `first run   ${display(result.first_run_command, '(blocked)')}`);
+        return;
+      }
       const available = bags(result.grants_available);
       const held = available.filter((spec) => isTruthy(spec.held)).map((spec) => display(spec.id));
       if (result.action === 'grant') say(io, `✓ granted ${display(result.id)}`);

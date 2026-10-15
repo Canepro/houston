@@ -68,6 +68,7 @@ export const ROUTE_ROLES: ReadonlyMap<string, RouteRole> = new Map([
   ['GET /api/machine', READ],
   ['GET /api/presets', READ],
   ['GET /api/settings', READ],
+  ['GET /api/setup', READ],
   ['GET /api/versions/{version}', READ],
   ['GET /api/repros/{name}/logs', WRITE],
   ['WS /api/repros/{name}/logs/stream', WRITE],
