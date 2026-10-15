@@ -161,7 +161,14 @@ async function verifyExistingClusterOwnership(emit: Emit): Promise<void> {
   try {
     const context = await exportKubeconfig(kubeconfig, env);
     if (!(await clusterIsOurs(context, env))) {
-      if (!(await holdsHoustonWorkspaces(context, env))) {
+      const holds = await holdsHoustonWorkspaces(context, env);
+      if (holds === null) {
+        throw new DockerError(
+          `a Kind cluster named '${CLUSTER_NAME}' exists without Houston's ownership marker, ` +
+            'and whether it holds houston workspaces could not be read; nothing was adopted.',
+        );
+      }
+      if (!holds) {
         throw new ConflictError(
           `a Kind cluster named '${CLUSTER_NAME}' exists without Houston's ownership marker; ` +
             'refusing to reuse or delete it. Remove or rename that cluster yourself, then retry.',
@@ -189,7 +196,10 @@ async function verifyExistingClusterOwnership(emit: Emit): Promise<void> {
  * namespace carrying houston's owner label is written by nothing else. A refused read is
  * not a proof either way, so it adopts nothing. Read through the probe file, like the marker.
  */
-async function holdsHoustonWorkspaces(context: string, env: NodeJS.ProcessEnv): Promise<boolean> {
+async function holdsHoustonWorkspaces(
+  context: string,
+  env: NodeJS.ProcessEnv,
+): Promise<boolean | null> {
   const result = await kube.run(
     [
       'kubectl',
@@ -204,12 +214,13 @@ async function holdsHoustonWorkspaces(context: string, env: NodeJS.ProcessEnv): 
     ],
     { timeout: APPLY_TIMEOUT, own: true, env },
   );
-  if (result.returncode !== 0) return false;
+  // A refused read is the third answer, not "none": it adopts nothing and says why.
+  if (result.returncode !== 0) return null;
   try {
     const items = (JSON.parse(result.stdout) as { items?: unknown }).items;
     return Array.isArray(items) && items.length > 0;
   } catch {
-    return false;
+    return null;
   }
 }
 
