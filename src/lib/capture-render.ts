@@ -72,6 +72,30 @@ export function renderCaptureSection(value: unknown): string[] {
   }
   lines.push('');
 
+  const privacy = bag(manifest.privacy);
+  const masks = Array.isArray(privacy.masked_input_selectors)
+    ? privacy.masked_input_selectors.map(markdownCode).filter((selector) => selector !== '')
+    : [];
+  lines.push(
+    '## Privacy review',
+    '',
+    'Inspect every retained PNG frame and the video before attaching this bundle. Houston does not scan pixels, so a page can show a credential outside a masked input.',
+  );
+  if (masks.length > 0) {
+    lines.push(
+      `Houston covered known secret input${masks.length === 1 ? '' : 's'} ` +
+        `(${masks.map((selector) => `\`${selector}\``).join(', ')}) before Playwright filled ${
+          masks.length === 1 ? 'it' : 'them'
+        }. The retained PNG frames and video show that cover instead of the direct control value.`,
+    );
+  } else {
+    lines.push('No masked input was recorded. That does not prove the visual artifacts are safe to attach.');
+  }
+  lines.push(
+    'The trace has no screenshots or DOM snapshots. Byte-level redaction checks known secret values in text artifacts, but it cannot prove that the page did not echo a value somewhere else.',
+    '',
+  );
+
   const shots = (Array.isArray(manifest.shots) ? manifest.shots : [])
     .map(captureArtifact)
     .filter((shot) => shot !== '');
