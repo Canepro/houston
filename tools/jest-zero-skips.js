@@ -89,8 +89,9 @@ const ROOT = path.resolve(__dirname, '..');
 // monitoring, pin and port, the operator password off every argv, the operator's memory and
 // PodMonitor, serve's shutdown, and the usage and wording answers it found untrue.
 // Bind enforcement covers protocol preservation, ephemeral long ports and invalid addresses.
-// Compose interpolation keeps the selected bind while preserving variable port fields.
-const FLOOR = 4511;
+// Compose interpolation keeps the selected bind while preserving variable port fields, and
+// monitoring reads that bind back without treating interpolation defaults as port fields.
+const FLOOR = 4512;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

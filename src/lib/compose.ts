@@ -586,7 +586,7 @@ const PORT_RE = /^\d+(-\d+)?$/;
  * forms commonly contain `:`, so splitting the string at every colon turns a valid mapping
  * such as `${BIND_IP:-127.0.0.1}:${HOST_PORT:-8080}:${CONTAINER_PORT:-80}` into nonsense.
  */
-function topLevelPositions(text: string, separator: string): number[] {
+export function topLevelPositions(text: string, separator: string): number[] {
   const positions: number[] = [];
   let interpolationDepth = 0;
   let bracketDepth = 0;
@@ -637,7 +637,7 @@ function composeVariable(value: string): boolean {
   const name = /^[A-Za-z_][A-Za-z0-9_]*/u.exec(expression);
   if (name === null) return false;
   const suffix = expression.slice(name[0].length);
-  return suffix === '' || /^(?::-|:\?|-|\?)/u.test(suffix);
+  return suffix === '' || /^(?::-|:\?|:\+|-|\?|\+)/u.test(suffix);
 }
 
 function portField(value: string): boolean {

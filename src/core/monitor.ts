@@ -10,7 +10,7 @@
  * in `core/kube/monitoring.ts` and this module is the caller that supplies the workspace's
  * namespace.
  */
-import { forEngine, toYaml, type ComposeDoc } from '../lib/compose';
+import { forEngine, toYaml, topLevelPositions, type ComposeDoc } from '../lib/compose';
 import * as config from '../lib/config';
 import { DockerError, NotReadyError, ValidationError, errorText } from '../lib/errors';
 import { type Emit, info, nullEmit, warn } from '../lib/events';
@@ -140,14 +140,10 @@ export function detectBind(doc: Bag, name = ''): string {
       // them, bracketed or not. `bindPorts` writes `::1:8025:8025` for `--bind ::1`, which
       // a count of exactly three colon-separated parts read as no address at all, so an
       // IPv6-bound workspace had its monitoring attached on 127.0.0.1.
-      const parts = String(p)
-        .replace(/\/[a-z]+$/iu, '')
-        .split(':');
-      if (parts.length < 3) continue;
-      const address = parts
-        .slice(0, -2)
-        .join(':')
-        .replace(/^\[|\]$/gu, '');
+      const text = String(p);
+      const colons = topLevelPositions(text, ':');
+      if (colons.length < 2) continue;
+      const address = text.slice(0, colons[colons.length - 2] ?? 0).replace(/^\[|\]$/gu, '');
       if (address !== '') return address;
     }
   }

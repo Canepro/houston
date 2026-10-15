@@ -302,12 +302,16 @@ describe('binding', () => {
         '${BIND_IP}:8080:80',
         '${BIND_IP:-127.0.0.1}:${HOST_PORT:-8080}:${CONTAINER_PORT:-80}',
         '${BIND_IP?set it}:${HOST_PORT?set it}:${CONTAINER_PORT?set it}/UDP',
+        '${BIND_IP:+127.0.0.1}:${HOST_PORT:+8080}:${CONTAINER_PORT:+80}',
+        '${BIND_IP+127.0.0.1}:${HOST_PORT+8080}:${CONTAINER_PORT+80}/TCP',
         '${CONTAINER_PORT:-80}',
       ]),
     ).toEqual([
       '127.0.0.1:8080:80',
       '127.0.0.1:${HOST_PORT:-8080}:${CONTAINER_PORT:-80}',
       '127.0.0.1:${HOST_PORT?set it}:${CONTAINER_PORT?set it}/udp',
+      '127.0.0.1:${HOST_PORT:+8080}:${CONTAINER_PORT:+80}',
+      '127.0.0.1:${HOST_PORT+8080}:${CONTAINER_PORT+80}/tcp',
       '127.0.0.1::${CONTAINER_PORT:-80}',
     ]);
   });
