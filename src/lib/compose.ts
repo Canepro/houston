@@ -17,6 +17,8 @@
  * every workspace earlier releases made holds.
  */
 
+import { isIP } from 'node:net';
+
 import {
   ADMIN_EMAIL,
   ADMIN_NAME,
@@ -587,7 +589,8 @@ const PORT_RE = /^\d+(-\d+)?$/;
  * `0.0.0.0:9000:9000` would otherwise publish a sidecar on every interface of a remote
  * sandbox while the workspace says it is loopback-bound. Short syntax keeps its host port
  * (or its absence: `IP::CONTAINER` is an ephemeral host port), its range and its
- * `/protocol`; long syntax gets `host_ip` set whenever it publishes.
+ * `/protocol`; long syntax gets `host_ip` even when `published` is omitted for an
+ * ephemeral host port.
  */
 export function bindPorts(doc: ComposeDoc, bind: string): void {
   if (!bind) return;
@@ -602,8 +605,7 @@ export function bindPorts(doc: ComposeDoc, bind: string): void {
       // has to be recognised before it is stringified.
       if (isPlainObject(p)) {
         const long = { ...p };
-        // A target with no `published` is not on the host, so there is nothing to bind.
-        if ('published' in long) long.host_ip = bind;
+        long.host_ip = bind;
         out.push(long);
         continue;
       }
@@ -616,7 +618,7 @@ export function bindPorts(doc: ComposeDoc, bind: string): void {
         throw new ValidationError(
           `port entry ${JSON.stringify(p)} in service ${JSON.stringify(name)} is a shape ` +
             `houston cannot bind to ${bind}. Write it as "HOST:CONTAINER", a range, or ` +
-            'compose long syntax with `published:` -- leaving it unbound would publish ' +
+            'compose long syntax -- leaving it unbound would publish ' +
             'it on every interface.',
         );
       }
@@ -634,8 +636,8 @@ export function bindPorts(doc: ComposeDoc, bind: string): void {
  *
  * READ FROM THE RIGHT. The address may be dotted, bracketed IPv6, or the unbracketed IPv6
  * the Compose specification's own examples use (`::1:6000:6000`); counting colons from
- * the left refused the last of these. The two rightmost fields are the ports, whatever
- * stands before them is the address, and the address is what `bind` replaces.
+ * the left refused the last of these. The two rightmost fields are the ports. Any
+ * preceding address must be a valid IP literal before `bind` replaces it.
  */
 function shortPort(entry: string): { host: string; container: string; protocol: string } | null {
   const slash = entry.lastIndexOf('/');
@@ -644,6 +646,10 @@ function shortPort(entry: string): { host: string; container: string; protocol: 
   const rest = slash === -1 ? entry : entry.slice(0, slash);
   if (protocol !== '' && !/^\/[a-z]+$/u.test(protocol)) return null;
   const fields = rest.split(':');
+  const address = fields.slice(0, -2).join(':');
+  const ip = address.startsWith('[') && address.endsWith(']') ? address.slice(1, -1) : address;
+  // Docker rejects scope IDs, though Node's isIP accepts them.
+  if (address !== '' && (isIP(ip) === 0 || ip.includes('%'))) return null;
   const container = fields[fields.length - 1] ?? '';
   const host = fields.length >= 2 ? (fields[fields.length - 2] ?? '') : '';
   if (!PORT_RE.test(container)) return null;

@@ -342,11 +342,22 @@ describe('binding', () => {
     ]);
   });
 
-  it('rebinds long syntax that already names a host_ip, and skips an unpublished target', () => {
+  it('rebinds long syntax that already names a host_ip', () => {
     expect(bound([{ target: 80, published: 8080, host_ip: '10.0.0.1' }])).toEqual([
       { target: 80, published: 8080, host_ip: '127.0.0.1' },
     ]);
-    expect(bound([{ target: 80 }])).toEqual([{ target: 80 }]);
+  });
+
+  it.each([
+    { target: 80 },
+    { target: 81, host_ip: '0.0.0.0' },
+    { target: 82, protocol: 'udp', mode: 'host', name: 'metrics', app_protocol: 'http' },
+  ])('binds an ephemeral long-syntax publication: %j', (port) => {
+    const doc = build(
+      official({ preset: preset({ services: { sidecar: { image: 'nginx', ports: [port] } } }) }),
+    );
+    expect(doc.services.sidecar?.ports).toEqual([{ ...port, host_ip: '127.0.0.1' }]);
+    expect((doc.services.sidecar?.ports as unknown[])[0]).not.toHaveProperty('published');
   });
 
   it('REFUSES a shape it does not understand, rather than publishing it everywhere', () => {
@@ -356,6 +367,14 @@ describe('binding', () => {
     expect(() => bound(['weird-shape'])).toThrow(ValidationError);
     expect(() => bound(['weird-shape'])).toThrow(/houston cannot bind to 127\.0\.0\.1/);
   });
+
+  it.each(['::1:80', '2001:db8::80', '[::1:80:80', 'host:80:80', 'fe80::1%lo0:80:80'])(
+    'refuses an invalid leftover address instead of inventing a host port: %s',
+    (port) => {
+      expect(() => bound([port])).toThrow(ValidationError);
+      expect(() => bound([port])).toThrow(/service "s"/);
+    },
+  );
 
   it('names the service, so a preset author can see what to change', () => {
     expect(() => bound(['weird-shape'])).toThrow(/service "s"/);
@@ -745,7 +764,7 @@ describe('what a workspace compose document never carries', () => {
 });
 
 describe('every published port shape', () => {
-  it('is bound, an unpublished target is left alone, and an unknown shape is refused', () => {
+  it('is bound, including ephemeral long syntax, and an unknown shape is refused', () => {
     // A fixed RANGE was appended unchanged and published on every interface while `info`
     // reported loopback; a one-sided range became IP:RANGE, which compose refuses; long
     // syntax was stringified into its own text. Reachable through custom presets.
@@ -759,7 +778,7 @@ describe('every published port shape', () => {
         plain: { ports: ['9000:9000'] },
         bare: { ports: ['8025'] },
         already: { ports: ['127.0.0.1:1:1'] },
-        unpublished: { ports: [{ target: 80 }] },
+        long_ephemeral: { ports: [{ target: 80 }] },
       },
     };
     bindPorts(doc, '127.0.0.1');
@@ -770,8 +789,7 @@ describe('every published port shape', () => {
       plain: ['127.0.0.1:9000:9000'],
       bare: ['127.0.0.1::8025'],
       already: ['127.0.0.1:1:1'],
-      // A target with no `published` is not on the host, so there is nothing to bind.
-      unpublished: [{ target: 80 }],
+      long_ephemeral: [{ target: 80, host_ip: '127.0.0.1' }],
     });
     // "Unbound" must never be the fallback for "I did not understand this".
     const weird: ComposeDoc = {
