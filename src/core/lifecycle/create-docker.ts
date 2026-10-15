@@ -1004,7 +1004,10 @@ export function buildRecord(plan: CreatePlan): void {
   if (spec.licensed) plan.meta.extra.licensed = true;
   // The record proves a token was consumed without retaining a credential from the request or
   // generated Compose document. The normalized value is the one deployment actually used.
-  if (plan.token !== '') plan.meta.extra.reg_token_supplied = true;
+  plan.meta.extra.reg_token_supplied = plan.token !== '';
+  // What the preset said at create time, so evidence does not re-ask a catalog that may
+  // have changed since.
+  plan.meta.extra.license_required = pre.requiresLicense === true;
   if (plan.req.actor) {
     // Who owns this. Shown by `list` and the GUI card.
     plan.meta.extra.created_by = plan.req.actor;

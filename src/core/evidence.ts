@@ -45,7 +45,7 @@ import { detail } from './lifecycle/payload';
 import { composeVersion, dockerServerVersion } from './runner/host';
 import { reproLock } from './runner/locks';
 import * as paths from './runner/paths';
-import { adminPass, type Metadata, projectName, readMeta } from './runner/record';
+import { adminPass, type Metadata, projectName, readCompose, readMeta } from './runner/record';
 import * as topology from './topology';
 
 export { renderMarkdown } from '../lib/capture-render';
@@ -230,25 +230,60 @@ async function ownershipOf(meta: Metadata, runtime: string): Promise<Record<stri
  * Whether a licence was needed and whether one was supplied. Never the value, only
  * whether and from where. A licence takes precedence when both it and a registration token
  * were supplied. Both markers are booleans only; no credential value reaches the record.
+ *
+ * `required` is read from the record when the create wrote it (`license_required`), so an
+ * edited or removed preset does not rewrite history; the catalog answers only for a record
+ * from before that was written. `supplied` is `null` when the record cannot say: a
+ * Kubernetes record from before `reg_token_supplied` existed put the token in a Secret
+ * this reader does not open. A Docker record of that age is asked through its compose
+ * file, which is where the token went.
  */
-function licenseOf(meta: Metadata, deployment: string): Record<string, unknown> {
-  // A microservices deployment needs a licence independently of its preset.
-  let required = deployment === topology.MICROSERVICES;
-  for (const name of namesOf(meta.preset).filter((item) => item !== 'default')) {
-    try {
-      // A runtime adapter may carry a topology marker: Kubernetes LDAP's `requiresLicense`
-      // does. The catalog is the semantic source for a preset's own requirement, whether it
-      // is user YAML, a scenario, or built in.
-      required ||= presets.load(name).requiresLicense;
-    } catch {
-      // A preset this install no longer has must not break the evidence for a workspace
-      // that was built from it. Other components of the recorded composite still count.
+async function licenseOf(meta: Metadata, deployment: string): Promise<Record<string, unknown>> {
+  const extra = bag(meta.extra);
+  let required: boolean;
+  if (typeof extra.license_required === 'boolean') {
+    required = extra.license_required;
+  } else {
+    // A microservices deployment needs a licence independently of its preset.
+    required = deployment === topology.MICROSERVICES;
+    for (const name of namesOf(meta.preset).filter((item) => item !== 'default')) {
+      try {
+        // A runtime adapter may carry a topology marker: Kubernetes LDAP's `requiresLicense`
+        // does. The catalog is the semantic source for a preset's own requirement, whether it
+        // is user YAML, a scenario, or built in.
+        required ||= presets.load(name).requiresLicense;
+      } catch {
+        // A preset this install no longer has must not break the evidence for a workspace
+        // that was built from it. Other components of the recorded composite still count.
+      }
     }
   }
-  const extra = bag(meta.extra);
   if (extra.licensed === true) return { required, supplied: true, source: 'license' };
-  const supplied = extra.reg_token_supplied === true;
-  return { required, supplied, source: supplied ? 'reg_token' : null };
+  if (extra.reg_token_supplied === true) return { required, supplied: true, source: 'reg_token' };
+  if (extra.reg_token_supplied === false) return { required, supplied: false, source: null };
+  const inferred = await tokenInCompose(meta);
+  if (inferred === null) return { required, supplied: null, source: 'unknown' };
+  return { required, supplied: inferred, source: inferred ? 'reg_token' : null };
+}
+
+/** Whether the generated compose file hands Rocket.Chat a REG_TOKEN; `null` when it cannot be read. */
+async function tokenInCompose(meta: Metadata): Promise<boolean | null> {
+  if (topology.ofMeta(meta) === topology.KUBERNETES) return null;
+  let doc: Record<string, unknown>;
+  try {
+    doc = await readCompose(meta.name);
+  } catch {
+    return null;
+  }
+  for (const service of Object.values(bag(doc.services))) {
+    const environment = bag(service).environment;
+    if (Array.isArray(environment)) {
+      if (environment.some((entry) => /^REG_TOKEN=\S/u.test(String(entry)))) return true;
+    } else if (toText(bag(environment).REG_TOKEN).trim() !== '') {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -258,19 +293,12 @@ function licenseOf(meta: Metadata, deployment: string): Record<string, unknown> 
 export function resolveRetention({
   retained = null,
   reason = '',
-  preferences = {},
-}: { retained?: boolean | null; reason?: string; preferences?: unknown } = {}): {
+}: { retained?: boolean | null; reason?: string } = {}): {
   retained: boolean;
   reason: string | null;
 } {
-  const preferenceRetains = bag(preferences).retain_runs === true;
   if (retained === true) {
-    const why =
-      reason.trim() === ''
-        ? preferenceRetains
-          ? 'persisted preference'
-          : 'explicit task'
-        : reason.trim();
+    const why = reason.trim() === '' ? 'explicit task' : reason.trim();
     if (!RETAIN_REASONS.includes(why)) {
       throw new ValidationError(
         `retained evidence reason must be ${RETAIN_REASONS.map((r) => `'${r}'`).join(' or ')}`,
@@ -278,21 +306,17 @@ export function resolveRetention({
     }
     return { retained: true, reason: why };
   }
-  if (retained === false) return { retained: false, reason: null };
-  return preferenceRetains
-    ? { retained: true, reason: 'persisted preference' }
-    : { retained: false, reason: null };
+  return { retained: false, reason: null };
 }
 
 function retentionOf(
   meta: Metadata,
   requested: { retained?: boolean | null; reason?: string },
 ): { retained: boolean; reason: string | null } {
-  const selected = resolveRetention({
-    ...requested,
-    preferences: config.loadConfig(false).preferences,
-  });
-  if (selected.retained || !meta.pinned) return selected;
+  // The pin is the one persisted state `prune` honours, so it is the one persisted
+  // retention evidence may claim. A config key nothing enforces is not a policy.
+  const selected = resolveRetention(requested);
+  if (selected.retained || !isTruthy(meta.pinned)) return selected;
   return { retained: true, reason: 'persisted preference' };
 }
 
@@ -451,7 +475,7 @@ async function snapshotOf(
     runtime: { state: toText(d.state), services: servicesOf(d.containers), engine },
     artifact: { name: artifact.name, sha256: artifact.sha256 },
     ownership: await ownershipOf(meta, runtime),
-    license: licenseOf(meta, deployment),
+    license: await licenseOf(meta, deployment),
     retention: {
       retained: keep.retained,
       reason: keep.reason,

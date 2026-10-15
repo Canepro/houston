@@ -655,7 +655,7 @@ export async function writeProvisionalRecord(job: KubeCreate): Promise<void> {
   if (job.licensed) job.provisional.extra.licensed = true;
   // A killed create leaves this record behind, so it needs the same value-free token proof as
   // the final one. `job.regToken` is already the normalized deployment value.
-  if (job.regToken !== '') job.provisional.extra.reg_token_supplied = true;
+  job.provisional.extra.reg_token_supplied = job.regToken !== '';
   // Still recorded while the create runs, so a create killed part-way leaves `down` able to
   // stop them.
   if (job.previous.pid !== 0) job.provisional.extra.port_forward_pid = job.previous.pid;
@@ -862,7 +862,18 @@ export function recordTheRequest(job: KubeCreate): void {
   // The same key Compose records them under, so re-up, `backup` and `restore --new` carry them.
   if (Object.keys(job.envOverrides).length > 0) meta.extra.env = job.envOverrides;
   if (job.licensed) meta.extra.licensed = true;
-  if (job.regToken !== '') meta.extra.reg_token_supplied = true;
+  meta.extra.reg_token_supplied = job.regToken !== '';
+  // From the catalog, not the runtime adapter: the Kubernetes LDAP adapter's flag marks
+  // the microservices topology, which is recorded through `job.microservices` instead.
+  meta.extra.license_required =
+    job.microservices ||
+    namesOf(job.req.preset || 'default').some((name) => {
+      try {
+        return presets.load(name).requiresLicense;
+      } catch {
+        return false;
+      }
+    });
   // A preset's self-configuration actions, recorded exactly as the Compose path records
   // them. Without this the OIDC preset would create no OAuth provider and the SAML preset
   // no provider settings -- both recorded and neither applied.

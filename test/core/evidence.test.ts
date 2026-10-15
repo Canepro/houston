@@ -197,9 +197,24 @@ describe('the record', () => {
   });
 
   it('records a licence or registration-token state without the value', async () => {
+    // No marker: a record from before `reg_token_supplied` existed. The Docker compose
+    // file says whether a token reached the deployment (the fixture hands one over).
     await workspaceNamed('e3');
     expect((await record('e3')).license).toEqual({
       required: false,
+      supplied: true,
+      source: 'reg_token',
+    });
+    await workspaceNamed('e3-none', { reg_token_supplied: false });
+    expect((await record('e3-none')).license).toEqual({
+      required: false,
+      supplied: false,
+      source: null,
+    });
+    // The record says what the create knew; a catalog edited since does not rewrite it.
+    await workspaceNamed('e3-recorded', { license_required: true, reg_token_supplied: false });
+    expect((await record('e3-recorded')).license).toEqual({
+      required: true,
       supplied: false,
       source: null,
     });
@@ -220,11 +235,12 @@ describe('the record', () => {
       source: 'reg_token',
     });
     expect(JSON.stringify(tokenEvidence)).not.toContain('EVIDENCE-REGISTRATION-TOKEN-SENTINEL');
+    // A malformed marker is no marker; the compose file answers, as for no marker.
     await workspaceNamed('e3t-malformed', { reg_token_supplied: 'true' });
     expect((await record('e3t-malformed')).license).toEqual({
       required: false,
-      supplied: false,
-      source: null,
+      supplied: true,
+      source: 'reg_token',
     });
     await workspaceNamed('e3t-license-wins', { licensed: true, reg_token_supplied: true });
     expect((await record('e3t-license-wins')).license).toEqual({
@@ -247,8 +263,9 @@ describe('the record', () => {
     );
     expect((await recordKubernetes('e3-composite')).license).toEqual({
       required: true,
-      supplied: false,
-      source: null,
+      // No marker on a Kubernetes record: the token went into a Secret this does not open.
+      supplied: null,
+      source: 'unknown',
     });
   });
 
@@ -269,8 +286,8 @@ describe('the record', () => {
     await workspaceNamed('e3-ldap', { runtime: 'kubernetes' }, { preset: 'ldap' });
     expect((await recordKubernetes('e3-ldap')).license).toEqual({
       required: false,
-      supplied: false,
-      source: null,
+      supplied: null,
+      source: 'unknown',
     });
   });
 
@@ -285,8 +302,8 @@ describe('the record', () => {
       ).license,
     ).toEqual({
       required: true,
-      supplied: false,
-      source: null,
+      supplied: null,
+      source: 'unknown',
     });
   });
 
@@ -304,28 +321,18 @@ describe('the record', () => {
     });
   });
 
-  it('uses only a literal retain_runs preference when retention was not requested', async () => {
+  it('ignores a retain_runs preference, which nothing enforces, and keeps the pin', async () => {
+    // `prune` skips pinned workspaces and reads no preference, so a config key that says
+    // "retain" would be evidence of a policy that does not exist.
     await workspaceNamed('e3-preference');
-    const retention = async (retained?: boolean) =>
-      (await record('e3-preference', retained === undefined ? {} : { retained })).retention;
-    const setPreference = (value: unknown) =>
-      config.updateConfig((cfg) => {
-        cfg.preferences = { retain_runs: value };
-      });
-
     try {
-      setPreference(true);
-      expect(await retention()).toMatchObject({
-        retained: true,
-        reason: 'persisted preference',
+      config.updateConfig((cfg) => {
+        cfg.preferences = { retain_runs: true };
       });
-      expect(await retention(false)).toMatchObject({ retained: false, reason: null });
-
-      setPreference(false);
-      expect(await retention()).toMatchObject({ retained: false, reason: null });
-
-      setPreference('true');
-      expect(await retention()).toMatchObject({ retained: false, reason: null });
+      expect((await record('e3-preference')).retention).toMatchObject({
+        retained: false,
+        reason: null,
+      });
     } finally {
       config.updateConfig((cfg) => {
         delete cfg.preferences;

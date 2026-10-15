@@ -176,13 +176,16 @@ export function renderMarkdown(payloadValue: unknown, captureValue?: unknown): s
       ['Preset', markdownText(repro.preset) || 'none'],
       ['URL', url],
       ['Created', markdownText(repro.created_at)],
+      // A credential was handed to the deployment; nothing here saw Rocket.Chat accept it.
       [
-        'Licensed',
+        'Licence',
         license.supplied === true
-          ? 'yes'
-          : license.required === true
-            ? 'no (required)'
-            : 'not required',
+          ? `credential supplied (${license.source === 'license' ? 'licence file' : 'registration token'}); acceptance not verified`
+          : license.supplied === false
+            ? license.required === true
+              ? 'none supplied (required)'
+              : 'none supplied (not required)'
+            : 'unknown (the record predates the marker)',
       ],
       ['State', markdownText(runtime.state)],
     ]),
