@@ -10,6 +10,7 @@ import { logPath, resetForTest } from '../../src/core/eventlog';
 import { loadtestTarget } from '../../src/core/loadtest';
 import { NotFoundError } from '../../src/lib/errors';
 
+import type * as PathsNS from '../../src/core/runner/paths';
 import type * as RecordNS from '../../src/core/runner/record';
 
 import type * as AppNS from '../../src/cli/app';
@@ -313,10 +314,20 @@ describe('SSH loopback guidance', () => {
         extra: { bind_host: '127.0.0.1' },
       }),
     );
-    const saved = { connection: process.env.SSH_CONNECTION, user: process.env.USER };
+    const keys = [
+      'SSH_CONNECTION',
+      'USER',
+      'HOUSTON_SSH_HOST',
+      'HOUSTON_SSH_USER',
+      'HOUSTON_SSH_LOCAL_PORT',
+    ] as const;
+    const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
     try {
       process.env.SSH_CONNECTION = '198.51.100.20 55100 203.0.113.8 22';
       process.env.USER = 'operator';
+      delete process.env.HOUSTON_SSH_HOST;
+      delete process.env.HOUSTON_SSH_USER;
+      delete process.env.HOUSTON_SSH_LOCAL_PORT;
       jest.resetModules();
       jest.doMock('../../src/core/lifecycle/create-docker', () => ({
         ...jest.requireActual<object>('../../src/core/lifecycle/create-docker'),
@@ -343,12 +354,25 @@ describe('SSH loopback guidance', () => {
         ),
       ).toHaveLength(2);
       expect(stdout.match(/browser: http:\/\/127\.0\.0\.1:3123/g)).toHaveLength(2);
+      // Old records can omit bind_host while Compose proves a wildcard publish.
+      const old = await record.readMeta('ssh-ready');
+      delete old.extra.bind_host;
+      await record.writeRecord('ssh-ready', old);
+      const paths = require('../../src/core/runner/paths') as typeof PathsNS;
+      fs.writeFileSync(
+        `${paths.workspace('ssh-ready')}/docker-compose.yml`,
+        'services:\n  rocketchat:\n    ports: ["0.0.0.0:3123:3000"]\n',
+      );
+      stdout = '';
+      expect(await app.runCli(['info', '--name', 'ssh-ready'], { execute, io })).toBe(0);
+      expect(stdout).not.toContain('tunnel :');
+      expect(stdout).not.toContain('Credentials stay private');
     } finally {
       jest.dontMock('../../src/core/lifecycle/create-docker');
-      if (saved.connection === undefined) delete process.env.SSH_CONNECTION;
-      else process.env.SSH_CONNECTION = saved.connection;
-      if (saved.user === undefined) delete process.env.USER;
-      else process.env.USER = saved.user;
+      for (const key of keys) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
       jest.resetModules();
     }
   });

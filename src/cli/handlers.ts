@@ -2352,9 +2352,10 @@ function summaryPanel(
 }
 
 /** Print a tunnel only when the current SSH session cannot open the server's loopback URL. */
-function printAccessHandoff(meta: RecordNS.Metadata, io: CliIo): void {
+async function printAccessHandoff(meta: RecordNS.Metadata, io: CliIo): Promise<void> {
   const access = require('../core/lifecycle/access') as typeof AccessNS;
-  const handoff = access.handoff(meta);
+  const payload = require('../core/lifecycle/payload') as typeof PayloadNS;
+  const handoff = access.handoff(meta, process.env, await payload.bindHostOf(meta));
   if (handoff === null || handoff.tunnel_command === null) return;
   io.writeOut('  remote access (workspace is loopback-only on the server):\n');
   io.writeOut(`    tunnel : ${handoff.tunnel_command}\n`);
@@ -2897,12 +2898,12 @@ export async function renderHuman(
             ? []
             : [['Booted in', fmtDuration(Number(booted))]],
         );
-        printAccessHandoff(meta, io);
+        await printAccessHandoff(meta, io);
         io.writeOut(`  next: houston logs --name ${meta.name} -f\n`);
       } else {
         io.writeOut('✓ starting\n');
         summaryPanel(meta, io);
-        printAccessHandoff(meta, io);
+        await printAccessHandoff(meta, io);
         io.writeOut(`  ready when serving : houston ready --name ${meta.name}\n`);
         io.writeOut(`  follow logs        : houston logs --name ${meta.name} -f\n`);
       }
@@ -2913,7 +2914,7 @@ export async function renderHuman(
       const meta = metaOf(value);
       io.writeOut('✓ ready\n');
       summaryPanel(meta, io, [['Booted in', fmtDuration(Number(result.booted_s))]]);
-      printAccessHandoff(meta, io);
+      await printAccessHandoff(meta, io);
       io.writeOut(`  next: houston logs --name ${meta.name} -f\n`);
       await printNotes(meta, io);
       return;
@@ -3048,7 +3049,7 @@ export async function renderHuman(
     case 'info': {
       const meta = metaOf(value);
       summaryPanel(meta, io);
-      printAccessHandoff(meta, io);
+      await printAccessHandoff(meta, io);
       io.writeOut(`  api  : houston api --name ${meta.name} GET /api/v1/me\n`);
       io.writeOut(`  curl : ${meta.rootUrl}/api/info\n`);
       await printNotes(meta, io);

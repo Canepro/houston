@@ -49,7 +49,7 @@ describe('SSH access handoff', () => {
 
   it('honours the documented overrides, forwards IPv6 loopback, and quotes a destination as one shell word', () => {
     expect(
-      handoff(workspace({ rootUrl: 'http://[::1]:3123' }), {
+      handoff(workspace({ extra: { bind_host: '::1' } }), {
         SSH_TTY: '/dev/ttys001',
         HOUSTON_SSH_HOST: 'repro; echo unsafe',
         HOUSTON_SSH_USER: "operator's team",
@@ -62,9 +62,24 @@ describe('SSH access handoff', () => {
       local_port: 4311,
       browser_url: 'http://127.0.0.1:4311',
       tunnel_command:
-        "ssh -N -L 127.0.0.1:4311:[::1]:3123 -- 'operator'\\''s team@repro; echo unsafe'",
+        "ssh -N -L '127.0.0.1:4311:[::1]:3123' -- 'operator'\\''s team@repro; echo unsafe'",
       note: REMOTE_NOTE,
     });
+  });
+
+  it('forwards the exact resolved loopback address rather than the browser hostname', () => {
+    for (const bind of ['127.0.0.2', '::1']) {
+      const answer = handoff(
+        workspace(),
+        { SSH_TTY: '/dev/ttys001', USER: 'operator', HOUSTON_SSH_HOST: 'server' },
+        bind,
+      );
+      expect(answer?.tunnel_command).toBe(
+        bind === '::1'
+          ? "ssh -N -L '127.0.0.1:3123:[::1]:3123' -- operator@server"
+          : 'ssh -N -L 127.0.0.1:3123:127.0.0.2:3123 -- operator@server',
+      );
+    }
   });
 
   it('keeps option-shaped overrides after the SSH option terminator', () => {

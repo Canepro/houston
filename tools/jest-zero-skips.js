@@ -90,7 +90,8 @@ const ROOT = path.resolve(__dirname, '..');
 // PodMonitor, serve's shutdown, and the usage and wording answers it found untrue.
 // Eight SSH access-handoff cases cover local and remote guidance, IPv6, option safety,
 // invalid local ports, wildcard binds, and the CLI's JSON and human consumers.
-const FLOOR = 4508;
+// The SSH bind regression adds one case for exact remote forwarding addresses.
+const FLOOR = 4509;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

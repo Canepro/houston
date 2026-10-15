@@ -112,8 +112,13 @@ function localPort(remotePort: number, env: AccessEnvironment): number {
   return port;
 }
 
-function forwardTarget(rootUrl: string): string {
-  return rootHost(rootUrl) === '::1' ? '[::1]' : '127.0.0.1';
+function forwardTarget(bind: string): string {
+  const host = bind
+    .trim()
+    .replace(/^\[|\]$/gu, '')
+    .toLowerCase();
+  if (host === '::1') return '[::1]';
+  return host === 'localhost' ? '127.0.0.1' : host;
 }
 
 function bindOf(meta: AccessRecord, resolvedBindHost: string): string {
@@ -125,16 +130,16 @@ function bindOf(meta: AccessRecord, resolvedBindHost: string): string {
 
 /**
  * The SSH handoff for a loopback-bound recorded workspace, or null when no tunnel guidance
- * applies. `resolvedBindHost` lets the detail payload pass its compose-derived answer. Human
- * output deliberately leaves it empty and uses persisted state, so `houston info` stays useful
- * if a half-created workspace has no compose file.
+ * applies. Both human output and the detail payload pass their compose-derived bind when
+ * available. Persisted state remains the fallback for a half-created workspace without a file.
  */
 export function handoff(
   meta: AccessRecord,
   env: AccessEnvironment = process.env,
   resolvedBindHost = '',
 ): AccessHandoff | null {
-  if (!loopback(bindOf(meta, resolvedBindHost))) return null;
+  const bind = bindOf(meta, resolvedBindHost);
+  if (!loopback(bind)) return null;
 
   const remotePort = Number(meta.hostPort);
   if (!sshSession(env)) {
@@ -152,7 +157,7 @@ export function handoff(
   const selectedPort = localPort(remotePort, env);
   const user = safeDestinationPart(remoteUser(env), 'HOUSTON_SSH_USER');
   const host = safeDestinationPart(remoteHost(env), 'HOUSTON_SSH_HOST');
-  const target = forwardTarget(meta.rootUrl);
+  const target = forwardTarget(bind);
   const destination = shellWord(`${user}@${host}`);
   // This deliberately strengthens the historical suggestion: `GatewayPorts` can widen an
   // unqualified `-L` bind, and `--` keeps an operator-supplied destination from becoming an
@@ -164,7 +169,7 @@ export function handoff(
     host_port: remotePort,
     local_port: selectedPort,
     browser_url: `http://127.0.0.1:${String(selectedPort)}`,
-    tunnel_command: `ssh -N -L ${forward} -- ${destination}`,
+    tunnel_command: `ssh -N -L ${shellWord(forward)} -- ${destination}`,
     note: REMOTE_NOTE,
   };
 }
