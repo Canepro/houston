@@ -465,7 +465,7 @@ export function settleAddressing(job: KubeCreate): void {
   );
   if (premium !== '') warn(job.emit, premium, { phase: 'plan' });
   const unlicensed = request.licenceAbsentWarning(
-    job.presetForNotes as Preset,
+    request.presetLicensing(names),
     job.microservices,
     job.licensed,
     job.regToken,

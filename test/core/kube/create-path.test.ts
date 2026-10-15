@@ -384,6 +384,29 @@ describe('a Kubernetes create', () => {
     expect(licence[0]?.message).toContain('neither --license nor --reg-token');
   });
 
+  it('does not call LDAP an Enterprise feature on a monolith', async () => {
+    // The Kubernetes LDAP adapter's `requiresLicense` is a marker of the microservices
+    // topology, not of LDAP; a monolith with LDAP and no licence gets no licence warning.
+    config.updateConfig((cfg) => {
+      delete cfg.reg_token;
+    });
+    const codes: string[] = [];
+    await createKubernetes(
+      createReq({
+        version: '8.5.1',
+        name: 'kmono',
+        preset: 'ldap',
+        runtime: 'kubernetes',
+        deployment: 'monolith',
+        offline: true,
+      }),
+      (event) => codes.push(event.code),
+    ).catch((error: unknown) => {
+      if (!(error instanceof ConflictError)) throw error;
+    });
+    expect(codes).not.toContain('LICENSE_ABSENT_EE_PRESET');
+  });
+
   it('composes several presets as one, and records the set as Compose does', async () => {
     // Side ports earlier cases in this file do not hold.
     await createRepro(

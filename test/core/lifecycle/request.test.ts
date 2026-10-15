@@ -8,6 +8,7 @@ import {
   paramsByPreset,
   licenceAbsentWarning,
   premiumAuthWarning,
+  presetLicensing,
   deriveIdpHost,
   inferRuntime,
   savedDefaultIsBillable,
@@ -403,6 +404,20 @@ describe('the Enterprise licence warning', () => {
       licenceAbsentWarning(ee, false, false, 'tok'),
       licenceAbsentWarning(plain, false, false, ''),
     ]).toEqual(['', '', '']);
+  });
+
+  it('reads licensing from the catalog, not from a runtime adapter', () => {
+    // The Kubernetes LDAP adapter marks `requiresLicense` for the microservices topology it
+    // once always ran on; the catalog's `ldap` does not need one.
+    expect(presetLicensing(['ldap'])).toEqual({ name: 'ldap', requiresLicense: false });
+    expect(presetLicensing(['email', 'ldap'])).toEqual({
+      name: 'email+ldap',
+      requiresLicense: false,
+    });
+    expect(presetLicensing(['no-such-preset'])).toEqual({
+      name: 'no-such-preset',
+      requiresLicense: false,
+    });
   });
 
   it('does not count a whitespace-only token as a licence', () => {

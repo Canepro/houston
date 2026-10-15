@@ -140,6 +140,27 @@ export function premiumAuthWarning(
 export const LICENSE_ABSENT_EE_PRESET = 'LICENSE_ABSENT_EE_PRESET';
 
 /**
+ * Whether the presets named need a licence, read from the catalog each name resolves to
+ * (a user file, a scenario's default adapter, or the built-in YAML), never from a
+ * runtime adapter. The Kubernetes LDAP adapter sets `requiresLicense` as a marker of the
+ * microservices topology it once always ran on, so asking it would call LDAP itself an
+ * Enterprise feature on a monolith. The deployment is the caller's to pass separately.
+ */
+export function presetLicensing(
+  names: readonly string[],
+): Pick<Preset, 'name' | 'requiresLicense'> {
+  let requiresLicense = false;
+  for (const name of names) {
+    try {
+      requiresLicense ||= presets.load(name).requiresLicense;
+    } catch {
+      // A name the catalog refuses is reported by the create itself; it is not a licence.
+    }
+  }
+  return { name: names.join('+'), requiresLicense };
+}
+
+/**
  * Warn when an Enterprise preset or the microservices deployment is created with neither a
  * licence nor a registration token, or ''. Unlike `premiumAuthWarning` this is not tied to
  * a Rocket.Chat version: `requires_license` on a preset says the feature does not work
