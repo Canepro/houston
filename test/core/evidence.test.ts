@@ -546,6 +546,7 @@ describe('the bundle', () => {
     expect(manifest.repro?.name).toBe('e7');
     const readme = fs.readFileSync(path.join(dest, 'README.md'), 'utf8');
     expect(readme).toContain('# Workspace `e7` — Rocket.Chat 8.5.1');
+    expect(readme).toContain('| URL | http://localhost:3000 |');
     expect(readme).toContain('houston down --name e7 --volumes --yes');
     // Rendered from the record, so it cannot say what the record withheld.
     expect(readme).not.toContain('S3cretPass');
@@ -584,6 +585,23 @@ describe('the bundle', () => {
     expect(rendered.services.rocketchat.command).toEqual(['/bin/sh', '-c', 'echo ********']);
     expect(rendered.services.rocketchat.labels['com.example.evidence-note']).toBe('********');
     expect(out.files).not.toContain('logs/compose.log');
+  });
+
+  it('uses the public URL and retains the quoted cleanup command in the README', async () => {
+    const name = 'e7-public\n';
+    await workspaceNamed(name, {}, { publicUrl: 'https://support.example.test/case?ticket=1234' });
+    const rec = await record(name);
+    const dest = path.join(workspace(name), 'out', 'bundle');
+
+    await writeBundle(name, dest, rec);
+
+    const readme = fs.readFileSync(path.join(dest, 'README.md'), 'utf8');
+    expect(readme).toContain('| URL | https://support.example.test |');
+    expect(readme).not.toContain('| URL | http://localhost:3000 |');
+    expect(readme).toContain(
+      `\`\`\`bash\nhouston capture --name 'e7-public\n' --workload smoke\n\`\`\``,
+    );
+    expect(readme).toContain(`\`\`\`bash\n${cleanupCommand(name)}\n\`\`\``);
   });
 
   it('redacts credentials in a Kubernetes values artifact', async () => {
