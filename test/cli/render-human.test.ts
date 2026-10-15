@@ -63,8 +63,8 @@ async function render(
 }
 
 describe('explicit human command renderers', () => {
-  test('all 41 routable paths have a renderer and none falls back to object JSON', async () => {
-    expect(COMMAND_SPECS).toHaveLength(41);
+  test('all 43 routable paths have a renderer and none falls back to object JSON', async () => {
+    expect(COMMAND_SPECS).toHaveLength(43);
     for (const spec of COMMAND_SPECS) {
       const action = ['users', 'edge', 'config', 'cluster'].includes(spec.path) ? 'status' : '';
       const result = await render(spec.path, { sentinel: 'must-not-be-a-json-dump' }, action);

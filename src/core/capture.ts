@@ -1,0 +1,1555 @@
+/**
+ * Drive a scripted reproduction through a browser and record what it did.
+ *
+ * `evidence` answers "what was deployed"; this answers "what happened when you did the
+ * thing". A support escalation is almost always shaped like *do X, then Y goes wrong*, and
+ * a record of the deployment proves Y exists at best. The artifacts here -- a frame per
+ * step, a screenshot per checkpoint, a video, and a log of every action -- are what a
+ * reader who was not in the session can actually look at.
+ *
+ * Three properties are load-bearing, and none of them is incidental:
+ *
+ * - FAILURE IS LOUD. houston runs version-matched workspaces, and Rocket.Chat's selectors
+ *   move between versions. A workload authored against 8.5.1 and pointed at 7.10.11 finds
+ *   nothing, and a blank frame is worse than no frame because it still looks like evidence.
+ *   A step that cannot run ends the capture, names itself in the manifest, and exits 9; and
+ *   an artifact the manifest lists but the disk does not hold fails the run the same way.
+ *
+ * - KNOWN SECRETS HAVE A NARROW, CHECKED PATH. The manifest records the workload as
+ *   authored, so a step filling `{{admin_pass}}` keeps the placeholder; a literal
+ *   credential is `REDACTED`; and the trace is rewritten after known values, session
+ *   cookies and login tokens are collected. Before a browser receives a known secret or a
+ *   literal in a credential-shaped field, its target gets a persistent visual mask which
+ *   covers it in screenshots and video.
+ *   If that mask cannot be installed, the fill refuses before the value reaches the page.
+ *   The trace records no screenshots or DOM snapshots. A page can still echo a credential
+ *   elsewhere, so the README requires a human visual review before attachment rather than
+ *   claiming an automated pixel scan that does not exist.
+ *
+ * - THE BROWSER IS INJECTED. The runner holds the ordering, redaction and failure logic
+ *   worth testing; a real browser in that path would only make it slow and flaky.
+ *   `browserDriver` builds the Playwright one, and the tests pass a fake.
+ *
+ * Playwright is not a dependency of houston: most people using this tool want a
+ * Rocket.Chat container, not a browser download. It is located at call time, from the
+ * current directory or beside houston, and its absence is a preflight refusal that names
+ * the install command.
+ */
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import * as zlib from 'node:zlib';
+
+import * as config from '../lib/config';
+import {
+  CaptureFailedError,
+  ConflictError,
+  PreflightError,
+  ReproError,
+  ValidationError,
+} from '../lib/errors';
+import { toInt, toText, valueKind } from '../lib/format';
+import { joinPath, pathExpandUser } from '../lib/home';
+import { type Bundle, record as evidenceRecord, writeBundle } from './evidence';
+import * as naming from './lifecycle/naming';
+import { adminPass, externalUrl, readMeta } from './runner/record';
+
+/**
+ * What a workload step may do. Deliberately small: each maps to a single browser call, so
+ * the DSL cannot drift into being a worse programming language. A target is a raw
+ * Playwright selector on purpose; it is the escape hatch that keeps an unusual
+ * reproduction from being blocked on this file growing a verb.
+ */
+export const ACTIONS = ['goto', 'click', 'fill', 'press', 'wait_for', 'shot'] as const;
+export type Action = (typeof ACTIONS)[number];
+
+/** Keys a step may carry beside its action. */
+const MODIFIERS: readonly string[] = ['value', 'timeout_ms', 'settle_ms'];
+
+/**
+ * A selector or placeholder name that carries a credential. Keyed off the NAME rather than
+ * the value's shape: `{{admin_pass}}` is a secret because of what it is, not because it
+ * looks like one.
+ */
+const PASSWORDISH = /pass|pwd|secret|token|otp/iu;
+
+/** `{{key}}`, resolved for the browser and never for the record. */
+const PLACEHOLDER = /\{\{[^}]*\}\}/gu;
+
+const DEFAULT_TIMEOUT_MS = 15000;
+
+/**
+ * Pacing that makes the video reviewable by a person. `slowMo` spaces the actions out;
+ * settle holds the frame after an action long enough for its RESULT to be on screen
+ * before the next step. A recording that failed review did exactly this: the click
+ * happened, but the video never showed what it changed.
+ */
+export const SLOW_MO_MS = 350;
+export const SETTLE_MS = 400;
+
+/**
+ * Pinned so two runs of the same workload produce comparable frames, and so a screenshot
+ * filed against a case is not sized by whoever ran it.
+ */
+export const VIEWPORT = Object.freeze({ width: 1280, height: 800 });
+
+/**
+ * Validation floors. Below these an artifact is almost certainly a blank frame or an empty
+ * recording; the bundle is marked suspect rather than presented as proof. Floors, not
+ * exact sizes: a legitimate artifact varies with page content.
+ */
+const MIN_FRAME_BYTES = 4096;
+const MIN_VIDEO_BYTES = 16384;
+
+export const REDACTED = 'REDACTED';
+
+/** Bright enough to make a masked credential control obvious during the required visual review. */
+export const SECRET_MASK_COLOR = '#ff00ff';
+
+/** Files that identify a Houston evidence bundle which `--force` may deliberately replace. */
+const BUNDLE_MARKERS = ['README.md', 'manifest.json'] as const;
+
+/**
+ * A workload name, and nothing that can be read as a path: `../x` or `/tmp/x` joined onto
+ * the workloads directory would read a file outside it.
+ */
+const WORKLOAD_NAME = /^[a-z0-9][a-z0-9._-]*$/iu;
+
+export interface Step {
+  action: Action;
+  target: string;
+  value: string;
+  timeoutMs: number;
+  settleMs: number;
+}
+
+export interface Workload {
+  name: string;
+  description: string;
+  steps: Step[];
+  /** `built-in`, or the path of the user file. */
+  source: string;
+}
+
+/** One row of `houston workloads`. */
+export interface WorkloadRow {
+  name: string;
+  description: string;
+  source: string;
+}
+
+/**
+ * What the runner asks of a browser. Thin on purpose: every method is one browser call,
+ * so the part with branching stays testable without a browser. `settle` and `banner` are
+ * optional because only a real recording benefits from pacing and narration, and neither
+ * may ever be the reason a step fails.
+ */
+export interface Driver {
+  goto(url: string): Promise<void>;
+  click(selector: string, timeoutMs: number): Promise<void>;
+  fill(selector: string, value: string, timeoutMs: number): Promise<void>;
+  press(key: string): Promise<void>;
+  waitFor(selector: string, timeoutMs: number): Promise<void>;
+  screenshot(file: string): Promise<void>;
+  settle?(ms: number): Promise<void>;
+  banner?(text: string): Promise<void>;
+  /** Close the browser, flushing the video; must be safe to call after a failed step. */
+  finish(): Promise<Artifacts>;
+}
+
+/**
+ * What a driver leaves behind. `video` is its file name under the capture directory, or
+ * null when nothing was recorded. `secrets` are the credentials the browser minted during
+ * the run -- session cookies, the login token -- which the runner removes from every
+ * artifact it writes after the browser closes.
+ */
+export interface Artifacts {
+  video: string | null;
+  /** A Playwright trace that has been parsed and scrubbed, or null when it could not be made safe. */
+  trace: string | null;
+  /** Secret values replaced while rewriting the Playwright trace. */
+  traceHits: number;
+  secrets: string[];
+  /** Input selectors masked in every retained PNG after a known secret was entered. */
+  maskedSelectors: string[];
+}
+
+export type Outcome = 'ok' | 'failed' | 'skipped';
+
+export interface StepRecord {
+  index: number;
+  action: Action;
+  target: string;
+  /** Present on `fill` only: the authored value, placeholders intact, or `REDACTED`. */
+  value?: string;
+  outcome: Outcome;
+  /** The frame left behind, relative to the capture directory; null when none was. */
+  frame: string | null;
+  ms: number;
+  error?: string;
+}
+
+export interface Validation {
+  check: string;
+  artifact: string;
+  status: 'ok' | 'suspect' | 'fail';
+  detail: string;
+}
+
+/** `capture/manifest.json`: what was done, what it left behind, and whether that holds up. */
+export interface Manifest {
+  workload: string;
+  description: string;
+  status: 'ok' | 'failed';
+  started_at: string;
+  finished_at: string;
+  duration_ms: number;
+  steps: StepRecord[];
+  /** The curated checkpoint screenshots, in order, relative to the capture directory. */
+  shots: string[];
+  video: string | null;
+  trace: string | null;
+  failed_step: StepRecord | null;
+  failure_frame: string | null;
+  /** Counts only, never values: what redaction did to this run. */
+  redaction: { placeholders: number; fields: number; secrets: number; trace_hits: number };
+  /** The exact automatic privacy boundaries a reviewer needs to know before attaching this. */
+  privacy: {
+    known_secret_values: number;
+    masked_input_selectors: string[];
+    trace_screenshots: false;
+    trace_snapshots: false;
+    visual_review_required: boolean;
+  };
+  validation: Validation[];
+}
+
+/** The `{{placeholders}}` a workload may use and the values they take, for the browser. */
+export type Context = Record<string, string>;
+
+function bag(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function isAction(key: string): key is Action {
+  return (ACTIONS as readonly string[]).includes(key);
+}
+
+function stamp(): string {
+  return new Date().toISOString().replace(/\.\d{3}Z$/u, 'Z');
+}
+
+function integerModifier(item: Record<string, unknown>, key: string, where: string): number {
+  const raw = item[key];
+  if (raw === undefined || raw === null) return 0;
+  try {
+    return Math.max(0, toInt(raw));
+  } catch {
+    throw new ValidationError(`${where}: ${key} must be a whole number of milliseconds`);
+  }
+}
+
+/** A workload document, refused loudly for every shape that would silently do nothing. */
+export function parseWorkload(text: string, source: string): Workload {
+  let raw: unknown;
+  try {
+    raw = config.safeLoadYaml(text);
+  } catch (error) {
+    throw new ValidationError(
+      `workload ${source} is not valid YAML: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (raw === null || raw === undefined) raw = {};
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new ValidationError(`workload ${source} is ${valueKind(raw)}, not a mapping`);
+  }
+  const doc = raw as Record<string, unknown>;
+  const rows = doc.steps === undefined || doc.steps === null ? [] : doc.steps;
+  if (!Array.isArray(rows)) {
+    throw new ValidationError(`workload ${source}: steps must be a list`);
+  }
+  const steps: Step[] = [];
+  rows.forEach((row, i) => {
+    const where = `workload ${source} step ${String(i)}`;
+    if (typeof row !== 'object' || row === null || Array.isArray(row)) {
+      throw new ValidationError(`${where} must be a mapping`);
+    }
+    const item = row as Record<string, unknown>;
+    const keys = Object.keys(item);
+    const actions = keys.filter(isAction);
+    // Named rather than ignored: a typo'd action would otherwise skip the one interaction
+    // the reproduction depends on while still producing frames, which reads as proof.
+    const unknown = keys.find((key) => !isAction(key) && !MODIFIERS.includes(key));
+    if (unknown !== undefined) {
+      throw new ValidationError(
+        `${where}: unknown key '${unknown}' (actions: ${ACTIONS.join(', ')})`,
+      );
+    }
+    const action = actions[0];
+    if (action === undefined || actions.length !== 1) {
+      throw new ValidationError(`${where} must name exactly one action (${ACTIONS.join(', ')})`);
+    }
+    const target = toText(item[action]).trim();
+    if (target === '') throw new ValidationError(`${where}: ${action} needs a target`);
+    const value = item.value;
+    if (action === 'fill' && (value === undefined || value === null)) {
+      throw new ValidationError(`${where}: fill needs a value`);
+    }
+    steps.push({
+      action,
+      target,
+      value: value === undefined || value === null ? '' : toText(value),
+      timeoutMs: integerModifier(item, 'timeout_ms', where),
+      settleMs: integerModifier(item, 'settle_ms', where),
+    });
+  });
+  if (steps.length === 0) throw new ValidationError(`workload ${source}: steps must not be empty`);
+  const name = toText(doc.name).trim();
+  return {
+    name: name === '' ? 'unnamed' : name,
+    description: toText(doc.description).trim(),
+    steps,
+    source,
+  };
+}
+
+async function readIfFile(file: string): Promise<string | null> {
+  try {
+    return await fs.readFile(file, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A workload by name. A user file (`<home>/workloads/<name>.yaml`) wins over the built-in
+ * one, the precedence presets use: when a shipped workload drifts against a new
+ * Rocket.Chat release it can be fixed locally without waiting for a release.
+ */
+export async function loadWorkload(name: string): Promise<Workload> {
+  if (!WORKLOAD_NAME.test(name)) {
+    throw new ValidationError(
+      `workload name '${name}' is not a plain name (letters, digits, '.', '_' and '-')`,
+    );
+  }
+  const user = joinPath(config.workloadDir(), `${name}.yaml`);
+  const own = await readIfFile(user);
+  if (own !== null) return parseWorkload(own, user);
+  const builtin = await readIfFile(config.dataPath('workloads', `${name}.yaml`));
+  if (builtin === null) {
+    throw new ValidationError(`unknown workload '${name}' (run \`houston workloads\` to list)`);
+  }
+  return parseWorkload(builtin, 'built-in');
+}
+
+async function yamlStems(dir: string): Promise<string[]> {
+  let entries: string[];
+  try {
+    entries = await fs.readdir(dir);
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((entry) => entry.endsWith('.yaml') && entry !== '.yaml')
+    .map((entry) => entry.slice(0, -'.yaml'.length))
+    .sort();
+}
+
+/** Every workload available here, built-in and user, a user file winning on name. */
+export async function listWorkloads(): Promise<WorkloadRow[]> {
+  const found = new Map<string, WorkloadRow>();
+  for (const stem of await yamlStems(config.dataPath('workloads'))) {
+    const text = await readIfFile(config.dataPath('workloads', `${stem}.yaml`));
+    if (text === null) continue;
+    found.set(stem, {
+      name: stem,
+      description: parseWorkload(text, 'built-in').description,
+      source: 'built-in',
+    });
+  }
+  const userDir = config.workloadDir();
+  for (const stem of await yamlStems(userDir)) {
+    const file = joinPath(userDir, `${stem}.yaml`);
+    const text = await readIfFile(file);
+    if (text === null) continue;
+    // Per file, as the preset catalogue is: one half-written workload must not take out
+    // the list, and a broken one is named rather than hidden.
+    let description: string;
+    try {
+      description = parseWorkload(text, file).description;
+    } catch (error) {
+      description = `UNREADABLE — ${error instanceof Error ? error.message : String(error)}`;
+    }
+    found.set(stem, { name: stem, description, source: file });
+  }
+  return [...found.keys()].sort().map((key) => found.get(key) as WorkloadRow);
+}
+
+/** Substitute `{{key}}` placeholders. Used for the browser, never for the record. */
+function resolve(text: string, context: Context): string {
+  let out = text;
+  for (const [key, value] of Object.entries(context)) {
+    out = out.replaceAll(`{{${key}}}`, value);
+  }
+  return out;
+}
+
+/** Resolved context values that must not survive into an artifact, keyed off their names. */
+export function secretValues(context: Context): string[] {
+  return [
+    ...new Set(
+      Object.entries(context)
+        .filter(([key, value]) => value !== '' && PASSWORDISH.test(key))
+        .map(([, value]) => value),
+    ),
+  ];
+}
+
+/** `text` with every secret replaced, and how many were. */
+export function redactText(
+  text: string,
+  secrets: readonly string[],
+): { text: string; hits: number } {
+  let out = text;
+  let hits = 0;
+  // A session token can begin with a password or another token. Replace the longest values
+  // first, otherwise replacing the prefix would leave the rest of the longer secret behind.
+  const ordered = [...new Set(secrets.filter((secret) => secret !== ''))].sort(
+    (left, right) => right.length - left.length,
+  );
+  for (const secret of ordered) {
+    const count = out.split(secret).length - 1;
+    if (count === 0) continue;
+    hits += count;
+    out = out.replaceAll(secret, REDACTED);
+  }
+  return { text: out, hits };
+}
+
+/**
+ * What the record says a `fill` typed. A value made only of placeholders carries no secret
+ * by construction, so it is recorded as authored even into a password field: "it typed
+ * {{admin_pass}}" tells a reader what happened, where `REDACTED` only tells them something
+ * did. A literal value into a credential field is redacted whatever it is: a workload
+ * author who inlines a password instead of using a placeholder must not be able to put it
+ * in a bundle that goes to a case.
+ */
+function recordedValue(step: Step, secrets: readonly string[]): string {
+  // A workload author can put a resolved password into an ordinary field by mistake. It has
+  // to be redacted before the manifest is assembled: detecting it only while validating the
+  // finished manifest would still leave the staged artifact holding the credential.
+  if (secrets.some((secret) => secret !== '' && step.value.includes(secret))) return REDACTED;
+  if (step.value.replace(PLACEHOLDER, '').trim() === '') return step.value;
+  return PASSWORDISH.test(step.target) ? REDACTED : step.value;
+}
+
+async function apply(
+  step: Step,
+  driver: Driver,
+  root: string,
+  context: Context,
+  dest: string,
+  shots: string[],
+): Promise<string | null> {
+  // `timeout_ms` is honoured by every action that waits on the page, not just `wait_for`: a
+  // click during a slow Rocket.Chat boot needs the same allowance, and a modifier that
+  // parses but is ignored fails as "your selectors moved" when the real cause was the clock.
+  const timeout = step.timeoutMs || DEFAULT_TIMEOUT_MS;
+  switch (step.action) {
+    case 'goto':
+      await driver.goto(root + resolve(step.target, context));
+      return null;
+    case 'click':
+      await driver.click(step.target, timeout);
+      return null;
+    case 'fill':
+      await driver.fill(step.target, resolve(step.value, context), timeout);
+      return null;
+    case 'press':
+      await driver.press(step.target);
+      return null;
+    case 'wait_for':
+      await driver.waitFor(step.target, timeout);
+      return null;
+    case 'shot': {
+      // A selector is not a file name. In particular, a valid selector may contain `/` or
+      // `..`; derive the checkpoint name from its position so a workload cannot escape the
+      // capture directory while still preserving the selector in the manifest.
+      const file = `shots/shot-${String(shots.length + 1).padStart(2, '0')}.png`;
+      await driver.screenshot(path.join(dest, file));
+      shots.push(file);
+      return file;
+    }
+  }
+}
+
+/** The banner narrates the video and the settle paces it; neither may fail a step. */
+async function quietly(action: (() => Promise<void>) | undefined): Promise<void> {
+  if (action === undefined) return;
+  try {
+    await action();
+  } catch {
+    // Narration and pacing are for the reader of the video, never a reason to stop.
+  }
+}
+
+async function finishQuietly(driver: Driver): Promise<Artifacts> {
+  try {
+    const out = await driver.finish();
+    return {
+      video: out.video,
+      trace: out.trace,
+      traceHits: out.traceHits,
+      secrets: out.secrets.filter((s) => s !== ''),
+      maskedSelectors: out.maskedSelectors,
+    };
+  } catch {
+    // A close failure must not mask the step failure, and must not lose the manifest.
+    return { video: null, trace: null, traceHits: 0, secrets: [], maskedSelectors: [] };
+  }
+}
+
+async function sizeOf(file: string): Promise<number | null> {
+  try {
+    const st = await fs.stat(file);
+    return st.isFile() ? st.size : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The small, standard ZIP subset Playwright traces use: local entries and a central directory. */
+const ZIP_LOCAL = 0x04034b50;
+const ZIP_CENTRAL = 0x02014b50;
+const ZIP_END = 0x06054b50;
+const ZIP_UTF8 = 0x0800;
+const ZIP_DATA_DESCRIPTOR = 0x0008;
+const ZIP_ALLOWED_FLAGS = ZIP_UTF8 | ZIP_DATA_DESCRIPTOR;
+
+interface TraceZipEntry {
+  name: Buffer;
+  flags: number;
+  modifiedTime: number;
+  modifiedDate: number;
+  data: Buffer;
+}
+
+function zipFailure(message: string): Error {
+  return new Error(`Playwright trace ZIP is not safe to rewrite: ${message}`);
+}
+
+function zipSlice(bytes: Buffer, offset: number, size: number, what: string): Buffer {
+  if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(size) || offset < 0 || size < 0)
+    throw zipFailure(`${what} has an invalid range`);
+  const end = offset + size;
+  if (end > bytes.length || end < offset) throw zipFailure(`${what} ends outside the archive`);
+  return bytes.subarray(offset, end);
+}
+
+function zipEnd(bytes: Buffer): number {
+  const first = Math.max(0, bytes.length - 0x10016);
+  for (let at = bytes.length - 22; at >= first; at -= 1) {
+    if (bytes.readUInt32LE(at) !== ZIP_END) continue;
+    const comment = bytes.readUInt16LE(at + 20);
+    if (at + 22 + comment === bytes.length) return at;
+  }
+  throw zipFailure('it has no complete end record');
+}
+
+function readTraceZip(bytes: Buffer): TraceZipEntry[] {
+  if (bytes.length < 22) throw zipFailure('it is shorter than an empty archive');
+  const end = zipEnd(bytes);
+  const disk = bytes.readUInt16LE(end + 4);
+  const centralDisk = bytes.readUInt16LE(end + 6);
+  const entriesHere = bytes.readUInt16LE(end + 8);
+  const entries = bytes.readUInt16LE(end + 10);
+  const centralSize = bytes.readUInt32LE(end + 12);
+  const centralOffset = bytes.readUInt32LE(end + 16);
+  if (disk !== 0 || centralDisk !== 0 || entriesHere !== entries)
+    throw zipFailure('it spans multiple disks');
+  if (entries === 0xffff || centralSize === 0xffffffff || centralOffset === 0xffffffff)
+    throw zipFailure('ZIP64 is not supported');
+  const central = zipSlice(bytes, centralOffset, centralSize, 'central directory');
+  let at = 0;
+  const result: TraceZipEntry[] = [];
+  for (let index = 0; index < entries; index += 1) {
+    if (at + 46 > central.length || central.readUInt32LE(at) !== ZIP_CENTRAL)
+      throw zipFailure(`central entry ${String(index)} is invalid`);
+    const flags = central.readUInt16LE(at + 8);
+    const method = central.readUInt16LE(at + 10);
+    const modifiedTime = central.readUInt16LE(at + 12);
+    const modifiedDate = central.readUInt16LE(at + 14);
+    const checksum = central.readUInt32LE(at + 16);
+    const compressedSize = central.readUInt32LE(at + 20);
+    const uncompressedSize = central.readUInt32LE(at + 24);
+    const nameLength = central.readUInt16LE(at + 28);
+    const extraLength = central.readUInt16LE(at + 30);
+    const commentLength = central.readUInt16LE(at + 32);
+    const entryDisk = central.readUInt16LE(at + 34);
+    const localOffset = central.readUInt32LE(at + 42);
+    const length = 46 + nameLength + extraLength + commentLength;
+    if (at + length > central.length)
+      throw zipFailure(`central entry ${String(index)} is truncated`);
+    if (entryDisk !== 0 || localOffset === 0xffffffff || compressedSize === 0xffffffff)
+      throw zipFailure(`central entry ${String(index)} needs ZIP64 or another disk`);
+    if ((flags & ~ZIP_ALLOWED_FLAGS) !== 0 || (method !== 0 && method !== 8))
+      throw zipFailure(`central entry ${String(index)} uses an unsupported encoding`);
+    const name = Buffer.from(central.subarray(at + 46, at + 46 + nameLength));
+    const local = zipSlice(bytes, localOffset, 30, `local entry ${String(index)}`);
+    if (local.readUInt32LE(0) !== ZIP_LOCAL)
+      throw zipFailure(`local entry ${String(index)} is invalid`);
+    if (local.readUInt16LE(6) !== flags || local.readUInt16LE(8) !== method)
+      throw zipFailure(`local entry ${String(index)} disagrees with its directory`);
+    const localNameLength = local.readUInt16LE(26);
+    const localExtraLength = local.readUInt16LE(28);
+    const dataOffset = localOffset + 30 + localNameLength + localExtraLength;
+    const encoded = zipSlice(bytes, dataOffset, compressedSize, `data for entry ${String(index)}`);
+    let data: Buffer;
+    try {
+      data = method === 0 ? Buffer.from(encoded) : zlib.inflateRawSync(encoded);
+    } catch {
+      throw zipFailure(`data for entry ${String(index)} cannot be inflated`);
+    }
+    if (data.length !== uncompressedSize || zlib.crc32(data) >>> 0 !== checksum)
+      throw zipFailure(`data for entry ${String(index)} does not match its checksum`);
+    result.push({ name, flags, modifiedTime, modifiedDate, data });
+    at += length;
+  }
+  if (at !== central.length) throw zipFailure('the central directory has trailing bytes');
+  return result;
+}
+
+/**
+ * A text secret can be serialized more than one way in a Playwright trace. The raw value
+ * covers normal command records; the JSON form covers a quoted or backslash-containing fill;
+ * and the form encoding covers a request body. Scrub every representation before retaining it.
+ */
+function secretEncodings(value: string): string[] {
+  if (value === '') return [];
+  const escaped = JSON.stringify(value);
+  const jsonString = escaped.slice(1, -1);
+  const formValue = new URLSearchParams({ value }).toString().slice('value='.length);
+  return [...new Set([value, jsonString, encodeURIComponent(value), formValue])];
+}
+
+function redactBytes(data: Buffer, values: readonly string[]): { data: Buffer; hits: number } {
+  let out = data;
+  let hits = 0;
+  const encodings = values.flatMap(secretEncodings);
+  for (const value of [...new Set(encodings)].sort(
+    (left, right) => Buffer.byteLength(right) - Buffer.byteLength(left),
+  )) {
+    const needle = Buffer.from(value, 'utf8');
+    if (needle.length === 0) continue;
+    const parts: Buffer[] = [];
+    let from = 0;
+    let found = out.indexOf(needle, from);
+    while (found !== -1) {
+      parts.push(out.subarray(from, found), Buffer.from(REDACTED, 'utf8'));
+      from = found + needle.length;
+      hits += 1;
+      found = out.indexOf(needle, from);
+    }
+    if (parts.length > 0) {
+      parts.push(out.subarray(from));
+      out = Buffer.concat(parts);
+    }
+  }
+  return { data: out, hits };
+}
+
+function writeTraceZip(entries: readonly TraceZipEntry[]): Buffer {
+  if (entries.length > 0xffff) throw zipFailure('it has too many entries');
+  const locals: Buffer[] = [];
+  const central: Buffer[] = [];
+  let offset = 0;
+  for (const entry of entries) {
+    if (entry.name.length > 0xffff || entry.data.length > 0xffffffff)
+      throw zipFailure('an entry is too large');
+    const encoded = zlib.deflateRawSync(entry.data);
+    if (encoded.length > 0xffffffff) throw zipFailure('an entry compresses beyond ZIP limits');
+    const checksum = zlib.crc32(entry.data) >>> 0;
+    const flags = entry.flags & ZIP_UTF8;
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(ZIP_LOCAL, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(flags, 6);
+    local.writeUInt16LE(8, 8);
+    local.writeUInt16LE(entry.modifiedTime, 10);
+    local.writeUInt16LE(entry.modifiedDate, 12);
+    local.writeUInt32LE(checksum, 14);
+    local.writeUInt32LE(encoded.length, 18);
+    local.writeUInt32LE(entry.data.length, 22);
+    local.writeUInt16LE(entry.name.length, 26);
+    locals.push(local, entry.name, encoded);
+
+    const directory = Buffer.alloc(46);
+    directory.writeUInt32LE(ZIP_CENTRAL, 0);
+    directory.writeUInt16LE(20, 4);
+    directory.writeUInt16LE(20, 6);
+    directory.writeUInt16LE(flags, 8);
+    directory.writeUInt16LE(8, 10);
+    directory.writeUInt16LE(entry.modifiedTime, 12);
+    directory.writeUInt16LE(entry.modifiedDate, 14);
+    directory.writeUInt32LE(checksum, 16);
+    directory.writeUInt32LE(encoded.length, 20);
+    directory.writeUInt32LE(entry.data.length, 24);
+    directory.writeUInt16LE(entry.name.length, 28);
+    directory.writeUInt32LE(offset, 42);
+    central.push(directory, entry.name);
+    offset += local.length + entry.name.length + encoded.length;
+  }
+  const directory = Buffer.concat(central);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(ZIP_END, 0);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(directory.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, directory, end]);
+}
+
+/** Rewrite a trace as a fresh, ordinary ZIP after replacing every known secret in every entry. */
+function redactTraceZip(
+  bytes: Buffer,
+  secrets: readonly string[],
+): { bytes: Buffer; hits: number } {
+  let hits = 0;
+  const entries = readTraceZip(bytes).map((entry) => {
+    const redacted = redactBytes(entry.data, secrets);
+    hits += redacted.hits;
+    return { ...entry, data: redacted.data };
+  });
+  return { bytes: writeTraceZip(entries), hits };
+}
+
+/**
+ * Whether every artifact the manifest claims holds up on disk, and whether any secret
+ * reached the two artifacts this module writes as text.
+ *
+ * `fail` means the bundle lies about what it contains, or carries a credential: the run
+ * is failed. `suspect` means an artifact exists but is implausibly small, or no video was
+ * recorded -- a blank frame that still LOOKS like evidence is the failure mode that burned
+ * a review. Suspect artifacts never raise; they are named in the manifest and the README
+ * so a reviewer checks them first.
+ */
+export async function validateArtifacts(
+  dest: string,
+  manifest: Omit<Manifest, 'validation'>,
+  secrets: readonly string[],
+): Promise<Validation[]> {
+  const rows: Validation[] = [];
+  const check = async (rel: string, kind: string, floor: number): Promise<void> => {
+    const size = await sizeOf(path.join(dest, rel));
+    if (size === null) {
+      rows.push({
+        check: kind,
+        artifact: rel,
+        status: 'fail',
+        detail: `${rel} is listed in the manifest but missing`,
+      });
+    } else if (size === 0) {
+      rows.push({ check: kind, artifact: rel, status: 'fail', detail: `${rel} is empty` });
+    } else if (size < floor) {
+      rows.push({
+        check: kind,
+        artifact: rel,
+        status: 'suspect',
+        detail: `${rel} is only ${String(size)} bytes - likely blank; review before attaching`,
+      });
+    } else {
+      rows.push({ check: kind, artifact: rel, status: 'ok', detail: rel });
+    }
+  };
+  const clean = async (rel: string, text: string): Promise<void> => {
+    const { hits } = redactText(text, secrets);
+    rows.push(
+      hits === 0
+        ? { check: 'secrets', artifact: rel, status: 'ok', detail: rel }
+        : {
+            check: 'secrets',
+            artifact: rel,
+            status: 'fail',
+            detail: `${rel} still holds ${String(hits)} secret value(s)`,
+          },
+    );
+  };
+
+  for (const step of manifest.steps) {
+    if (step.outcome !== 'ok') continue;
+    if (step.frame === null) {
+      rows.push({
+        check: 'frame',
+        artifact: `step ${String(step.index)}`,
+        status: 'fail',
+        detail: `step ${String(step.index)} (${step.action}) left no frame`,
+      });
+    } else {
+      await check(step.frame, step.action === 'shot' ? 'shot' : 'frame', MIN_FRAME_BYTES);
+    }
+  }
+  if (manifest.failure_frame !== null) {
+    await check(manifest.failure_frame, 'failure-frame', MIN_FRAME_BYTES);
+  }
+  if (manifest.video === null) {
+    // Stated rather than omitted: a silently missing recording reads as a workload that
+    // did not ask for one.
+    rows.push({
+      check: 'video',
+      artifact: '',
+      status: 'suspect',
+      detail: 'no video was recorded; the frames are the only visual record',
+    });
+  } else {
+    await check(manifest.video, 'video', MIN_VIDEO_BYTES);
+  }
+  if (manifest.trace !== null) await check(manifest.trace, 'trace', 1);
+  await clean('manifest.json', JSON.stringify(manifest));
+  return rows;
+}
+
+/**
+ * Execute a workload against `driver`, writing its artifacts and manifest into `dest`.
+ *
+ * Throws `CaptureFailedError` when a step could not run or an artifact does not hold up.
+ * The manifest is written either way, because a failed capture's partial artifacts are
+ * exactly what tells you WHERE a workload drifted; what must not happen is a run that
+ * failed halfway reporting success.
+ */
+export async function run(
+  workload: Workload,
+  driver: Driver,
+  dest: string,
+  context: Context = {},
+): Promise<Manifest> {
+  const out = pathExpandUser(dest);
+  const stepsDir = path.join(out, 'steps');
+  const root = (context.root_url ?? '').replace(/\/+$/u, '');
+  const startedAt = stamp();
+  const startedMs = Date.now();
+
+  const steps: StepRecord[] = [];
+  const shots: string[] = [];
+  let failed: StepRecord | null = null;
+  let failureFrame: string | null = null;
+  let placeholders = 0;
+  let fields = 0;
+  const runSecrets = new Set(secretValues(context));
+  let artifacts!: Artifacts;
+
+  try {
+    await fs.mkdir(stepsDir, { recursive: true });
+    try {
+      for (const [i, step] of workload.steps.entries()) {
+        const rec: StepRecord = {
+          index: i,
+          action: step.action,
+          target: step.target,
+          outcome: 'ok',
+          frame: null,
+          ms: 0,
+        };
+        if (failed !== null) {
+          rec.outcome = 'skipped';
+          steps.push(rec);
+          continue;
+        }
+        if (step.action === 'fill') {
+          const resolvedValue = resolve(step.value, context);
+          if (PASSWORDISH.test(step.target) && resolvedValue !== '') runSecrets.add(resolvedValue);
+          const value = recordedValue(step, [...runSecrets]);
+          if (value === REDACTED) fields += 1;
+          else if (value !== step.value || PLACEHOLDER.test(value)) placeholders += 1;
+          PLACEHOLDER.lastIndex = 0;
+          rec.value = value;
+        }
+        // Curated `shot` frames stay clean; every acting step is announced so the video says
+        // what it is doing while it does it.
+        const banner = driver.banner?.bind(driver);
+        const narration =
+          step.action === 'shot' ? '' : `step ${String(i)}: ${step.action} ${step.target}`;
+        await quietly(
+          banner === undefined
+            ? undefined
+            : () => banner(redactText(narration, [...runSecrets]).text),
+        );
+        const begun = Date.now();
+        try {
+          const shot = await apply(step, driver, root, context, out, shots);
+          if (shot !== null) {
+            rec.frame = shot;
+          } else {
+            // Hold the result on screen, then keep its frame. The pair is what makes an
+            // omitted or invisible action detectable at review instead of at escalation.
+            const settle = driver.settle?.bind(driver);
+            await quietly(
+              settle === undefined ? undefined : () => settle(step.settleMs || SETTLE_MS),
+            );
+            const frame = `steps/step-${String(i).padStart(2, '0')}-${step.action}.png`;
+            rec.frame = frame;
+            try {
+              await driver.screenshot(path.join(out, frame));
+            } catch {
+              // A lost frame is reported by validation, not a reason to stop the run.
+            }
+          }
+        } catch (error) {
+          rec.outcome = 'failed';
+          rec.error = error instanceof Error ? error.message : String(error);
+          failed = rec;
+          // The page as it looked at the moment of failure is the single most useful
+          // artifact a drifted workload can leave behind.
+          const frame = `steps/failed-step-${String(i).padStart(2, '0')}.png`;
+          try {
+            await driver.screenshot(path.join(out, frame));
+            failureFrame = frame;
+          } catch {
+            failureFrame = null;
+          }
+        } finally {
+          rec.ms = Date.now() - begun;
+          steps.push(rec);
+        }
+      }
+    } finally {
+      const banner = driver.banner?.bind(driver);
+      await quietly(banner === undefined ? undefined : () => banner(''));
+    }
+  } finally {
+    // A driver is already a live browser when this function is called. Close it even if
+    // initial artifact setup or narration fails, and let the original error keep its cause.
+    artifacts = await finishQuietly(driver);
+  }
+  const finishedAt = stamp();
+
+  // The browser's own session credentials join the set before anything is written as text.
+  const secrets = [...new Set([...runSecrets, ...artifacts.secrets])];
+  for (const rec of steps) {
+    rec.target = redactText(rec.target, secrets).text;
+    if (rec.value !== undefined) rec.value = redactText(rec.value, secrets).text;
+    if (rec.error !== undefined) rec.error = redactText(rec.error, secrets).text;
+  }
+
+  const partial: Omit<Manifest, 'validation'> = {
+    workload: redactText(workload.name, secrets).text,
+    description: redactText(workload.description, secrets).text,
+    status: failed === null ? 'ok' : 'failed',
+    started_at: startedAt,
+    finished_at: finishedAt,
+    duration_ms: Date.now() - startedMs,
+    steps,
+    shots,
+    video: artifacts.video,
+    trace: artifacts.trace,
+    failed_step: failed,
+    failure_frame: failureFrame,
+    redaction: { placeholders, fields, secrets: secrets.length, trace_hits: artifacts.traceHits },
+    privacy: {
+      known_secret_values: secrets.length,
+      masked_input_selectors: artifacts.maskedSelectors.map(
+        (selector) => redactText(selector, secrets).text,
+      ),
+      trace_screenshots: false,
+      trace_snapshots: false,
+      // A mask proves only that one input was covered. A page can already show a credential,
+      // or render one elsewhere after an action, and Houston has no pixel scanner that could
+      // certify the retained frames or video. Every visual capture therefore needs review.
+      visual_review_required: true,
+    },
+  };
+  const validation = await validateArtifacts(out, partial, secrets);
+  const missing = validation.filter((row) => row.status === 'fail');
+  const manifest: Manifest = {
+    ...partial,
+    status: failed === null && missing.length === 0 ? 'ok' : 'failed',
+    validation,
+  };
+  const manifestFile = path.join(out, 'manifest.json');
+  await fs.writeFile(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+
+  if (failed !== null) {
+    throw new CaptureFailedError(
+      `capture stopped at step ${String(failed.index)} (${failed.action} '${failed.target}'): ` +
+        `${failed.error ?? ''}. If the workload was written for another Rocket.Chat ` +
+        'version, its selectors may have moved.',
+      { details: { manifest: manifestFile } },
+    );
+  }
+  if (missing.length > 0) {
+    throw new CaptureFailedError(
+      `capture ran but its artifacts do not hold up: ${missing.map((row) => row.detail).join('; ')}. ` +
+        'Do not attach this bundle as proof.',
+      { details: { manifest: manifestFile } },
+    );
+  }
+  return manifest;
+}
+
+/**
+ * Stop before overwriting a bundle that already exists.
+ *
+ * A bundle is evidence, and its README is where a person writes the observed behaviour by
+ * hand. A rerun cannot restore that, so replacing it has to be something the operator asks
+ * for rather than something a repeated command does quietly. Checked before the browser
+ * starts, so a refusal costs nothing and leaves no partial artifacts behind.
+ */
+type BundleRoot = 'missing' | 'empty' | 'nonempty' | 'unsafe';
+
+async function bundleRoot(dest: string): Promise<BundleRoot> {
+  let info: Awaited<ReturnType<typeof fs.lstat>>;
+  try {
+    info = await fs.lstat(dest);
+  } catch (error) {
+    if (
+      typeof error === 'object' &&
+      error !== null &&
+      (error as { code?: unknown }).code === 'ENOENT'
+    )
+      return 'missing';
+    throw error;
+  }
+  if (!info.isDirectory() || info.isSymbolicLink()) return 'unsafe';
+  return (await fs.readdir(dest)).length === 0 ? 'empty' : 'nonempty';
+}
+
+/** A directory is replaceable only when both normal Houston bundle files identify it. */
+async function identifiesHoustonBundle(dest: string): Promise<boolean> {
+  try {
+    const manifestPath = path.join(dest, BUNDLE_MARKERS[1]);
+    const [readme, manifestInfo, manifest] = await Promise.all([
+      fs.lstat(path.join(dest, BUNDLE_MARKERS[0])),
+      fs.lstat(manifestPath),
+      fs.readFile(manifestPath, 'utf8'),
+    ]);
+    if (
+      !readme.isFile() ||
+      readme.isSymbolicLink() ||
+      !manifestInfo.isFile() ||
+      manifestInfo.isSymbolicLink()
+    )
+      return false;
+    const payload = bag(JSON.parse(manifest));
+    return toText(bag(payload.repro).name) !== '';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Refuse to reuse an evidence root without explicit force. A nonempty unrecognised
+ * directory stays untouched even with force, and an empty directory is removed so the
+ * evidence writer can claim a fresh root with exclusive creation.
+ */
+export async function prepareBundleRoot(dest: string, force: boolean): Promise<void> {
+  const state = await bundleRoot(dest);
+  if (state === 'missing') return;
+  if (state === 'unsafe') {
+    throw new ConflictError(
+      `${dest} is not a plain directory; capture will not replace it, even with --force.`,
+    );
+  }
+  if (state === 'empty') {
+    await fs.rmdir(dest);
+    return;
+  }
+  if (!force) {
+    throw new ConflictError(
+      `${dest} already contains files. Pass a different --bundle, or --force to replace an ` +
+        'identifiable earlier Houston bundle.',
+    );
+  }
+  if (!(await identifiesHoustonBundle(dest))) {
+    throw new ConflictError(
+      `${dest} is not an identifiable Houston evidence bundle; --force never removes arbitrary files.`,
+    );
+  }
+  await fs.rm(dest, { recursive: true, force: false });
+}
+
+/** Create a sibling so a failed evidence write cannot leave a partial bundle root behind. */
+async function captureStage(dest: string): Promise<string> {
+  const parent = path.dirname(dest);
+  await fs.mkdir(parent, { recursive: true });
+  return await fs.mkdtemp(path.join(parent, `.${path.basename(dest) || 'capture'}.stage-`));
+}
+
+/** The manifest is written even for a failed run, so the evidence README can name the stop. */
+async function manifestFrom(dir: string): Promise<Manifest | null> {
+  try {
+    const value = JSON.parse(await fs.readFile(path.join(dir, 'manifest.json'), 'utf8'));
+    return Object.keys(bag(value)).length === 0 ? null : (value as Manifest);
+  } catch {
+    return null;
+  }
+}
+
+/** The bundle receipt names every file, including the staged browser artifacts moved into it. */
+async function filesBelow(dir: string, prefix = ''): Promise<string[]> {
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  const found: string[] = [];
+  for (const entry of entries) {
+    const relative = path.posix.join(prefix, entry.name);
+    const absolute = path.join(dir, entry.name);
+    if (entry.isDirectory()) found.push(...(await filesBelow(absolute, relative)));
+    else if (entry.isFile()) found.push(relative);
+  }
+  return found.sort();
+}
+
+/** Keep staged files readable after a later writer fails, and name their exact location. */
+function reportStage(error: unknown, stage: string): never {
+  const note = `Capture artifacts remain at ${stage}.`;
+  if (error instanceof ReproError) {
+    error.details.capture_stage = stage;
+    error.message = `${error.message} ${note}`;
+    throw error;
+  }
+  throw new ReproError(
+    `could not finish the capture bundle: ${error instanceof Error ? error.message : String(error)}. ${note}`,
+    { details: { capture_stage: stage } },
+  );
+}
+
+/** Builds the browser for a run: the real one by default, a fake in tests. */
+export type DriverFactory = (
+  rootUrl: string,
+  dest: string,
+  secrets: readonly string[],
+) => Promise<Driver>;
+
+/**
+ * Run a workload against a workspace and write the complete attachable bundle: the
+ * capture under `capture/`, then the evidence record and its README around it.
+ *
+ * The ordering is load-bearing: the evidence bundle is written BEFORE a capture failure
+ * propagates, so a run that drifted still produces the README whose banner explains where
+ * it stopped, and the failure names that bundle. Losing it on failure would throw away the
+ * artifacts that show what went wrong.
+ *
+ * The admin login comes from the workspace record and goes to the browser only; the
+ * evidence record never carried it and the capture manifest records placeholders.
+ */
+export async function captureBundle(
+  name: string,
+  workloadName: string,
+  dest = '',
+  {
+    force = false,
+    driverFactory = browserDriver,
+  }: { force?: boolean; driverFactory?: DriverFactory } = {},
+): Promise<Record<string, unknown>> {
+  const workload = await loadWorkload(workloadName);
+  const target = await naming.resolveName(name);
+  const meta = await readMeta(target);
+  const out =
+    dest === '' ? joinPath(config.reportsDir(), target, workloadName) : pathExpandUser(dest);
+  await prepareBundleRoot(out, force);
+  const context: Context = {
+    root_url: externalUrl(meta),
+    admin_user: config.ADMIN_USERNAME,
+    admin_pass: adminPass(meta),
+  };
+  const stage = await captureStage(out);
+  const captureDir = path.join(stage, 'capture');
+  let driver: Driver;
+  try {
+    driver = await driverFactory(context.root_url ?? '', captureDir, secretValues(context));
+  } catch (error) {
+    // A driver that never started has no useful evidence. Delete its private staging directory
+    // so a failed optional-dependency preflight cannot leave raw browser output behind.
+    await fs.rm(stage, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
+
+  let failure: CaptureFailedError | null = null;
+  let manifest: Manifest | null;
+  try {
+    manifest = await run(workload, driver, captureDir, context);
+  } catch (error) {
+    if (!(error instanceof CaptureFailedError)) reportStage(error, stage);
+    failure = error;
+    manifest = await manifestFrom(captureDir);
+  }
+  const capture = manifest ?? (await manifestFrom(captureDir));
+  let payload: Record<string, unknown>;
+  try {
+    payload = await evidenceRecord(target);
+  } catch (error) {
+    reportStage(error, stage);
+  }
+  let bundle: Bundle;
+  try {
+    bundle = await writeBundle(target, out, payload, capture ?? undefined);
+  } catch (error) {
+    reportStage(error, stage);
+  }
+  try {
+    const captured = await filesBelow(captureDir, 'capture');
+    await fs.rename(captureDir, path.join(out, 'capture'));
+    bundle.files = [...new Set([...bundle.files, ...captured])].sort();
+    await fs.rm(stage, { recursive: true, force: true });
+  } catch (error) {
+    reportStage(error, stage);
+  }
+  payload.bundle = bundle;
+  if (failure !== null) {
+    failure.details.bundle = bundle.path;
+    if (capture !== null)
+      failure.details.manifest = path.join(bundle.path, 'capture', 'manifest.json');
+    throw failure;
+  }
+  payload.capture = manifest;
+  return payload;
+}
+
+/*
+ * The Playwright surface this module uses, declared here rather than imported: a type
+ * import would be a production edge to a devDependency, and the dependency gate would
+ * rightly refuse it. Each member is the documented shape of the call it names.
+ */
+interface PwVideo {
+  saveAs(file: string): Promise<void>;
+  delete(): Promise<void>;
+}
+interface PwPage {
+  goto(url: string, options: { waitUntil: 'domcontentloaded' }): Promise<unknown>;
+  click(selector: string, options: { timeout: number }): Promise<void>;
+  fill(selector: string, value: string, options: { timeout: number }): Promise<void>;
+  keyboard: { press(key: string): Promise<void> };
+  waitForSelector(selector: string, options: { timeout: number }): Promise<unknown>;
+  screenshot(options: { path: string; fullPage: boolean }): Promise<unknown>;
+  waitForTimeout(ms: number): Promise<void>;
+  evaluate(expression: string): Promise<unknown>;
+  video(): PwVideo | null;
+  close(): Promise<void>;
+}
+interface PwTracing {
+  start(options: { screenshots: boolean; snapshots: boolean }): Promise<void>;
+  stop(options: { path: string }): Promise<void>;
+}
+interface PwContext {
+  newPage(): Promise<PwPage>;
+  cookies(): Promise<{ name: string; value: string }[]>;
+  tracing: PwTracing;
+  close(): Promise<void>;
+}
+interface PwBrowser {
+  newContext(options: Record<string, unknown>): Promise<PwContext>;
+  close(): Promise<void>;
+}
+interface PwModule {
+  chromium: { launch(options: { slowMo: number }): Promise<PwBrowser> };
+}
+
+/** The packages that provide a browser, in the order tried; either launches Chromium. */
+export const PLAYWRIGHT_MODULES: readonly string[] = Object.freeze([
+  'playwright',
+  'playwright-core',
+]);
+
+const INSTALL_HINT = 'then `npx playwright install chromium`, and retry';
+
+/**
+ * Playwright, located at call time: from the current directory first, so a project that
+ * has it serves it to houston, then beside houston itself, which is where a checkout's
+ * devDependencies put it. The name is held in a variable on purpose: houston does not
+ * depend on Playwright, and the dependency gate must not read a production edge to a
+ * devDependency where there is none.
+ */
+export function loadPlaywright(candidates: readonly string[] = PLAYWRIGHT_MODULES): PwModule {
+  const paths = [process.cwd(), config.dataPath('..')];
+  for (const name of candidates) {
+    let resolved: string;
+    try {
+      resolved = require.resolve(name, { paths });
+    } catch {
+      continue;
+    }
+    return require(resolved) as PwModule;
+  }
+  throw new PreflightError(
+    'browser capture needs Playwright, which houston does not install: run ' +
+      '`npm install playwright` in this directory (or next to houston), ' +
+      INSTALL_HINT,
+  );
+}
+
+/** Playwright's own wording for a browser it has not downloaded. */
+const NO_BROWSER = /Executable doesn't exist|playwright install/iu;
+
+/** The banner, as a page expression: a small high-contrast step label the video narrates itself with. */
+function bannerScript(text: string): string {
+  return `(() => {
+    const text = ${JSON.stringify(text)};
+    let el = document.getElementById('__houston_step__');
+    if (!text) { if (el) el.remove(); return; }
+    if (!el) {
+      el = document.createElement('div');
+      el.id = '__houston_step__';
+      el.style.cssText = 'position:fixed;bottom:12px;right:12px;z-index:2147483647;'
+        + 'background:#111;color:#fff;font:600 14px/1.4 system-ui,sans-serif;'
+        + 'padding:6px 10px;border-radius:6px;opacity:.92;pointer-events:none;max-width:60vw;';
+      document.body.appendChild(el);
+    }
+    el.textContent = text;
+  })()`;
+}
+
+/**
+ * Install a document-local cover over a secret input before Playwright fills it.
+ *
+ * The cover stays above the target and follows layout changes, so it protects the real
+ * browser video as well as a later PNG. `pointer-events: none` leaves the control usable.
+ * Returning false refuses the fill before the secret reaches a page we cannot mask.
+ */
+function secretMaskScript(selector: string): string {
+  return `(() => {
+    const selector = ${JSON.stringify(selector)};
+    let target;
+    try { target = document.querySelector(selector); } catch { return false; }
+    if (!(target instanceof Element)) return false;
+    target.scrollIntoView({ block: 'center', inline: 'center' });
+    const stateKey = '__houstonSecretMasks__';
+    const state = window[stateKey] || (window[stateKey] = { entries: [], running: false });
+    let entry = state.entries.find((item) => item.selector === selector && item.target === target);
+    if (!entry) {
+      const cover = document.createElement('div');
+      cover.setAttribute('aria-hidden', 'true');
+      cover.style.cssText = 'position:fixed;z-index:2147483647;pointer-events:none;'
+        + 'background:${SECRET_MASK_COLOR};opacity:1;display:none;';
+      document.documentElement.appendChild(cover);
+      entry = { selector, target, cover };
+      state.entries.push(entry);
+    }
+    const position = () => {
+      for (const item of state.entries) {
+        if (!item.target.isConnected) { item.cover.style.display = 'none'; continue; }
+        const rect = item.target.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) { item.cover.style.display = 'none'; continue; }
+        item.cover.style.display = 'block';
+        item.cover.style.left = rect.left + 'px';
+        item.cover.style.top = rect.top + 'px';
+        item.cover.style.width = rect.width + 'px';
+        item.cover.style.height = rect.height + 'px';
+      }
+    };
+    position();
+    if (entry.cover.style.display !== 'block') return false;
+    if (!state.running) {
+      state.running = true;
+      const tick = () => { position(); requestAnimationFrame(tick); };
+      requestAnimationFrame(tick);
+    }
+    return true;
+  })()`;
+}
+
+/**
+ * The real browser. Thin on purpose: every method is one Playwright call, so the part
+ * with branching stays testable without a browser. Reduced motion and the pinned
+ * viewport make repeated runs of one workload comparable frames rather than diffs made
+ * of animation.
+ */
+class PlaywrightDriver implements Driver {
+  private readonly secretTargets = new Set<string>();
+  private readonly runtimeSecrets: Set<string>;
+
+  private constructor(
+    private readonly dest: string,
+    private readonly browser: PwBrowser,
+    private readonly context: PwContext,
+    private readonly page: PwPage,
+    baseSecrets: readonly string[],
+  ) {
+    this.runtimeSecrets = new Set(baseSecrets.filter((secret) => secret !== ''));
+  }
+
+  static async open(
+    pw: PwModule,
+    rootUrl: string,
+    dest: string,
+    secrets: readonly string[] = [],
+  ): Promise<PlaywrightDriver> {
+    await fs.mkdir(dest, { recursive: true });
+    let browser: PwBrowser;
+    try {
+      // `slowMo` spaces the actions so a person can follow the video. Without it a scripted
+      // run clicks faster than the page can visibly respond, which is how a recording ends
+      // up not demonstrating the very action it performed.
+      browser = await pw.chromium.launch({ slowMo: SLOW_MO_MS });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!NO_BROWSER.test(message)) throw error;
+      throw new PreflightError(
+        `Chromium for Playwright is not installed: run \`npx playwright install chromium\`, and retry`,
+      );
+    }
+    let context: PwContext | null = null;
+    try {
+      context = await browser.newContext({
+        viewport: { ...VIEWPORT },
+        recordVideo: { dir: path.join(dest, '_video'), size: { ...VIEWPORT } },
+        reducedMotion: 'reduce',
+        ...(rootUrl === '' ? {} : { baseURL: rootUrl }),
+      });
+      // Trace action and network data are useful after byte-level redaction. Screenshots and
+      // snapshots are not: their pixels and DOM state cannot be certified by that redaction.
+      await context.tracing.start({ screenshots: false, snapshots: false });
+      const page = await context.newPage();
+      return new PlaywrightDriver(
+        dest,
+        browser,
+        context,
+        page,
+        secrets.filter((value) => value !== ''),
+      );
+    } catch (error) {
+      try {
+        await context?.close();
+      } catch {
+        // The browser close below is still necessary when creating a context failed halfway.
+      }
+      try {
+        await browser.close();
+      } catch {
+        // Preserve the original Playwright error.
+      }
+      throw error;
+    }
+  }
+
+  async goto(url: string): Promise<void> {
+    await this.page.goto(url, { waitUntil: 'domcontentloaded' });
+  }
+
+  async click(selector: string, timeoutMs: number): Promise<void> {
+    await this.page.click(selector, { timeout: timeoutMs });
+  }
+
+  async fill(selector: string, value: string, timeoutMs: number): Promise<void> {
+    const knownValue = [...this.runtimeSecrets].some(
+      (secret) => secret !== '' && value.includes(secret),
+    );
+    const credentialValue = PASSWORDISH.test(selector) && value !== '';
+    if (credentialValue || knownValue) {
+      // A workload can carry a credential literal which is not in the workspace record. It
+      // deserves the same treatment as the recorded admin password: mask it before filling
+      // and retain it only in the in-memory set that rewrites the final trace and manifest.
+      if (credentialValue) this.runtimeSecrets.add(value);
+      let installed: unknown;
+      try {
+        installed = await this.page.evaluate(secretMaskScript(selector));
+      } catch {
+        installed = false;
+      }
+      if (installed !== true) {
+        throw new PreflightError(
+          `capture will not fill a known secret into '${selector}' because its visual mask could not be installed`,
+        );
+      }
+      this.secretTargets.add(selector);
+    }
+    await this.page.fill(selector, value, { timeout: timeoutMs });
+  }
+
+  async press(key: string): Promise<void> {
+    await this.page.keyboard.press(key);
+  }
+
+  async waitFor(selector: string, timeoutMs: number): Promise<void> {
+    await this.page.waitForSelector(selector, { timeout: timeoutMs });
+  }
+
+  async screenshot(file: string): Promise<void> {
+    await this.page.screenshot({ path: file, fullPage: true });
+  }
+
+  async settle(ms: number): Promise<void> {
+    await this.page.waitForTimeout(ms);
+  }
+
+  async banner(text: string): Promise<void> {
+    await this.page.evaluate(bannerScript(text));
+  }
+
+  /**
+   * The credentials the browser holds now that the run is over: every cookie value and
+   * the Meteor login token. Short values are left out, because a cookie such as a locale
+   * is not a secret and replacing every `en` in the log would mangle it.
+   */
+  private async sessionSecrets(): Promise<string[]> {
+    const found: string[] = [];
+    try {
+      for (const cookie of await this.context.cookies()) found.push(cookie.value);
+      const token = await this.page.evaluate("localStorage.getItem('Meteor.loginToken')");
+      if (typeof token === 'string') found.push(token);
+    } catch {
+      // A page that crashed has no session to redact.
+    }
+    return found.filter((value) => value.length >= 8);
+  }
+
+  async finish(): Promise<Artifacts> {
+    const secrets = [...new Set([...this.runtimeSecrets, ...(await this.sessionSecrets())])];
+    const out: Artifacts = {
+      video: null,
+      trace: null,
+      traceHits: 0,
+      secrets,
+      maskedSelectors: [...this.secretTargets].sort(),
+    };
+    const video = this.page.video();
+    const trace = path.join(this.dest, 'trace.zip');
+    try {
+      await this.context.tracing.stop({ path: trace });
+      const redacted = redactTraceZip(await fs.readFile(trace), secrets);
+      await fs.writeFile(trace, redacted.bytes);
+      out.trace = 'trace.zip';
+      out.traceHits = redacted.hits;
+    } catch {
+      // A trace whose central directory cannot be rebuilt, or whose replacement cannot be
+      // written, is not certifiably secret-safe. Keep the rest of the capture, never it.
+      await fs.rm(trace, { force: true }).catch(() => undefined);
+    }
+    try {
+      await this.page.close();
+    } catch {
+      // Context close below still finalises a video when the page itself has already crashed.
+    }
+    try {
+      await this.context.close(); // finalises the video file
+    } catch {
+      // A lost recording is reported by validation; the frames and the manifest remain.
+    }
+    if (video !== null) {
+      try {
+        await video.saveAs(path.join(this.dest, 'video.webm'));
+        await video.delete();
+        out.video = 'video.webm';
+      } catch {
+        // The validated frames remain when Playwright did not finalise the recording.
+      }
+    }
+    try {
+      await this.browser.close();
+    } catch {
+      // Nothing left to flush.
+    }
+    // This directory belongs to the driver. If saveAs failed it holds an unlisted raw video,
+    // which must not travel with an otherwise attachable capture.
+    await fs
+      .rm(path.join(this.dest, '_video'), { recursive: true, force: true })
+      .catch(() => undefined);
+    return out;
+  }
+}
+
+/** A Playwright-backed driver recording a video into `dest`, or a preflight refusal. */
+export async function browserDriver(
+  rootUrl: string,
+  dest: string,
+  secrets: readonly string[] = [],
+): Promise<Driver> {
+  return await PlaywrightDriver.open(loadPlaywright(), rootUrl, dest, secrets);
+}

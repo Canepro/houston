@@ -19,7 +19,7 @@ On a shared machine, set `HOUSTON_USER=<account>` so the audit log names who ran
 
 ## `--json`
 
-`up`, `ready`, `down`, `list`, `info`, `evidence`, `doctor`, `loadtest`, `capacity`,
+`up`, `ready`, `down`, `list`, `info`, `evidence`, `capture`, `doctor`, `loadtest`, `capacity`,
 `cluster` and `skill` take `--json`; `capabilities` always prints JSON. Every reply is one envelope:
 
 ```json
@@ -56,6 +56,7 @@ and exit codes. Read it instead of assuming a flag exists.
 | 6 | gate | `GATE`, `GATE_*` | a person has to decide; see below |
 | 7 | create failed | `CREATE_FAILED` | it did not come up. Stop; do not retry in a loop |
 | 8 | conflict | `CONFLICT` | the name or port is taken |
+| 9 | capture failed | `CAPTURE_FAILED` | the scripted browser capture stopped or its artifacts did not hold up; inspect the retained partial bundle |
 | 130 | interrupt | — | Ctrl-C: no envelope |
 | 252 | no code | — | `bin/houston` could not find houston's code; nothing ran |
 

@@ -157,6 +157,22 @@ export class CreateFailedError extends ReproError {
   static override exitCode = 7;
 }
 
+/**
+ * A scripted browser capture could not complete, or its artifacts do not hold up.
+ *
+ * Distinct from `NotReadyError` (exit 5, "poll again") because retrying is pointless: the
+ * usual cause is a workload whose selectors were written against another Rocket.Chat
+ * version, and houston exists to run version-matched workspaces. It earns its own code so
+ * that outcome is unmistakable -- the failure it prevents is a half-run capture whose blank
+ * frames still look like proof. `details.bundle` names the bundle that was written anyway,
+ * because the partial artifacts are what show where the workload drifted.
+ */
+export class CaptureFailedError extends ReproError {
+  static override httpStatus = 500;
+  static override code = 'CAPTURE_FAILED';
+  static override exitCode = 9;
+}
+
 /** The gate as a plain object, for a machine-readable error payload. */
 export interface Gate {
   kind: string;
@@ -272,6 +288,7 @@ export const ERROR_CLASSES: readonly (typeof ReproError)[] = Object.freeze([
   DockerError,
   PreflightError,
   CreateFailedError,
+  CaptureFailedError,
   AuthorityGateError,
 ]);
 
@@ -338,4 +355,5 @@ export const EXIT_CODES: Readonly<Record<number, string>> = Object.freeze({
   6: 'gate',
   7: 'create_failed',
   8: 'conflict',
+  9: 'capture_failed',
 });

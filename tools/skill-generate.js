@@ -21,6 +21,7 @@
 'use strict';
 
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -49,6 +50,9 @@ const EXIT_PROSE = {
     '     PERSON to run, not something you may run yourself.',
   create_failed: 'known dead. Stop; do not retry in a loop.',
   conflict: 'the name or port is taken. Pick another.',
+  capture_failed:
+    'a scripted browser capture stopped, or its artifacts do not hold up.\n' +
+    '     `error.details.bundle` is the partial bundle; read its README, do not attach it as proof.',
 };
 
 function code(text) {
@@ -123,10 +127,21 @@ function render(manifest, template, version) {
 
 /** The shipped file as this build would write it now. */
 function generate() {
-  require(path.join(ROOT, 'tools', 'ts-require')).install();
-  const { capabilities } = require(path.join(ROOT, 'src', 'cli', 'capabilities.ts'));
-  const version = require(path.join(ROOT, 'package.json')).version;
-  return render(capabilities(), fs.readFileSync(TEMPLATE, 'utf8'), version);
+  // `capabilities()` includes user presets for the live CLI. The shipped skill describes the
+  // build, so render from an empty home and never let a caller's local preset leak into Git.
+  const previousHome = process.env.HOUSTON_HOME;
+  const buildHome = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-skill-'));
+  try {
+    process.env.HOUSTON_HOME = buildHome;
+    require(path.join(ROOT, 'tools', 'ts-require')).install();
+    const { capabilities } = require(path.join(ROOT, 'src', 'cli', 'capabilities.ts'));
+    const version = require(path.join(ROOT, 'package.json')).version;
+    return render(capabilities(), fs.readFileSync(TEMPLATE, 'utf8'), version);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOUSTON_HOME;
+    else process.env.HOUSTON_HOME = previousHome;
+    fs.rmSync(buildHome, { recursive: true, force: true });
+  }
 }
 
 if (require.main === module) {

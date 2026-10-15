@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -20,6 +21,7 @@ jest.mock('../../src/core/kube/namespace', () => {
 import * as lifecyclePayload from '../../src/core/lifecycle/payload';
 import * as kubeNamespace from '../../src/core/kube/namespace';
 import * as config from '../../src/lib/config';
+import { renderMarkdown } from '../../src/lib/capture-render';
 import { ValidationError } from '../../src/lib/errors';
 import { Interrupted } from '../../src/seams/exec';
 import {
@@ -67,6 +69,18 @@ const COMPOSE = [
   '    image: mongo:7.0',
   '',
 ].join('\n');
+
+function captureInstructionArgs(readme: string): string[] {
+  const match = readme.match(/```bash\nhouston capture([\s\S]*?)\n```/u);
+  const suffix = match?.[1];
+  if (suffix === undefined) throw new Error('README did not include a fenced capture instruction');
+  const parsed = spawnSync('/bin/sh', ['-c', `set -- capture${suffix}; printf '%s\\0' "$@"`], {
+    encoding: 'buffer',
+  });
+  if (parsed.status !== 0)
+    throw new Error(`shell rejected capture instruction: ${String(parsed.stderr)}`);
+  return parsed.stdout.toString('utf8').split('\0').filter(Boolean);
+}
 
 const KUBERNETES_DETAIL = {
   deployment: 'monolith',
@@ -747,8 +761,21 @@ describe('the bundle', () => {
     const readme = fs.readFileSync(path.join(dest, 'README.md'), 'utf8');
     expect(readme).toContain('| URL | https://support.example.test |');
     expect(readme).not.toContain('| URL | http://localhost:3000 |');
-    expect(readme).not.toContain('houston capture');
+    expect(readme).toContain('houston capture --name ');
     expect(readme).toContain(`\`\`\`bash\n${cleanupCommand(name)}\n\`\`\``);
+  });
+
+  it('renders a capture instruction the shell parses as the original arguments', () => {
+    const name = "e7-public's\ncapture";
+    const readme = renderMarkdown({ repro: { name, rc_version: '8.5.1' } });
+
+    expect(captureInstructionArgs(readme)).toEqual([
+      'capture',
+      '--name',
+      name,
+      '--workload',
+      'smoke',
+    ]);
   });
 
   it('redacts credentials in a Kubernetes values artifact', async () => {
