@@ -5,14 +5,20 @@ import * as path from 'node:path';
 import * as YAML from 'yaml';
 
 import * as config from '../../../src/lib/config';
-import { AuthorityGateError, CreateFailedError, DockerError } from '../../../src/lib/errors';
+import {
+  AuthorityGateError,
+  ConflictError,
+  CreateFailedError,
+  DockerError,
+} from '../../../src/lib/errors';
 import type { Event } from '../../../src/lib/events';
 import { grant, revoke } from '../../../src/lib/onboarding';
+import { Interrupted } from '../../../src/seams/exec';
 import type { KubectlResult } from '../../../src/seams/kubectl';
 
 import { workspaceNamespaces } from '../../../src/core/kube/capabilities';
 import { deleteCluster, ensureCluster } from '../../../src/core/kube/cluster';
-import { kube, type RunOptions } from '../../../src/core/kube/exec';
+import { kube, ownedKubeconfig, type RunOptions } from '../../../src/core/kube/exec';
 import { mongoManifest } from '../../../src/core/kube/manifests';
 import {
   CHART,
@@ -391,9 +397,9 @@ describe('the cluster houston makes for itself', () => {
     expect(calls.some(({ argv }) => argv.includes('create'))).toBe(false);
   });
 
-  it('adopts a same-named cluster an earlier houston made, by the workspaces it holds', async () => {
-    // Releases before the marker left none. A person upgrading must not delete a cluster
-    // holding their workspaces; a namespace with houston's owner label is proof enough.
+  it('refuses an unmarked same-named cluster even when it has a Houston-labelled namespace', async () => {
+    // The namespace label proves only that namespace. Another operator can forge it, so an
+    // unmarked cluster cannot become ours or leave a kubeconfig in Houston's durable state.
     config.updateConfig((stored) => {
       grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
     });
@@ -407,12 +413,97 @@ describe('the cluster houston makes for itself', () => {
       }
       return undefined;
     });
-    expect(await ensureCluster()).toBe(CONTEXT);
+    await expect(ensureCluster()).rejects.toBeInstanceOf(ConflictError);
     expect(calls.some(({ argv }) => argv.includes('create'))).toBe(false);
-    const marker = calls.find(({ argv }) => argv.includes('apply') && argv.includes('--filename'));
-    expect(JSON.parse(String(marker?.options.input))).toMatchObject({
-      data: { cluster: CLUSTER_NAME },
+    expect(calls.some(({ argv }) => argv.includes('get') && argv.includes('namespace'))).toBe(
+      false,
+    );
+    expect(calls.some(({ argv }) => argv.includes('apply') && argv.includes('--filename'))).toBe(
+      false,
+    );
+
+    const exports = calls.filter(
+      ({ argv }) => argv.includes('export') && argv.includes('kubeconfig'),
+    );
+    expect(exports).toHaveLength(1);
+    const probe = exports[0];
+    const probeConfig = String(probe?.argv[probe.argv.indexOf('--kubeconfig') + 1]);
+    expect(probeConfig).not.toBe(ownedKubeconfig());
+    expect(probe?.options.env?.KUBECONFIG).toBe(probeConfig);
+    const markerRead = calls.find(({ argv }) => argv.includes('get') && argv.includes('configmap'));
+    expect(markerRead?.options.env?.KUBECONFIG).toBe(probeConfig);
+    expect(fs.existsSync(ownedKubeconfig())).toBe(false);
+    expect(fs.existsSync(path.dirname(probeConfig))).toBe(false);
+  });
+
+  it.each(['kubeconfig export', 'readiness'])(
+    'rolls back a newly created unmarked cluster when %s fails',
+    async (failure) => {
+      config.updateConfig((stored) => {
+        grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+      });
+      route((joined) => {
+        if (joined.includes('get clusters')) return { stdout: '' };
+        if (joined.includes('create cluster')) return undefined;
+        if (joined.includes('export kubeconfig') && failure === 'kubeconfig export') {
+          return { returncode: 1, stderr: 'export failed' };
+        }
+        if (joined.includes('current-context')) return { stdout: CONTEXT };
+        if (joined.includes('/readyz') && failure === 'readiness') {
+          return { returncode: 1, stderr: 'not ready' };
+        }
+        return undefined;
+      });
+
+      await expect(ensureCluster()).rejects.toBeInstanceOf(CreateFailedError);
+      const deletes = calls.filter(
+        ({ argv }) => argv[0] === 'kind' && argv.includes('delete') && argv.includes('cluster'),
+      );
+      expect(deletes).toHaveLength(1);
+      expect(calls.some(({ argv }) => argv.includes('apply') && argv.includes('--filename'))).toBe(
+        false,
+      );
+    },
+  );
+
+  it('keeps a newly marked cluster when a later progress listener fails', async () => {
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
     });
+    route(healthy(''));
+
+    await expect(
+      ensureCluster((event: Event) => {
+        if (event.message.includes(' ready at ')) throw new Error('progress listener failed');
+      }),
+    ).rejects.toThrow('progress listener failed');
+
+    expect(calls.some(({ argv }) => argv.includes('apply') && argv.includes('--filename'))).toBe(
+      true,
+    );
+    expect(
+      calls.some(
+        ({ argv }) => argv[0] === 'kind' && argv.includes('delete') && argv.includes('cluster'),
+      ),
+    ).toBe(false);
+  });
+
+  it('rolls back a newly created unmarked cluster before rethrowing an interrupt', async () => {
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
+    route((joined) => (joined.includes('get clusters') ? { stdout: '' } : undefined));
+    const routed = kube.run;
+    kube.run = (argv, options = {}) => {
+      if (argv.includes('export')) return Promise.reject(new Interrupted());
+      return routed(argv, options);
+    };
+
+    await expect(ensureCluster()).rejects.toBeInstanceOf(Interrupted);
+    const deletes = calls.filter(
+      ({ argv }) => argv[0] === 'kind' && argv.includes('delete') && argv.includes('cluster'),
+    );
+    expect(deletes).toHaveLength(1);
   });
 
   it('refuses a same-named cluster without Houston’s ConfigMap, even when force is requested', async () => {

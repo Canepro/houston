@@ -5,9 +5,14 @@
  * adopted. `deleteCluster` takes NO cluster parameter at all, deliberately -- it can only
  * ever mean ours, and a parameter would be an invitation to pass somebody else's.
  */
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+
 import { ConflictError, CreateFailedError, DockerError, PreflightError } from '../../lib/errors';
 import { info, nullEmit, type Emit } from '../../lib/events';
 import { requireGrant, requireOnboarded } from '../../lib/onboarding';
+import { makeTempDir } from '../../lib/tempdir';
+import { cleanup } from '../../seams/exec';
 import { reproLock } from '../runner/locks';
 
 import { why } from './ask';
@@ -79,7 +84,7 @@ async function markClusterOwned(context: string): Promise<void> {
  * A failed or malformed read is not evidence of ownership. This check intentionally does
  * not use namespace labels: those prove individual workspace ownership, not the cluster.
  */
-async function clusterIsOurs(context: string): Promise<boolean> {
+async function clusterIsOurs(context: string, env?: NodeJS.ProcessEnv): Promise<boolean> {
   const result = await kube.run(
     [
       'kubectl',
@@ -94,7 +99,7 @@ async function clusterIsOurs(context: string): Promise<boolean> {
       '--output',
       'json',
     ],
-    { timeout: APPLY_TIMEOUT, own: true },
+    { timeout: APPLY_TIMEOUT, own: true, ...(env === undefined ? {} : { env }) },
   );
   if (result.returncode !== 0) {
     throw new DockerError(`cluster ownership marker could not be read: ${why(result)}`);
@@ -117,6 +122,49 @@ async function clusterIsOurs(context: string): Promise<boolean> {
   return labels?.[OWNER_LABEL_KEY] === OWNER_LABEL_VALUE && data?.cluster === CLUSTER_NAME;
 }
 
+/** Export a Kind kubeconfig and read its context through that exact private file. */
+async function exportKubeconfig(kubeconfig: string, env: NodeJS.ProcessEnv): Promise<string> {
+  const exported = await kube.run(
+    ['kind', 'export', 'kubeconfig', '--name', CLUSTER_NAME, '--kubeconfig', kubeconfig],
+    { timeout: APPLY_TIMEOUT, own: true, env },
+  );
+  if (exported.returncode !== 0) {
+    throw new CreateFailedError(
+      `cluster ${CLUSTER_NAME} exists but its kubeconfig could not be read: ${why(exported)}`,
+    );
+  }
+  const current = await kube.run(['kubectl', 'config', 'current-context'], {
+    timeout: APPLY_TIMEOUT,
+    own: true,
+    env,
+  });
+  return current.returncode === 0 && current.stdout.trim() !== '' ? current.stdout.trim() : CONTEXT;
+}
+
+/**
+ * Prove an existing fixed-name cluster before writing it into Houston's durable kubeconfig.
+ *
+ * The temporary directory is mode 0700 and is removed after the marker read. Its environment
+ * points both Kind's explicit output and KUBECONFIG at that file, so neither the user's
+ * kubeconfig nor Houston's later trusted client state can be changed by a refused cluster.
+ */
+async function verifyExistingClusterOwnership(): Promise<void> {
+  const directory = makeTempDir('houston-kind-probe-');
+  const kubeconfig = path.join(directory, 'config');
+  const env = { ...process.env, KUBECONFIG: kubeconfig };
+  try {
+    const context = await exportKubeconfig(kubeconfig, env);
+    if (!(await clusterIsOurs(context, env))) {
+      throw new ConflictError(
+        `a Kind cluster named '${CLUSTER_NAME}' exists without Houston's ownership marker; ` +
+          'refusing to reuse or delete it. Remove or rename that cluster yourself, then retry.',
+      );
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 /** Remove only a cluster this invocation created before it could leave an ownership receipt. */
 async function rollbackUnmarkedCluster(): Promise<string> {
   const result = await kube.run(['kind', 'delete', 'cluster', '--name', CLUSTER_NAME], {
@@ -126,6 +174,19 @@ async function rollbackUnmarkedCluster(): Promise<string> {
   return result.returncode === 0
     ? '; the unmarked cluster was rolled back'
     : `; rollback also failed: ${why(result)}`;
+}
+
+/**
+ * Remove only the cluster this call created if an error reached it before the ownership
+ * marker. `cleanup` keeps the rollback runnable while a Ctrl-C is unwinding, then the
+ * original interruption remains the caller's result.
+ */
+async function failBeforeOwnershipMarker(error: unknown): Promise<never> {
+  const rollback = await cleanup(async () => await rollbackUnmarkedCluster());
+  if (error instanceof CreateFailedError) {
+    throw new CreateFailedError(`${error.message}${rollback}`);
+  }
+  throw error;
 }
 
 /**
@@ -141,7 +202,9 @@ async function createIfAbsent(emit: Emit, kubeconfig: string): Promise<boolean> 
       requireOnboarded();
       requireGrant('owned-cluster');
       if ((await clusters())[0].includes(CLUSTER_NAME)) {
-        info(emit, `reusing cluster ${CLUSTER_NAME}`, { phase: 'provision' });
+        info(emit, `checking ownership of existing cluster ${CLUSTER_NAME}`, {
+          phase: 'provision',
+        });
         return false;
       }
       info(
@@ -166,18 +229,6 @@ async function createIfAbsent(emit: Emit, kubeconfig: string): Promise<boolean> 
       return res.returncode === 0;
     }
   }
-}
-
-/**
- * Whether a same-named cluster with no marker is one an earlier houston made. Releases
- * before the marker left none, and a person upgrading must not have to delete a cluster
- * holding their workspaces and volumes. The proof is the workspaces themselves: a
- * namespace carrying houston's owner label is written by nothing else. A refused read
- * is not a proof either way, so it adopts nothing.
- */
-async function madeByAnEarlierHouston(context: string): Promise<boolean> {
-  const owned = await workspaceNamespaces(context);
-  return owned !== null && owned.length > 0;
 }
 
 /**
@@ -207,55 +258,32 @@ export async function ensureCluster(emit: Emit = nullEmit): Promise<string> {
 async function ensureClusterLocked(emit: Emit): Promise<string> {
   const kubeconfig = ownedKubeconfig();
   const createdHere = await createIfAbsent(emit, kubeconfig);
-  // ALWAYS export, not only after creating. `kind get clusters` reads Docker, so it sees a
-  // cluster that houston's OWN kubeconfig knows nothing about -- which happens whenever
-  // the cluster outlives the kubeconfig: a different or fresh HOUSTON_HOME, a deleted
-  // config, or a cluster someone made by hand. Then "reusing cluster" is followed by every
-  // kubectl call going to localhost:8080 and the create failing with "the API server is
-  // not answering" about a cluster that is perfectly healthy.
-  const exported = await kube.run(
-    ['kind', 'export', 'kubeconfig', '--name', CLUSTER_NAME, '--kubeconfig', kubeconfig],
-    { timeout: APPLY_TIMEOUT, own: true },
-  );
-  if (exported.returncode !== 0) {
-    throw new CreateFailedError(
-      `cluster ${CLUSTER_NAME} exists but its kubeconfig could not be read: ${why(exported)}`,
-    );
-  }
-  const context = await clusterContext();
-  if (!(await reachable(context))) {
-    throw new CreateFailedError(
-      `cluster ${CLUSTER_NAME} was created but its API server is not answering at ` +
-        `'${context}'. \`kind delete cluster --name ${CLUSTER_NAME}\` and try again.`,
-    );
-  }
-  if (createdHere) {
-    try {
-      await markClusterOwned(context);
-    } catch (error) {
-      if (error instanceof CreateFailedError) {
-        throw new CreateFailedError(`${error.message}${await rollbackUnmarkedCluster()}`);
-      }
-      throw error;
-    }
-  } else if (!(await clusterIsOurs(context))) {
-    if (!(await madeByAnEarlierHouston(context))) {
-      throw new ConflictError(
-        `a Kind cluster named '${CLUSTER_NAME}' exists without Houston's ownership marker; ` +
-          'refusing to reuse or delete it. Remove or rename that cluster yourself, then retry.',
+  if (!createdHere) await verifyExistingClusterOwnership();
+
+  let context: string;
+  try {
+    // A marked cluster that outlived this home's kubeconfig needs exporting before Houston
+    // can use it. The marker probe above makes this persistent write only after ownership is
+    // proved; a newly created cluster is known to this invocation and is rolled back below
+    // if it cannot establish that proof.
+    context = await exportKubeconfig(kubeconfig, ownedEnv());
+    if (!(await reachable(context))) {
+      throw new CreateFailedError(
+        `cluster ${CLUSTER_NAME} was created but its API server is not answering at ` +
+          `'${context}'. \`kind delete cluster --name ${CLUSTER_NAME}\` and try again.`,
       );
     }
-    // Adopted, not refused: the grant just checked is the authority to own this cluster,
-    // and its houston workspaces are the proof an earlier release made it.
-    info(
-      emit,
-      `adopting cluster ${CLUSTER_NAME}: an earlier houston made it, and it holds houston workspaces`,
-      {
-        phase: 'provision',
-      },
-    );
-    await markClusterOwned(context);
+    if (createdHere) {
+      await markClusterOwned(context);
+    }
+  } catch (error) {
+    if (createdHere) {
+      await failBeforeOwnershipMarker(error);
+    }
+    throw error;
   }
+  // The marker has been recorded. A downstream progress listener may fail, but that
+  // must not turn a healthy marked cluster into a rollback candidate.
   info(emit, `cluster ${CLUSTER_NAME} ready at ${context}`, { phase: 'provision' });
   return context;
 }
