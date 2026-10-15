@@ -360,6 +360,30 @@ describe('a Kubernetes create', () => {
     expect(said.filter((line) => line.includes('Premium plan for LDAP login'))).toHaveLength(1);
   });
 
+  it('warns, with a stable code, that unlicensed microservices stop after the first replica', async () => {
+    // An earlier case may leave a box-wide token, which rightly silences the warning.
+    config.updateConfig((cfg) => {
+      delete cfg.reg_token;
+    });
+    const said: { message: string; code: string }[] = [];
+    await createKubernetes(
+      createReq({
+        version: '8.5.1',
+        name: 'kmicro',
+        runtime: 'kubernetes',
+        deployment: 'microservices',
+        offline: true,
+      }),
+      (event) => said.push({ message: event.message, code: event.code }),
+    ).catch((error: unknown) => {
+      if (!(error instanceof ConflictError)) throw error;
+    });
+    const licence = said.filter((line) => line.code === 'LICENSE_ABSENT_EE_PRESET');
+    expect(licence).toHaveLength(1);
+    expect(licence[0]?.message).toContain('Enterprise license not found');
+    expect(licence[0]?.message).toContain('neither --license nor --reg-token');
+  });
+
   it('composes several presets as one, and records the set as Compose does', async () => {
     // Side ports earlier cases in this file do not hold.
     await createRepro(

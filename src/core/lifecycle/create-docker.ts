@@ -943,6 +943,15 @@ export async function buildDocument(plan: CreatePlan): Promise<void> {
     plan.token,
   );
   if (premium !== '') warn(plan.emit, premium, { phase: 'create' });
+  const unlicensed = request.licenceAbsentWarning(
+    plan.pre as Preset,
+    false,
+    plan.spec.licensed,
+    plan.token,
+  );
+  if (unlicensed !== '') {
+    warn(plan.emit, unlicensed, { phase: 'create', code: request.LICENSE_ABSENT_EE_PRESET });
+  }
   const samlEmail = request.samlEmailWarning(
     plan.pre as Preset,
     resolved.rcVersion,

@@ -6,6 +6,7 @@ import {
   chooseImage,
   samlEmailWarning,
   paramsByPreset,
+  licenceAbsentWarning,
   premiumAuthWarning,
   deriveIdpHost,
   inferRuntime,
@@ -376,6 +377,37 @@ describe('the Rocket.Chat 9 login warning', () => {
       premiumAuthWarning(['email', 'default'], '9.0.0', false, ''),
       premiumAuthWarning(['ldap'], 'not-a-version', false, ''),
     ]).toEqual(['', '', '', '', '']);
+  });
+});
+
+describe('the Enterprise licence warning', () => {
+  const ee = { name: 'ldap+microservices', requiresLicense: true };
+  const plain = { name: 'default', requiresLicense: false };
+
+  it('names an Enterprise preset created with neither a licence nor a token, on any version', () => {
+    const said = licenceAbsentWarning(ee, false, false, '');
+    expect(said).toContain("'ldap+microservices' preset is an Enterprise feature");
+    expect(said).toContain('neither --license nor --reg-token');
+    expect(said).toContain('may not work as licensed');
+  });
+
+  it('says what microservices do without one: replicas after the first stop', () => {
+    const said = licenceAbsentWarning(plain, true, false, '');
+    expect(said).toContain('microservices are an Enterprise feature');
+    expect(said).toContain('Enterprise license not found');
+  });
+
+  it('stays quiet with a licence, with a token, and for an ordinary preset', () => {
+    expect([
+      licenceAbsentWarning(ee, true, true, ''),
+      licenceAbsentWarning(ee, false, false, 'tok'),
+      licenceAbsentWarning(plain, false, false, ''),
+    ]).toEqual(['', '', '']);
+  });
+
+  it('does not count a whitespace-only token as a licence', () => {
+    // The same rule as the Kubernetes create path, which refuses to make an empty Secret.
+    expect(licenceAbsentWarning(ee, false, false, '  ')).not.toBe('');
   });
 });
 

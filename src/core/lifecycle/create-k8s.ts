@@ -464,6 +464,15 @@ export function settleAddressing(job: KubeCreate): void {
     job.regToken,
   );
   if (premium !== '') warn(job.emit, premium, { phase: 'plan' });
+  const unlicensed = request.licenceAbsentWarning(
+    job.presetForNotes as Preset,
+    job.microservices,
+    job.licensed,
+    job.regToken,
+  );
+  if (unlicensed !== '') {
+    warn(job.emit, unlicensed, { phase: 'plan', code: request.LICENSE_ABSENT_EE_PRESET });
+  }
   const samlEmail = request.samlEmailWarning(
     job.presetForNotes as Preset,
     job.resolved?.rcVersion ?? '',

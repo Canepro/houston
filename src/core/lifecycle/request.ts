@@ -136,6 +136,41 @@ export function premiumAuthWarning(
   );
 }
 
+/** The stable code of `licenceAbsentWarning`; scripts branch on it, not on the words. */
+export const LICENSE_ABSENT_EE_PRESET = 'LICENSE_ABSENT_EE_PRESET';
+
+/**
+ * Warn when an Enterprise preset or the microservices deployment is created with neither a
+ * licence nor a registration token, or ''. Unlike `premiumAuthWarning` this is not tied to
+ * a Rocket.Chat version: `requires_license` on a preset says the feature does not work
+ * unlicensed on any version, and microservices stop every replica after the first without
+ * one. Said at create time rather than only in the notes afterwards, because by then the
+ * workspace has been built and the agent reading `--json` has moved on. A warning, not a
+ * refusal: a licence can be added after the workspace is up.
+ */
+export function licenceAbsentWarning(
+  pre: Pick<Preset, 'name' | 'requiresLicense'>,
+  microservices: boolean,
+  licensed: boolean,
+  regToken: string,
+): string {
+  if (licensed || regToken.trim() !== '') return '';
+  const what = pre.requiresLicense
+    ? `the '${pre.name}' preset is an Enterprise feature`
+    : microservices
+      ? 'microservices are an Enterprise feature'
+      : '';
+  if (what === '') return '';
+  return (
+    `${what} and this workspace has neither --license nor --reg-token: it will run, but ` +
+    (microservices && !pre.requiresLicense
+      ? 'Rocket.Chat replicas after the first stop ("Enterprise license not found"). '
+      : 'the feature may not work as licensed. ') +
+    'Add --license <file> or --reg-token <token>, or a license later in Rocket.Chat under ' +
+    'Workspace > Subscription.'
+  );
+}
+
 /**
  * Warn when a SAML login and the email preset are combined, or ''. With email two-factor on, Rocket.Chat asks a
  * SAML login for the emailed code and refuses the right code, on every version measured: 8.5.1
