@@ -136,8 +136,19 @@ export function detectBind(doc: Bag, name = ''): string {
   )) {
     const ports = mapping(svc, `service ${quotedText(service)}`, name).ports;
     for (const p of Array.isArray(ports) ? ports : []) {
-      const parts = String(p).split(':');
-      if (parts.length === 3) return parts[0] as string;
+      // The two rightmost fields are the ports; the address is whatever stands before
+      // them, bracketed or not. `bindPorts` writes `::1:8025:8025` for `--bind ::1`, which
+      // a count of exactly three colon-separated parts read as no address at all, so an
+      // IPv6-bound workspace had its monitoring attached on 127.0.0.1.
+      const parts = String(p)
+        .replace(/\/[a-z]+$/iu, '')
+        .split(':');
+      if (parts.length < 3) continue;
+      const address = parts
+        .slice(0, -2)
+        .join(':')
+        .replace(/^\[|\]$/gu, '');
+      if (address !== '') return address;
     }
   }
   return config.DEFAULT_BIND_HOST;

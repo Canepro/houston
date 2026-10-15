@@ -53,6 +53,16 @@ describe('reading the host bind out of an existing workspace', () => {
     const { detectBind } = require('../../src/core/monitor') as typeof MonitorNS;
     expect(docs.map((doc) => detectBind(doc))).toEqual(RECORDED.binds);
   });
+
+  it('reads an IPv6 bind back, bracketed or as bindPorts writes it', () => {
+    const { detectBind } = require('../../src/core/monitor') as typeof MonitorNS;
+    const doc = (ports: string[]) => ({ services: { rocketchat: { ports } } });
+    expect(detectBind(doc(['::1:8025:8025']))).toBe('::1');
+    expect(detectBind(doc(['[::1]:8025:8025/tcp']))).toBe('::1');
+    expect(detectBind(doc(['127.0.0.1::9090/udp']))).toBe('127.0.0.1');
+    // No address on any port: the default, as before.
+    expect(detectBind(doc(['8025:8025']))).toBe('127.0.0.1');
+  });
 });
 
 describe('a hand-edited compose file or record, attached and detached on Compose', () => {
