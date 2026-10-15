@@ -303,6 +303,9 @@ describe('binding', () => {
     expect(bound(['0.0.0.0:9000:9000'])).toEqual(['127.0.0.1:9000:9000']);
     expect(bound(['127.0.0.1:8025:8025'])).toEqual(['127.0.0.1:8025:8025']);
     expect(bound(['[::1]:8025:8025'])).toEqual(['127.0.0.1:8025:8025']);
+    // The Compose specification's own unbracketed IPv6 example.
+    expect(bound(['::1:6000:6000'])).toEqual(['127.0.0.1:6000:6000']);
+    expect(bound(['::1::6000'])).toEqual(['127.0.0.1::6000']);
     // And the other way: an explicit `--bind 0.0.0.0` reaches a loopback-pinned entry too.
     expect(bound(['127.0.0.1:8025:8025'], '0.0.0.0')).toEqual(['0.0.0.0:8025:8025']);
   });
@@ -311,6 +314,8 @@ describe('binding', () => {
     expect(bound(['9090/udp'])).toEqual(['127.0.0.1::9090/udp']);
     expect(bound(['9001:9001/tcp'])).toEqual(['127.0.0.1:9001:9001/tcp']);
     expect(bound(['0.0.0.0::9090/udp'])).toEqual(['127.0.0.1::9090/udp']);
+    // Docker lowercases the protocol before it validates it.
+    expect(bound(['8080:80/UDP'])).toEqual(['127.0.0.1:8080:80/udp']);
   });
 
   it('uses the IP::CONTAINER form for a bare container port', () => {

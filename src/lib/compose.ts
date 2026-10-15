@@ -629,24 +629,23 @@ export function bindPorts(doc: ComposeDoc, bind: string): void {
 /**
  * The host-side and container-side of a compose short-syntax port entry, with its
  * protocol suffix, and WITHOUT the host address it may name: `[IP:][HOST:]CONTAINER[/PROTO]`,
- * where HOST and CONTAINER are each a port or a range, HOST may be empty (`IP::CONTAINER`),
- * and IP may be bracketed IPv6. `null` for anything else.
+ * where HOST and CONTAINER are each a port or a range, and HOST may be empty
+ * (`IP::CONTAINER`). `null` for anything else.
+ *
+ * READ FROM THE RIGHT. The address may be dotted, bracketed IPv6, or the unbracketed IPv6
+ * the Compose specification's own examples use (`::1:6000:6000`); counting colons from
+ * the left refused the last of these. The two rightmost fields are the ports, whatever
+ * stands before them is the address, and the address is what `bind` replaces.
  */
 function shortPort(entry: string): { host: string; container: string; protocol: string } | null {
   const slash = entry.lastIndexOf('/');
-  const protocol = slash === -1 ? '' : entry.slice(slash);
-  let rest = slash === -1 ? entry : entry.slice(0, slash);
+  // Docker lowercases the protocol before it validates it, so `/UDP` is `/udp`.
+  const protocol = slash === -1 ? '' : entry.slice(slash).toLowerCase();
+  const rest = slash === -1 ? entry : entry.slice(0, slash);
   if (protocol !== '' && !/^\/[a-z]+$/u.test(protocol)) return null;
-  if (rest.startsWith('[')) {
-    const close = rest.indexOf(']:');
-    if (close === -1) return null;
-    rest = rest.slice(close + 2);
-  }
   const fields = rest.split(':');
-  if (fields.length === 3) fields.shift(); // a dotted host address: dropped, `bind` replaces it
-  if (fields.length > 2) return null;
   const container = fields[fields.length - 1] ?? '';
-  const host = fields.length === 2 ? (fields[0] ?? '') : '';
+  const host = fields.length >= 2 ? (fields[fields.length - 2] ?? '') : '';
   if (!PORT_RE.test(container)) return null;
   if (host !== '' && !PORT_RE.test(host)) return null;
   return { host, container, protocol };
