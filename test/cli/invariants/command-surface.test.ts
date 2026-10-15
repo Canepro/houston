@@ -44,7 +44,7 @@ function program(): Command {
 }
 
 describe('the command table against the built parser', () => {
-  it('registers exactly the forty commands the table declares', () => {
+  it('registers exactly the commands the table declares', () => {
     const declared = COMMAND_SPECS.map((spec) => spec.path).sort();
     expect(declared).toHaveLength(41);
     expect(new Set(declared).size).toBe(declared.length);

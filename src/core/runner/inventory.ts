@@ -116,11 +116,15 @@ function parsedBindings(publishers: unknown): ParsedBindings {
     const target = portNumber(entry.TargetPort);
     const host = entry.URL;
     const protocol = entry.Protocol;
+    // A port above 65535 cannot be reached, so a binding that names one is a malformed
+    // read, marked unknown like a non-numeric port, never a known reachable route.
     if (
       published === null ||
       published < 0 ||
+      published > 65535 ||
       target === null ||
       target <= 0 ||
+      target > 65535 ||
       typeof host !== 'string' ||
       host === '' ||
       (protocol !== undefined && protocol !== null && typeof protocol !== 'string') ||

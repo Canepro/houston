@@ -122,6 +122,9 @@ describe('the Docker inspection rows', () => {
             Publishers: [
               { URL: '127.0.0.1', PublishedPort: 3001, TargetPort: 3001 },
               { URL: '127.0.0.1', PublishedPort: 'not-a-port', TargetPort: 3002 },
+              // Out of range on either side is unreachable, so it is malformed, not known.
+              { URL: '127.0.0.1', PublishedPort: 65536, TargetPort: 3003 },
+              { URL: '127.0.0.1', PublishedPort: 3004, TargetPort: 65536 },
             ],
           },
           { State: 'running', Status: 'Up 1 minute' },
