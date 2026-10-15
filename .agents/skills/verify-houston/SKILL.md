@@ -1,6 +1,6 @@
 ---
 name: verify-houston
-description: Verify recurring Houston v2 CLI migrations through bin/houston with isolated state and durable command receipts. Use for capability discovery, missing-workspace failures, offline resource inspection, evidence JSON or bundles, and capture preflight; consult pending recipes for SSH handoff, onboarding, and successful browser capture.
+description: Verify recurring Houston v2 CLI migrations through bin/houston with isolated state and durable command receipts. Use for capability discovery, missing-workspace failures, offline resource inspection, evidence JSON or bundles, SSH access handoff, and capture preflight; consult pending recipes for onboarding and successful browser capture.
 ---
 
 # Verify Houston
@@ -33,7 +33,7 @@ evidence outside both checkouts.
 
 The helper requires Python 3.9+, Node, `dirname`, and `readlink`. It creates a unique
 temporary directory containing `HOUSTON_HOME`, `HOUSTON_SKILL_HOME`, a synthetic
-user home, and the workspaces `verify-fixture` and `verify-kube-fixture`. Only
+user home, and synthetic Docker, Kubernetes, IPv6 and wildcard-bind workspaces. Only
 entry-point utilities are on the child's PATH. It passes no inherited credentials, engine sockets, kubeconfig,
 proxy variables, or Houston overrides. Do not broaden that environment to make a
 check pass.
@@ -77,9 +77,11 @@ An advertised `capture` command also gets an explicit missing-workspace drive,
 which must refuse without creating a bundle or starting a browser.
 
 An absent optional port is pending. An advertised port with an incompatible
-recipe is a verifier drift failure, not permission to skip it. SSH handoff,
-onboarding, and capture require their pending recipes to be extended against the
-candidate's actual help, source, and tests before acceptance. A scoped baseline
+recipe is a verifier drift failure, not permission to skip it. An `info` payload
+with `data.access` triggers the SSH handoff drive using only synthetic environment
+overrides. Onboarding and successful capture require their
+pending recipes to be extended against the candidate's actual help, source, and
+tests before acceptance. A scoped baseline
 pass leaves those paths pending until their actual consumer contracts are
 exercised. Match command paths, flags, or documented payload fields, never version
 strings or branch names, when choosing applicability.

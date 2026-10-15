@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import tempfile
 
@@ -82,6 +83,14 @@ def main():
                                   'namespace': 'houston-verify-kube-fixture', 'bind_host': '127.0.0.1'})
         (kube_workspace / 'repro.json').write_text(json.dumps(kube_record))
 
+        for name, bind, url in [('verify-ipv6-fixture', '::1', 'http://[::1]:39999'),
+                                ('verify-public-fixture', '0.0.0.0', 'http://192.0.2.40:39999')]:
+            target = workspace.parent / name
+            target.mkdir()
+            (target / 'repro.json').write_text(json.dumps(dict(record, name=name, root_url=url,
+                extra={'bind_host': bind, 'runtime': 'kubernetes', 'context': 'verify-offline',
+                       'namespace': name})))
+
         def fixture_bytes():
             return {str(p.relative_to(workspace.parent)): p.read_bytes()
                     for p in workspace.parent.rglob('*') if p.is_file()}
@@ -89,9 +98,10 @@ def main():
         fixture_before = fixture_bytes()
         receipts = []
 
-        def run(label, argv, expected=0, schema=None, ok=True):
+        def run(label, argv, expected=0, schema=None, ok=True, overrides=None):
             command = [str(root / 'bin' / 'houston'), *argv]
-            result = subprocess.run(command, cwd=root, env=env, capture_output=True, timeout=60)
+            child_env = dict(env, **(overrides or {}))
+            result = subprocess.run(command, cwd=root, env=child_env, capture_output=True, timeout=60)
             (out / f'{label}.stdout').write_bytes(result.stdout)
             (out / f'{label}.stderr').write_bytes(result.stderr)
             receipt = {'argv': ['bin/houston', *argv], 'exit': result.returncode}
@@ -212,12 +222,51 @@ def main():
             require(absent['error']['code'] == 'NOT_FOUND', 'Capture missing name must be NOT_FOUND')
             require(not absent_bundle.exists(), 'Missing workspace capture wrote a bundle')
             summary['features']['capture'] = 'PASS: missing workspace refused without bundle; browser capture pending'
-        for feature, names in {'access': [],
-                               'onboarding': ['onboard', 'onboarding']}.items():
-            summary['features'][feature] = {
-                'status': ('PENDING: SSH handoff consumer and environment contract not ported/settled'
-                           if feature == 'access' else 'PENDING: feature recipe prerequisites required'),
-                'advertised': sorted(c for c in commands if any(c == n or c.startswith(n + ' ') for n in names))}
+        detail = run('access-discovery', ['info', '--name', 'verify-fixture', '--json'],
+                     schema='houston.info.v1')['data']
+        if 'access' not in detail:
+            summary['features']['access'] = 'PENDING: info payload has no access consumer'
+        else:
+            local = detail['access']
+            require(local['mode'] == 'local' and local['bind'] == 'loopback'
+                    and local['host_port'] == 39999 and local['local_port'] == 39999
+                    and local['browser_url'] == record['root_url']
+                    and local['tunnel_command'] is None and local['note'] is None,
+                    'Local access handoff differs from recorded workspace')
+            ssh = {'SSH_CONNECTION': '198.51.100.20 55100 203.0.113.8 22',
+                   'HOUSTON_SSH_USER': 'operator', 'HOUSTON_SSH_HOST': 'ssh-proof.invalid'}
+            for label, name, target, port, changes in [
+                ('remote', 'verify-fixture', '127.0.0.1', 39999, {}),
+                ('ipv6', 'verify-ipv6-fixture', '[::1]', 4311,
+                 {'HOUSTON_SSH_LOCAL_PORT': '4311', 'HOUSTON_SSH_USER': "operator's team",
+                  'HOUSTON_SSH_HOST': 'ssh-proof.invalid; echo unsafe'}),
+                ('option', 'verify-fixture', '127.0.0.1', 39999,
+                 {'HOUSTON_SSH_USER': '-oProxyCommand=unsafe'})]:
+                overrides = dict(ssh, **changes)
+                data = run('access-' + label, ['info', '--name', name, '--json'],
+                           schema='houston.info.v1', overrides=overrides)['data']['access']
+                require(data['mode'] == 'remote_ssh' and data['bind'] == 'loopback'
+                        and data['host_port'] == 39999 and data['local_port'] == port
+                        and data['browser_url'] == f'http://127.0.0.1:{port}' and bool(data['note']),
+                        'Remote access mode, ports or browser URL differ')
+                require(shlex.split(data['tunnel_command']) ==
+                        ['ssh', '-N', '-L', f'127.0.0.1:{port}:{target}:39999', '--',
+                         overrides['HOUSTON_SSH_USER'] + '@' + overrides['HOUSTON_SSH_HOST']],
+                        'Tunnel must bind client loopback and preserve one option-safe destination')
+                human = run('access-' + label + '-human', ['info', '--name', name], overrides=overrides)
+                require(data['tunnel_command'] in human and data['browser_url'] in human,
+                        'Human access guidance differs from JSON')
+            public = run('access-public', ['info', '--name', 'verify-public-fixture', '--json'],
+                         schema='houston.info.v1', overrides=ssh)['data']
+            require(public['access'] is None, 'Wildcard workspace must not claim loopback access')
+            invalid = run('access-invalid-port', ['info', '--name', 'verify-fixture', '--json'],
+                          expected=2, schema='houston.error.v1', ok=False,
+                          overrides=dict(ssh, HOUSTON_SSH_LOCAL_PORT='not-a-port'))
+            require(invalid['error']['code'] == 'VALIDATION_FAILED', 'Invalid local port must be refused')
+            summary['features']['access'] = 'PASS: real info JSON/human handoff, IPv6, option safety, local-port refusal; no SSH executed'
+        summary['features']['onboarding'] = {
+            'status': 'PENDING: feature recipe prerequisites required',
+            'advertised': sorted(c for c in commands if c in ('onboard', 'onboarding'))}
         require(fixture_before == fixture_bytes(),
                 'CLI changed the synthetic workspace files')
         require(source_before == source_manifest(root), 'Candidate source changed during verification')

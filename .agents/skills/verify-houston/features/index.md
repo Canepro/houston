@@ -5,7 +5,7 @@
 | Discovery and missing workspace | [capabilities](capabilities.md) | Mandatory offline path on every v2 candidate. |
 | Attachable evidence | [evidence](evidence.md) | Drive when `evidence` is advertised; otherwise pending. |
 | Resource inspection | [inspect](inventory.md) | Drive offline fixtures when `inspect` is advertised; live resources pending. |
-| SSH access handoff | [access](access.md) | Pending the actual v2 payload consumer and environment contract. |
+| SSH access handoff | [access](access.md) | Drive when `info` includes `data.access`; otherwise pending. No SSH execution. |
 | Onboarding and capture | [onboarding and capture](onboarding-capture.md) | Pending prerequisite and browser/capture recipes. |
 
 Read capability command paths and their flags at each exact candidate revision.

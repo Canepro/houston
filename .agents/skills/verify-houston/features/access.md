@@ -15,20 +15,25 @@ it leaves the workspace bind unchanged and never executes SSH. The recorded root
 URL selects IPv4 or IPv6 loopback as the forward target. A remote process cannot
 measure a port conflict on the operator's laptop.
 
-Pending the TypeScript consumer and environment contract. Applicability comes
-from that consumer's actual payload field or documented CLI output, not a guessed
-command name. Inspect its handler and tests after the owner ports it. Extend the
-helper's real CLI drive at that point, using only synthetic SSH_CONNECTION and
-the port's documented host/user/local-port overrides in the child's environment.
-Legacy RC_REPRO_SSH_* spellings describe the old implementation, not assumed v2
-flags or environment names.
+The v2 consumer is `info --json`, schema `houston.info.v1`, at `data.access`.
+Human `info` prints the same tunnel and browser URL. The helper detects this
+payload field and drives local and remote results through the real CLI. It uses
+only synthetic SSH_CONNECTION, HOUSTON_SSH_HOST, HOUSTON_SSH_USER, and
+HOUSTON_SSH_LOCAL_PORT values. An absent access field leaves this port pending.
 
-Drive a local handoff, an SSH handoff, an alternate local port, an invalid port,
-and an IPv6 forward target. Require the documented mode, ports, safely quoted
-SSH destination, matching loopback browser URL, and the specified invalid-port
-refusal. Compare fixture bytes and bind before/after. Capture only synthetic
-handoff output; `info --json` can include credentials and is unsuitable for a real
-customer attachment. Execute no printed tunnel or account mutation.
+Require local mode with no tunnel, remote mode with matching ports and browser
+URL, an alternate local port, IPv6 remote loopback, and exit 2 with
+VALIDATION_FAILED for an invalid port. Parse the generated command with shell
+word rules. Its forwarding argument must explicitly bind the client to
+127.0.0.1, and `--` must precede a single destination argument, including spaces,
+quotes, shell punctuation, or an option-shaped user override. These explicit
+bind and option protections are safety corrections to the historical command.
+A wildcard-bound fixture must return null access guidance. Human output must
+contain the JSON tunnel and browser URL. Compare fixture bytes before and after.
+Execute no printed tunnel or account mutation.
+
+Capture only synthetic handoff output. `info --json` can include credentials
+and is unsuitable for a real customer attachment.
 
 Live reachability remains pending an approved SSH destination, existing workspace,
 and operator-side browser and available local port. A generated command proves
