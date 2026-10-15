@@ -249,6 +249,7 @@ describe('a whole prune', () => {
     context?: string;
     owners?: Record<string, string | null>;
     deleteCluster?: () => Promise<boolean>;
+    reclaimError?: () => Error;
     reclaimable?: boolean;
     down?: (name: string) => Promise<number>;
     running?: Record<string, string>;
@@ -284,7 +285,10 @@ describe('a whole prune', () => {
     }));
     jest.doMock('../../../src/core/kube/cluster', () => ({
       ...jest.requireActual('../../../src/core/kube/cluster'),
-      clusterReclaimable: async () => world.reclaimable ?? false,
+      clusterReclaimable: async () => {
+        if (world.reclaimError !== undefined) throw world.reclaimError();
+        return world.reclaimable ?? false;
+      },
       deleteCluster: async (options: unknown) => {
         reclaimed.push(options);
         return world.deleteCluster === undefined ? false : await world.deleteCluster();
@@ -364,6 +368,83 @@ describe('a whole prune', () => {
     // And the same offer applies on the other early path.
     world.reclaimed.length = 0;
     expect((await world.pruning.prune({ confirm: true, orphans: false })).cluster).toBe(true);
+    expect(world.reclaimed).toHaveLength(1);
+  });
+
+  it('does not gate a compose prune for an existing local cluster that is not reclaimable', async () => {
+    // `deleteCluster` requires the grant whenever the fixed local cluster exists, even when
+    // it is occupied or otherwise not reclaimable. Plan that fact before deleting unrelated
+    // Compose work, so a later best-effort cleanup cannot turn a successful prune into a gate.
+    let gate: Error | null = null;
+    const world = load({
+      reclaimable: false,
+      deleteCluster: async () => {
+        throw gate ?? new Error('missing test gate');
+      },
+    });
+    gate = new world.errors.AuthorityGateError('the local cluster is not authorised', {
+      code: 'GATE_OWNED_CLUSTER',
+    });
+    await composeRecords(world.record, 'compose');
+
+    const out = await world.pruning.prune({ confirm: true, only: ['compose'] });
+
+    expect(out.removed).toEqual(['compose']);
+    expect(out.cluster).toBe(false);
+    expect(world.audited).toEqual([['prune', 'compose']]);
+    expect(world.reclaimed).toEqual([]);
+  });
+
+  it('leaves an unreadable cluster alone while pruning a compose target', async () => {
+    // A failed marker read is not a reason to abandon a separate selected workspace. It is
+    // still not authority to call `deleteCluster`, so it is reported as the existing
+    // best-effort cleanup warning after the unrelated removal completes.
+    let errors: typeof ErrorsNS | null = null;
+    const world = load({
+      reclaimError: () =>
+        new (errors as typeof ErrorsNS).DockerError('cluster ownership marker could not be read'),
+    });
+    errors = world.errors;
+    await composeRecords(world.record, 'compose');
+    const events: Event[] = [];
+
+    const out = await world.pruning.prune({
+      confirm: true,
+      only: ['compose'],
+      emit: (event) => events.push(event),
+    });
+
+    expect(out.removed).toEqual(['compose']);
+    expect(out.cluster).toBe(false);
+    expect(world.reclaimed).toEqual([]);
+    expect(events.some((event) => event.message.includes('the cluster was left alone'))).toBe(
+      true,
+    );
+  });
+
+  it('stops a confirmed reclaim before auditing or removing a compose target without the grant', async () => {
+    const world = load({ reclaimable: true, deleteCluster: async () => true });
+    await composeRecords(world.record, 'compose');
+
+    await expect(
+      world.pruning.prune({ confirm: true, only: ['compose'] }),
+    ).rejects.toMatchObject({ code: 'GATE_NOT_ONBOARDED' });
+
+    expect(world.audited).toEqual([]);
+    expect(world.reclaimed).toEqual([]);
+  });
+
+  it('reclaims a confirmed empty cluster after a selected compose cleanup with the grant', async () => {
+    const world = load({ reclaimable: true, deleteCluster: async () => true });
+    await composeRecords(world.record, 'compose');
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
+
+    const out = await world.pruning.prune({ confirm: true, only: ['compose'] });
+
+    expect(out.removed).toEqual(['compose']);
+    expect(out.cluster).toBe(true);
     expect(world.reclaimed).toHaveLength(1);
   });
 

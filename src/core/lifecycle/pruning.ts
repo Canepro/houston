@@ -157,20 +157,31 @@ export async function orphanContext(): Promise<string> {
   }
 }
 
-/**
- * Give back houston's own cluster once nothing of ours is left in it.
- *
- * Only ever OUR cluster: `deleteCluster` takes no parameter, needs the `kind` binary, and
- * refuses while any workspace namespace remains -- so a cluster somebody else supplied
- * cannot be reached from here at all.
- *
- * Best-effort: a cluster that will not go is not a failed prune.
- */
-export async function reclaimCluster(emit: Emit = nullEmit): Promise<boolean> {
+type ClusterReclaimPlan =
+  | { readonly kind: 'reclaim' }
+  | { readonly kind: 'skip' }
+  | { readonly kind: 'unreadable'; readonly error: ReproError };
+
+/** Inspect cluster reclamation before a prune deletes any independent selected work. */
+async function planClusterReclaim(): Promise<ClusterReclaimPlan> {
   try {
-    // `deleteCluster` is deliberately best-effort for cleanup. Check authority before
-    // entering that path so a gate remains a gate instead of becoming a warning.
-    if (await clusterReclaimable()) requireOwnedClusterAuthority(KUBE_CONTEXT);
+    return (await clusterReclaimable()) ? { kind: 'reclaim' } : { kind: 'skip' };
+  } catch (error) {
+    if (error instanceof ReproError) {
+      return { kind: 'unreadable', error };
+    }
+    throw error;
+  }
+}
+
+/** Give back only a cluster the pre-prune plan confirmed reclaimable and authorised. */
+async function reclaimPlannedCluster(plan: ClusterReclaimPlan, emit: Emit): Promise<boolean> {
+  if (plan.kind === 'unreadable') {
+    warn(emit, `the cluster was left alone: ${plan.error.message}`, { phase: 'done' });
+    return false;
+  }
+  if (plan.kind === 'skip') return false;
+  try {
     return await deleteCluster({ emit });
   } catch (error) {
     if (error instanceof AuthorityGateError) throw error;
@@ -181,6 +192,20 @@ export async function reclaimCluster(emit: Emit = nullEmit): Promise<boolean> {
     // never let cleanup fail a successful prune
     return false;
   }
+}
+
+/**
+ * Give back houston's own cluster once nothing of ours is left in it.
+ *
+ * Only ever OUR cluster: `deleteCluster` takes no parameter, needs the `kind` binary, and
+ * refuses while any workspace namespace remains -- so a cluster somebody else supplied
+ * cannot be reached from here at all. Best-effort cleanup uses a plan so it never calls
+ * `deleteCluster` merely because a local cluster happens to exist.
+ */
+export async function reclaimCluster(emit: Emit = nullEmit): Promise<boolean> {
+  const plan = await planClusterReclaim();
+  if (plan.kind === 'reclaim') requireOwnedClusterAuthority(KUBE_CONTEXT);
+  return await reclaimPlannedCluster(plan, emit);
 }
 
 /**
@@ -482,13 +507,18 @@ export async function prune({
   }
   const orphanCtx = orphans ? await orphanContext() : '';
   const stray = orphans ? await orphanNamespaces(orphanCtx) : [];
+  const clusterPlan = await planClusterReclaim();
   if (targets.length === 0 && stray.length === 0) {
     // Still worth asking about the CLUSTER. With every workspace gone, houston's own kind
     // cluster is a 514 MiB control plane holding nothing -- and both the README and the
     // agent skill said `prune` reclaims it, which nothing did.
-    const willReclaimOwnedCluster = await clusterReclaimable();
-    if (willReclaimOwnedCluster) requireOwnedClusterAuthority(KUBE_CONTEXT);
-    return { targets: [], removed: [], orphans: [], cluster: await reclaimCluster(emit) };
+    if (clusterPlan.kind === 'reclaim') requireOwnedClusterAuthority(KUBE_CONTEXT);
+    return {
+      targets: [],
+      removed: [],
+      orphans: [],
+      cluster: await reclaimPlannedCluster(clusterPlan, emit),
+    };
   }
   if (!confirm) {
     throw new ValidationError(
@@ -497,9 +527,8 @@ export async function prune({
   }
   // Consult this before a mixed prune starts. Otherwise a denied local-cluster cleanup
   // could arrive after Compose workspaces had already been removed.
-  const willReclaimOwnedCluster = await clusterReclaimable();
   if (
-    willReclaimOwnedCluster ||
+    clusterPlan.kind === 'reclaim' ||
     (await targetsUseOwnedCluster(targets)) ||
     (stray.length > 0 && isOurs(orphanCtx))
   ) {
@@ -513,5 +542,5 @@ export async function prune({
   const removed: string[] = [];
   await removeEachWorkspace(emit, removed, targets);
   const swept = await sweepOrphanNamespaces(emit, force, stray, orphanCtx);
-  return { targets, removed, orphans: swept, cluster: await reclaimCluster(emit) };
+  return { targets, removed, orphans: swept, cluster: await reclaimPlannedCluster(clusterPlan, emit) };
 }

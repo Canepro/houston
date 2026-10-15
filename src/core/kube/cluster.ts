@@ -12,7 +12,7 @@ import { ConflictError, CreateFailedError, DockerError, PreflightError } from '.
 import { info, nullEmit, type Emit } from '../../lib/events';
 import { requireGrant, requireOnboarded } from '../../lib/onboarding';
 import { makeTempDir } from '../../lib/tempdir';
-import { cleanup } from '../../seams/exec';
+import { cleanup, sleep } from '../../seams/exec';
 import { reproLock } from '../runner/locks';
 
 import { why } from './ask';
@@ -26,7 +26,6 @@ import {
   CONTEXT,
   OWNER_LABEL_KEY,
   OWNER_LABEL_VALUE,
-  OWNER_SELECTOR,
 } from './names';
 import { reachable } from './reachability';
 import { which } from './tools';
@@ -44,6 +43,10 @@ export const CLUSTER_LOCK = '__cluster__';
 export const CREATE_TIMEOUT = 600.0;
 
 export const DELETE_TIMEOUT = 120.0;
+
+/** A cross-home Kind winner has a brief window to publish its ownership receipt. */
+const MARKER_PUBLICATION_TRIES = 20;
+const MARKER_PUBLICATION_INTERVAL_MS = 500;
 
 function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -65,16 +68,11 @@ function ownershipManifest(): string {
   });
 }
 
-/** Write the receipt: after this invocation created the cluster, or adopted one. */
-async function markClusterOwned(context: string, env?: NodeJS.ProcessEnv): Promise<void> {
+/** Write the receipt only after this invocation created the cluster. */
+async function markClusterOwned(context: string): Promise<void> {
   const result = await kube.run(
     ['kubectl', '--context', context, '--namespace', 'kube-system', 'apply', '--filename', '-'],
-    {
-      timeout: APPLY_TIMEOUT,
-      own: true,
-      input: ownershipManifest(),
-      ...(env === undefined ? {} : { env }),
-    },
+    { timeout: APPLY_TIMEOUT, own: true, input: ownershipManifest() },
   );
   if (result.returncode !== 0) {
     throw new CreateFailedError(
@@ -84,13 +82,15 @@ async function markClusterOwned(context: string, env?: NodeJS.ProcessEnv): Promi
   }
 }
 
+type MarkerState = 'owned' | 'absent' | 'not-owned';
+
 /**
- * Whether an existing fixed-name cluster carries Houston's exact ownership receipt.
+ * Read an existing fixed-name cluster's exact ownership receipt.
  *
  * A failed or malformed read is not evidence of ownership. This check intentionally does
  * not use namespace labels: those prove individual workspace ownership, not the cluster.
  */
-async function clusterIsOurs(context: string, env?: NodeJS.ProcessEnv): Promise<boolean> {
+async function markerState(context: string, env?: NodeJS.ProcessEnv): Promise<MarkerState> {
   const result = await kube.run(
     [
       'kubectl',
@@ -111,7 +111,7 @@ async function clusterIsOurs(context: string, env?: NodeJS.ProcessEnv): Promise<
     throw new DockerError(`cluster ownership marker could not be read: ${why(result)}`);
   }
   // --ignore-not-found makes an absent ConfigMap a successful empty response.
-  if (result.stdout.trim() === '') return false;
+  if (result.stdout.trim() === '') return 'absent';
   let parsed: unknown;
   try {
     parsed = JSON.parse(result.stdout) as unknown;
@@ -125,7 +125,14 @@ async function clusterIsOurs(context: string, env?: NodeJS.ProcessEnv): Promise<
   if (payload === null || metadata === null) {
     throw new DockerError('cluster ownership marker could not be read: invalid object');
   }
-  return labels?.[OWNER_LABEL_KEY] === OWNER_LABEL_VALUE && data?.cluster === CLUSTER_NAME;
+  return labels?.[OWNER_LABEL_KEY] === OWNER_LABEL_VALUE && data?.cluster === CLUSTER_NAME
+    ? 'owned'
+    : 'not-owned';
+}
+
+/** Whether an existing fixed-name cluster carries Houston's exact ownership receipt. */
+async function clusterIsOurs(context: string, env?: NodeJS.ProcessEnv): Promise<boolean> {
+  return (await markerState(context, env)) === 'owned';
 }
 
 /** Export a Kind kubeconfig and read its context through that exact private file. */
@@ -154,74 +161,43 @@ async function exportKubeconfig(kubeconfig: string, env: NodeJS.ProcessEnv): Pro
  * points both Kind's explicit output and KUBECONFIG at that file, so neither the user's
  * kubeconfig nor Houston's later trusted client state can be changed by a refused cluster.
  */
-async function verifyExistingClusterOwnership(emit: Emit): Promise<void> {
+function ownershipConflict(): ConflictError {
+  return new ConflictError(
+    `a Kind cluster named '${CLUSTER_NAME}' exists without Houston's ownership marker; ` +
+      'refusing to reuse or delete it. Remove or rename that cluster yourself, then retry.',
+  );
+}
+
+/** Probe through a disposable kubeconfig before Houston accepts an existing cluster. */
+async function privateMarkerState(): Promise<MarkerState> {
   const directory = makeTempDir('houston-kind-probe-');
   const kubeconfig = path.join(directory, 'config');
   const env = { ...process.env, KUBECONFIG: kubeconfig };
   try {
     const context = await exportKubeconfig(kubeconfig, env);
-    if (!(await clusterIsOurs(context, env))) {
-      const holds = await holdsHoustonWorkspaces(context, env);
-      if (holds === null) {
-        throw new DockerError(
-          `a Kind cluster named '${CLUSTER_NAME}' exists without Houston's ownership marker, ` +
-            'and whether it holds houston workspaces could not be read; nothing was adopted.',
-        );
-      }
-      if (!holds) {
-        throw new ConflictError(
-          `a Kind cluster named '${CLUSTER_NAME}' exists without Houston's ownership marker; ` +
-            'refusing to reuse or delete it. Remove or rename that cluster yourself, then retry.',
-        );
-      }
-      // Adopted, not refused: the grant just checked is the authority to own this cluster,
-      // and its houston workspaces are the proof an earlier release made it. The marker is
-      // written through the same private probe file, before anything durable knows it.
-      info(
-        emit,
-        `adopting cluster ${CLUSTER_NAME}: an earlier houston made it, and it holds houston workspaces`,
-        { phase: 'provision' },
-      );
-      await markClusterOwned(context, env);
-    }
+    return await markerState(context, env);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 }
 
+/** Prove an existing fixed-name cluster before writing it into Houston's durable kubeconfig. */
+async function verifyExistingClusterOwnership(): Promise<void> {
+  if ((await privateMarkerState()) !== 'owned') throw ownershipConflict();
+}
+
 /**
- * Whether a same-named cluster with no marker is one an earlier houston made. Releases
- * before the marker left none, and a person upgrading must not have to delete a cluster
- * holding their workspaces and volumes. The proof is the workspaces themselves: a
- * namespace carrying houston's owner label is written by nothing else. A refused read is
- * not a proof either way, so it adopts nothing. Read through the probe file, like the marker.
+ * Wait only after our Kind create lost a cross-home collision. The winner can still be
+ * publishing its receipt, but an existing or malformed marker remains a refusal immediately.
  */
-async function holdsHoustonWorkspaces(
-  context: string,
-  env: NodeJS.ProcessEnv,
-): Promise<boolean | null> {
-  const result = await kube.run(
-    [
-      'kubectl',
-      '--context',
-      context,
-      'get',
-      'namespace',
-      '--selector',
-      OWNER_SELECTOR,
-      '--output',
-      'json',
-    ],
-    { timeout: APPLY_TIMEOUT, own: true, env },
-  );
-  // A refused read is the third answer, not "none": it adopts nothing and says why.
-  if (result.returncode !== 0) return null;
-  try {
-    const items = (JSON.parse(result.stdout) as { items?: unknown }).items;
-    return Array.isArray(items) && items.length > 0;
-  } catch {
-    return null;
+async function waitForCollisionMarker(): Promise<void> {
+  for (let attempt = 0; attempt < MARKER_PUBLICATION_TRIES; attempt += 1) {
+    const state = await privateMarkerState();
+    if (state === 'owned') return;
+    if (state !== 'absent') throw ownershipConflict();
+    if (attempt + 1 < MARKER_PUBLICATION_TRIES) await sleep(MARKER_PUBLICATION_INTERVAL_MS);
   }
+  throw ownershipConflict();
 }
 
 /** Remove only a cluster this invocation created before it could leave an ownership receipt. */
@@ -249,32 +225,14 @@ async function failBeforeOwnershipMarker(error: unknown): Promise<never> {
 }
 
 /**
- * A failed Kind create can leave its Docker and cluster records behind. The name was absent
- * immediately before this invocation started creating it, but a failed process is not proof
- * that it made nothing. Re-list during cleanup and roll back only when the formerly absent
- * name is now visible. A listing failure or a still-absent name leaves the original failure
- * alone rather than deleting an unconfirmed cluster.
- */
-async function failAfterCreateAttempt(error: unknown): Promise<never> {
-  let names: string[];
-  let failure: string;
-  try {
-    [names, failure] = await cleanup(async () => await clusters());
-  } catch {
-    throw error;
-  }
-  if (failure === '' && names.includes(CLUSTER_NAME)) {
-    return await failBeforeOwnershipMarker(error);
-  }
-  throw error;
-}
-
-/**
  * Create the shared kind cluster if it is not there. The caller holds the cluster lock
  * around this AND the marker that follows: a waiter released at this return saw the new
  * cluster, found no marker yet, and refused the cluster its sibling was still marking.
  */
-async function createIfAbsent(emit: Emit, kubeconfig: string): Promise<boolean> {
+async function createIfAbsent(
+  emit: Emit,
+  kubeconfig: string,
+): Promise<'created' | 'existing' | 'collision'> {
   // Reuse still exports this home's private kubeconfig and is therefore the same scoped
   // local lifecycle action as creation. Check before the existing-cluster return.
   requireOnboarded();
@@ -283,7 +241,7 @@ async function createIfAbsent(emit: Emit, kubeconfig: string): Promise<boolean> 
     info(emit, `checking ownership of existing cluster ${CLUSTER_NAME}`, {
       phase: 'provision',
     });
-    return false;
+    return 'existing';
   }
   info(
     emit,
@@ -292,26 +250,23 @@ async function createIfAbsent(emit: Emit, kubeconfig: string): Promise<boolean> 
     { phase: 'provision', pct: 5 },
   );
   ownedEnv(); // make the directories before kind writes into them
-  let result;
-  try {
-    result = await kube.run(
-      ['kind', 'create', 'cluster', '--name', CLUSTER_NAME, '--kubeconfig', kubeconfig],
-      { timeout: CREATE_TIMEOUT, own: true },
-    );
-  } catch (error) {
-    return await failAfterCreateAttempt(error);
-  }
+  const result = await kube.run(
+    ['kind', 'create', 'cluster', '--name', CLUSTER_NAME, '--kubeconfig', kubeconfig],
+    { timeout: CREATE_TIMEOUT, own: true },
+  );
   if (result.returncode !== 0) {
     const combined = `${result.stdout}\n${result.stderr}`.toLowerCase();
     // A create that lost a race to something not holding this lock (a manual `kind
     // create`) is success, not failure.
     if (!combined.includes('already exist')) {
-      return await failAfterCreateAttempt(
-        new CreateFailedError(`could not create the cluster ${CLUSTER_NAME}: ${why(result)}`),
-      );
+      // A failed process cannot prove it created a same-named cluster that appears afterwards:
+      // a manual Kind invocation may have won the race. Its missing marker therefore remains a
+      // refusal, rather than authority for Houston to delete it.
+      throw new CreateFailedError(`could not create the cluster ${CLUSTER_NAME}: ${why(result)}`);
     }
+    return 'collision';
   }
-  return result.returncode === 0;
+  return 'created';
 }
 
 /**
@@ -340,8 +295,10 @@ export async function ensureCluster(emit: Emit = nullEmit): Promise<string> {
 
 async function ensureClusterLocked(emit: Emit): Promise<string> {
   const kubeconfig = ownedKubeconfig();
-  const createdHere = await createIfAbsent(emit, kubeconfig);
-  if (!createdHere) await verifyExistingClusterOwnership(emit);
+  const create = await createIfAbsent(emit, kubeconfig);
+  const createdHere = create === 'created';
+  if (create === 'existing') await verifyExistingClusterOwnership();
+  if (create === 'collision') await waitForCollisionMarker();
 
   let context: string;
   try {

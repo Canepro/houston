@@ -89,6 +89,22 @@ describe('persisted onboarding grants', () => {
     expect(cfg).toEqual({ grants: ['owned-cluster'], onboarding: { untouched: true } });
   });
 
+  it.each([
+    ['string', 'yes'],
+    ['null', null],
+    ['number', 1],
+  ])('treats a malformed %s grant value as unanswered', (_kind, value) => {
+    const cfg: Config = { grants: { owned_cluster: value } };
+
+    expect(holdsGrant('owned-cluster', cfg)).toBe(false);
+    expect(answeredGrants(cfg)).toEqual([]);
+    expect(state(cfg)).toMatchObject({
+      grants: { owned_cluster: false },
+      answered_grants: { owned_cluster: false },
+      grants_available: [{ id: 'owned-cluster', held: false, answered: false }],
+    });
+  });
+
   it('refuses an undeclared grant before a command can write it', () => {
     expect(() => checkGrantId('unapproved-cluster')).toThrow(ValidationError);
     expect(grantIds()).toEqual(['owned-cluster']);

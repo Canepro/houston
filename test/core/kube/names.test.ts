@@ -397,11 +397,82 @@ describe('the cluster houston makes for itself', () => {
     expect(calls.some(({ argv }) => argv.includes('create'))).toBe(false);
   });
 
-  it('adopts an unmarked same-named cluster that holds houston workspaces, through the probe file', async () => {
-    // Releases before the marker left none. A person upgrading must not delete a cluster
-    // holding their workspaces; a namespace with houston's owner label is written by nothing
-    // else. The namespace read and the marker write both go through the private probe
-    // kubeconfig, so nothing durable learns of the cluster before it is proven ours.
+  it('waits for a marker published by the winner of a cross-home create collision', async () => {
+    // Each HOUSTON_HOME has its own lock. A loser that sees Kind's `already exists` response
+    // cannot write a marker, but the winner may still be exporting and publishing its own one.
+    // The only safe wait is private probing for that exact receipt.
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
+    let reads = 0;
+    route((joined) => {
+      if (joined.includes('get clusters')) return { stdout: '' };
+      if (joined.includes('create cluster')) {
+        return { returncode: 1, stderr: 'ERROR: node(s) already exist' };
+      }
+      if (joined.includes('current-context')) return { stdout: CONTEXT };
+      if (joined.includes(`get configmap ${CLUSTER_OWNER_CONFIGMAP}`)) {
+        reads += 1;
+        return { stdout: reads === 1 ? '' : ownedClusterMarker() };
+      }
+      if (joined.includes('/readyz')) return { stdout: 'ok' };
+      return undefined;
+    });
+
+    await expect(ensureCluster()).resolves.toBe(CONTEXT);
+
+    const exports = calls.filter(({ argv }) => argv.includes('export') && argv.includes('kubeconfig'));
+    expect(exports).toHaveLength(3);
+    for (const call of exports.slice(0, -1)) {
+      expect(String(call.argv[call.argv.indexOf('--kubeconfig') + 1])).not.toBe(
+        ownedKubeconfig(),
+      );
+    }
+    expect(String(exports.at(-1)?.argv[exports.at(-1)?.argv.indexOf('--kubeconfig') + 1])).toBe(
+      ownedKubeconfig(),
+    );
+    const markerReads = calls.filter(({ argv }) => argv.includes('get') && argv.includes('configmap'));
+    expect(markerReads).toHaveLength(2);
+    expect(markerReads.every((call) => call.options.env?.KUBECONFIG !== ownedKubeconfig())).toBe(
+      true,
+    );
+    expect(calls.some(({ argv }) => argv.includes('apply') && argv.includes('--filename'))).toBe(
+      false,
+    );
+    expect(calls.some(({ argv }) => argv.includes('get') && argv.includes('namespace'))).toBe(
+      false,
+    );
+  });
+
+  it('refuses a cross-home create collision when its marker never appears', async () => {
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
+    route((joined) => {
+      if (joined.includes('get clusters')) return { stdout: '' };
+      if (joined.includes('create cluster')) {
+        return { returncode: 1, stderr: 'ERROR: node(s) already exist' };
+      }
+      if (joined.includes('current-context')) return { stdout: CONTEXT };
+      if (joined.includes(`get configmap ${CLUSTER_OWNER_CONFIGMAP}`)) return { stdout: '' };
+      return undefined;
+    });
+
+    await expect(ensureCluster()).rejects.toBeInstanceOf(ConflictError);
+
+    const exports = calls.filter(({ argv }) => argv.includes('export') && argv.includes('kubeconfig'));
+    expect(exports.length).toBeGreaterThan(1);
+    expect(
+      exports.every(
+        (call) => String(call.argv[call.argv.indexOf('--kubeconfig') + 1]) !== ownedKubeconfig()),
+    ).toBe(true);
+    expect(calls.some(({ argv }) => argv.includes('apply') && argv.includes('--filename'))).toBe(false);
+    expect(calls.some(({ argv }) => argv.includes('get') && argv.includes('namespace'))).toBe(false);
+  });
+
+  it('refuses an unmarked same-named cluster even when it has a Houston-labelled namespace', async () => {
+    // The namespace label proves only that namespace. Another operator can forge it, so an
+    // unmarked cluster cannot become ours or leave a kubeconfig in Houston's durable state.
     config.updateConfig((stored) => {
       grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
     });
@@ -415,18 +486,21 @@ describe('the cluster houston makes for itself', () => {
       }
       return undefined;
     });
-    expect(await ensureCluster()).toBe(CONTEXT);
+    await expect(ensureCluster()).rejects.toBeInstanceOf(ConflictError);
     expect(calls.some(({ argv }) => argv.includes('create'))).toBe(false);
+    expect(calls.some(({ argv }) => argv.includes('get') && argv.includes('namespace'))).toBe(
+      false,
+    );
+    expect(calls.some(({ argv }) => argv.includes('apply') && argv.includes('--filename'))).toBe(
+      false,
+    );
     const probe = calls.find(({ argv }) => argv.includes('export') && argv.includes('kubeconfig'));
     const probeConfig = String(probe?.argv[probe.argv.indexOf('--kubeconfig') + 1]);
     expect(probeConfig).not.toBe(ownedKubeconfig());
-    const namespaces = calls.find(({ argv }) => argv.includes('get') && argv.includes('namespace'));
-    expect(namespaces?.options.env?.KUBECONFIG).toBe(probeConfig);
-    const marker = calls.find(({ argv }) => argv.includes('apply') && argv.includes('--filename'));
-    expect(marker?.options.env?.KUBECONFIG).toBe(probeConfig);
-    expect(JSON.parse(String(marker?.options.input))).toMatchObject({
-      data: { cluster: CLUSTER_NAME },
-    });
+    expect(probe?.options.env?.KUBECONFIG).toBe(probeConfig);
+    const markerRead = calls.find(({ argv }) => argv.includes('get') && argv.includes('configmap'));
+    expect(markerRead?.options.env?.KUBECONFIG).toBe(probeConfig);
+    expect(fs.existsSync(ownedKubeconfig())).toBe(false);
     expect(fs.existsSync(path.dirname(probeConfig))).toBe(false);
   });
 
@@ -479,40 +553,47 @@ describe('the cluster houston makes for itself', () => {
   );
 
   it.each([
-    ['leaves the named cluster behind', `${CLUSTER_NAME}\n`, 1],
-    ['leaves no named cluster behind', '', 0],
-  ])(
-    'checks for rollback after kind create fails and %s',
-    async (_outcome, clustersAfter, deletes) => {
-      config.updateConfig((stored) => {
-        grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
-      });
-      let createAttempted = false;
-      route((joined) => {
-        if (joined.includes('get clusters')) {
-          return { stdout: createAttempted ? clustersAfter : '' };
-        }
-        if (joined.includes('create cluster')) {
-          createAttempted = true;
-          return { returncode: 1, stderr: 'control plane creation failed' };
-        }
-        return undefined;
-      });
+    [
+      'throws',
+      () => {
+        throw new Error('control plane creation threw');
+      },
+    ],
+    [
+      'returns a nonzero result',
+      () => ({ returncode: 1, stderr: 'control plane creation failed' }),
+    ],
+  ])('does not delete a cluster that appears after Kind create %s', async (_outcome, fail) => {
+    // A failed Kind process does not identify which process created the cluster that now has
+    // the fixed name. Another home or a manual invocation may have won the race, so cleanup
+    // must preserve it for an operator to inspect.
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
+    let createAttempted = false;
+    route((joined) => {
+      if (joined.includes('get clusters'))
+        return { stdout: createAttempted ? `${CLUSTER_NAME}\n` : '' };
+      if (joined.includes('create cluster')) {
+        createAttempted = true;
+        return fail();
+      }
+      return undefined;
+    });
 
-      await expect(ensureCluster()).rejects.toBeInstanceOf(CreateFailedError);
-      expect(
-        calls.filter(
-          ({ argv }) => argv[0] === 'kind' && argv.includes('delete') && argv.includes('cluster'),
-        ),
-      ).toHaveLength(deletes);
-      expect(calls.some(({ argv }) => argv.includes('export') && argv.includes('kubeconfig'))).toBe(
-        false,
-      );
-      expect(calls.some(({ argv }) => argv.includes('apply') && argv.includes('--filename'))).toBe(
-        false,
-      );
-    },
-  );
+    await expect(ensureCluster()).rejects.toThrow(/control plane creation/u);
+    expect(
+      calls.filter(
+        ({ argv }) => argv[0] === 'kind' && argv.includes('delete') && argv.includes('cluster'),
+      ),
+    ).toHaveLength(0);
+    expect(calls.some(({ argv }) => argv.includes('export') && argv.includes('kubeconfig'))).toBe(
+      false,
+    );
+    expect(calls.some(({ argv }) => argv.includes('apply') && argv.includes('--filename'))).toBe(
+      false,
+    );
+  });
 
   it('keeps a newly marked cluster when a later progress listener fails', async () => {
     config.updateConfig((stored) => {

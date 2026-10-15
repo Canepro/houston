@@ -89,10 +89,10 @@ const ROOT = path.resolve(__dirname, '..');
 // monitoring, pin and port, the operator password off every argv, the operator's memory and
 // PodMonitor, serve's shutdown, and the usage and wording answers it found untrue.
 // Eight onboarding-grant and local-Kind lifecycle boundary cases complete the port.
-// A later ownership follow-up adds one adoption case, then replaces it and adds four
-// label-forgery and rollback cases. A failed-create repair then adds two post-attempt
-// rollback cases. The measured registered suite is 4515 tests.
-const FLOOR = 4515;
+// A later ownership follow-up replaces its adoption case with a forgeable-label refusal and
+// adds the ownership and rollback cases. A failed-create review adds one race-preservation
+// case for each failure channel. The measured registered suite is 4525 tests.
+const FLOOR = 4525;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

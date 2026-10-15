@@ -158,9 +158,10 @@ interface StoredGrant {
 function storedGrant(cfg: Config, id: string): StoredGrant {
   const grants = readMapping(cfg, GRANTS_KEY);
   const key = grantKey(id);
+  const value = grants[key];
   return {
-    held: grants[key] === true,
-    answered: Object.prototype.hasOwnProperty.call(grants, key),
+    held: value === true,
+    answered: value === true || value === false,
   };
 }
 
