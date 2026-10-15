@@ -2,7 +2,9 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
+import * as config from '../../../src/lib/config';
 import type { Event } from '../../../src/lib/events';
+import { grant, revoke } from '../../../src/lib/onboarding';
 import type { KubectlResult } from '../../../src/core/kube/exec';
 
 import type * as PruningNS from '../../../src/core/lifecycle/pruning';
@@ -247,6 +249,7 @@ describe('a whole prune', () => {
     context?: string;
     owners?: Record<string, string | null>;
     deleteCluster?: () => Promise<boolean>;
+    reclaimable?: boolean;
     down?: (name: string) => Promise<number>;
     running?: Record<string, string>;
     /** Whether a Kubernetes workspace's workload answers: true is "not down". */
@@ -281,6 +284,7 @@ describe('a whole prune', () => {
     }));
     jest.doMock('../../../src/core/kube/cluster', () => ({
       ...jest.requireActual('../../../src/core/kube/cluster'),
+      clusterReclaimable: async () => world.reclaimable ?? false,
       deleteCluster: async (options: unknown) => {
         reclaimed.push(options);
         return world.deleteCluster === undefined ? false : await world.deleteCluster();
@@ -348,7 +352,13 @@ describe('a whole prune', () => {
     // Measured live: with every workspace gone, `prune` said "Nothing to prune" and left
     // houston's own kind control plane running -- 514 MiB holding nothing -- while the
     // README and the agent skill both said it reclaims it.
-    const world = load({ deleteCluster: async () => true });
+    const world = load({ reclaimable: true, deleteCluster: async () => true });
+    await expect(world.pruning.prune({ confirm: true })).rejects.toMatchObject({
+      code: 'GATE_NOT_ONBOARDED',
+    });
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
     expect((await world.pruning.prune({ confirm: true })).cluster).toBe(true);
     expect(world.reclaimed).toHaveLength(1);
     // And the same offer applies on the other early path.
@@ -361,9 +371,32 @@ describe('a whole prune', () => {
     // The subject was the local records alone, so a sweep of namespaces and no records
     // wrote `prune` with an empty subject -- no trace anywhere of what was destroyed.
     const world = load({ namespaces: ['houston-ghost'] });
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
     await world.pruning.prune({ confirm: true, orphans: true });
     expect(world.audited[0]?.[0]).toBe('prune');
     expect(world.audited[0]?.[1]).toContain('houston-ghost');
+  });
+
+  it('gates a local orphan sweep before it records or deletes anything', async () => {
+    // With no record target, the former precheck saw neither a local workspace nor a
+    // reclaimable cluster and deleted the namespace under an unanswered grant.
+    const world = load({ namespaces: ['houston-ghost'], owners: { 'houston-ghost': 'me' } });
+    await expect(world.pruning.prune({ confirm: true, orphans: true })).rejects.toMatchObject({
+      code: 'GATE_NOT_ONBOARDED',
+    });
+    expect(world.audited).toEqual([]);
+    expect(world.deleted).toEqual([]);
+
+    config.updateConfig((stored) => {
+      revoke(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
+    await expect(world.pruning.prune({ confirm: true, orphans: true })).rejects.toMatchObject({
+      code: 'GATE_OWNED_CLUSTER',
+    });
+    expect(world.audited).toEqual([]);
+    expect(world.deleted).toEqual([]);
   });
 
   it('skips one unreadable workspace rather than abandoning the rest', async () => {
@@ -419,7 +452,7 @@ describe('a whole prune', () => {
       world.record.metadata({
         name: 'kub',
         project: 'houston-kub',
-        extra: { runtime: 'kubernetes', context: 'default' },
+        extra: { runtime: 'kubernetes', context: 'kind-houston-local' },
       }),
     );
     for (const name of ['cmp', 'kub', 'stuck']) {
@@ -428,6 +461,22 @@ describe('a whole prune', () => {
     }
     journal.record(journal.CREATE_UNFINISHED, 'bystander');
 
+    await expect(
+      world.pruning.prune({ confirm: true, only: ['cmp', 'kub', 'stuck'] }),
+    ).rejects.toMatchObject({
+      code: 'GATE_NOT_ONBOARDED',
+    });
+    config.updateConfig((stored) => {
+      revoke(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
+    await expect(
+      world.pruning.prune({ confirm: true, only: ['cmp', 'kub', 'stuck'] }),
+    ).rejects.toMatchObject({
+      code: 'GATE_OWNED_CLUSTER',
+    });
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
     const out = await world.pruning.prune({ confirm: true, only: ['cmp', 'kub', 'stuck'] });
 
     expect(out.removed).toEqual(['cmp', 'kub']);
@@ -463,6 +512,9 @@ describe('a whole prune', () => {
     expect((await world.pruning.prune({ confirm: true })).orphans).toEqual([]);
     expect(world.deleted).toEqual([]);
     // Asked for explicitly, it removes exactly the unexplained one.
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
     expect((await world.pruning.prune({ confirm: true, orphans: true })).orphans).toEqual([
       'houston-p3',
     ]);
@@ -474,6 +526,7 @@ describe('a whole prune', () => {
     // in. No kind binary here, so nothing of ours to give back; and a cluster that still
     // holds a workspace refuses while the prune itself succeeds.
     const world = load({
+      reclaimable: true,
       deleteCluster: async () => {
         throw new (require('../../../src/lib/errors') as typeof ErrorsNS).ConflictError(
           'cluster houston-local still holds 1 workspace namespace(s)',
@@ -484,6 +537,9 @@ describe('a whole prune', () => {
       clusterReclaimable: () => Promise<boolean>;
     };
     expect(await cluster.clusterReclaimable()).toBe(false);
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
     const events: Event[] = [];
     const out = await world.pruning.prune({ confirm: true, emit: (event) => events.push(event) });
     expect(out.cluster).toBe(false);

@@ -11,6 +11,7 @@ import * as config from '../../lib/config';
 import { ConflictError, DockerError, ValidationError } from '../../lib/errors';
 import { quotedText } from '../../lib/format';
 import { type Emit, info, nullEmit, warn } from '../../lib/events';
+import { requireGrant, requireOnboarded } from '../../lib/onboarding';
 import { actor as auditActor, record as auditRecord } from '../audit';
 import { detach } from '../edge/networks';
 import { deregister as deregisterRoute } from '../edge/routes';
@@ -23,7 +24,7 @@ import {
   removeMonitoring,
 } from '../kube/monitoring';
 import { removeOperator } from '../kube/operator';
-import { CONTEXT as KUBE_CONTEXT, RELEASE } from '../kube/names';
+import { CONTEXT as KUBE_CONTEXT, RELEASE, isOurs } from '../kube/names';
 import * as engine from '../runner/engine';
 import { reproLock } from '../runner/locks';
 import * as paths from '../runner/paths';
@@ -255,6 +256,20 @@ export async function teardown(
     if (!allowed) {
       auditRecord('down-volumes', target, { outcome: 'denied' });
       throw new ConflictError(why);
+    }
+  }
+  if ((await topology.ofRepro(target)) === topology.KUBERNETES) {
+    const meta = await readMeta(target);
+    const extra = bag(meta.extra);
+    const context = isTruthy(extra[config.EXTRA_CONTEXT])
+      ? String(extra[config.EXTRA_CONTEXT])
+      : KUBE_CONTEXT;
+    // This is the public lifecycle boundary. An adopted cluster retains its
+    // namespace-only teardown contract; a local Kind workspace needs the
+    // machine-scoped decision before forwards or namespaces are touched.
+    if (isOurs(context)) {
+      requireOnboarded();
+      requireGrant('owned-cluster');
     }
   }
   // Recorded BEFORE the work, not after: a teardown that dies half way through has still

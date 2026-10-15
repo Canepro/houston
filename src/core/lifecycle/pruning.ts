@@ -5,14 +5,21 @@
  * before anything does.
  */
 import * as config from '../../lib/config';
-import { ConflictError, DockerError, ReproError, ValidationError } from '../../lib/errors';
+import {
+  AuthorityGateError,
+  ConflictError,
+  DockerError,
+  ReproError,
+  ValidationError,
+} from '../../lib/errors';
 import { type Emit, info, nullEmit, warn } from '../../lib/events';
+import { requireGrant, requireOnboarded } from '../../lib/onboarding';
 import { actor as auditActor, record as auditRecord } from '../audit';
 import { deregister as deregisterRoute } from '../edge/routes';
 import { detach } from '../edge/networks';
 import { clearWorkspace } from '../journal';
 import { workspaceNamespaces } from '../kube/capabilities';
-import { deleteCluster } from '../kube/cluster';
+import { clusterReclaimable, deleteCluster } from '../kube/cluster';
 import { planCluster } from '../kube/context';
 import { kube } from '../kube/exec';
 import { CONTEXT as KUBE_CONTEXT, APPLY_TIMEOUT, isOurs } from '../kube/names';
@@ -50,6 +57,27 @@ function isTruthy(value: unknown): boolean {
   if (Array.isArray(value)) return value.length > 0;
   if (typeof value === 'object') return Object.keys(value).length > 0;
   return true;
+}
+
+/** Stop before a local Kind lifecycle operation, leaving adopted clusters alone. */
+function requireOwnedClusterAuthority(context: string): void {
+  if (!isOurs(context)) return;
+  requireOnboarded();
+  requireGrant('owned-cluster');
+}
+
+/** Whether any selected workspace will mutate the local Kind cluster. */
+async function targetsUseOwnedCluster(targets: readonly string[]): Promise<boolean> {
+  for (const name of targets) {
+    const meta = await readMeta(name);
+    if (topology.ofMeta(meta) !== topology.KUBERNETES) continue;
+    const extra = bag(meta.extra);
+    const context = isTruthy(extra[config.EXTRA_CONTEXT])
+      ? String(extra[config.EXTRA_CONTEXT])
+      : KUBE_CONTEXT;
+    if (isOurs(context)) return true;
+  }
+  return false;
 }
 
 /**
@@ -140,8 +168,12 @@ export async function orphanContext(): Promise<string> {
  */
 export async function reclaimCluster(emit: Emit = nullEmit): Promise<boolean> {
   try {
+    // `deleteCluster` is deliberately best-effort for cleanup. Check authority before
+    // entering that path so a gate remains a gate instead of becoming a warning.
+    if (await clusterReclaimable()) requireOwnedClusterAuthority(KUBE_CONTEXT);
     return await deleteCluster({ emit });
   } catch (error) {
+    if (error instanceof AuthorityGateError) throw error;
     if (error instanceof ReproError) {
       warn(emit, `the cluster was left alone: ${error.message}`, { phase: 'done' });
       return false;
@@ -189,12 +221,14 @@ export async function sweepOrphanNamespaces(
   emit: Emit,
   force: boolean,
   stray: readonly string[],
+  context = '',
 ): Promise<string[]> {
   const swept: string[] = [];
   // HOISTED, and that is the fix. The sweep below resolved the context properly and the
   // wait further down used the hardcoded `CONTEXT` -- so on any cluster houston did not
   // create the two disagreed and the wait read the failure as "gone".
-  const ctx = await orphanContext();
+  const ctx = context || (await orphanContext());
+  if (stray.length > 0) requireOwnedClusterAuthority(ctx);
   if (stray.length > 0) {
     const me = auditActor();
     for (const ns of stray) {
@@ -446,17 +480,30 @@ export async function prune({
       );
     }
   }
-  const stray = orphans ? await orphanNamespaces() : [];
+  const orphanCtx = orphans ? await orphanContext() : '';
+  const stray = orphans ? await orphanNamespaces(orphanCtx) : [];
   if (targets.length === 0 && stray.length === 0) {
     // Still worth asking about the CLUSTER. With every workspace gone, houston's own kind
     // cluster is a 514 MiB control plane holding nothing -- and both the README and the
     // agent skill said `prune` reclaims it, which nothing did.
+    const willReclaimOwnedCluster = await clusterReclaimable();
+    if (willReclaimOwnedCluster) requireOwnedClusterAuthority(KUBE_CONTEXT);
     return { targets: [], removed: [], orphans: [], cluster: await reclaimCluster(emit) };
   }
   if (!confirm) {
     throw new ValidationError(
       `prune deletes ${String(targets.length)} down repro(s) incl. data - pass confirm=true`,
     );
+  }
+  // Consult this before a mixed prune starts. Otherwise a denied local-cluster cleanup
+  // could arrive after Compose workspaces had already been removed.
+  const willReclaimOwnedCluster = await clusterReclaimable();
+  if (
+    willReclaimOwnedCluster ||
+    (await targetsUseOwnedCluster(targets)) ||
+    (stray.length > 0 && isOurs(orphanCtx))
+  ) {
+    requireOwnedClusterAuthority(KUBE_CONTEXT);
   }
   // The NAMESPACES go in the subject too. Recording only `targets` meant a sweep that
   // deleted three namespaces and no local records wrote `- prune - system ok`, with no
@@ -465,6 +512,6 @@ export async function prune({
   auditRecord('prune', subject);
   const removed: string[] = [];
   await removeEachWorkspace(emit, removed, targets);
-  const swept = await sweepOrphanNamespaces(emit, force, stray);
+  const swept = await sweepOrphanNamespaces(emit, force, stray, orphanCtx);
   return { targets, removed, orphans: swept, cluster: await reclaimCluster(emit) };
 }

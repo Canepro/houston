@@ -243,6 +243,8 @@ export const GATE_CODES: Readonly<Record<string, string>> = Object.freeze({
  * carries its specific code.
  */
 export const RAISED_GATE_CODES: readonly string[] = Object.freeze([
+  'GATE_NOT_ONBOARDED',
+  'GATE_OWNED_CLUSTER',
   'GATE_UNAPPROVED_CLUSTER',
   'GATE_CLOUD_SPEND',
   'GATE_DELETE_UNOWNED',

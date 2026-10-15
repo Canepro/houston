@@ -1017,7 +1017,14 @@
     {"code":2,"stdout":"","stderr":"Usage: houston up [OPTIONS]\nTry 'houston up --help' for help.\n╭─ Error ──────────────────────────────────────────────────────────────────────╮\n│ Invalid value for '--seed-history-days': '7\\x1f' is not a valid integer.     │\n╰──────────────────────────────────────────────────────────────────────────────╯\n"},
     {"code":2,"stdout":"","stderr":"Usage: houston up [OPTIONS]\nTry 'houston up --help' for help.\n╭─ Error ──────────────────────────────────────────────────────────────────────╮\n│ Invalid value for '--seed-history-days': '\\ufeff7' is not a valid integer.   │\n╰──────────────────────────────────────────────────────────────────────────────╯\n"},
     {"ran":"up","values":{"port":0,"replicas":0,"seed_history_days":5}},
-    {"code":2,"stdout":"","stderr":"Usage: houston up [OPTIONS]\nTry 'houston up --help' for help.\n╭─ Error ──────────────────────────────────────────────────────────────────────╮\n│ Invalid value for '--seed-history-days': 'abc' is not a valid integer.       │\n╰──────────────────────────────────────────────────────────────────────────────╯\n"}
+    {"code":2,"stdout":"","stderr":"Usage: houston up [OPTIONS]\nTry 'houston up --help' for help.\n╭─ Error ──────────────────────────────────────────────────────────────────────╮\n│ Invalid value for '--seed-history-days': 'abc' is not a valid integer.       │\n╰──────────────────────────────────────────────────────────────────────────────╯\n"},
+    {"code":2,"stdout":"","stderr":"Usage: houston onboard [OPTIONS] [action] [id]\nTry 'houston onboard --help' for help.\n╭─ Error ──────────────────────────────────────────────────────────────────────╮\n│ No such option: --bogus                                                      │\n╰──────────────────────────────────────────────────────────────────────────────╯\n"},
+    {"code":2,"stdout":"","stderr":"Usage: houston onboard [OPTIONS] [action] [id]\nTry 'houston onboard --help' for help.\n╭─ Error ──────────────────────────────────────────────────────────────────────╮\n│ No such option: -Z                                                           │\n╰──────────────────────────────────────────────────────────────────────────────╯\n"},
+    {"code":0,"help":"houston onboard [OPTIONS] [action] [id]"},
+    {"code":2,"stdout":"","stderr":"Usage: houston onboard [OPTIONS] [action] [id]\nTry 'houston onboard --help' for help.\n╭─ Error ──────────────────────────────────────────────────────────────────────╮\n│ Got unexpected extra argument(s) (e3 e4 e5)                                  │\n╰──────────────────────────────────────────────────────────────────────────────╯\n"},
+    {"ran":"onboard","values":{}},
+    {"code":2,"stdout":"","stderr":"Usage: houston onboard [OPTIONS] [action] [id]\nTry 'houston onboard --help' for help.\n╭─ Error ──────────────────────────────────────────────────────────────────────╮\n│ No such option: --js (Possible options: --json)                              │\n╰──────────────────────────────────────────────────────────────────────────────╯\n"},
+    {"code":2,"stdout":"{\"contract\": 2, \"data\": null, \"error\": {\"code\": \"VALIDATION_FAILED\", \"message\": \"No such option: --bogus\"}, \"generated_at\": \"-\", \"houston_version\": \"2.1.1\", \"ok\": false, \"schema\": \"houston.error.v1\", \"warnings\": []}\n","stderr":"Usage: houston onboard [OPTIONS] [action] [id]\nTry 'houston onboard --help' for help.\n╭─ Error ──────────────────────────────────────────────────────────────────────╮\n│ No such option: --bogus                                                      │\n╰──────────────────────────────────────────────────────────────────────────────╯\n"}
   ],
   "cases": {
     "rootShapes": {
@@ -2120,7 +2127,19 @@
       "[[\"up\",\"--seed-history-days\",\"nope\"],null]": 1003,
       "[[\"up\",\"--seed-history-days\",\"1_0\"],null]": 156,
       "[[\"up\",\"--seed-history-days\",\" 7 \"],null]": 156,
-      "[[\"up\",\"--seed-history-da\"],null]": 1004
+      "[[\"up\",\"--seed-history-da\"],null]": 1004,
+      "[[\"onboard\",\"--bogus\"],null]": 1018,
+      "[[\"onboard\",\"-Z\"],null]": 1019,
+      "[[\"onboard\",\"--bogus\",\"--help\"],null]": 1018,
+      "[[\"onboard\",\"--help\",\"--bogus\"],null]": 1018,
+      "[[\"onboard\",\"--help\"],null]": 1020,
+      "[[\"onboard\",\"e1\",\"e2\",\"e3\",\"e4\",\"e5\"],null]": 1021,
+      "[[\"onboard\",\"--bogus=1\"],null]": 1018,
+      "[[\"onboard\",\"-\"],null]": 1022,
+      "[[\"onboard\",\"--json=yes\"],null]": 224,
+      "[[\"onboard\",\"--js\"],null]": 1023,
+      "[[\"onboard\",\"--json\",\"--bogus\"],null]": 1024,
+      "[[\"onboard\",\"--json\",\"stray\"],null]": 1022
     },
     "narrowUsage": {
       "[[\"config-import\",\"--bogus\"],30]": 725,
@@ -3648,7 +3667,19 @@
         "[[\"up\",\"--seed-history-days\",\"nope\"],null]": 944,
         "[[\"up\",\"--seed-history-days\",\"1_0\"],null]": 944,
         "[[\"up\",\"--seed-history-days\",\" 7 \"],null]": 944,
-        "[[\"up\",\"--seed-history-da\"],null]": 944
+        "[[\"up\",\"--seed-history-da\"],null]": 944,
+        "[[\"onboard\",\"--bogus\"],null]": 944,
+        "[[\"onboard\",\"-Z\"],null]": 944,
+        "[[\"onboard\",\"--bogus\",\"--help\"],null]": 944,
+        "[[\"onboard\",\"--help\",\"--bogus\"],null]": 944,
+        "[[\"onboard\",\"--help\"],null]": 944,
+        "[[\"onboard\",\"e1\",\"e2\",\"e3\",\"e4\",\"e5\"],null]": 944,
+        "[[\"onboard\",\"--bogus=1\"],null]": 944,
+        "[[\"onboard\",\"-\"],null]": 944,
+        "[[\"onboard\",\"--json=yes\"],null]": 944,
+        "[[\"onboard\",\"--js\"],null]": 944,
+        "[[\"onboard\",\"--json\",\"--bogus\"],null]": 945,
+        "[[\"onboard\",\"--json\",\"stray\"],null]": 945
       },
       "mode 000": {
         "[[],null]": 0,
@@ -4619,7 +4650,19 @@
         "[[\"up\",\"--seed-history-days\",\"nope\"],null]": 946,
         "[[\"up\",\"--seed-history-days\",\"1_0\"],null]": 946,
         "[[\"up\",\"--seed-history-days\",\" 7 \"],null]": 946,
-        "[[\"up\",\"--seed-history-da\"],null]": 946
+        "[[\"up\",\"--seed-history-da\"],null]": 946,
+        "[[\"onboard\",\"--bogus\"],null]": 946,
+        "[[\"onboard\",\"-Z\"],null]": 946,
+        "[[\"onboard\",\"--bogus\",\"--help\"],null]": 946,
+        "[[\"onboard\",\"--help\",\"--bogus\"],null]": 946,
+        "[[\"onboard\",\"--help\"],null]": 946,
+        "[[\"onboard\",\"e1\",\"e2\",\"e3\",\"e4\",\"e5\"],null]": 946,
+        "[[\"onboard\",\"--bogus=1\"],null]": 946,
+        "[[\"onboard\",\"-\"],null]": 946,
+        "[[\"onboard\",\"--json=yes\"],null]": 946,
+        "[[\"onboard\",\"--js\"],null]": 946,
+        "[[\"onboard\",\"--json\",\"--bogus\"],null]": 947,
+        "[[\"onboard\",\"--json\",\"stray\"],null]": 947
       },
       "not UTF-8": {
         "[[],null]": 0,
@@ -5590,7 +5633,19 @@
         "[[\"up\",\"--seed-history-days\",\"nope\"],null]": 948,
         "[[\"up\",\"--seed-history-days\",\"1_0\"],null]": 948,
         "[[\"up\",\"--seed-history-days\",\" 7 \"],null]": 948,
-        "[[\"up\",\"--seed-history-da\"],null]": 948
+        "[[\"up\",\"--seed-history-da\"],null]": 948,
+        "[[\"onboard\",\"--bogus\"],null]": 948,
+        "[[\"onboard\",\"-Z\"],null]": 948,
+        "[[\"onboard\",\"--bogus\",\"--help\"],null]": 948,
+        "[[\"onboard\",\"--help\",\"--bogus\"],null]": 948,
+        "[[\"onboard\",\"--help\"],null]": 948,
+        "[[\"onboard\",\"e1\",\"e2\",\"e3\",\"e4\",\"e5\"],null]": 948,
+        "[[\"onboard\",\"--bogus=1\"],null]": 948,
+        "[[\"onboard\",\"-\"],null]": 948,
+        "[[\"onboard\",\"--json=yes\"],null]": 948,
+        "[[\"onboard\",\"--js\"],null]": 948,
+        "[[\"onboard\",\"--json\",\"--bogus\"],null]": 949,
+        "[[\"onboard\",\"--json\",\"stray\"],null]": 949
       }
     }
   }

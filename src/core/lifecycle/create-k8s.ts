@@ -13,6 +13,7 @@
 import * as fs from 'node:fs/promises';
 
 import * as config from '../../lib/config';
+import { requireGrant, requireOnboarded } from '../../lib/onboarding';
 import { joinPath } from '../../lib/home';
 import { toText } from '../../lib/format';
 import {
@@ -44,7 +45,7 @@ import { stopForward } from '../kube/forward';
 import { deregister as deregisterRoute, routeHost } from '../edge/routes';
 import { installed as edgeInstalled } from '../edge/spec';
 import { assertNamespaceAvailable, namespaceFor, namespaceLabels } from '../kube/namespace';
-import { mintNamespace } from '../kube/names';
+import { isOurs, mintNamespace } from '../kube/names';
 import { type ClusterPlan, planCluster } from '../kube/context';
 import { ensureKubeconfig } from '../kube/cluster';
 import { helmReachable } from '../kube/reachability';
@@ -980,6 +981,13 @@ export async function createKubernetes(
     refuseEnforcedBefore880(requestedPreset(job), (job.resolved as Resolved).rcVersion);
     await claimSidecarPorts(job);
     await planClusterStep(job);
+    // A local Kind context needs the machine-scoped decision before `planTls` exports its
+    // owned kubeconfig or this create writes its provisional record. Adopted contexts retain
+    // their existing per-request rules.
+    if (job.plan !== null && isOurs(job.plan.context)) {
+      requireOnboarded();
+      requireGrant('owned-cluster');
+    }
     await planTls(job);
     await planKubeTls(job);
     await writeProvisionalRecord(job);

@@ -2,6 +2,7 @@ import { Command, CommanderError, InvalidArgumentError, Option } from 'commander
 
 import { ReproError, ValidationError } from '../lib/errors';
 import { quotedText } from '../lib/format';
+import { setOnboardingVersion } from '../lib/onboarding';
 import {
   activate,
   active,
@@ -517,6 +518,7 @@ export async function runCli(argv: readonly string[], options: BuildCliOptions):
   jsonModeReset();
   panelUsage = false;
   setHoustonVersion(PACKAGE_VERSION);
+  setOnboardingVersion(PACKAGE_VERSION);
   const io = options.io ?? processIo;
   // THE FROZEN VERDICT FIRST. Help, the version and every usage error are decided as the
   // frozen CLI decides them, in its order (`./usage-error`), before commander sees argv. A usage

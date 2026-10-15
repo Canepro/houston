@@ -23,6 +23,7 @@ import type * as TlsplanNS from '../../../src/core/lifecycle/tlsplan';
 import type * as RoutesNS from '../../../src/core/edge/routes';
 
 import * as config from '../../../src/lib/config';
+import { grant, revoke } from '../../../src/lib/onboarding';
 import { ConflictError, PreflightError, ValidationError } from '../../../src/lib/errors';
 import { NOTHING_LEFT, nullEmit } from '../../../src/lib/events';
 import type { KubectlResult } from '../../../src/seams/kubectl';
@@ -173,6 +174,11 @@ beforeEach(() => {
   mockRoute = null;
   mockCalls.length = 0;
   mockCreated.length = 0;
+  // Most cases exercise the local Kind path's Kubernetes behavior. Give it the standing
+  // decision deliberately; the gate regression below clears it and proves the refusal.
+  config.updateConfig((stored) => {
+    grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+  });
 });
 
 afterEach(() => {
@@ -180,6 +186,30 @@ afterEach(() => {
 });
 
 describe('a Kubernetes create', () => {
+  it('gates local Kind setup before it exports a kubeconfig or writes a provisional record', async () => {
+    // `ensureKubeconfig` writes Houston's owned kubeconfig for an existing Kind cluster, and
+    // the record reserves the workspace name. Both must remain untouched until onboarding
+    // and the scoped grant are present.
+    config.saveConfig({});
+    const req = (name: string) =>
+      createReq({ version: '8.5.1', name, runtime: 'kubernetes', offline: true });
+
+    await expect(createKubernetes(req('kgated-none'))).rejects.toMatchObject({
+      code: 'GATE_NOT_ONBOARDED',
+    });
+    expect(mockCreated).toEqual([]);
+    expect(await exists('kgated-none')).toBe(false);
+
+    config.updateConfig((stored) => {
+      revoke(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
+    await expect(createKubernetes(req('kgated-denied'))).rejects.toMatchObject({
+      code: 'GATE_OWNED_CLUSTER',
+    });
+    expect(mockCreated).toEqual([]);
+    expect(await exists('kgated-denied')).toBe(false);
+  });
+
   it('waits for the workspace to SERVE before it seeds it', async () => {
     // `up --seed` ran the seeder the instant helm returned -- "can't seed — repro not
     // ready". The CLI forces wait when seeding, and this path never read it. Helm returning

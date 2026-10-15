@@ -2,6 +2,7 @@ import * as fs from 'node:fs/promises';
 
 import * as config from '../../../src/lib/config';
 import { type Emit } from '../../../src/lib/events';
+import { grant, revoke } from '../../../src/lib/onboarding';
 import { metadata, writeRecord } from '../../../src/core/runner/record';
 import * as paths from '../../../src/core/runner/paths';
 
@@ -400,7 +401,11 @@ describe('the repair notes of a workspace that is torn down', () => {
     journal.record(journal.CREATE_UNFINISHED, 'bystander');
     const runtimes: Record<string, Record<string, unknown>> = {
       'notes-cmp': { runtime: 'docker' },
-      'notes-kub': { runtime: 'kubernetes', namespace: 'houston-notes-kub', context: 'default' },
+      'notes-kub': {
+        runtime: 'kubernetes',
+        namespace: 'houston-notes-kub',
+        context: 'kind-houston-local',
+      },
     };
     for (const [name, extra] of Object.entries(runtimes)) {
       await writeRecord(name, metadata({ name, project: `houston-${name}`, extra }));
@@ -411,6 +416,21 @@ describe('the repair notes of a workspace that is torn down', () => {
         journal.CLUSTER_UNFINISHED,
       ]) {
         journal.record(kind, name);
+      }
+
+      if (extra.runtime === 'kubernetes') {
+        await expect(destroy.teardown(name, { volumes: false })).rejects.toMatchObject({
+          code: 'GATE_NOT_ONBOARDED',
+        });
+        config.updateConfig((stored) => {
+          revoke(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+        });
+        await expect(destroy.teardown(name, { volumes: false })).rejects.toMatchObject({
+          code: 'GATE_OWNED_CLUSTER',
+        });
+        config.updateConfig((stored) => {
+          grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+        });
       }
 
       await destroy.teardown(name, { volumes: false });

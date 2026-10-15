@@ -27,6 +27,15 @@ export const CLUSTER_NAME = 'houston-local';
 export const CONTEXT = `kind-${CLUSTER_NAME}`;
 
 /**
+ * The in-cluster receipt that proves Houston created the fixed-name Kind cluster.
+ *
+ * A name is not ownership: another operator can create `houston-local`. The marker lives
+ * in `kube-system`, carries the ordinary Houston ownership label, and records the one
+ * cluster name this build is ever allowed to manage.
+ */
+export const CLUSTER_OWNER_CONFIGMAP = 'houston-cluster-owner';
+
+/**
  * One namespace per workspace. The official guide creates a named namespace and says
  * the name is the operator's choice, so this fits the documented model.
  */

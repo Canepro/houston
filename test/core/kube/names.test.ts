@@ -5,8 +5,9 @@ import * as path from 'node:path';
 import * as YAML from 'yaml';
 
 import * as config from '../../../src/lib/config';
-import { CreateFailedError, DockerError } from '../../../src/lib/errors';
+import { AuthorityGateError, CreateFailedError, DockerError } from '../../../src/lib/errors';
 import type { Event } from '../../../src/lib/events';
+import { grant, revoke } from '../../../src/lib/onboarding';
 import type { KubectlResult } from '../../../src/seams/kubectl';
 
 import { workspaceNamespaces } from '../../../src/core/kube/capabilities';
@@ -16,6 +17,7 @@ import { mongoManifest } from '../../../src/core/kube/manifests';
 import {
   CHART,
   CLUSTER_NAME,
+  CLUSTER_OWNER_CONFIGMAP,
   CONTEXT,
   CORE_TOOLS,
   LOCAL_PROVISION_TOOLS,
@@ -122,6 +124,13 @@ const RECORDED: Record<string, unknown> = {
   CORE_TOOLS: { kubectl: [1, 21], helm: [3, 0] },
   LOCAL_PROVISION_TOOLS: { kind: [0, 20] },
 };
+
+function ownedClusterMarker(): string {
+  return JSON.stringify({
+    metadata: { labels: { [OWNER_LABEL_KEY]: OWNER_LABEL_VALUE } },
+    data: { cluster: CLUSTER_NAME },
+  });
+}
 
 describe('the vocabulary', () => {
   it('matches earlier releases constant for constant', () => {
@@ -310,13 +319,47 @@ describe('the cluster houston makes for itself', () => {
     if (joined.includes('get clusters')) return { stdout: clusters };
     if (joined.includes('current-context')) return { stdout: CONTEXT };
     if (joined.includes('/readyz')) return { stdout: 'ok' };
+    if (joined.includes(`get configmap ${CLUSTER_OWNER_CONFIGMAP}`)) {
+      return { stdout: ownedClusterMarker() };
+    }
     return undefined;
   };
 
-  it('never writes the user’s kubeconfig when it creates one', async () => {
+  it('requires onboarding and a held grant before it creates or reuses a cluster and never writes the user’s kubeconfig', async () => {
     // kind writes the file it is GIVEN and also honours KUBECONFIG for the context switch,
     // so both are set. Verified live -- a real `kind create` left ~/.kube/config
     // byte-identical -- and pinned here because the live check is not in CI.
+    route(healthy(''));
+    const refused = await ensureCluster().catch((error: unknown) => error);
+    expect(refused).toBeInstanceOf(AuthorityGateError);
+    expect(refused).toMatchObject({ code: 'GATE_NOT_ONBOARDED' });
+    expect((refused as AuthorityGateError).asGate()).toMatchObject({
+      approve_with: 'houston onboard',
+    });
+    expect(calls.some(({ argv }) => argv.includes('create'))).toBe(false);
+
+    // A Kind cluster that already exists still needs its private kubeconfig exported into
+    // this home's state. Reuse is part of the same local lifecycle grant, not a bypass.
+    calls.length = 0;
+    route(healthy(`${CLUSTER_NAME}\n`));
+    const reuseRefused = await ensureCluster().catch((error: unknown) => error);
+    expect(reuseRefused).toMatchObject({ code: 'GATE_NOT_ONBOARDED' });
+    expect(calls.some(({ argv }) => argv.includes('export'))).toBe(false);
+
+    config.updateConfig((stored) => {
+      revoke(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
+    const denied = await ensureCluster().catch((error: unknown) => error);
+    expect(denied).toBeInstanceOf(AuthorityGateError);
+    expect(denied).toMatchObject({ code: 'GATE_OWNED_CLUSTER' });
+    expect((denied as AuthorityGateError).asGate()).toMatchObject({
+      approve_with: 'houston onboard grant owned-cluster',
+    });
+    expect(calls.some(({ argv }) => argv.includes('create'))).toBe(false);
+
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
     route(healthy(''));
     expect(await ensureCluster()).toBe(CONTEXT);
     const create = calls.find(({ argv }) => argv.includes('create'));
@@ -326,20 +369,58 @@ describe('the cluster houston makes for itself', () => {
     expect(String(argv[argv.indexOf('--kubeconfig') + 1]).startsWith(config.home())).toBe(true);
     // And the create itself runs with the redirected environment.
     expect(create?.options.own).toBe(true);
+    const marker = calls.find(({ argv }) => argv.includes('apply') && argv.includes('--filename'));
+    expect(JSON.parse(String(marker?.options.input))).toMatchObject({
+      metadata: {
+        name: CLUSTER_OWNER_CONFIGMAP,
+        namespace: 'kube-system',
+        labels: { [OWNER_LABEL_KEY]: OWNER_LABEL_VALUE },
+      },
+      data: { cluster: CLUSTER_NAME },
+    });
   });
 
   it('reuses the cluster a concurrent up already made, instead of racing to create it', async () => {
     // Two simultaneous `up`s would both see no cluster and both run `kind create`; the
     // re-check inside the lock is what makes the loser reuse rather than retry.
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
     route(healthy(`${CLUSTER_NAME}\n`));
     await ensureCluster();
     expect(calls.some(({ argv }) => argv.includes('create'))).toBe(false);
+  });
+
+  it('refuses a same-named cluster without Houston’s ConfigMap, even when force is requested', async () => {
+    // `kind-houston-local` says only that someone used the same name. The marker is the
+    // proof that lets Houston export its kubeconfig, use the cluster, or delete it.
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
+    route((joined) => {
+      if (joined.includes('get clusters')) return { stdout: `${CLUSTER_NAME}\n` };
+      if (joined.includes('current-context')) return { stdout: CONTEXT };
+      if (joined.includes('/readyz')) return { stdout: 'ok' };
+      if (joined.includes(`get configmap ${CLUSTER_OWNER_CONFIGMAP}`)) {
+        return { returncode: 1, stderr: 'NotFound' };
+      }
+      return undefined;
+    });
+    await expect(ensureCluster()).rejects.toThrow(/ownership marker/u);
+    expect(calls.some(({ argv }) => argv.includes('create'))).toBe(false);
+
+    calls.length = 0;
+    await expect(deleteCluster({ force: true })).rejects.toThrow(/ownership marker/u);
+    expect(calls.some(({ argv }) => argv.includes('delete'))).toBe(false);
   });
 
   it('reconnects a cluster that outlived its kubeconfig, and says so when it cannot', async () => {
     // `kind get clusters` reads Docker, so it sees a cluster houston's OWN kubeconfig knows
     // nothing about -- a fresh HOUSTON_HOME, a deleted config. Without the export, "reusing
     // cluster" was followed by every kubectl call going to localhost:8080.
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
     route(healthy(`${CLUSTER_NAME}\n`));
     expect(await ensureCluster()).toBe(CONTEXT);
     const joined = calls.map(({ argv }) => argv.join(' '));
@@ -362,10 +443,16 @@ describe('the cluster houston makes for itself', () => {
   it('deletes only its own cluster, by name, whatever else the machine has', async () => {
     // There is no parameter for which cluster to delete, because a delete that can be
     // pointed anywhere eventually is. Asserted on the argv, which is what reaches the box.
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
     route((joined, argv) => {
       if (joined.includes('get clusters')) return { stdout: `kind\n${CLUSTER_NAME}\nother\n` };
       if (joined.includes('current-context')) return { stdout: CONTEXT };
       if (joined.includes('/readyz')) return { stdout: 'ok' };
+      if (joined.includes(`get configmap ${CLUSTER_OWNER_CONFIGMAP}`)) {
+        return { stdout: ownedClusterMarker() };
+      }
       if (argv.includes('namespace')) return { stdout: JSON.stringify({ items: [] }) };
       return undefined;
     });

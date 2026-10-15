@@ -255,7 +255,7 @@ One line per directory. Where a line uses `·`, it separates ranks, bottom first
 `git ls-files src` is the authority on what exists (tests live in `test/`), and each module's
 header comment says what it is for.
 
-- **`lib/`**, below every service: `errors` `events` `jsonout` `config` `lock` `context`, the registries `audit` `journal` `teammode`, then `compose` `versions` `monitoring` `mongo-kernel` `redact` `seed-profiles` `seed-options` `targz`, and the exact-format modules `format` `float-text` `json-text` `yaml-dump` `close-matches` `mkdir-parents` `tempdir` `login-name` `platform-name` `home` `version-spec` `unicode-tables`, and `map-limit` (a bounded concurrent map the cluster ledger and the region sweep share)
+- **`lib/`**, below every service: `errors` `events` `jsonout` `config` `onboarding` `lock` `context`, the registries `audit` `journal` `teammode`, then `compose` `versions` `monitoring` `mongo-kernel` `redact` `seed-profiles` `seed-options` `targz`, and the exact-format modules `format` `float-text` `json-text` `yaml-dump` `close-matches` `mkdir-parents` `tempdir` `login-name` `platform-name` `home` `version-spec` `unicode-tables`, and `map-limit` (a bounded concurrent map the cluster ledger and the region sweep share)
 - **`lib/presets/`**, the dynamic scenarios (static presets are YAML in `data/presets/`): `types` · `registry` · `common` `scenario` `composite` (several presets as one) · `keycloak` `public` (a preset's UIs at paths of the HTTPS name) · `e2ee` `email` `ldap` `livechat` `multi-instance` `oidc` `s3-minio` `saml` · `index`
 - **`seams/`**, the only doors out: `exec` `docker-cli` `kubectl` `aws-cli` `rc-http`
 - **`seams/fs/`**: `lock`
