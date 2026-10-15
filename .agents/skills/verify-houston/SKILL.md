@@ -1,6 +1,6 @@
 ---
 name: verify-houston
-description: Verify recurring Houston v2 CLI migrations through bin/houston with isolated state and durable command receipts. Use for capability discovery, missing-workspace failures, and evidence JSON or bundles; consult pending recipes for resource inspection, SSH access handoff, onboarding, and capture.
+description: Verify recurring Houston v2 CLI migrations through bin/houston with isolated state and durable command receipts. Use for capability discovery, missing-workspace failures, offline resource inspection, evidence JSON or bundles, and capture preflight; consult pending recipes for SSH handoff, onboarding, and successful browser capture.
 ---
 
 # Verify Houston
@@ -25,6 +25,12 @@ root, then run:
 python3 .agents/skills/verify-houston/scripts/verify.py --evidence-dir /absolute/durable/proof/run-001
 ```
 
+To drive another feature checkout without copying this skill into it, add
+`--checkout /absolute/candidate/checkout`. Install dependencies in that candidate
+first and keep its source fixed during the run. The receipt records the candidate
+path, head and tracked diff digest, plus this verifier script's digest. Store
+evidence outside both checkouts.
+
 The helper requires Python 3.9+, Node, `dirname`, and `readlink`. It creates a unique
 temporary directory containing `HOUSTON_HOME`, `HOUSTON_SKILL_HOME`, a synthetic
 user home, and the workspaces `verify-fixture` and `verify-kube-fixture`. Only
@@ -47,9 +53,12 @@ python3 -m json.tool /absolute/durable/proof/run-001/summary.json
 ```
 
 Require `result: PASS_SCOPED`, `scratch_removed: true`, and
-`fixture_unchanged: true`. Check `head` against the intended candidate and inspect
+`fixture_unchanged: true`, plus `source_unchanged: true`. Check `head` against the intended candidate and inspect
 `diff_sha256` when verifying uncommitted tracked changes. This fingerprints tracked
-diffs only; commit verifier changes before final acceptance and record the exact
+diffs only. `candidate-source.json` additionally hashes tracked and untracked
+nonignored CLI source, entry points, tools, packaged data and dependency manifests.
+The helper refuses a run if that manifest changes during verification. Commit
+verifier changes before final acceptance and record the exact
 head in the delivery receipt. Version alone cannot distinguish two same-version
 branches. The underlying read-only CLI probe is `bin/houston --version` inside the
 helper's isolated environment. Do not use the application's infrastructure
@@ -64,6 +73,8 @@ runtime fixtures and the missing-workspace failure. If `capabilities.data.comman
 `evidence`, it also drives
 JSON and bundle output against the synthetic record. It fails if the advertised
 flags or known contract differ. Missing mandatory baseline commands are failures.
+An advertised `capture` command also gets an explicit missing-workspace drive,
+which must refuse without creating a bundle or starting a browser.
 
 An absent optional port is pending. An advertised port with an incompatible
 recipe is a verifier drift failure, not permission to skip it. SSH handoff,

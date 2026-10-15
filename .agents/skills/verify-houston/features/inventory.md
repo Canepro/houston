@@ -21,10 +21,13 @@ bin/houston inspect --name verify-kube-fixture --json
 The first must return exit 4 with NOT_FOUND. The fixture reads must return the
 named workspace and runtime, an origin-only URL, loopback bind, and both runtime
 sections. With engine tools unavailable, nodes/services/pods and
-containers/networks/volumes must be empty; Kubernetes context and namespace must
-match the synthetic record. The synthetic secret, login, and environment must
+containers/networks/volumes must be empty. The active runtime must also report
+nonempty warnings. Kubernetes context and namespace must match the synthetic
+record, and unavailable Kind must leave `cluster_exists` null. The synthetic secret, login, and environment must
 be absent. Require fixture bytes to remain unchanged. Empty offline arrays prove
 only the unavailable-engine projection, never an empty or healthy real cluster.
+The helper also drives both fixtures without `--json` and requires the human
+panels to mark unreadable resources `unknown`, with the synthetic secret absent.
 
 Live prerequisites remain an approved existing Kubernetes context/namespace and
 read-only API access to nodes, Services, and pods. Capture actual node readiness,

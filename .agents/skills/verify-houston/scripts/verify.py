@@ -14,16 +14,33 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
+def source_manifest(root):
+    paths = subprocess.check_output(
+        ['git', 'ls-files', '--cached', '--others', '--exclude-standard', '-z', '--',
+         'src', 'bin', 'tools', 'data', 'package.json', 'yarn.lock', '.yarnrc.yml'], cwd=root)
+    return {name: (hashlib.sha256((root / name).read_bytes()).hexdigest()
+                   if (root / name).is_file() else 'MISSING')
+            for name in sorted(set(paths.decode().split('\0'))) if name}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--evidence-dir', required=True, type=Path)
+    parser.add_argument('--checkout', type=Path, help='Candidate checkout; defaults to this skill checkout')
     args = parser.parse_args()
-    root = Path(__file__).resolve().parents[4]
+    verifier_root = Path(__file__).resolve().parents[4]
+    root = args.checkout.expanduser().resolve() if args.checkout else verifier_root
+    require((root / 'bin' / 'houston').is_file(), 'Candidate checkout has no bin/houston')
     out = args.evidence_dir.expanduser().resolve()
-    require(not out.is_relative_to(root), 'Evidence must be outside the checkout')
+    require(not out.is_relative_to(root) and not out.is_relative_to(verifier_root),
+            'Evidence must be outside candidate and verifier checkouts')
     out.mkdir(parents=True, exist_ok=False)
+    source_before = source_manifest(root)
+    (out / 'candidate-source.json').write_text(json.dumps(source_before, indent=2) + '\n')
     summary = {'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip(),
                'diff_sha256': hashlib.sha256(subprocess.check_output(['git', 'diff', 'HEAD'], cwd=root)).hexdigest(),
+               'checkout': str(root),
+               'verifier_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                'features': {}, 'boundary': 'Real checkout CLI; synthetic workspace; engine tools unavailable. No live runtime proof.'}
     scratch = Path(tempfile.mkdtemp(prefix='verify-houston-'))
     try:
@@ -125,7 +142,22 @@ def main():
                     require(data['kubernetes']['context'] == 'verify-offline'
                             and data['kubernetes']['namespace'] == 'houston-verify-kube-fixture',
                             'Inspect lost Kubernetes scope')
+                    require(data['kubernetes']['cluster_exists'] is None,
+                            'Unavailable Kind must leave cluster existence unknown')
+                    warnings = data['kubernetes']['warnings']
+                    require(isinstance(warnings, list) and len(warnings) >= 3
+                            and all(isinstance(warning, str) and warning for warning in warnings),
+                            'Unavailable Kubernetes reads must report warnings')
+                else:
+                    warnings = data['docker']['warnings']
+                    require(isinstance(warnings, list) and bool(warnings)
+                            and all(isinstance(warning, str) and warning for warning in warnings),
+                            'Unavailable Docker engine must report a warning')
                 require(sentinel not in json.dumps(data), 'Inspect leaked synthetic secret')
+                human = run(f'inspect-{runtime}-human', ['inspect', '--name', name])
+                require(human.lower().count('unknown') >= 3,
+                        'Offline human inspection must mark unreadable resources unknown')
+                require(sentinel not in human, 'Human inspection leaked synthetic secret')
             summary['features']['inspect'] = 'PASS: offline Docker/Kubernetes shape and missing name; live resource reads pending'
         evidence = commands.get('evidence')
         if evidence is None:
@@ -148,14 +180,30 @@ def main():
                 if file.is_file():
                     require(sentinel.encode() not in file.read_bytes(), f'Synthetic secret leaked: {file.name}')
             summary['features']['evidence'] = 'PENDING: JSON and bundle sentinel checks passed; sanitized attachment contract and live logs pending'
+        capture = commands.get('capture')
+        if capture is None:
+            summary['features']['capture'] = 'PENDING: command absent from capabilities'
+        else:
+            require(capture['json'] and {'--name', '--workload', '--bundle'}.issubset(capture['flags'])
+                    and capture.get('schema') == 'houston.capture.v1',
+                    'Advertised capture differs from owner draft; reconcile contract before driving')
+            absent_bundle = out / 'capture-missing-bundle'
+            absent = run('capture-missing', ['capture', '--name', 'verify-missing', '--workload', 'smoke',
+                                          '--bundle', str(absent_bundle), '--json'],
+                         expected=4, schema='houston.error.v1', ok=False)
+            require(absent['error']['code'] == 'NOT_FOUND', 'Capture missing name must be NOT_FOUND')
+            require(not absent_bundle.exists(), 'Missing workspace capture wrote a bundle')
+            summary['features']['capture'] = 'PASS: missing workspace refused without bundle; browser capture pending'
         for feature, names in {'access': [],
-                               'onboarding-capture': ['onboard', 'onboarding', 'capture']}.items():
+                               'onboarding': ['onboard', 'onboarding']}.items():
             summary['features'][feature] = {
                 'status': ('PENDING: SSH handoff consumer and environment contract not ported/settled'
                            if feature == 'access' else 'PENDING: feature recipe prerequisites required'),
                 'advertised': sorted(c for c in commands if any(c == n or c.startswith(n + ' ') for n in names))}
         require(fixture_before == fixture_bytes(),
                 'CLI changed the synthetic workspace files')
+        require(source_before == source_manifest(root), 'Candidate source changed during verification')
+        summary['source_unchanged'] = True
         summary['fixture_unchanged'] = True
         summary['result'] = 'PASS_SCOPED'
     except Exception as error:
