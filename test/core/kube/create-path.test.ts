@@ -27,7 +27,7 @@ import * as path from 'node:path';
 
 import * as config from '../../../src/lib/config';
 import { ConflictError, PreflightError, ValidationError } from '../../../src/lib/errors';
-import { NOTHING_LEFT, nullEmit } from '../../../src/lib/events';
+import { NOTHING_LEFT, nullEmit, type Event } from '../../../src/lib/events';
 import type { KubectlResult } from '../../../src/seams/kubectl';
 import { createRepro } from '../../../src/core/lifecycle/create-docker';
 import { createKubernetes } from '../../../src/core/lifecycle/create-k8s';
@@ -398,29 +398,55 @@ describe('a Kubernetes create', () => {
     },
   );
 
-  it('passes the trimmed token to Kubernetes and warns only when it is absent', async () => {
-    for (const [index, source, raw, expected] of [
-      [0, 'config', '   ', ''],
-      [1, 'flag', '   ', ''],
-      [2, 'flag', '  registration-fixture  ', 'registration-fixture'],
+  it('uses Kubernetes final token sources and warns only when they are absent', async () => {
+    await fs.mkdir(config.presetDir(), { recursive: true });
+    await fs.writeFile(
+      path.join(config.presetDir(), 'token-licensed.yaml'),
+      'name: token-licensed\nrequires_license: true\nenv:\n  REG_TOKEN: preset-token\n',
+    );
+    // A user preset can override a dynamic one, so this also proves the login warning sees
+    // the same final chart environment as the Enterprise warning.
+    await fs.writeFile(
+      path.join(config.presetDir(), 'ldap.yaml'),
+      'name: ldap\nenv:\n  REG_TOKEN: premium-token\n',
+    );
+    for (const [index, source, raw, secret, licenceWarning, premiumWarning] of [
+      [0, 'config', '   ', '', true, false],
+      [1, 'flag', '   ', '', true, false],
+      [2, 'flag', '  registration-fixture  ', 'registration-fixture', false, false],
+      [3, 'preset', 'preset-token', '', false, false],
+      [4, 'premium preset', 'premium-token', '', false, false],
     ] as const) {
       config.updateConfig((cfg) => {
         cfg.reg_token = source === 'config' ? raw : '';
       });
-      const codes: string[] = [];
+      const events: Event[] = [];
+      const preset =
+        source === 'preset' ? 'token-licensed' : source === 'premium preset' ? 'ldap' : '';
       await createKubernetes(
         createReq({
-          version: '8.5.1',
+          version: source === 'premium preset' ? '9.0.0' : '8.5.1',
           name: `token-${String(index)}`,
+          preset,
           runtime: 'kubernetes',
-          deployment: 'microservices',
+          deployment: preset === '' ? 'microservices' : 'monolith',
           regToken: source === 'flag' ? raw : '',
           offline: true,
         }),
-        (event) => codes.push(event.code),
+        (event) => events.push(event),
       );
-      expect(mockCreated.at(-1)?.regToken).toBe(expected);
-      expect(codes.includes('LICENSE_ABSENT_EE_PRESET')).toBe(expected === '');
+      expect(mockCreated.at(-1)?.regToken).toBe(secret);
+      expect(events.some((event) => event.code === 'LICENSE_ABSENT_EE_PRESET')).toBe(
+        licenceWarning,
+      );
+      expect(events.some((event) => event.message.includes('Premium plan for LDAP login'))).toBe(
+        premiumWarning,
+      );
+      if (preset !== '') {
+        expect((mockCreated.at(-1)?.preset as { env: Record<string, string> }).env.REG_TOKEN).toBe(
+          raw,
+        );
+      }
     }
   });
 

@@ -36,7 +36,7 @@ import {
   applyMongoOverride,
   resolve,
 } from '../../lib/versions';
-import { refuseChartOwnedEnv } from '../kube/chart';
+import { hasEffectiveRegToken, refuseChartOwnedEnv } from '../kube/chart';
 import * as ownership from './ownership';
 import { refuseEnforcedBefore880 } from '../../lib/presets/e2ee';
 import { endpointString } from '../kube/endpoints';
@@ -457,18 +457,27 @@ export function settleAddressing(job: KubeCreate): void {
   // Allocation, deployment and notes share the same resolved scenario.
   requestedPreset(job);
   const names = namesOf(job.req.preset || 'default');
+  // The chart can receive REG_TOKEN through the preset environment as well as the Secret
+  // created for --reg-token or config. Warnings must use the chart's final source.
+  const effectiveToken = hasEffectiveRegToken(
+    (job.presetForNotes as Preset).env,
+    job.regToken,
+    job.envOverrides,
+  )
+    ? 'present'
+    : '';
   const premium = request.premiumAuthWarning(
     names,
     job.resolved?.rcVersion ?? '',
     job.licensed,
-    job.regToken,
+    effectiveToken,
   );
   if (premium !== '') warn(job.emit, premium, { phase: 'plan' });
   const unlicensed = request.licenceAbsentWarning(
     request.presetLicensing(names),
     job.microservices,
     job.licensed,
-    job.regToken,
+    effectiveToken,
   );
   if (unlicensed !== '') {
     warn(job.emit, unlicensed, { phase: 'plan', code: request.LICENSE_ABSENT_EE_PRESET });

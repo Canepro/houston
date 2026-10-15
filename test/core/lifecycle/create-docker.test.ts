@@ -308,9 +308,9 @@ describe('the create path end to end, stopped at the write seam', () => {
   });
 
   it('warns about the registration token the container will see, wherever it came from', async () => {
-    // The flag and the box-wide config are trimmed; a preset's env or `--env` can supply
-    // the token instead; and `--env REG_TOKEN` (null) removes the one the flag gave, so
-    // the warning fires then even though a flag was passed.
+    // The flag and the box-wide config are trimmed; a preset's env, `--env`, or either
+    // final Compose patch can supply or remove the token. The warning must agree with the
+    // rendered document, rather than with an earlier input to it.
     const cases = [
       { label: 'config spaces', config: '   ', expected: '' },
       { label: 'flag spaces', flag: '   ', expected: '' },
@@ -318,6 +318,12 @@ describe('the create path end to end, stopped at the write seam', () => {
       { label: 'preset env', presetEnv: 'preset-token', expected: 'preset-token' },
       { label: 'user env', env: { REG_TOKEN: 'user-token' }, expected: 'user-token' },
       { label: 'flag removed by env', flag: 'flag-token', env: { REG_TOKEN: null }, expected: '' },
+      { label: 'service patch removes flag', flag: 'flag-token', servicePatch: "''", expected: '' },
+      {
+        label: 'Rocket.Chat patch supplies token',
+        rocketchatPatch: 'patch-token',
+        expected: 'patch-token',
+      },
     ] as const;
     for (const one of cases) {
       config.updateConfig((cfg) => {
@@ -327,7 +333,13 @@ describe('the create path end to end, stopped at the write seam', () => {
       fs.writeFileSync(
         path.join(config.presetDir(), 'token-licensed.yaml'),
         'name: token-licensed\nrequires_license: true\n' +
-          ('presetEnv' in one ? `env:\n  REG_TOKEN: ${one.presetEnv}\n` : ''),
+          ('presetEnv' in one ? `env:\n  REG_TOKEN: ${one.presetEnv}\n` : '') +
+          ('servicePatch' in one
+            ? `services:\n  rocketchat:\n    environment:\n      REG_TOKEN: ${one.servicePatch}\n`
+            : '') +
+          ('rocketchatPatch' in one
+            ? `rocketchat:\n  environment:\n    REG_TOKEN: ${one.rocketchatPatch}\n`
+            : ''),
       );
       const { seen, createDocker } = capture();
       const codes: string[] = [];

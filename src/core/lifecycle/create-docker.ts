@@ -936,9 +936,17 @@ export async function buildDocument(plan: CreatePlan): Promise<void> {
     envOverrides: plan.envOverrides,
   });
   plan.spec.adminPassword = plan.adminPassword;
-  // The token the container will see, not the flag: a preset's env or `--env` can supply
-  // one, and `--env REG_TOKEN` removes the one `--reg-token` gave.
-  const effectiveToken = compose.effectiveRegToken(plan.spec);
+  try {
+    plan.doc = compose.build(plan.spec);
+  } catch (error) {
+    // e.g. a preset naming an entry_service it doesn't define.
+    throw new ValidationError(error instanceof Error ? error.message : String(error));
+  }
+  // The completed document is the source of truth: a preset's service and Rocket.Chat
+  // patches apply after the base environment, so an earlier token is not enough.
+  const effectiveToken = compose.hasEffectiveRegToken(plan.doc, (plan.pre as Preset).instances)
+    ? 'present'
+    : '';
   const premium = request.premiumAuthWarning(
     [(plan.pre as Preset).name],
     resolved.rcVersion,
@@ -961,12 +969,6 @@ export async function buildDocument(plan: CreatePlan): Promise<void> {
     new Set(Object.keys(plan.envOverrides)),
   );
   if (samlEmail !== '') warn(plan.emit, samlEmail, { phase: 'create' });
-  try {
-    plan.doc = compose.build(plan.spec);
-  } catch (error) {
-    // e.g. a preset naming an entry_service it doesn't define.
-    throw new ValidationError(error instanceof Error ? error.message : String(error));
-  }
 }
 
 /** `repro.json`: everything a later command needs that the compose file does not say. */

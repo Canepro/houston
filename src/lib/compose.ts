@@ -145,14 +145,32 @@ function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
+/** Whether one final Compose environment gives Rocket.Chat a supplied registration token. */
+function environmentHasRegToken(environment: unknown): boolean {
+  if (isPlainObject(environment)) {
+    const token = environment.REG_TOKEN;
+    return token !== null && token !== undefined && String(token).trim() !== '';
+  }
+  if (!Array.isArray(environment)) return false;
+  // Compose also accepts `environment: [REG_TOKEN=value]`. A bare REG_TOKEN inherits an
+  // ambient host value, which is not a token houston can claim it supplied.
+  let token = '';
+  for (const entry of environment) {
+    if (typeof entry !== 'string') return false;
+    if (entry === 'REG_TOKEN') token = '';
+    else if (entry.startsWith('REG_TOKEN=')) token = entry.slice('REG_TOKEN='.length);
+  }
+  return token.trim() !== '';
+}
+
 /**
- * The REG_TOKEN Rocket.Chat will actually see, after the preset's env and the user's
- * `--env` have had their say: a preset can supply one, `--env REG_TOKEN=` can replace
- * one, and `--env REG_TOKEN` (null) removes the one `--reg-token` gave. A warning about
- * a missing token has to look here, not at the flag.
+ * Whether every final Rocket.Chat service gets a registration token. This reads the completed
+ * document because a preset's services or rocketchat patch runs after the base environment.
  */
-export function effectiveRegToken(s: Spec): string {
-  return (rcEnvironment(s).REG_TOKEN ?? '').trim();
+export function hasEffectiveRegToken(doc: ComposeDoc, instances: number): boolean {
+  return rcServiceNames(instances).every((name) =>
+    environmentHasRegToken(doc.services[name]?.environment),
+  );
 }
 
 function rcEnvironment(s: Spec): Record<string, string> {
