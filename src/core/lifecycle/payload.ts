@@ -19,6 +19,7 @@ import { type Metadata, readCompose, readMeta } from '../runner/record';
 import * as paths from '../runner/paths';
 import * as topology from '../topology';
 
+import * as access from './access';
 import * as inspect from './inspect';
 import * as naming from './naming';
 import { LAST_BACKUP_KEY, UPGRADE_FROM_KEY } from './types';
@@ -363,6 +364,8 @@ export async function detail(name: string): Promise<Record<string, unknown>> {
   // from `localhost`, which for a browser on a different box than `serve` names that
   // browser's own machine.
   d.bind_host = await bindHostOf(meta);
+  // This is advice only. It neither opens an SSH connection nor changes the workspace bind.
+  d.access = access.handoff(meta, process.env, String(d.bind_host));
   // The panel keys its HTTPS row and its "Check TLS" action off these.
   d.public_url = meta.publicUrl;
   d.tls = isTruthy(extra.tls) ? String(extra.tls) : '';

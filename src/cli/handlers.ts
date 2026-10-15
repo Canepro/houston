@@ -20,6 +20,7 @@ import type * as KubeClusterNS from '../core/kube/cluster';
 import type * as KubeReachabilityNS from '../core/kube/reachability';
 import type * as KubeStatusNS from '../core/kube/status';
 import type * as KubeNamesNS from '../core/kube/names';
+import type * as AccessNS from '../core/lifecycle/access';
 import type * as AdminNS from '../core/lifecycle/admin';
 import type * as CreateDockerNS from '../core/lifecycle/create-docker';
 import type * as DestroyNS from '../core/lifecycle/destroy';
@@ -2350,6 +2351,17 @@ function summaryPanel(
   }
 }
 
+/** Print a tunnel only when the current SSH session cannot open the server's loopback URL. */
+function printAccessHandoff(meta: RecordNS.Metadata, io: CliIo): void {
+  const access = require('../core/lifecycle/access') as typeof AccessNS;
+  const handoff = access.handoff(meta);
+  if (handoff === null || handoff.tunnel_command === null) return;
+  io.writeOut('  remote access (workspace is loopback-only on the server):\n');
+  io.writeOut(`    tunnel : ${handoff.tunnel_command}\n`);
+  io.writeOut(`    browser: ${handoff.browser_url}\n`);
+  if (handoff.note !== null) io.writeOut(`    note   : ${handoff.note}\n`);
+}
+
 /**
  * An INDENTED line is something to paste and is never wrapped; anything else is wrapped by
  * `wrapWords` with hyphen breaks off, so `metrics-server` stays one word.
@@ -2885,10 +2897,12 @@ export async function renderHuman(
             ? []
             : [['Booted in', fmtDuration(Number(booted))]],
         );
+        printAccessHandoff(meta, io);
         io.writeOut(`  next: houston logs --name ${meta.name} -f\n`);
       } else {
         io.writeOut('✓ starting\n');
         summaryPanel(meta, io);
+        printAccessHandoff(meta, io);
         io.writeOut(`  ready when serving : houston ready --name ${meta.name}\n`);
         io.writeOut(`  follow logs        : houston logs --name ${meta.name} -f\n`);
       }
@@ -2899,6 +2913,7 @@ export async function renderHuman(
       const meta = metaOf(value);
       io.writeOut('✓ ready\n');
       summaryPanel(meta, io, [['Booted in', fmtDuration(Number(result.booted_s))]]);
+      printAccessHandoff(meta, io);
       io.writeOut(`  next: houston logs --name ${meta.name} -f\n`);
       await printNotes(meta, io);
       return;
@@ -3033,6 +3048,7 @@ export async function renderHuman(
     case 'info': {
       const meta = metaOf(value);
       summaryPanel(meta, io);
+      printAccessHandoff(meta, io);
       io.writeOut(`  api  : houston api --name ${meta.name} GET /api/v1/me\n`);
       io.writeOut(`  curl : ${meta.rootUrl}/api/info\n`);
       await printNotes(meta, io);

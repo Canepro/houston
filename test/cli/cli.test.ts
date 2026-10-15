@@ -293,3 +293,63 @@ describe("a multi-instance workspace's info", () => {
     expect(out).toContain('instances (2');
   });
 });
+
+describe('SSH loopback guidance', () => {
+  it('prints the tunnel and client URL after a ready up and in human info', async () => {
+    const record = require('../../src/core/runner/record') as typeof RecordNS;
+    await record.writeRecord(
+      'ssh-ready',
+      record.metadata({
+        name: 'ssh-ready',
+        project: 'houston-ssh-ready',
+        rcVersion: '8.5.1',
+        rcImage: 'i',
+        mongoTag: '8.0',
+        mongoFlavor: 'official',
+        preset: 'default',
+        rootUrl: 'http://localhost:3123',
+        hostPort: 3123,
+        versionSource: 'map',
+        extra: { bind_host: '127.0.0.1' },
+      }),
+    );
+    const saved = { connection: process.env.SSH_CONNECTION, user: process.env.USER };
+    try {
+      process.env.SSH_CONNECTION = '198.51.100.20 55100 203.0.113.8 22';
+      process.env.USER = 'operator';
+      jest.resetModules();
+      jest.doMock('../../src/core/lifecycle/create-docker', () => ({
+        ...jest.requireActual<object>('../../src/core/lifecycle/create-docker'),
+        createRepro: async () => ({ name: 'ssh-ready', waited: true, booted_s: 1 }),
+      }));
+      const app = require('../../src/cli/app') as typeof AppNS;
+      const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
+      let stdout = '';
+      let stderr = '';
+      const io = {
+        writeOut: (text: string) => void (stdout += text),
+        writeErr: (text: string) => void (stderr += text),
+      };
+      const execute = handlers.createExecutor(io);
+      const up = await app.runCli(
+        ['up', '--version', '8.5.1', '--name', 'ssh-ready', '--offline', '--wait'],
+        { execute, io },
+      );
+      const info = await app.runCli(['info', '--name', 'ssh-ready'], { execute, io });
+      expect([up, info, stderr]).toEqual([0, 0, '']);
+      expect(
+        stdout.match(
+          /tunnel : ssh -N -L 127\.0\.0\.1:3123:127\.0\.0\.1:3123 -- operator@203\.0\.113\.8/g,
+        ),
+      ).toHaveLength(2);
+      expect(stdout.match(/browser: http:\/\/127\.0\.0\.1:3123/g)).toHaveLength(2);
+    } finally {
+      jest.dontMock('../../src/core/lifecycle/create-docker');
+      if (saved.connection === undefined) delete process.env.SSH_CONNECTION;
+      else process.env.SSH_CONNECTION = saved.connection;
+      if (saved.user === undefined) delete process.env.USER;
+      else process.env.USER = saved.user;
+      jest.resetModules();
+    }
+  });
+});

@@ -88,7 +88,9 @@ const ROOT = path.resolve(__dirname, '..');
 // The final re-verification's fixes: up resolving a name the actor may act on, a rebuild's
 // monitoring, pin and port, the operator password off every argv, the operator's memory and
 // PodMonitor, serve's shutdown, and the usage and wording answers it found untrue.
-const FLOOR = 4500;
+// Eight SSH access-handoff cases cover local and remote guidance, IPv6, option safety,
+// invalid local ports, wildcard binds, and the CLI's JSON and human consumers.
+const FLOOR = 4508;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [
