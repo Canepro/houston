@@ -158,9 +158,11 @@ interface StoredGrant {
 function storedGrant(cfg: Config, id: string): StoredGrant {
   const grants = readMapping(cfg, GRANTS_KEY);
   const key = grantKey(id);
+  // Only a boolean is an answer. A hand-edited `"yes"` or `null` is neither held nor
+  // settled: reporting it as "denied" would tell automation a person decided.
   return {
     held: grants[key] === true,
-    answered: Object.prototype.hasOwnProperty.call(grants, key),
+    answered: typeof grants[key] === 'boolean',
   };
 }
 

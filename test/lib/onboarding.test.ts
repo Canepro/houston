@@ -19,6 +19,17 @@ import type { Config } from '../../src/lib/config';
 const WHEN = new Date('2026-10-15T00:00:00Z');
 
 describe('persisted onboarding grants', () => {
+  it('counts only a boolean as an answer', () => {
+    // A hand-edited "yes" or null is neither held nor settled.
+    for (const value of ['yes', null, 1, {}]) {
+      const cfg = { grants: { owned_cluster: value } } as unknown as Parameters<
+        typeof heldGrants
+      >[0];
+      expect(heldGrants(cfg)).toEqual([]);
+      expect(answeredGrants(cfg)).toEqual([]);
+    }
+  });
+
   it('keeps an additive mapping and distinguishes granted, denied, and unanswered', () => {
     const cfg: Config = {
       grants: { future_grant: true, owned_cluster: false, clusters: ['someone-elses-cluster'] },

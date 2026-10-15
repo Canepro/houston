@@ -17,7 +17,7 @@ import { Interrupted } from '../../../src/seams/exec';
 import type { KubectlResult } from '../../../src/seams/kubectl';
 
 import { workspaceNamespaces } from '../../../src/core/kube/capabilities';
-import { deleteCluster, ensureCluster } from '../../../src/core/kube/cluster';
+import { deleteCluster, ensureCluster, adoptIfUnmarked } from '../../../src/core/kube/cluster';
 import { kube, ownedKubeconfig, type RunOptions } from '../../../src/core/kube/exec';
 import { mongoManifest } from '../../../src/core/kube/manifests';
 import {
@@ -479,10 +479,12 @@ describe('the cluster houston makes for itself', () => {
   );
 
   it.each([
-    ['leaves the named cluster behind', `${CLUSTER_NAME}\n`, 1],
+    // A cluster listed after THIS create failed is one some other process made meanwhile;
+    // it is never deleted on the strength of this process's failure.
+    ['leaves the named cluster behind', `${CLUSTER_NAME}\n`, 0],
     ['leaves no named cluster behind', '', 0],
   ])(
-    'checks for rollback after kind create fails and %s',
+    'never rolls back after kind create fails, whether it %s',
     async (_outcome, clustersAfter, deletes) => {
       config.updateConfig((stored) => {
         grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
@@ -554,10 +556,93 @@ describe('the cluster houston makes for itself', () => {
     expect(deletes).toHaveLength(1);
   });
 
+  it('waits for the winner’s marker after losing a cross-home create race', async () => {
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
+    let markerReads = 0;
+    route((joined) => {
+      if (joined.includes('get clusters')) return { stdout: '' };
+      if (joined.includes('create cluster'))
+        return { returncode: 1, stderr: 'node(s) already exist' };
+      if (joined.includes('current-context')) return { stdout: CONTEXT };
+      if (joined.includes('/readyz')) return { stdout: 'ok' };
+      if (joined.includes(`get configmap ${CLUSTER_OWNER_CONFIGMAP}`)) {
+        markerReads += 1;
+        return { stdout: markerReads < 2 ? '' : ownedClusterMarker() };
+      }
+      return undefined;
+    });
+    expect(await ensureCluster()).toBe(CONTEXT);
+    expect(markerReads).toBe(2);
+    expect(calls.some(({ argv }) => argv.includes('apply') && argv.includes('--filename'))).toBe(
+      false,
+    );
+  });
+
+  it('lets --force take an owned cluster whose control plane is not answering, by this home’s receipt', async () => {
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
+    // Created here first, which writes the receipt beside the owned kubeconfig.
+    route(healthy(''));
+    await ensureCluster();
+    expect(fs.existsSync(path.join(path.dirname(ownedKubeconfig()), 'owned-cluster.json'))).toBe(
+      true,
+    );
+    calls.length = 0;
+    // Now the API server is gone: the marker cannot be read at all.
+    route((joined) => {
+      if (joined.includes('get clusters')) return { stdout: `${CLUSTER_NAME}\n` };
+      if (joined.includes('current-context')) return { stdout: CONTEXT };
+      if (joined.includes(`get configmap ${CLUSTER_OWNER_CONFIGMAP}`)) {
+        return { returncode: 1, stderr: 'connection refused' };
+      }
+      return undefined;
+    });
+    await expect(deleteCluster()).rejects.toBeInstanceOf(DockerError);
+    expect(await deleteCluster({ force: true })).toBe(true);
+    expect(
+      calls.some(
+        ({ argv }) => argv[0] === 'kind' && argv.includes('delete') && argv.includes('cluster'),
+      ),
+    ).toBe(true);
+  });
+
+  it('adopts an unmarked legacy cluster before its last workspace is torn down', async () => {
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
+    route((joined) => {
+      if (joined.includes('get clusters')) return { stdout: `${CLUSTER_NAME}\n` };
+      if (joined.includes('current-context')) return { stdout: CONTEXT };
+      if (joined.includes(`get configmap ${CLUSTER_OWNER_CONFIGMAP}`)) return { stdout: '' };
+      if (joined.includes('get namespace')) {
+        return { stdout: JSON.stringify({ items: [{ metadata: { name: 'houston-last' } }] }) };
+      }
+      return undefined;
+    });
+    await adoptIfUnmarked();
+    expect(calls.some(({ argv }) => argv.includes('apply') && argv.includes('--filename'))).toBe(
+      true,
+    );
+    // Not answering: reported, not thrown, so the teardown itself goes on.
+    calls.length = 0;
+    route((joined) => {
+      if (joined.includes('get clusters')) return { stdout: `${CLUSTER_NAME}\n` };
+      if (joined.includes('export kubeconfig'))
+        return { returncode: 1, stderr: 'no such container' };
+      return undefined;
+    });
+    await expect(adoptIfUnmarked()).resolves.toBeUndefined();
+  });
+
   it('refuses a same-named cluster without Houston’s ConfigMap, even when force is requested', async () => {
     // `kind-houston-local` says only that someone used the same name. The marker is the
     // proof that lets Houston export its kubeconfig, use the cluster, or delete it. With
-    // no houston workspace in it, nothing says an earlier houston made it either.
+    // no houston workspace in it, nothing says an earlier houston made it either. No
+    // receipt from this home either: an earlier case in this file may have left one.
+    fs.rmSync(path.join(path.dirname(ownedKubeconfig()), 'owned-cluster.json'), { force: true });
     config.updateConfig((stored) => {
       grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
     });

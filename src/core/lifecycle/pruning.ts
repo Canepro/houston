@@ -168,9 +168,13 @@ export async function orphanContext(): Promise<string> {
  */
 export async function reclaimCluster(emit: Emit = nullEmit): Promise<boolean> {
   try {
-    // `deleteCluster` is deliberately best-effort for cleanup. Check authority before
-    // entering that path so a gate remains a gate instead of becoming a warning.
-    if (await clusterReclaimable()) requireOwnedClusterAuthority(KUBE_CONTEXT);
+    // A cluster that cannot be reclaimed (it still holds a workspace, or it is not
+    // answering) is never handed to `deleteCluster`: that call gates on the grant, and a
+    // gate raised here would come AFTER the selected workspaces were already removed.
+    // When it can be reclaimed, check authority before entering the best-effort path so
+    // a gate remains a gate instead of becoming a warning.
+    if (!(await clusterReclaimable())) return false;
+    requireOwnedClusterAuthority(KUBE_CONTEXT);
     return await deleteCluster({ emit });
   } catch (error) {
     if (error instanceof AuthorityGateError) throw error;
@@ -180,6 +184,21 @@ export async function reclaimCluster(emit: Emit = nullEmit): Promise<boolean> {
     }
     // never let cleanup fail a successful prune
     return false;
+  }
+}
+
+/**
+ * Whether the owned cluster can be reclaimed, for the authority precheck before a prune.
+ * A probe that fails (the marker could not be read, the daemon is asleep) is not a reason
+ * to abort removing workspaces that do not use that cluster; `reclaimCluster` reports the
+ * same failure as a warning in its own best-effort step.
+ */
+async function reclaimableForPrecheck(): Promise<boolean> {
+  try {
+    return await clusterReclaimable();
+  } catch (error) {
+    if (error instanceof ReproError) return false;
+    throw error;
   }
 }
 
@@ -486,7 +505,7 @@ export async function prune({
     // Still worth asking about the CLUSTER. With every workspace gone, houston's own kind
     // cluster is a 514 MiB control plane holding nothing -- and both the README and the
     // agent skill said `prune` reclaims it, which nothing did.
-    const willReclaimOwnedCluster = await clusterReclaimable();
+    const willReclaimOwnedCluster = await reclaimableForPrecheck();
     if (willReclaimOwnedCluster) requireOwnedClusterAuthority(KUBE_CONTEXT);
     return { targets: [], removed: [], orphans: [], cluster: await reclaimCluster(emit) };
   }
@@ -497,7 +516,7 @@ export async function prune({
   }
   // Consult this before a mixed prune starts. Otherwise a denied local-cluster cleanup
   // could arrive after Compose workspaces had already been removed.
-  const willReclaimOwnedCluster = await clusterReclaimable();
+  const willReclaimOwnedCluster = await reclaimableForPrecheck();
   if (
     willReclaimOwnedCluster ||
     (await targetsUseOwnedCluster(targets)) ||

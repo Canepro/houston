@@ -16,6 +16,7 @@ import { actor as auditActor, record as auditRecord } from '../audit';
 import { detach } from '../edge/networks';
 import { deregister as deregisterRoute } from '../edge/routes';
 import { clearWorkspace } from '../journal';
+import { adoptIfUnmarked } from '../kube/cluster';
 import { deleteNamespace, namespaceFor } from '../kube/namespace';
 import {
   MONITORING_NAMESPACE,
@@ -270,6 +271,9 @@ export async function teardown(
     if (isOurs(context)) {
       requireOnboarded();
       requireGrant('owned-cluster');
+      // The workspace about to go may be the last proof that an earlier houston made this
+      // cluster; write the marker while that proof still exists.
+      await adoptIfUnmarked(emit);
     }
   }
   // Recorded BEFORE the work, not after: a teardown that dies half way through has still

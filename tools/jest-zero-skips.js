@@ -92,7 +92,7 @@ const ROOT = path.resolve(__dirname, '..');
 // A later ownership follow-up adds one adoption case, then replaces it and adds four
 // label-forgery and rollback cases. A failed-create repair then adds two post-attempt
 // rollback cases. The measured registered suite is 4515 tests.
-const FLOOR = 4515;
+const FLOOR = 4519;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [
