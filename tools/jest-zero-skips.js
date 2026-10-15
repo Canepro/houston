@@ -90,8 +90,9 @@ const ROOT = path.resolve(__dirname, '..');
 // PodMonitor, serve's shutdown, and the usage and wording answers it found untrue.
 // Eight onboarding-grant and local-Kind lifecycle boundary cases complete the port.
 // A later ownership follow-up adds one adoption case, then replaces it and adds four
-// label-forgery and rollback cases. The measured registered suite is 4513 tests.
-const FLOOR = 4513;
+// label-forgery and rollback cases. A failed-create repair then adds two post-attempt
+// rollback cases. The measured registered suite is 4515 tests.
+const FLOOR = 4515;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

@@ -397,9 +397,11 @@ describe('the cluster houston makes for itself', () => {
     expect(calls.some(({ argv }) => argv.includes('create'))).toBe(false);
   });
 
-  it('refuses an unmarked same-named cluster even when it has a Houston-labelled namespace', async () => {
-    // The namespace label proves only that namespace. Another operator can forge it, so an
-    // unmarked cluster cannot become ours or leave a kubeconfig in Houston's durable state.
+  it('adopts an unmarked same-named cluster that holds houston workspaces, through the probe file', async () => {
+    // Releases before the marker left none. A person upgrading must not delete a cluster
+    // holding their workspaces; a namespace with houston's owner label is written by nothing
+    // else. The namespace read and the marker write both go through the private probe
+    // kubeconfig, so nothing durable learns of the cluster before it is proven ours.
     config.updateConfig((stored) => {
       grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
     });
@@ -413,27 +415,37 @@ describe('the cluster houston makes for itself', () => {
       }
       return undefined;
     });
-    await expect(ensureCluster()).rejects.toBeInstanceOf(ConflictError);
+    expect(await ensureCluster()).toBe(CONTEXT);
     expect(calls.some(({ argv }) => argv.includes('create'))).toBe(false);
-    expect(calls.some(({ argv }) => argv.includes('get') && argv.includes('namespace'))).toBe(
-      false,
-    );
+    const probe = calls.find(({ argv }) => argv.includes('export') && argv.includes('kubeconfig'));
+    const probeConfig = String(probe?.argv[probe.argv.indexOf('--kubeconfig') + 1]);
+    expect(probeConfig).not.toBe(ownedKubeconfig());
+    const namespaces = calls.find(({ argv }) => argv.includes('get') && argv.includes('namespace'));
+    expect(namespaces?.options.env?.KUBECONFIG).toBe(probeConfig);
+    const marker = calls.find(({ argv }) => argv.includes('apply') && argv.includes('--filename'));
+    expect(marker?.options.env?.KUBECONFIG).toBe(probeConfig);
+    expect(JSON.parse(String(marker?.options.input))).toMatchObject({
+      data: { cluster: CLUSTER_NAME },
+    });
+    expect(fs.existsSync(path.dirname(probeConfig))).toBe(false);
+  });
+
+  it('still refuses an unmarked same-named cluster that holds no houston workspace', async () => {
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
+    route((joined) => {
+      if (joined.includes('get clusters')) return { stdout: `${CLUSTER_NAME}\n` };
+      if (joined.includes('current-context')) return { stdout: CONTEXT };
+      if (joined.includes(`get configmap ${CLUSTER_OWNER_CONFIGMAP}`)) return { stdout: '' };
+      if (joined.includes('get namespace')) return { stdout: '{"items": []}' };
+      return undefined;
+    });
+    await expect(ensureCluster()).rejects.toBeInstanceOf(ConflictError);
     expect(calls.some(({ argv }) => argv.includes('apply') && argv.includes('--filename'))).toBe(
       false,
     );
-
-    const exports = calls.filter(
-      ({ argv }) => argv.includes('export') && argv.includes('kubeconfig'),
-    );
-    expect(exports).toHaveLength(1);
-    const probe = exports[0];
-    const probeConfig = String(probe?.argv[probe.argv.indexOf('--kubeconfig') + 1]);
-    expect(probeConfig).not.toBe(ownedKubeconfig());
-    expect(probe?.options.env?.KUBECONFIG).toBe(probeConfig);
-    const markerRead = calls.find(({ argv }) => argv.includes('get') && argv.includes('configmap'));
-    expect(markerRead?.options.env?.KUBECONFIG).toBe(probeConfig);
     expect(fs.existsSync(ownedKubeconfig())).toBe(false);
-    expect(fs.existsSync(path.dirname(probeConfig))).toBe(false);
   });
 
   it.each(['kubeconfig export', 'readiness'])(
@@ -460,6 +472,42 @@ describe('the cluster houston makes for itself', () => {
         ({ argv }) => argv[0] === 'kind' && argv.includes('delete') && argv.includes('cluster'),
       );
       expect(deletes).toHaveLength(1);
+      expect(calls.some(({ argv }) => argv.includes('apply') && argv.includes('--filename'))).toBe(
+        false,
+      );
+    },
+  );
+
+  it.each([
+    ['leaves the named cluster behind', `${CLUSTER_NAME}\n`, 1],
+    ['leaves no named cluster behind', '', 0],
+  ])(
+    'checks for rollback after kind create fails and %s',
+    async (_outcome, clustersAfter, deletes) => {
+      config.updateConfig((stored) => {
+        grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+      });
+      let createAttempted = false;
+      route((joined) => {
+        if (joined.includes('get clusters')) {
+          return { stdout: createAttempted ? clustersAfter : '' };
+        }
+        if (joined.includes('create cluster')) {
+          createAttempted = true;
+          return { returncode: 1, stderr: 'control plane creation failed' };
+        }
+        return undefined;
+      });
+
+      await expect(ensureCluster()).rejects.toBeInstanceOf(CreateFailedError);
+      expect(
+        calls.filter(
+          ({ argv }) => argv[0] === 'kind' && argv.includes('delete') && argv.includes('cluster'),
+        ),
+      ).toHaveLength(deletes);
+      expect(calls.some(({ argv }) => argv.includes('export') && argv.includes('kubeconfig'))).toBe(
+        false,
+      );
       expect(calls.some(({ argv }) => argv.includes('apply') && argv.includes('--filename'))).toBe(
         false,
       );
