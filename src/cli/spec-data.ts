@@ -736,7 +736,7 @@ export const COMMAND_SPECS = [
     id: 'evidence',
     path: 'evidence',
     description:
-      'Emit a record of what was deployed and how it is behaving.\n\nThe record reduces the root URL to its origin and omits the stored login and environment\nvalues. `info --json` is not that: it carries the admin login.\n\n\b\n    houston evidence --name TICKET-1234 --json\n    houston evidence --name TICKET-1234 --bundle ./TICKET-1234-evidence\n\b\nA bundle adds a deployment file with the workspace admin password, credential-named fields,\nand URL userinfo masked, plus a README a person can read. Houston cannot infer unknown\ncredentials in arbitrary custom YAML values. Raw logs stay in the workspace because they can\ncontain credentials.',
+      'Emit a record of what was deployed and how it is behaving.\n\nThe record reduces the root URL to its origin and omits the stored login and environment\nvalues. `info --json` is not that: it carries the admin login.\n\n\b\n    houston evidence --name TICKET-1234 --json\n    houston evidence --name TICKET-1234 --bundle ./TICKET-1234-evidence\n\b\nA bundle writes a manifest, README, and, when available, a redacted deployment file. It masks\nthe workspace admin password, credential-named fields, and URL userinfo. Houston cannot infer\nunknown credentials in arbitrary custom YAML values. Raw logs stay in the workspace because\nthey can contain credentials.',
     arguments: [],
     options: [
       {
@@ -758,7 +758,8 @@ export const COMMAND_SPECS = [
         required: false,
         repeatable: false,
         defaultValue: '',
-        description: 'also write the logs and the rendered artifact to this directory',
+        description:
+          'also write a manifest, README, and any available redacted deployment artifact to this directory',
         hidden: false,
         negatablePair: false,
       },

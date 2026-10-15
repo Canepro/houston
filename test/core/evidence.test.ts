@@ -5,15 +5,23 @@ import * as path from 'node:path';
 import * as YAML from 'yaml';
 
 import type * as PayloadNS from '../../src/core/lifecycle/payload';
+import type * as KubeNamespaceNS from '../../src/core/kube/namespace';
 
 jest.mock('../../src/core/lifecycle/payload', () => {
   const actual = jest.requireActual<typeof PayloadNS>('../../src/core/lifecycle/payload');
   return { ...actual, detail: jest.fn(actual.detail) };
 });
 
+jest.mock('../../src/core/kube/namespace', () => {
+  const actual = jest.requireActual<typeof KubeNamespaceNS>('../../src/core/kube/namespace');
+  return { ...actual, namespaceLabels: jest.fn() };
+});
+
 import * as lifecyclePayload from '../../src/core/lifecycle/payload';
+import * as kubeNamespace from '../../src/core/kube/namespace';
 import * as config from '../../src/lib/config';
 import { ValidationError } from '../../src/lib/errors';
+import { Interrupted } from '../../src/seams/exec';
 import {
   cleanupCommand,
   collect,
@@ -24,6 +32,18 @@ import {
 } from '../../src/core/evidence';
 import { workspace } from '../../src/core/runner/paths';
 import { metadata, write } from '../../src/core/runner/record';
+
+const namespaceLabels = kubeNamespace.namespaceLabels as jest.MockedFunction<
+  typeof kubeNamespace.namespaceLabels
+>;
+
+beforeEach(() => {
+  namespaceLabels.mockReset();
+  namespaceLabels.mockImplementation(async (namespace) => ({
+    'app.kubernetes.io/managed-by': 'houston',
+    'houston.io/workspace': namespace.replace(/^houston-/u, ''),
+  }));
+});
 
 const COMPOSE = [
   'services:',
@@ -176,7 +196,7 @@ describe('the record', () => {
     expect(blob).not.toContain('"login"');
   });
 
-  it('records the licence state without the value, and that nothing needed one', async () => {
+  it('records a licence or registration-token state without the value', async () => {
     await workspaceNamed('e3');
     expect((await record('e3')).license).toEqual({
       required: false,
@@ -185,6 +205,29 @@ describe('the record', () => {
     });
     await workspaceNamed('e3l', { licensed: true });
     expect((await record('e3l')).license).toEqual({
+      required: false,
+      supplied: true,
+      source: 'license',
+    });
+    await workspaceNamed('e3t', {
+      reg_token_supplied: true,
+      reg_token: 'EVIDENCE-REGISTRATION-TOKEN-SENTINEL',
+    });
+    const tokenEvidence = await record('e3t');
+    expect(tokenEvidence.license).toEqual({
+      required: false,
+      supplied: true,
+      source: 'reg_token',
+    });
+    expect(JSON.stringify(tokenEvidence)).not.toContain('EVIDENCE-REGISTRATION-TOKEN-SENTINEL');
+    await workspaceNamed('e3t-malformed', { reg_token_supplied: 'true' });
+    expect((await record('e3t-malformed')).license).toEqual({
+      required: false,
+      supplied: false,
+      source: null,
+    });
+    await workspaceNamed('e3t-license-wins', { licensed: true, reg_token_supplied: true });
+    expect((await record('e3t-license-wins')).license).toEqual({
       required: false,
       supplied: true,
       source: 'license',
@@ -206,6 +249,19 @@ describe('the record', () => {
       required: true,
       supplied: false,
       source: null,
+    });
+  });
+
+  it('keeps a multi-instance deployment out of the recorded scenario preset', async () => {
+    await workspaceNamed(
+      'e3-normalized-preset',
+      { runtime: 'docker', deployment: 'multi-instance' },
+      { preset: 'email+multi-instance' },
+    );
+
+    expect((await record('e3-normalized-preset')).repro).toMatchObject({
+      preset: 'email',
+      deployment: 'multi-instance',
     });
   });
 
@@ -289,6 +345,93 @@ describe('the record', () => {
       name: 'kubernetes/values.yaml',
       sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
     });
+  });
+
+  it('uses a live namespace label read before claiming Kubernetes ownership', async () => {
+    await workspaceNamed('e3-ownership', {
+      runtime: 'kubernetes',
+      namespace: 'test-namespace',
+      context: 'recorded-context',
+    });
+    namespaceLabels.mockResolvedValueOnce(null).mockResolvedValueOnce({
+      'app.kubernetes.io/managed-by': 'houston',
+      'houston.io/workspace': 'e3-ownership',
+    });
+
+    expect((await recordKubernetes('e3-ownership')).ownership).toEqual({
+      proof: 'unknown',
+      managed_by: 'unknown',
+      namespace: 'test-namespace',
+    });
+    expect((await recordKubernetes('e3-ownership')).ownership).toEqual({
+      proof: 'label',
+      managed_by: 'houston',
+      namespace: 'test-namespace',
+    });
+    expect(namespaceLabels).toHaveBeenNthCalledWith(1, 'test-namespace', {
+      context: 'recorded-context',
+    });
+    expect(namespaceLabels).toHaveBeenNthCalledWith(2, 'test-namespace', {
+      context: 'recorded-context',
+    });
+  });
+
+  it('leaves Kubernetes ownership unknown without the recorded namespace or context', async () => {
+    await workspaceNamed('e3-no-context', {
+      runtime: 'kubernetes',
+      namespace: 'test-namespace',
+    });
+    await workspaceNamed('e3-no-namespace', {
+      runtime: 'kubernetes',
+      context: 'test-context',
+    });
+
+    expect((await recordKubernetes('e3-no-context')).ownership).toEqual({
+      proof: 'unknown',
+      managed_by: 'unknown',
+      namespace: 'test-namespace',
+    });
+    expect((await recordKubernetes('e3-no-namespace')).ownership).toEqual({
+      proof: 'unknown',
+      managed_by: 'unknown',
+      namespace: '',
+    });
+    expect(namespaceLabels).not.toHaveBeenCalled();
+  });
+
+  it('unwinds an interrupted Kubernetes ownership read', async () => {
+    await workspaceNamed('e3-interrupted', {
+      runtime: 'kubernetes',
+      namespace: 'test-namespace',
+      context: 'test-context',
+    });
+    namespaceLabels.mockRejectedValueOnce(new Interrupted());
+
+    await expect(recordKubernetes('e3-interrupted')).rejects.toBeInstanceOf(Interrupted);
+  });
+
+  it('selects the Kubernetes artifact after a Docker workspace changes runtime', async () => {
+    await workspaceNamed('e3-runtime-switch', {
+      runtime: 'kubernetes',
+      namespace: 'test-namespace',
+    });
+    fs.mkdirSync(path.join(workspace('e3-runtime-switch'), 'kubernetes'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspace('e3-runtime-switch'), 'kubernetes', 'values.yaml'),
+      'rocketchat:\n  env:\n    ADMIN_PASS: KubeAdminSecret\n',
+    );
+    const rec = await recordKubernetes('e3-runtime-switch');
+    const dest = path.join(workspace('e3-runtime-switch'), 'out', 'bundle');
+    const out = await writeBundle('e3-runtime-switch', dest, rec);
+
+    expect(rec.artifact).toEqual({
+      name: 'kubernetes/values.yaml',
+      sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+    });
+    expect(out.files).toEqual(
+      expect.arrayContaining(['manifest.json', 'README.md', 'values.yaml']),
+    );
+    expect(fs.existsSync(path.join(dest, 'docker-compose.yml'))).toBe(false);
   });
 
   it('carries the seed record when there is one, and nothing when there is not', async () => {

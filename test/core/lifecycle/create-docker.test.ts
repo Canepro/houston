@@ -307,6 +307,29 @@ describe('the create path end to end, stopped at the write seam', () => {
     expect(seen.yaml).toContain('admin123');
   });
 
+  it('records only the effective registration-token presence', async () => {
+    const token = 'EVIDENCE-REGISTRATION-TOKEN-SENTINEL';
+    const { seen, createDocker } = capture();
+    await expect(
+      createDocker.createRepro(
+        createReq({
+          version: '8.5.1',
+          name: 'token-evidence',
+          regToken: `  ${token}  `,
+          wait: false,
+          offline: true,
+        }),
+      ),
+    ).rejects.toThrow('stopped at the write seam');
+
+    const document = YAML.parse(seen.yaml ?? '') as {
+      services: { rocketchat: { environment: Record<string, string> } };
+    };
+    expect(seen.meta?.extra.reg_token_supplied).toBe(true);
+    expect(JSON.stringify(seen.meta)).not.toContain(token);
+    expect(document.services.rocketchat.environment.REG_TOKEN).toBe(token);
+  });
+
   it('warns that Rocket.Chat 9 may refuse an unlicensed LDAP login', async () => {
     // An earlier case leaves a box-wide token, which rightly silences the warning.
     config.updateConfig((cfg) => {

@@ -37,6 +37,9 @@ import { namesOf } from '../lib/presets/composite';
 import * as presets from '../lib/presets/index';
 import { PROFILES } from '../lib/seed-profiles';
 import { SCENARIOS } from '../lib/seed-options';
+import { Interrupted } from '../seams/exec';
+import { OWNER_LABEL_KEY, OWNER_LABEL_VALUE, WORKSPACE_LABEL } from './kube/names';
+import { namespaceLabels } from './kube/namespace';
 import * as naming from './lifecycle/naming';
 import { detail } from './lifecycle/payload';
 import { composeVersion, dockerServerVersion } from './runner/host';
@@ -47,11 +50,12 @@ import * as topology from './topology';
 
 export { renderMarkdown } from '../lib/capture-render';
 
-/** The portable record name and native filesystem path of every deployable artifact. */
-const ARTIFACTS = [
-  { name: 'docker-compose.yml', path: ['docker-compose.yml'] },
-  { name: 'kubernetes/values.yaml', path: ['kubernetes', 'values.yaml'] },
-] as const;
+/** The portable record name and native filesystem path of each runtime's deployment artifact. */
+const DOCKER_ARTIFACT = { name: 'docker-compose.yml', path: ['docker-compose.yml'] } as const;
+const KUBERNETES_ARTIFACT = {
+  name: 'kubernetes/values.yaml',
+  path: ['kubernetes', 'values.yaml'],
+} as const;
 
 /** Only these reasons may appear on a retained run, so nobody invents a softer one. */
 const RETAIN_REASONS: readonly string[] = ['persisted preference', 'explicit task'];
@@ -171,21 +175,22 @@ export function cleanupCommand(name: string): string {
   return `houston down --name ${shellArgument(name)} --volumes --yes`;
 }
 
-async function artifactOf(name: string): Promise<CapturedArtifact> {
-  const ws = paths.workspace(name);
-  for (const candidate of ARTIFACTS) {
-    try {
-      const bytes = await fs.readFile(path.join(ws, ...candidate.path));
-      return {
-        name: candidate.name,
-        sha256: sha256(bytes),
-        bytes,
-      };
-    } catch {
-      continue;
-    }
+async function artifactOf(meta: Metadata): Promise<CapturedArtifact> {
+  // A runtime switch deliberately leaves the old runtime's files behind for inspection. The
+  // metadata names the deployment that exists now, so evidence must not discover an artifact
+  // by filesystem order and attach the stale one.
+  const candidate =
+    topology.ofMeta(meta) === topology.KUBERNETES ? KUBERNETES_ARTIFACT : DOCKER_ARTIFACT;
+  try {
+    const bytes = await fs.readFile(path.join(paths.workspace(meta.name), ...candidate.path));
+    return {
+      name: candidate.name,
+      sha256: sha256(bytes),
+      bytes,
+    };
+  } catch {
+    return { name: '', sha256: '', bytes: null };
   }
-  return { name: '', sha256: '', bytes: null };
 }
 
 /**
@@ -195,16 +200,36 @@ async function artifactOf(name: string): Promise<CapturedArtifact> {
  */
 async function ownershipOf(meta: Metadata, runtime: string): Promise<Record<string, unknown>> {
   if (runtime === topology.KUBERNETES) {
-    return { proof: 'label', managed_by: 'houston', namespace: toText(bag(meta.extra).namespace) };
+    const extra = bag(meta.extra);
+    // A record without both fields cannot identify one namespace on one cluster. Never turn a
+    // current detail response, default Kind context, or derived namespace into ownership proof.
+    const namespace = toText(extra.namespace);
+    const context = toText(extra[config.EXTRA_CONTEXT]);
+    if (namespace === '' || context === '') {
+      return { proof: 'unknown', managed_by: 'unknown', namespace };
+    }
+    try {
+      const labels = await namespaceLabels(namespace, { context });
+      if (
+        labels?.[OWNER_LABEL_KEY] === OWNER_LABEL_VALUE &&
+        labels[WORKSPACE_LABEL] === meta.name
+      ) {
+        return { proof: 'label', managed_by: 'houston', namespace };
+      }
+    } catch (error) {
+      if (error instanceof Interrupted) throw error;
+      // A context, namespace name, or local record is not ownership proof. Evidence remains
+      // useful when Kubernetes cannot answer, but it must say that this claim is unknown.
+    }
+    return { proof: 'unknown', managed_by: 'unknown', namespace };
   }
   return { proof: 'record', managed_by: 'houston', project: await projectName(meta.name) };
 }
 
 /**
  * Whether a licence was needed and whether one was supplied. Never the value, only
- * whether and from where. `extra.licensed` is set by `--license` on either runtime; a
- * registration token is not recorded in the metadata at all, so it cannot be reported
- * here and `source` names only what the record can prove.
+ * whether and from where. A licence takes precedence when both it and a registration token
+ * were supplied. Both markers are booleans only; no credential value reaches the record.
  */
 function licenseOf(meta: Metadata, deployment: string): Record<string, unknown> {
   // A microservices deployment needs a licence independently of its preset.
@@ -220,8 +245,10 @@ function licenseOf(meta: Metadata, deployment: string): Record<string, unknown> 
       // that was built from it. Other components of the recorded composite still count.
     }
   }
-  const supplied = bag(meta.extra).licensed === true;
-  return { required, supplied, source: supplied ? 'license' : null };
+  const extra = bag(meta.extra);
+  if (extra.licensed === true) return { required, supplied: true, source: 'license' };
+  const supplied = extra.reg_token_supplied === true;
+  return { required, supplied, source: supplied ? 'reg_token' : null };
 }
 
 /**
@@ -378,6 +405,7 @@ async function snapshotOf(
   const meta = await readMeta(target);
   const d = await detail(target);
   const runtime = topology.ofMeta(meta);
+  const axes = topology.axesOfMeta(meta);
   const deployment = toText(d.deployment);
   const extra = bag(meta.extra);
 
@@ -397,13 +425,15 @@ async function snapshotOf(
     };
   }
 
-  const artifact = await artifactOf(target);
+  const artifact = await artifactOf(meta);
   const keep = retentionOf(meta, retention);
   const payload: Record<string, unknown> = {
     // Identical shape on both runtimes, so a consumer never branches here.
     repro: {
       name: meta.name,
-      preset: meta.preset,
+      // `multi-instance` is a deployment representation in old Compose records, not a
+      // scenario preset. The normalized axes retain actual scenarios while removing it.
+      preset: toText(axes.preset),
       runtime,
       deployment,
       rc_version: meta.rcVersion,
@@ -644,7 +674,7 @@ export async function writeBundle(
     return await writeBundleAt(
       dest,
       payload,
-      await artifactOf(target),
+      await artifactOf(meta),
       knownWorkspaceSecrets(meta),
       capture,
     );

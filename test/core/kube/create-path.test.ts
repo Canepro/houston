@@ -306,6 +306,40 @@ describe('a Kubernetes create', () => {
     expect([mockCreated[1]?.license, mockCreated[1]?.licensed]).toEqual(['', true]);
   });
 
+  it('records only effective registration-token presence before and after Kubernetes create', async () => {
+    const token = 'EVIDENCE-REGISTRATION-TOKEN-SENTINEL';
+    let provisional: Record<string, unknown> | undefined;
+    mockCreate = async (options) => {
+      provisional = (await readMeta(String(options.name))).extra;
+      return {
+        context: CONTEXT,
+        namespace: `houston-${String(options.name)}`,
+        chart_version: '7.0.0',
+        release: 'rocketchat',
+        port_forward_pid: 0,
+        bind_host: '',
+        microservices: false,
+      };
+    };
+
+    await createKubernetes(
+      createReq({
+        version: '8.5.1',
+        name: 'ktoken-evidence',
+        runtime: 'kubernetes',
+        regToken: `  ${token}  `,
+        offline: true,
+      }),
+    );
+
+    expect(mockCreated.at(-1)?.regToken).toBe(token);
+    expect(provisional?.reg_token_supplied).toBe(true);
+    expect(JSON.stringify(provisional)).not.toContain(token);
+    const final = await readMeta('ktoken-evidence');
+    expect(final.extra.reg_token_supplied).toBe(true);
+    expect(JSON.stringify(final)).not.toContain(token);
+  });
+
   it('retires its own forwards on a re-up, and keeps them findable while it runs', async () => {
     // The write-ahead record replaced the one holding the forwards, and the re-up then read
     // them back from it: pid 0. Measured on k3s, on the release before this: the old forward

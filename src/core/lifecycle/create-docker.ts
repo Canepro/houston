@@ -679,7 +679,7 @@ export async function claimPorts(plan: CreatePlan): Promise<void> {
   // ...on the address the port is published on, which is loopback unless one other
   // address was asked for (`request.callHost`).
   plan.root = `http://${request.callHost(plan.bindHost)}:${String(plan.hostPort)}`;
-  plan.token = plan.req.regToken || toText(plan.cfg.reg_token);
+  plan.token = (plan.req.regToken || toText(plan.cfg.reg_token)).trim();
   plan.tlsspec = await tlsplan.resolveTls(
     plan.req,
     plan.reproName,
@@ -1002,6 +1002,9 @@ export function buildRecord(plan: CreatePlan): void {
   if (pre.ports.length > 0) plan.meta.extra.sidecar_ports = pre.ports;
   if (Object.keys(plan.envOverrides).length > 0) plan.meta.extra.env = plan.envOverrides;
   if (spec.licensed) plan.meta.extra.licensed = true;
+  // The record proves a token was consumed without retaining a credential from the request or
+  // generated Compose document. The normalized value is the one deployment actually used.
+  if (plan.token !== '') plan.meta.extra.reg_token_supplied = true;
   if (plan.req.actor) {
     // Who owns this. Shown by `list` and the GUI card.
     plan.meta.extra.created_by = plan.req.actor;

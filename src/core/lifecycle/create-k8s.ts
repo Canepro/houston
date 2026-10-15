@@ -447,7 +447,7 @@ export function settleAddressing(job: KubeCreate): void {
   // Same resolution order Compose uses: the flag, then the box-level config, then
   // loopback. This was dropped entirely on the Kubernetes path.
   job.cfg = config.loadConfig();
-  job.regToken = job.req.regToken || toText(job.cfg.reg_token);
+  job.regToken = (job.req.regToken || toText(job.cfg.reg_token)).trim();
   if (job.req.bind) job.bindHost = String(job.req.bind);
   else if (isTruthy(job.cfg.bind_host)) job.bindHost = String(job.cfg.bind_host);
   else job.bindHost = config.DEFAULT_BIND_HOST;
@@ -653,6 +653,9 @@ export async function writeProvisionalRecord(job: KubeCreate): Promise<void> {
   // In the write-ahead record too: a re-up after a killed create carries forward from it.
   if (Object.keys(job.envOverrides).length > 0) job.provisional.extra.env = job.envOverrides;
   if (job.licensed) job.provisional.extra.licensed = true;
+  // A killed create leaves this record behind, so it needs the same value-free token proof as
+  // the final one. `job.regToken` is already the normalized deployment value.
+  if (job.regToken !== '') job.provisional.extra.reg_token_supplied = true;
   // Still recorded while the create runs, so a create killed part-way leaves `down` able to
   // stop them.
   if (job.previous.pid !== 0) job.provisional.extra.port_forward_pid = job.previous.pid;
@@ -859,6 +862,7 @@ export function recordTheRequest(job: KubeCreate): void {
   // The same key Compose records them under, so re-up, `backup` and `restore --new` carry them.
   if (Object.keys(job.envOverrides).length > 0) meta.extra.env = job.envOverrides;
   if (job.licensed) meta.extra.licensed = true;
+  if (job.regToken !== '') meta.extra.reg_token_supplied = true;
   // A preset's self-configuration actions, recorded exactly as the Compose path records
   // them. Without this the OIDC preset would create no OAuth provider and the SAML preset
   // no provider settings -- both recorded and neither applied.
