@@ -82,6 +82,12 @@ def main():
                            extra={'runtime': 'kubernetes', 'context': 'verify-offline',
                                   'namespace': 'houston-verify-kube-fixture', 'bind_host': '127.0.0.1'})
         (kube_workspace / 'repro.json').write_text(json.dumps(kube_record))
+        local_kube = workspace.parent / 'verify-owned-kube-fixture'
+        local_kube.mkdir()
+        (local_kube / 'repro.json').write_text(json.dumps(dict(kube_record,
+            name=local_kube.name, extra={'runtime': 'kubernetes',
+                'context': 'kind-houston-local', 'namespace': 'houston-verify-owned',
+                'bind_host': '127.0.0.1'})))
 
         for name, bind, url in [('verify-ipv6-fixture', '::1', 'http://[::1]:39999'),
                                 ('verify-public-fixture', '0.0.0.0', 'http://192.0.2.40:39999')]:
@@ -284,6 +290,21 @@ def main():
                     and state['answered_grants']['owned_cluster'] is False,
                     'Missing grant must remain unanswered')
             require(config_file.read_bytes() == original, 'Onboarding status rewrote config')
+            # Satisfy executable discovery with a trap, never an actual cluster client.
+            # Either authority refusal must happen before the trap is invoked.
+            trap_called = scratch / 'kubectl-was-invoked'
+            kubectl_trap = toolbin / 'kubectl'
+            kubectl_trap.write_text('#!/bin/sh\nprintf attempted > '
+                                    + shlex.quote(str(trap_called)) + '\nexit 97\n')
+            kubectl_trap.chmod(0o700)
+            refused = run('onboard-teardown-unanswered',
+                          ['down', '--name', local_kube.name, '--yes', '--json'],
+                          expected=6, schema='houston.error.v1', ok=False)
+            require(refused['error']['code'] == 'GATE_NOT_ONBOARDED'
+                    and refused['error']['gate']['approve_with'] == 'houston onboard'
+                    and not trap_called.exists() and config_file.read_bytes() == original,
+                    'Local teardown must refuse an unanswered machine before cluster invocation')
+
             invalid = run('onboard-invalid', ['onboard', 'grant', 'verify-unknown', '--json'],
                           expected=2, schema='houston.error.v1', ok=False)
             require(invalid['error']['code'] == 'VALIDATION_FAILED'
@@ -308,6 +329,15 @@ def main():
                     and revoked['clusters'] == ['preserved-cluster']
                     and revoked['completed_at'] == granted['completed_at'],
                     'Revoke must record a denial and remove only the owned cluster scope')
+            denied_config = config_file.read_bytes()
+            denied = run('onboard-teardown-denied',
+                         ['down', '--name', local_kube.name, '--yes', '--json'],
+                         expected=6, schema='houston.error.v1', ok=False)
+            require(denied['error']['code'] == 'GATE_OWNED_CLUSTER'
+                    and denied['error']['gate']['approve_with'] == 'houston onboard grant owned-cluster'
+                    and not trap_called.exists() and config_file.read_bytes() == denied_config,
+                    'Local teardown must refuse a denied grant before cluster invocation')
+
             # Read the actual YAML written by the CLI using its existing dependency.
             # This does not import application onboarding logic to produce expectations.
             persisted = json.loads(subprocess.check_output([
@@ -325,7 +355,7 @@ def main():
             (out / 'onboarding-persisted.json').write_text(json.dumps(persisted, indent=2) + '\n')
             summary['features']['onboarding'] = (
                 'PASS: synthetic-home status, invalid grant, grant/revoke persistence and '
-                'legacy preservation; engine authority gates and goal-first setup pending')
+                'legacy preservation and local teardown authority refusals; live engine and goal-first setup pending')
         require(fixture_before == fixture_bytes(),
                 'CLI changed the synthetic workspace files')
         require(source_before == source_manifest(root), 'Candidate source changed during verification')

@@ -1,12 +1,12 @@
 ---
 name: verify-houston
-description: Verify recurring Houston v2 CLI migrations through bin/houston with isolated state and durable command receipts. Use for capability discovery, missing-workspace failures, offline resource inspection, evidence JSON or bundles, SSH access handoff, onboarding persistence, and capture preflight; consult pending recipes for engine authority gates, goal-first setup, and successful browser capture.
+description: Verify recurring Houston v2 CLI migrations through bin/houston with isolated state and durable command receipts. Use for capability discovery, missing-workspace failures, offline resource inspection, evidence JSON or bundles, SSH access handoff, onboarding persistence and teardown authority refusals, and capture preflight; consult pending recipes for live engine behavior, goal-first setup, and successful browser capture.
 ---
 
 # Verify Houston
 
 This repository verifier exercises the real checkout entry point and parser. It
-uses synthetic persisted workspace files and makes engine executables unavailable.
+uses synthetic persisted workspace files and keeps real engine executables unavailable.
 Its offline result does not establish Docker, Kubernetes, authentication, or
 browser behavior. Keep the generated application skill in `data/skill/` and its
 mirrors under their existing generator's ownership.
@@ -34,7 +34,8 @@ evidence outside both checkouts.
 The helper requires Python 3.9+, Node, `dirname`, and `readlink`. It creates a unique
 temporary directory containing `HOUSTON_HOME`, `HOUSTON_SKILL_HOME`, a synthetic
 user home, and synthetic Docker, Kubernetes, IPv6 and wildcard-bind workspaces. Only
-entry-point utilities are on the child's PATH. It passes no inherited credentials, engine sockets, kubeconfig,
+entry-point utilities are initially on the child's PATH. The onboarding refusal
+drive adds a disposable kubectl trap and requires it never to be invoked. It passes no inherited credentials, engine sockets, kubeconfig,
 proxy variables, or Houston overrides. Do not broaden that environment to make a
 check pass.
 
@@ -82,8 +83,9 @@ with `data.access` triggers the SSH handoff drive using only synthetic environme
 overrides. An advertised `onboard` command triggers status, unknown-grant refusal,
 grant and revoke drives in the run's disposable home. The helper checks the
 persisted grant state, cluster scope and preservation of legacy settings.
-These synthetic answers grant nothing in the operator's real home. Engine
-authority gates, goal-first setup and successful capture require their pending
+The helper also requires local teardown to refuse missing onboarding and a denied
+grant before invoking its kubectl trap. These synthetic answers grant nothing in
+the operator's real home. Live engine behavior, goal-first setup and successful capture require their pending
 recipes to be extended against the candidate's actual help, source, and tests
 before acceptance. A scoped baseline
 pass leaves those paths pending until their actual consumer contracts are

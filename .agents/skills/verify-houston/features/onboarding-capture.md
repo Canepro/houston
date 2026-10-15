@@ -10,10 +10,14 @@ existing cluster scopes; revoking removes only that entry. The completion stamp
 must survive revocation and the version must match the running package.
 
 These commands answer questions only in the verifier's temporary home. They
-never grant permission in the operator's real home. The helper starts no engine
-or cluster operation. Authority-gate enforcement remains pending. Extend its
-recipe by driving an unmet prerequisite through the real CLI and requiring the
-documented refusal and next action before any mutation. Goal-first setup also
+never grant permission in the operator's real home. The helper then drives
+`down --name verify-owned-kube-fixture --yes --json` with missing onboarding and
+with a denied owned-cluster grant. It requires exit 6, the exact gate code and
+the next-action command. A disposable executable trap satisfies kubectl discovery;
+its marker must remain absent, proving the refusal happened before invoking
+any cluster client. The recorded workspace and configuration must remain unchanged
+by each refusal. No real engine or cluster operation runs. Create, orphan-prune
+and granted live-engine behavior remain outside this helper. Goal-first setup
 remains pending until its actual CLI and shared GUI contract are available.
 
 Capture's draft contract is `capture --name NAME --workload smoke --bundle PATH
