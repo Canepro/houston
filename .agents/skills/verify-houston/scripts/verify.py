@@ -264,9 +264,68 @@ def main():
                           overrides=dict(ssh, HOUSTON_SSH_LOCAL_PORT='not-a-port'))
             require(invalid['error']['code'] == 'VALIDATION_FAILED', 'Invalid local port must be refused')
             summary['features']['access'] = 'PASS: real info JSON/human handoff, IPv6, option safety, local-port refusal; no SSH executed'
-        summary['features']['onboarding'] = {
-            'status': 'PENDING: feature recipe prerequisites required',
-            'advertised': sorted(c for c in commands if c in ('onboard', 'onboarding'))}
+        if 'onboard' not in commands:
+            summary['features']['onboarding'] = 'PENDING: onboard command absent'
+        else:
+            # These answers belong only to this run's disposable home. Nothing here
+            # grants authority in the operator's home or invokes an engine action.
+            config_file = Path(env['HOUSTON_HOME']) / 'config.yaml'
+            legacy = {'grants': {'engine_resize': False, 'clusters': ['preserved-cluster'],
+                                 'future_grant': {'answer': 'preserve'}},
+                      'onboarding': {'future_field': 'preserve'},
+                      'preferences': {'retain_runs': False, 'seed_profile': 'small'},
+                      'default_deployment': 'default', 'default_scenarios': [],
+                      'future_config': {'nested': ['preserve']}}
+            config_file.write_text(json.dumps(legacy))
+            original = config_file.read_bytes()
+            state = run('onboard-status', ['onboard', '--json'],
+                        schema='houston.onboard.v1')['data']
+            require(state['completed'] is False and state['grants']['owned_cluster'] is False
+                    and state['answered_grants']['owned_cluster'] is False,
+                    'Missing grant must remain unanswered')
+            require(config_file.read_bytes() == original, 'Onboarding status rewrote config')
+            invalid = run('onboard-invalid', ['onboard', 'grant', 'verify-unknown', '--json'],
+                          expected=2, schema='houston.error.v1', ok=False)
+            require(invalid['error']['code'] == 'VALIDATION_FAILED'
+                    and config_file.read_bytes() == original,
+                    'Unknown grant must refuse without writing config')
+            granted = run('onboard-grant', ['onboard', 'grant', 'owned-cluster', '--json'],
+                          schema='houston.onboard.v1')['data']
+            require(granted['completed'] is True and granted['grants']['owned_cluster'] is True
+                    and granted['answered_grants']['owned_cluster'] is True
+                    and granted['clusters'] == ['preserved-cluster', 'houston-local']
+                    and granted['rc_repro_version'] == version,
+                    'Grant must persist one scoped answer and the running version')
+            repeated = run('onboard-grant-status', ['onboard', '--json'],
+                           schema='houston.onboard.v1')['data']
+            require(all(repeated[key] == granted[key] for key in
+                        ('completed', 'completed_at', 'grants', 'answered_grants', 'clusters')),
+                    'Grant did not survive a separate CLI process')
+            revoked = run('onboard-revoke', ['onboard', 'revoke', 'owned-cluster', '--json'],
+                          schema='houston.onboard.v1')['data']
+            require(revoked['grants']['owned_cluster'] is False
+                    and revoked['answered_grants']['owned_cluster'] is True
+                    and revoked['clusters'] == ['preserved-cluster']
+                    and revoked['completed_at'] == granted['completed_at'],
+                    'Revoke must record a denial and remove only the owned cluster scope')
+            # Read the actual YAML written by the CLI using its existing dependency.
+            # This does not import application onboarding logic to produce expectations.
+            persisted = json.loads(subprocess.check_output([
+                shutil.which('node'), '-e',
+                'const fs=require("node:fs");const yaml=require(require.resolve("yaml",'
+                '{paths:[process.argv[1]]}));process.stdout.write(JSON.stringify('
+                'yaml.parse(fs.readFileSync(process.argv[2],"utf8"))));',
+                str(root), str(config_file)], cwd=root, env=env))
+            require(all(persisted[key] == legacy[key] for key in
+                        ('preferences', 'default_deployment', 'default_scenarios', 'future_config'))
+                    and persisted['grants']['engine_resize'] is False
+                    and persisted['grants']['future_grant'] == legacy['grants']['future_grant']
+                    and persisted['onboarding']['future_field'] == 'preserve',
+                    'Onboarding discarded an unrelated legacy answer or unknown config field')
+            (out / 'onboarding-persisted.json').write_text(json.dumps(persisted, indent=2) + '\n')
+            summary['features']['onboarding'] = (
+                'PASS: synthetic-home status, invalid grant, grant/revoke persistence and '
+                'legacy preservation; engine authority gates and goal-first setup pending')
         require(fixture_before == fixture_bytes(),
                 'CLI changed the synthetic workspace files')
         require(source_before == source_manifest(root), 'Candidate source changed during verification')

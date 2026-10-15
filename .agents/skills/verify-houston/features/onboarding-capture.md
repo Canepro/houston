@@ -1,13 +1,20 @@
 # Onboarding and capture
 
-Onboarding remains pending. Resolve its actual capability paths and help,
-including any parent subcommands, before adding a drive. Presence in discovery
-is not execution proof.
+When `onboard` is advertised, the helper creates synthetic legacy configuration
+inside its disposable home. It runs `onboard --json`, refuses an unknown grant
+without changing that file, then drives `onboard grant owned-cluster --json`
+and `onboard revoke owned-cluster --json`. A separate status process must read
+the grant back. The persisted YAML must retain unrelated preferences, selectors,
+explicit denials and unknown fields. Granting adds only `houston-local` to the
+existing cluster scopes; revoking removes only that entry. The completion stamp
+must survive revocation and the version must match the running package.
 
-For onboarding, prepare synthetic configuration under the isolated home. Drive
-an unmet prerequisite through the CLI and require the documented refusal and
-next action, with no workspace or account creation. A successful onboarding
-claim additionally needs its actual authorized workflow and resulting state.
+These commands answer questions only in the verifier's temporary home. They
+never grant permission in the operator's real home. The helper starts no engine
+or cluster operation. Authority-gate enforcement remains pending. Extend its
+recipe by driving an unmet prerequisite through the real CLI and requiring the
+documented refusal and next action before any mutation. Goal-first setup also
+remains pending until its actual CLI and shared GUI contract are available.
 
 Capture's draft contract is `capture --name NAME --workload smoke --bundle PATH
 --json`, schema `houston.capture.v1`. Read `src/core/capture.ts` and
@@ -21,7 +28,7 @@ exact target and prerequisite versions. If it starts a temporary listener, bind
 to loopback and verify the actual bind before driving it; stop only its owned PID.
 
 The baseline starts no browser, workspace, listener, or infrastructure. Real
-login, browser capture, artifact content, and onboarding side effects remain
-pending. Extend the successful browser recipe against the final candidate and
+login, browser capture and artifact content remain pending. Onboarding writes
+only disposable synthetic configuration. Extend the successful browser recipe against the final candidate and
 retain its artifacts. A missing-workspace refusal does not establish a
 successful capture.

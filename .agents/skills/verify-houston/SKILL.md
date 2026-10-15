@@ -1,6 +1,6 @@
 ---
 name: verify-houston
-description: Verify recurring Houston v2 CLI migrations through bin/houston with isolated state and durable command receipts. Use for capability discovery, missing-workspace failures, offline resource inspection, evidence JSON or bundles, SSH access handoff, and capture preflight; consult pending recipes for onboarding and successful browser capture.
+description: Verify recurring Houston v2 CLI migrations through bin/houston with isolated state and durable command receipts. Use for capability discovery, missing-workspace failures, offline resource inspection, evidence JSON or bundles, SSH access handoff, onboarding persistence, and capture preflight; consult pending recipes for engine authority gates, goal-first setup, and successful browser capture.
 ---
 
 # Verify Houston
@@ -79,9 +79,13 @@ which must refuse without creating a bundle or starting a browser.
 An absent optional port is pending. An advertised port with an incompatible
 recipe is a verifier drift failure, not permission to skip it. An `info` payload
 with `data.access` triggers the SSH handoff drive using only synthetic environment
-overrides. Onboarding and successful capture require their
-pending recipes to be extended against the candidate's actual help, source, and
-tests before acceptance. A scoped baseline
+overrides. An advertised `onboard` command triggers status, unknown-grant refusal,
+grant and revoke drives in the run's disposable home. The helper checks the
+persisted grant state, cluster scope and preservation of legacy settings.
+These synthetic answers grant nothing in the operator's real home. Engine
+authority gates, goal-first setup and successful capture require their pending
+recipes to be extended against the candidate's actual help, source, and tests
+before acceptance. A scoped baseline
 pass leaves those paths pending until their actual consumer contracts are
 exercised. Match command paths, flags, or documented payload fields, never version
 strings or branch names, when choosing applicability.
