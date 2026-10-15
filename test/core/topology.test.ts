@@ -501,6 +501,10 @@ describe('each command asks the runtime the workspace is on', () => {
     previous = process.env.HOUSTON_HOME;
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-topology-'));
     process.env.HOUSTON_HOME = home;
+    config.updateConfig((stored) => {
+      stored.onboarding = { completed_at: '2026-10-15T00:00:00Z' };
+      stored.grants = { owned_cluster: true };
+    });
     jest.resetModules();
   });
   afterEach(() => {

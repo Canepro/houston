@@ -402,7 +402,7 @@ describe('the cluster houston makes for itself', () => {
       if (joined.includes('current-context')) return { stdout: CONTEXT };
       if (joined.includes('/readyz')) return { stdout: 'ok' };
       if (joined.includes(`get configmap ${CLUSTER_OWNER_CONFIGMAP}`)) {
-        return { returncode: 1, stderr: 'NotFound' };
+        return { stdout: '' };
       }
       return undefined;
     });
@@ -412,6 +412,19 @@ describe('the cluster houston makes for itself', () => {
     calls.length = 0;
     await expect(deleteCluster({ force: true })).rejects.toThrow(/ownership marker/u);
     expect(calls.some(({ argv }) => argv.includes('delete'))).toBe(false);
+
+    // A denied or malformed read is unknown, rather than a confirmed absent marker.
+    for (const reply of [{ returncode: 1, stderr: 'forbidden' }, { stdout: '{broken' }]) {
+      route((joined) => {
+        if (joined.includes('get clusters')) return { stdout: `${CLUSTER_NAME}\n` };
+        if (joined.includes('current-context')) return { stdout: CONTEXT };
+        if (joined.includes(`get configmap ${CLUSTER_OWNER_CONFIGMAP}`)) return reply;
+        return undefined;
+      });
+      calls.length = 0;
+      await expect(deleteCluster({ force: true })).rejects.toBeInstanceOf(DockerError);
+      expect(calls.some(({ argv }) => argv.includes('delete'))).toBe(false);
+    }
   });
 
   it('reconnects a cluster that outlived its kubeconfig, and says so when it cannot', async () => {

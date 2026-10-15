@@ -90,21 +90,31 @@ async function clusterIsOurs(context: string): Promise<boolean> {
       'get',
       'configmap',
       CLUSTER_OWNER_CONFIGMAP,
+      '--ignore-not-found',
       '--output',
       'json',
     ],
     { timeout: APPLY_TIMEOUT, own: true },
   );
-  if (result.returncode !== 0) return false;
-  try {
-    const payload = object(JSON.parse(result.stdout));
-    const metadata = object(payload?.metadata);
-    const labels = object(metadata?.labels);
-    const data = object(payload?.data);
-    return labels?.[OWNER_LABEL_KEY] === OWNER_LABEL_VALUE && data?.cluster === CLUSTER_NAME;
-  } catch {
-    return false;
+  if (result.returncode !== 0) {
+    throw new DockerError(`cluster ownership marker could not be read: ${why(result)}`);
   }
+  // --ignore-not-found makes an absent ConfigMap a successful empty response.
+  if (result.stdout.trim() === '') return false;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(result.stdout) as unknown;
+  } catch {
+    throw new DockerError('cluster ownership marker could not be read: invalid JSON');
+  }
+  const payload = object(parsed);
+  const metadata = object(payload?.metadata);
+  const labels = object(metadata?.labels);
+  const data = object(payload?.data);
+  if (payload === null || metadata === null) {
+    throw new DockerError('cluster ownership marker could not be read: invalid object');
+  }
+  return labels?.[OWNER_LABEL_KEY] === OWNER_LABEL_VALUE && data?.cluster === CLUSTER_NAME;
 }
 
 /** Remove only a cluster this invocation created before it could leave an ownership receipt. */
