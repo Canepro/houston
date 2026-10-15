@@ -92,7 +92,9 @@ const ROOT = path.resolve(__dirname, '..');
 // Compose interpolation brackets an IPv6 bind before variable port fields, and monitoring reads
 // that bind back from both short and long syntax.
 // Whole-value interpolation refusals: 11 cases; IPv6 and long-syntax regressions: 2; total 4525.
-const FLOOR = 4525;
+// Seven existing licence-warning cases and the licensed-user microservices regression add eight
+// exercised Jest cases above the bind-enforcement base.
+const FLOOR = 4533;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

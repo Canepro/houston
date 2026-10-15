@@ -22,6 +22,9 @@ import type * as SizingNS from '../../../src/core/lifecycle/sizing';
 import type * as TlsplanNS from '../../../src/core/lifecycle/tlsplan';
 import type * as RoutesNS from '../../../src/core/edge/routes';
 
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+
 import * as config from '../../../src/lib/config';
 import { ConflictError, PreflightError, ValidationError } from '../../../src/lib/errors';
 import { NOTHING_LEFT, nullEmit } from '../../../src/lib/events';
@@ -360,29 +363,40 @@ describe('a Kubernetes create', () => {
     expect(said.filter((line) => line.includes('Premium plan for LDAP login'))).toHaveLength(1);
   });
 
-  it('warns, with a stable code, that unlicensed microservices stop after the first replica', async () => {
-    // An earlier case may leave a box-wide token, which rightly silences the warning.
-    config.updateConfig((cfg) => {
-      delete cfg.reg_token;
-    });
-    const said: { message: string; code: string }[] = [];
-    await createKubernetes(
-      createReq({
-        version: '8.5.1',
-        name: 'kmicro',
-        runtime: 'kubernetes',
-        deployment: 'microservices',
-        offline: true,
-      }),
-      (event) => said.push({ message: event.message, code: event.code }),
-    ).catch((error: unknown) => {
-      if (!(error instanceof ConflictError)) throw error;
-    });
-    const licence = said.filter((line) => line.code === 'LICENSE_ABSENT_EE_PRESET');
-    expect(licence).toHaveLength(1);
-    expect(licence[0]?.message).toContain('Enterprise license not found');
-    expect(licence[0]?.message).toContain('neither --license nor --reg-token');
-  });
+  it.each(['default', 'licensed-user'])(
+    'warns at plan time that unlicensed microservices stop after the first replica with %s',
+    async (preset) => {
+      // An earlier case may leave a box-wide token, which rightly silences the warning.
+      config.updateConfig((cfg) => {
+        delete cfg.reg_token;
+      });
+      await fs.mkdir(config.presetDir(), { recursive: true });
+      await fs.writeFile(
+        path.join(config.presetDir(), 'licensed-user.yaml'),
+        'name: licensed-user\nrequires_license: true\n',
+      );
+      const said: { message: string; code: string; phase: string }[] = [];
+      await createKubernetes(
+        createReq({
+          version: '8.5.1',
+          name: `kmicro-${preset}`,
+          preset,
+          runtime: 'kubernetes',
+          deployment: 'microservices',
+          offline: true,
+        }),
+        (event) => said.push({ message: event.message, code: event.code, phase: event.phase }),
+      ).catch((error: unknown) => {
+        if (!(error instanceof ConflictError)) throw error;
+      });
+      const licence = said.filter((line) => line.code === 'LICENSE_ABSENT_EE_PRESET');
+      expect(licence).toHaveLength(1);
+      expect(licence[0]?.phase).toBe('plan');
+      expect(licence[0]?.message).toContain('replicas after the first stop');
+      expect(licence[0]?.message).toContain('Enterprise license not found');
+      expect(licence[0]?.message).toContain('neither --license nor --reg-token');
+    },
+  );
 
   it('does not call LDAP an Enterprise feature on a monolith', async () => {
     // The Kubernetes LDAP adapter's `requiresLicense` is a marker of the microservices

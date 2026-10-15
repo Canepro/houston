@@ -184,7 +184,7 @@ export function licenceAbsentWarning(
   if (what === '') return '';
   return (
     `${what} and this workspace has neither --license nor --reg-token: it will run, but ` +
-    (microservices && !pre.requiresLicense
+    (microservices
       ? 'Rocket.Chat replicas after the first stop ("Enterprise license not found"). '
       : 'the feature may not work as licensed. ') +
     'Add --license <file> or --reg-token <token>, or a license later in Rocket.Chat under ' +
