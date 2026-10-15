@@ -1,6 +1,6 @@
 ---
 name: verify-houston
-description: Verify recurring Houston v2 CLI migrations through bin/houston with isolated state and durable command receipts. Use for capability discovery, missing-workspace failures, and evidence JSON or bundles; consult pending recipes for inventory, access, onboarding, and capture.
+description: Verify recurring Houston v2 CLI migrations through bin/houston with isolated state and durable command receipts. Use for capability discovery, missing-workspace failures, and evidence JSON or bundles; consult pending recipes for resource inspection, SSH access handoff, onboarding, and capture.
 ---
 
 # Verify Houston
@@ -27,8 +27,8 @@ python3 .agents/skills/verify-houston/scripts/verify.py --evidence-dir /absolute
 
 The helper requires Python 3.9+, Node, `dirname`, and `readlink`. It creates a unique
 temporary directory containing `HOUSTON_HOME`, `HOUSTON_SKILL_HOME`, a synthetic
-user home, and the workspace `verify-fixture`. Only entry-point utilities are on
-the child's PATH. It passes no inherited credentials, engine sockets, kubeconfig,
+user home, and the workspaces `verify-fixture` and `verify-kube-fixture`. Only
+entry-point utilities are on the child's PATH. It passes no inherited credentials, engine sockets, kubeconfig,
 proxy variables, or Houston overrides. Do not broaden that environment to make a
 check pass.
 
@@ -59,16 +59,19 @@ helper's isolated environment. Do not use the application's infrastructure
 
 Read [the feature map](features/index.md), then the recipe for each changed path.
 The helper drives `--version`, `capabilities`, and an unknown workspace through
-`info --json`. If `capabilities.data.commands` advertises `evidence`, it also drives
+`info --json`. If capabilities advertise `inspect`, it drives both offline
+runtime fixtures and the missing-workspace failure. If `capabilities.data.commands` advertises
+`evidence`, it also drives
 JSON and bundle output against the synthetic record. It fails if the advertised
 flags or known contract differ. Missing mandatory baseline commands are failures.
 
 An absent optional port is pending. An advertised port with an incompatible
-recipe is a verifier drift failure, not permission to skip it. Inventory, access,
+recipe is a verifier drift failure, not permission to skip it. SSH handoff,
 onboarding, and capture require their pending recipes to be extended against the
 candidate's actual help, source, and tests before acceptance. A scoped baseline
-pass leaves those paths pending even if they are advertised. Match command paths
-and flags, never version strings or branch names, when choosing applicability.
+pass leaves those paths pending until their actual consumer contracts are
+exercised. Match command paths, flags, or documented payload fields, never version
+strings or branch names, when choosing applicability.
 
 ## Evidence
 

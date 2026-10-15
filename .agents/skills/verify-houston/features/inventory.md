@@ -1,18 +1,35 @@
-# Workspace inventory
+# Resource inspection
 
-Pending. At the candidate head, inspect capability paths for `inventory` and its
-subcommands, their help, and matching CLI tests. Existing `list` is a different
-contract and does not prove a new inventory port. Record absent commands as
-pending, not failed execution or a pass.
+The CLI entry is `inspect`, not `inventory`. The port's owners are
+`src/core/kube/inventory.ts`, `src/core/runner/inventory.ts`, and
+`src/core/lifecycle/payload.ts`'s `inspection`, with the CLI contract in
+`src/cli/spec-data.ts`. Read those files and `test/cli/inspect.test.ts` on the
+candidate. They are absent on the pinned baseline. Historical Kubernetes
+inventory is in `rc_repro/services/k8s.py` at integration commit
+`ea07050063370437984c40d604bf4c4a9e4eeb40`, available through `git show`.
 
-Before extending the helper, identify the port's source-of-truth files and safe
-read-only mode. Add synthetic records for an owned workspace, an unknown owner,
-and a missing or unreadable source in this run's isolated home. Use only actual
-advertised argv. Require structured output to preserve each identity and report
-unknown state as unknown, with the expected nonzero refusal where specified.
-Capture stdout, stderr, exit codes, and before/after fixture bytes.
+Applicability is the exact `inspect` capability path. Absence is pending. The
+owner draft advertises `--name`, `--json`, and `houston.inspect.v1` at contract 2.
+When present, the helper drives:
 
-Prerequisites for live discovery are an explicitly approved host or context and
-read-only access. The offline baseline neither enumerates actual engines nor
-proves cross-host inventory completeness. The parent owns the candidate-specific
-recipe and real-interface sweep after this port is available.
+```bash
+bin/houston inspect --name verify-missing --json
+bin/houston inspect --name verify-fixture --json
+bin/houston inspect --name verify-kube-fixture --json
+```
+
+The first must return exit 4 with NOT_FOUND. The fixture reads must return the
+named workspace and runtime, an origin-only URL, loopback bind, and both runtime
+sections. With engine tools unavailable, nodes/services/pods and
+containers/networks/volumes must be empty; Kubernetes context and namespace must
+match the synthetic record. The synthetic secret, login, and environment must
+be absent. Require fixture bytes to remain unchanged. Empty offline arrays prove
+only the unavailable-engine projection, never an empty or healthy real cluster.
+
+Live prerequisites remain an approved existing Kubernetes context/namespace and
+read-only API access to nodes, Services, and pods. Capture actual node readiness,
+roles, addresses and allocatable resources; Service type, external addresses,
+ports and NodePorts; and pod state. Docker coverage additionally needs an approved
+existing project with known container port bindings and labelled networks/volumes.
+Compare CLI rows with read-only engine/API results. No Secret, environment read,
+resource creation, deletion, or tunnel execution belongs in this recipe.
