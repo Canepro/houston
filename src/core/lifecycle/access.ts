@@ -56,14 +56,6 @@ function extraOf(meta: AccessRecord): Record<string, unknown> {
     : {};
 }
 
-function rootHost(rootUrl: string): string {
-  try {
-    return new URL(rootUrl).hostname.replace(/^\[|\]$/gu, '').toLowerCase();
-  } catch {
-    return '';
-  }
-}
-
 export function loopback(value: string): boolean {
   const host = value
     .trim()
@@ -172,8 +164,9 @@ function forwardTarget(bind: string): string {
 function bindOf(meta: AccessRecord, resolvedBindHost: string): string {
   const resolved = resolvedBindHost.trim();
   if (resolved !== '') return resolved;
-  const recorded = text(extraOf(meta).bind_host).trim();
-  return recorded || rootHost(meta.rootUrl);
+  // rootUrl is Houston's local call target, even for a wildcard listener. It cannot prove
+  // loopback privacy, so absent recovered or recorded bind data stays unknown.
+  return text(extraOf(meta).bind_host).trim();
 }
 
 /**

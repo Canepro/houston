@@ -296,7 +296,7 @@ describe("a multi-instance workspace's info", () => {
 });
 
 describe('SSH loopback guidance', () => {
-  it('prints the tunnel and client URL after a ready up and in human info', async () => {
+  it('prints the tunnel only when human info verifies a loopback bind', async () => {
     const record = require('../../src/core/runner/record') as typeof RecordNS;
     await record.writeRecord(
       'ssh-ready',
@@ -363,6 +363,13 @@ describe('SSH loopback guidance', () => {
         `${paths.workspace('ssh-ready')}/docker-compose.yml`,
         'services:\n  rocketchat:\n    ports: ["0.0.0.0:3123:3000"]\n',
       );
+      stdout = '';
+      expect(await app.runCli(['info', '--name', 'ssh-ready'], { execute, io })).toBe(0);
+      expect(stdout).not.toContain('tunnel :');
+      expect(stdout).not.toContain('Credentials stay private');
+      // rootUrl is where Houston itself calls the workspace. With neither the current
+      // metadata nor its legacy Compose file proving the bind, do not infer loopback from it.
+      fs.unlinkSync(`${paths.workspace('ssh-ready')}/docker-compose.yml`);
       stdout = '';
       expect(await app.runCli(['info', '--name', 'ssh-ready'], { execute, io })).toBe(0);
       expect(stdout).not.toContain('tunnel :');

@@ -94,7 +94,7 @@ async function run(argv: string[]): Promise<Ran> {
 
 const errorOf = (ran: Ran) => (ran.envelope.error ?? {}) as Record<string, unknown>;
 
-function writeWorkspace(name: string, compose = true): void {
+function writeWorkspace(name: string, compose = true, bindHost = ''): void {
   const record = require('../../src/core/runner/record') as typeof RecordNS;
   const dir = path.join(home, 'repros', name);
   fs.mkdirSync(dir, { recursive: true });
@@ -109,6 +109,7 @@ function writeWorkspace(name: string, compose = true): void {
           rootUrl: 'http://localhost:3001',
           hostPort: 3001,
           versionSource: 'x',
+          ...(bindHost === '' ? {} : { extra: { bind_host: bindHost } }),
         }),
       ),
     ),
@@ -141,7 +142,7 @@ describe('a command that fails', () => {
   });
 
   it('includes copy-safe SSH handoff guidance in the real info JSON payload', async () => {
-    writeWorkspace('ssh-access');
+    writeWorkspace('ssh-access', true, '127.0.0.1');
     const saved = {
       connection: process.env.SSH_CONNECTION,
       user: process.env.USER,

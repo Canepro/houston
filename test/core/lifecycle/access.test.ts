@@ -10,11 +10,15 @@ const REMOTE_NOTE =
   'handoff again.';
 
 function workspace(values: Parameters<typeof metadata>[0] = {}) {
+  const { extra = {}, ...rest } = values;
   return metadata({
     name: 'remote',
     rootUrl: 'http://localhost:3123',
     hostPort: 3123,
-    ...values,
+    ...rest,
+    // A current record carries its actual bind explicitly. Tests that need a legacy or
+    // unknown bind build that record directly instead of inferring it from rootUrl.
+    extra: { bind_host: '127.0.0.1', ...extra },
   });
 }
 
