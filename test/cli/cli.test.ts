@@ -376,4 +376,65 @@ describe('SSH loopback guidance', () => {
       jest.resetModules();
     }
   });
+
+  it('recovers a legacy IPv6 Compose bind for human info guidance', async () => {
+    const record = require('../../src/core/runner/record') as typeof RecordNS;
+    const paths = require('../../src/core/runner/paths') as typeof PathsNS;
+    await record.writeRecord(
+      'ssh-legacy-ipv6',
+      record.metadata({
+        name: 'ssh-legacy-ipv6',
+        project: 'houston-ssh-legacy-ipv6',
+        rcVersion: '8.5.1',
+        rcImage: 'i',
+        mongoTag: '8.0',
+        mongoFlavor: 'official',
+        preset: 'default',
+        rootUrl: 'http://localhost:3123',
+        hostPort: 3123,
+        versionSource: 'map',
+      }),
+    );
+    fs.writeFileSync(
+      `${paths.workspace('ssh-legacy-ipv6')}/docker-compose.yml`,
+      'services:\n  rocketchat:\n    ports: ["[::1]:3123:3000"]\n',
+    );
+    const keys = [
+      'SSH_CONNECTION',
+      'USER',
+      'HOUSTON_SSH_HOST',
+      'HOUSTON_SSH_USER',
+      'HOUSTON_SSH_LOCAL_PORT',
+    ] as const;
+    const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    try {
+      process.env.SSH_CONNECTION = '198.51.100.20 55100 203.0.113.8 22';
+      process.env.USER = 'operator';
+      delete process.env.HOUSTON_SSH_HOST;
+      delete process.env.HOUSTON_SSH_USER;
+      delete process.env.HOUSTON_SSH_LOCAL_PORT;
+      const app = require('../../src/cli/app') as typeof AppNS;
+      const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
+      let stdout = '';
+      let stderr = '';
+      const io = {
+        writeOut: (text: string) => void (stdout += text),
+        writeErr: (text: string) => void (stderr += text),
+      };
+      const code = await app.runCli(['info', '--name', 'ssh-legacy-ipv6'], {
+        execute: handlers.createExecutor(io),
+        io,
+      });
+      expect([code, stderr]).toEqual([0, '']);
+      expect(stdout).toContain(
+        "tunnel : ssh -N -L '127.0.0.1:3123:[::1]:3123' -- operator@203.0.113.8",
+      );
+      expect(stdout).toContain('browser: http://127.0.0.1:3123');
+    } finally {
+      for (const key of keys) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
+    }
+  });
 });

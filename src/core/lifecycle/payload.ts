@@ -140,7 +140,12 @@ export async function bindHostOf(meta: Metadata): Promise<string> {
   const rc = bag(services.rocketchat ?? services['rocketchat-1']);
   const ports = Array.isArray(rc.ports) ? rc.ports : [];
   for (const port of ports) {
-    const parts = String(port).split(':');
+    const published = String(port);
+    // Compose brackets IPv6 hosts, so splitting `[::1]:3123:3000` on colons yields only `[`.
+    // Decode that address before retaining the existing short IPv4/wildcard recovery below.
+    const ipv6 = /^\[([^\]]+)\]:[^:]+:[^:]+(?:\/[^:]+)?$/u.exec(published);
+    if (ipv6 !== null) return ipv6[1] as string;
+    const parts = published.split(':');
     if (parts.length >= 3 && parts[0]) return parts[0] as string;
   }
   return '';

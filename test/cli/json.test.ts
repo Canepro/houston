@@ -184,6 +184,54 @@ describe('a command that fails', () => {
     }
   });
 
+  it('recovers a legacy IPv6 Compose bind for the real info JSON payload', async () => {
+    writeWorkspace('ssh-access-ipv6');
+    fs.writeFileSync(
+      path.join(home, 'repros', 'ssh-access-ipv6', 'docker-compose.yml'),
+      'services:\n  rocketchat:\n    ports: ["[::1]:3001:3000"]\n',
+    );
+    const saved = {
+      connection: process.env.SSH_CONNECTION,
+      user: process.env.USER,
+      host: process.env.HOUSTON_SSH_HOST,
+      sshUser: process.env.HOUSTON_SSH_USER,
+      localPort: process.env.HOUSTON_SSH_LOCAL_PORT,
+    };
+    try {
+      process.env.SSH_CONNECTION = '198.51.100.20 55100 203.0.113.8 22';
+      process.env.USER = 'operator';
+      delete process.env.HOUSTON_SSH_HOST;
+      delete process.env.HOUSTON_SSH_USER;
+      delete process.env.HOUSTON_SSH_LOCAL_PORT;
+      const ran = await run(['info', '--name', 'ssh-access-ipv6', '--json']);
+      expect(ran.code).toBe(0);
+      expect((ran.envelope.data as Record<string, unknown>).access).toEqual({
+        mode: 'remote_ssh',
+        bind: 'loopback',
+        host_port: 3001,
+        local_port: 3001,
+        browser_url: 'http://127.0.0.1:3001',
+        tunnel_command: "ssh -N -L '127.0.0.1:3001:[::1]:3001' -- operator@203.0.113.8",
+        note:
+          'The workspace listens on loopback on the remote host only. Run the tunnel command on your ' +
+          'machine, then open the browser URL there. Credentials stay private to that tunnel. If the ' +
+          'local port is occupied, set HOUSTON_SSH_LOCAL_PORT on the remote command and request the ' +
+          'handoff again.',
+      });
+    } finally {
+      if (saved.connection === undefined) delete process.env.SSH_CONNECTION;
+      else process.env.SSH_CONNECTION = saved.connection;
+      if (saved.user === undefined) delete process.env.USER;
+      else process.env.USER = saved.user;
+      if (saved.host === undefined) delete process.env.HOUSTON_SSH_HOST;
+      else process.env.HOUSTON_SSH_HOST = saved.host;
+      if (saved.sshUser === undefined) delete process.env.HOUSTON_SSH_USER;
+      else process.env.HOUSTON_SSH_USER = saved.sshUser;
+      if (saved.localPort === undefined) delete process.env.HOUSTON_SSH_LOCAL_PORT;
+      else process.env.HOUSTON_SSH_LOCAL_PORT = saved.localPort;
+    }
+  });
+
   it('keeps stdout a document and moves the human line to stderr', async () => {
     // `houston info --json > case.json` has to produce a valid document, and the person
     // who ran it should still see what happened.
