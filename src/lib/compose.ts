@@ -574,14 +574,20 @@ export function build(s: Spec): ComposeDoc {
   return doc;
 }
 
-/** "8000-8005:8000-8005", and the single-sided "8000-8005" form. */
-const RANGE_RE = /^\d+-\d+(:\d+(-\d+)?)?$/;
+/** A port or a range of them: "8025", "8000-8005". Either side of a short-syntax entry. */
+const PORT_RE = /^\d+(-\d+)?$/;
 
 /**
- * Prefix every published port with the bind host, unless one is already given. Applied
- * to ALL services in one pass -- RC, multi-instance direct ports, the load balancer, and
- * preset sidecars -- mirroring the official rocketchat-compose
- * `${BIND_IP}:${HOST_PORT}:${PORT}` pattern.
+ * Bind every published port to ONE host address. Applied to ALL services in one pass --
+ * RC, multi-instance direct ports, the load balancer, and preset sidecars -- mirroring the
+ * official rocketchat-compose `${BIND_IP}:${HOST_PORT}:${PORT}` pattern.
+ *
+ * A host address an entry already names is REPLACED, not kept. The bind host is the one
+ * posture `info` reports and `detectBind` reads back, and a custom preset that writes
+ * `0.0.0.0:9000:9000` would otherwise publish a sidecar on every interface of a remote
+ * sandbox while the workspace says it is loopback-bound. Short syntax keeps its host port
+ * (or its absence: `IP::CONTAINER` is an ephemeral host port), its range and its
+ * `/protocol`; long syntax gets `host_ip` set whenever it publishes.
  */
 export function bindPorts(doc: ComposeDoc, bind: string): void {
   if (!bind) return;
@@ -591,41 +597,20 @@ export function bindPorts(doc: ComposeDoc, bind: string): void {
     const out: unknown[] = [];
     for (const p of ports) {
       // THE TYPE CHECK COMES FIRST. Stringifying compose long syntax gives the object's
-      // text containing two colons, which matched the already-IP-qualified branch below
-      // -- the object's text was appended as a ports entry. Any shape that is not a
-      // string has to be recognised before it is stringified.
+      // text containing two colons, which once matched the IP-qualified branch below --
+      // the object's text was appended as a ports entry. Any shape that is not a string
+      // has to be recognised before it is stringified.
       if (isPlainObject(p)) {
         const long = { ...p };
-        if ('published' in long && (long.host_ip ?? '') === '') long.host_ip = bind;
+        // A target with no `published` is not on the host, so there is nothing to bind.
+        if ('published' in long) long.host_ip = bind;
         out.push(long);
         continue;
       }
-      const str = String(p);
-      const colons = str.split(':').length - 1;
-      const head = str.split(':')[0] ?? '';
-      if (colons >= 2) {
-        // Already IP-qualified ("127.0.0.1:8025:8025") -- prefixing again would produce
-        // a double-IP mapping.
-        out.push(str);
-      } else if (colons === 1 && head !== '' && /^[0-9]+$/.test(head)) {
-        out.push(`${bind}:${str}`); // "8025:8025"
-      } else if (str !== '' && /^[0-9]+$/.test(str)) {
-        // A BARE container port. "127.0.0.1:8025" would be parsed as host:container with
-        // an invalid host port, so use compose's IP::CONTAINER form: an ephemeral host
-        // port, still bound to `bind` rather than every interface.
-        out.push(`${bind}::${str}`);
-      } else if (RANGE_RE.test(str)) {
-        // A PORT RANGE ("8000-8005:8000-8005"). This fell through to the `else` below
-        // and was appended UNCHANGED, so it published on every interface while `info`
-        // and the detail panel both reported the workspace as loopback-bound: a silent
-        // opt-out of the default posture, on a workspace running fixed weak credentials.
-        // Legal Compose, and reachable through the custom presets the README documents.
-        // A one-sided range means CONTAINER ports with ephemeral host ports.
-        // Preserve that with IP::RANGE; IP:RANGE is invalid HOST:CONTAINER.
-        out.push(str.includes(':') ? `${bind}:${str}` : `${bind}::${str}`);
-      } else {
-        // NOT SILENTLY PASSED THROUGH. Everything above is a shape this function
-        // understands; anything else is a published port it would be leaving on every
+      const parsed = shortPort(String(p));
+      if (parsed === null) {
+        // NOT SILENTLY PASSED THROUGH. Everything this function understands is bound
+        // above; anything else is a published port it would be leaving on every
         // interface, which is the one outcome that must never be the default. Named so
         // the preset author can see what to change.
         throw new ValidationError(
@@ -635,9 +620,36 @@ export function bindPorts(doc: ComposeDoc, bind: string): void {
             'it on every interface.',
         );
       }
+      out.push(`${bind}:${parsed.host}:${parsed.container}${parsed.protocol}`);
     }
     svc.ports = out;
   }
+}
+
+/**
+ * The host-side and container-side of a compose short-syntax port entry, with its
+ * protocol suffix, and WITHOUT the host address it may name: `[IP:][HOST:]CONTAINER[/PROTO]`,
+ * where HOST and CONTAINER are each a port or a range, HOST may be empty (`IP::CONTAINER`),
+ * and IP may be bracketed IPv6. `null` for anything else.
+ */
+function shortPort(entry: string): { host: string; container: string; protocol: string } | null {
+  const slash = entry.lastIndexOf('/');
+  const protocol = slash === -1 ? '' : entry.slice(slash);
+  let rest = slash === -1 ? entry : entry.slice(0, slash);
+  if (protocol !== '' && !/^\/[a-z]+$/u.test(protocol)) return null;
+  if (rest.startsWith('[')) {
+    const close = rest.indexOf(']:');
+    if (close === -1) return null;
+    rest = rest.slice(close + 2);
+  }
+  const fields = rest.split(':');
+  if (fields.length === 3) fields.shift(); // a dotted host address: dropped, `bind` replaces it
+  if (fields.length > 2) return null;
+  const container = fields[fields.length - 1] ?? '';
+  const host = fields.length === 2 ? (fields[0] ?? '') : '';
+  if (!PORT_RE.test(container)) return null;
+  if (host !== '' && !PORT_RE.test(host)) return null;
+  return { host, container, protocol };
 }
 
 export const HEADER = '# Generated by houston. Do not edit by hand -- re-run `houston up`.\n';

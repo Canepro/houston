@@ -212,7 +212,9 @@ and a create that cannot finish leaves a half-made workspace behind.
 
 **Everything binds loopback unless told otherwise.** Reproductions ship weak fixed credentials
 (`admin` / `admin123`), so everything binds `DEFAULT_BIND_HOST` (`127.0.0.1`) unless opted out
-with `--bind`, `HOUSTON_BIND_HOST` or `config set bind_host`. A workspace reachable beyond
+with `--bind`, `HOUSTON_BIND_HOST` or `config set bind_host`. The bind host is applied to
+every published port after presets merge, replacing any address a preset wrote, so one
+custom preset cannot leave a sidecar on every interface. A workspace reachable beyond
 loopback gets a generated admin password instead, when it is made: a rebuild keeps the one
 its database holds (`keptAdminPassword`), since Rocket.Chat sets it only on an empty
 database. `PRESET_PORTS` in `lib/config.ts` is the one port registry, and

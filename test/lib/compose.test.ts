@@ -296,9 +296,21 @@ describe('binding', () => {
     expect(bound(['8025:8025'])).toEqual(['127.0.0.1:8025:8025']);
   });
 
-  it('leaves an already IP-qualified mapping alone', () => {
-    // Prefixing again would produce a double-IP mapping.
+  it('REPLACES a host address the entry already names, rather than keeping it', () => {
+    // The bind host is the one posture `info` reports and `detectBind` reads back. A
+    // custom preset writing `0.0.0.0:9000:9000` published that sidecar on every interface
+    // of a remote sandbox while the workspace said it was loopback-bound.
+    expect(bound(['0.0.0.0:9000:9000'])).toEqual(['127.0.0.1:9000:9000']);
     expect(bound(['127.0.0.1:8025:8025'])).toEqual(['127.0.0.1:8025:8025']);
+    expect(bound(['[::1]:8025:8025'])).toEqual(['127.0.0.1:8025:8025']);
+    // And the other way: an explicit `--bind 0.0.0.0` reaches a loopback-pinned entry too.
+    expect(bound(['127.0.0.1:8025:8025'], '0.0.0.0')).toEqual(['0.0.0.0:8025:8025']);
+  });
+
+  it('keeps the protocol suffix and the ephemeral host port through a rebind', () => {
+    expect(bound(['9090/udp'])).toEqual(['127.0.0.1::9090/udp']);
+    expect(bound(['9001:9001/tcp'])).toEqual(['127.0.0.1:9001:9001/tcp']);
+    expect(bound(['0.0.0.0::9090/udp'])).toEqual(['127.0.0.1::9090/udp']);
   });
 
   it('uses the IP::CONTAINER form for a bare container port', () => {
@@ -325,10 +337,11 @@ describe('binding', () => {
     ]);
   });
 
-  it('leaves long syntax that already names a host_ip alone', () => {
+  it('rebinds long syntax that already names a host_ip, and skips an unpublished target', () => {
     expect(bound([{ target: 80, published: 8080, host_ip: '10.0.0.1' }])).toEqual([
-      { target: 80, published: 8080, host_ip: '10.0.0.1' },
+      { target: 80, published: 8080, host_ip: '127.0.0.1' },
     ]);
+    expect(bound([{ target: 80 }])).toEqual([{ target: 80 }]);
   });
 
   it('REFUSES a shape it does not understand, rather than publishing it everywhere', () => {
