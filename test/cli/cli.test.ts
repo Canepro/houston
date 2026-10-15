@@ -350,7 +350,7 @@ describe('SSH loopback guidance', () => {
       expect([up, info, stderr]).toEqual([0, 0, '']);
       expect(
         stdout.match(
-          /tunnel : ssh -N -L 127\.0\.0\.1:3123:127\.0\.0\.1:3123 -- operator@203\.0\.113\.8/g,
+          /tunnel : ssh -N -o ExitOnForwardFailure=yes -L 127\.0\.0\.1:3123:127\.0\.0\.1:3123 -- operator@203\.0\.113\.8/g,
         ),
       ).toHaveLength(2);
       expect(stdout.match(/browser: http:\/\/127\.0\.0\.1:3123/g)).toHaveLength(2);
@@ -427,7 +427,7 @@ describe('SSH loopback guidance', () => {
       });
       expect([code, stderr]).toEqual([0, '']);
       expect(stdout).toContain(
-        "tunnel : ssh -N -L '127.0.0.1:3123:[::1]:3123' -- operator@203.0.113.8",
+        "tunnel : ssh -N -o ExitOnForwardFailure=yes -L '127.0.0.1:3123:[::1]:3123' -- operator@203.0.113.8",
       );
       expect(stdout).toContain('browser: http://127.0.0.1:3123');
     } finally {
