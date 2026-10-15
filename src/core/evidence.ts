@@ -28,6 +28,7 @@ import * as YAML from 'yaml';
 
 import { renderMarkdown as renderBundleMarkdown } from '../lib/capture-render';
 import { imageRef } from '../lib/compose';
+import * as config from '../lib/config';
 import { ValidationError } from '../lib/errors';
 import { isTruthy, quotedText, toText } from '../lib/format';
 import { pathExpandUser } from '../lib/home';
@@ -205,11 +206,15 @@ async function ownershipOf(meta: Metadata, runtime: string): Promise<Record<stri
  * registration token is not recorded in the metadata at all, so it cannot be reported
  * here and `source` names only what the record can prove.
  */
-function licenseOf(meta: Metadata, deployment: string, runtime: string): Record<string, unknown> {
+function licenseOf(meta: Metadata, deployment: string): Record<string, unknown> {
+  // A microservices deployment needs a licence independently of its preset.
   let required = deployment === topology.MICROSERVICES;
   for (const name of namesOf(meta.preset).filter((item) => item !== 'default')) {
     try {
-      required ||= presets.resolve(name, runtime).requiresLicense;
+      // A runtime adapter may carry a topology marker: Kubernetes LDAP's `requiresLicense`
+      // does. The catalog is the semantic source for a preset's own requirement, whether it
+      // is user YAML, a scenario, or built in.
+      required ||= presets.load(name).requiresLicense;
     } catch {
       // A preset this install no longer has must not break the evidence for a workspace
       // that was built from it. Other components of the recorded composite still count.
@@ -226,12 +231,19 @@ function licenseOf(meta: Metadata, deployment: string, runtime: string): Record<
 export function resolveRetention({
   retained = null,
   reason = '',
-}: { retained?: boolean | null; reason?: string } = {}): {
+  preferences = {},
+}: { retained?: boolean | null; reason?: string; preferences?: unknown } = {}): {
   retained: boolean;
   reason: string | null;
 } {
+  const preferenceRetains = bag(preferences).retain_runs === true;
   if (retained === true) {
-    const why = reason.trim() === '' ? 'explicit task' : reason.trim();
+    const why =
+      reason.trim() === ''
+        ? preferenceRetains
+          ? 'persisted preference'
+          : 'explicit task'
+        : reason.trim();
     if (!RETAIN_REASONS.includes(why)) {
       throw new ValidationError(
         `retained evidence reason must be ${RETAIN_REASONS.map((r) => `'${r}'`).join(' or ')}`,
@@ -239,15 +251,21 @@ export function resolveRetention({
     }
     return { retained: true, reason: why };
   }
-  return { retained: false, reason: null };
+  if (retained === false) return { retained: false, reason: null };
+  return preferenceRetains
+    ? { retained: true, reason: 'persisted preference' }
+    : { retained: false, reason: null };
 }
 
 function retentionOf(
   meta: Metadata,
   requested: { retained?: boolean | null; reason?: string },
 ): { retained: boolean; reason: string | null } {
-  const explicit = resolveRetention(requested);
-  if (explicit.retained || !meta.pinned) return explicit;
+  const selected = resolveRetention({
+    ...requested,
+    preferences: config.loadConfig(false).preferences,
+  });
+  if (selected.retained || !meta.pinned) return selected;
   return { retained: true, reason: 'persisted preference' };
 }
 
@@ -403,7 +421,7 @@ async function snapshotOf(
     runtime: { state: toText(d.state), services: servicesOf(d.containers), engine },
     artifact: { name: artifact.name, sha256: artifact.sha256 },
     ownership: await ownershipOf(meta, runtime),
-    license: licenseOf(meta, deployment, runtime),
+    license: licenseOf(meta, deployment),
     retention: {
       retained: keep.retained,
       reason: keep.reason,

@@ -192,7 +192,7 @@ export function renderMarkdown(payloadValue: unknown, captureValue?: unknown): s
   if (Object.keys(capture).length === 0) {
     lines.push(
       'No scripted capture was run, so this bundle proves what was deployed but not what was done to it. ' +
-        `Add one with \`houston capture --name ${name} --workload smoke\`.`,
+        'Include a scripted capture with a later collection when that proof is needed.',
       '',
     );
   } else {

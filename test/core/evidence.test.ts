@@ -12,6 +12,7 @@ jest.mock('../../src/core/lifecycle/payload', () => {
 });
 
 import * as lifecyclePayload from '../../src/core/lifecycle/payload';
+import * as config from '../../src/lib/config';
 import { ValidationError } from '../../src/lib/errors';
 import {
   cleanupCommand,
@@ -56,9 +57,12 @@ const KUBERNETES_DETAIL = {
   containers: [],
 };
 
-async function recordKubernetes(name: string): Promise<Record<string, unknown>> {
+async function recordKubernetes(
+  name: string,
+  result = KUBERNETES_DETAIL,
+): Promise<Record<string, unknown>> {
   const detail = lifecyclePayload.detail as jest.MockedFunction<typeof lifecyclePayload.detail>;
-  detail.mockResolvedValueOnce(KUBERNETES_DETAIL);
+  detail.mockResolvedValueOnce(result);
   return await record(name);
 }
 
@@ -187,9 +191,43 @@ describe('the record', () => {
     });
   });
 
-  it('evaluates every member of a composite preset', async () => {
-    await workspaceNamed('e3-composite', { runtime: 'kubernetes' }, { preset: 'email+ldap' });
+  it('evaluates every member of a composite preset from the catalog', async () => {
+    fs.mkdirSync(config.presetDir(), { recursive: true });
+    fs.writeFileSync(
+      path.join(config.presetDir(), 'evidence-licensed.yaml'),
+      'name: evidence-licensed\nrequires_license: true\n',
+    );
+    await workspaceNamed(
+      'e3-composite',
+      { runtime: 'kubernetes' },
+      { preset: 'email+evidence-licensed' },
+    );
     expect((await recordKubernetes('e3-composite')).license).toEqual({
+      required: true,
+      supplied: false,
+      source: null,
+    });
+  });
+
+  it('does not mistake the Kubernetes LDAP topology marker for a preset licence', async () => {
+    await workspaceNamed('e3-ldap', { runtime: 'kubernetes' }, { preset: 'ldap' });
+    expect((await recordKubernetes('e3-ldap')).license).toEqual({
+      required: false,
+      supplied: false,
+      source: null,
+    });
+  });
+
+  it('records the microservices deployment requirement independently of its preset', async () => {
+    await workspaceNamed('e3-microservices', { runtime: 'kubernetes' }, { preset: 'ldap' });
+    expect(
+      (
+        await recordKubernetes('e3-microservices', {
+          ...KUBERNETES_DETAIL,
+          deployment: 'microservices',
+        })
+      ).license,
+    ).toEqual({
       required: true,
       supplied: false,
       source: null,
@@ -198,7 +236,7 @@ describe('the record', () => {
 
   it('keeps a persisted pin and the derived Compose project in the evidence', async () => {
     await workspaceNamed('e3-pinned', {}, { pinned: true, project: '' });
-    const rec = await record('e3-pinned');
+    const rec = await record('e3-pinned', { retained: false });
     expect(rec.retention).toMatchObject({
       retained: true,
       reason: 'persisted preference',
@@ -208,6 +246,35 @@ describe('the record', () => {
       managed_by: 'houston',
       project: 'houston-e3-pinned',
     });
+  });
+
+  it('uses only a literal retain_runs preference when retention was not requested', async () => {
+    await workspaceNamed('e3-preference');
+    const retention = async (retained?: boolean) =>
+      (await record('e3-preference', retained === undefined ? {} : { retained })).retention;
+    const setPreference = (value: unknown) =>
+      config.updateConfig((cfg) => {
+        cfg.preferences = { retain_runs: value };
+      });
+
+    try {
+      setPreference(true);
+      expect(await retention()).toMatchObject({
+        retained: true,
+        reason: 'persisted preference',
+      });
+      expect(await retention(false)).toMatchObject({ retained: false, reason: null });
+
+      setPreference(false);
+      expect(await retention()).toMatchObject({ retained: false, reason: null });
+
+      setPreference('true');
+      expect(await retention()).toMatchObject({ retained: false, reason: null });
+    } finally {
+      config.updateConfig((cfg) => {
+        delete cfg.preferences;
+      });
+    }
   });
 
   it('uses the schema path for a Kubernetes artifact on every platform', async () => {
