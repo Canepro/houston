@@ -16,9 +16,12 @@ import { grant, revoke } from '../../../src/lib/onboarding';
 import { Interrupted } from '../../../src/seams/exec';
 import type { KubectlResult } from '../../../src/seams/kubectl';
 
+import { reproLock } from '../../../src/core/runner/locks';
+
 import { workspaceNamespaces } from '../../../src/core/kube/capabilities';
 import {
   CREATE_TIMEOUT,
+  CLUSTER_LOCK,
   adoptIfUnmarked,
   deleteCluster,
   ensureCluster,
@@ -117,33 +120,37 @@ const sleep = () => Promise.resolve();
 async function withCollisionClock<T>(
   operation: () => Promise<T>,
 ): Promise<{ value: T; elapsed: number }> {
-  jest.useFakeTimers();
-  const started = performance.now();
-  const outcome: { current: { value: T } | { error: unknown } | null } = { current: null };
-  void operation().then(
-    (value) => {
-      outcome.current = { value };
-    },
-    (error: unknown) => {
-      outcome.current = { error };
-    },
-  );
-  try {
-    for (
-      let tick = 0;
-      tick <= Math.ceil((CREATE_TIMEOUT * 1000) / 1000) + 1 && outcome.current === null;
-      tick += 1
-    ) {
-      await jest.advanceTimersByTimeAsync(1000);
+  // Acquire and probe the real OS lock before virtual time can outrun Linux flock I/O.
+  // ensureCluster reenters this same owner lock; its release occurs after real time returns.
+  return await reproLock(CLUSTER_LOCK, async () => {
+    jest.useFakeTimers();
+    const started = performance.now();
+    const outcome: { current: { value: T } | { error: unknown } | null } = { current: null };
+    void operation().then(
+      (value) => {
+        outcome.current = { value };
+      },
+      (error: unknown) => {
+        outcome.current = { error };
+      },
+    );
+    try {
+      for (
+        let tick = 0;
+        tick <= Math.ceil((CREATE_TIMEOUT * 1000) / 1000) + 1 && outcome.current === null;
+        tick += 1
+      ) {
+        await jest.advanceTimersByTimeAsync(1000);
+      }
+      const settled = outcome.current;
+      if (settled === null)
+        throw new Error('the collision waiter did not settle before its deadline');
+      if ('error' in settled) throw settled.error;
+      return { value: settled.value, elapsed: performance.now() - started };
+    } finally {
+      jest.useRealTimers();
     }
-    const settled = outcome.current;
-    if (settled === null)
-      throw new Error('the collision waiter did not settle before its deadline');
-    if ('error' in settled) throw settled.error;
-    return { value: settled.value, elapsed: performance.now() - started };
-  } finally {
-    jest.useRealTimers();
-  }
+  });
 }
 
 afterEach(() => {
@@ -853,6 +860,96 @@ describe('the cluster houston makes for itself', () => {
       false,
     );
   });
+
+  it('preserves another home after marker commit with a failed publication response', async () => {
+    config.updateConfig((stored) => grant(stored, 'owned-cluster'));
+    const firstHome = process.env.HOUSTON_HOME;
+    const secondHome = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-second-home-'));
+    let published = false;
+    const resources = new Set<string>();
+    route((joined) => {
+      if (joined.includes('get clusters')) return { stdout: published ? CLUSTER_NAME : '' };
+      if (joined.includes('current-context')) return { stdout: CONTEXT };
+      if (joined.includes('/readyz')) return { stdout: 'ok' };
+      if (joined.includes(`get configmap ${CLUSTER_OWNER_CONFIGMAP}`))
+        return { stdout: published ? ownedClusterMarker() : '' };
+      if (joined.includes('kind delete cluster')) resources.clear();
+      return undefined;
+    });
+    const scripted = kube.run;
+    kube.run = async (argv, options) => {
+      const result = await scripted(argv, options);
+      if (argv.includes('apply')) {
+        published = true;
+        process.env.HOUSTON_HOME = secondHome;
+        try {
+          config.updateConfig((stored) => grant(stored, 'owned-cluster'));
+          await ensureCluster();
+          resources.add('second-home-namespace');
+        } finally {
+          process.env.HOUSTON_HOME = firstHome;
+        }
+        return { ...result, returncode: 1, stderr: 'response lost after commit' };
+      }
+      return result;
+    };
+    try {
+      await expect(ensureCluster()).rejects.toThrow('response lost after commit');
+      expect(resources.has('second-home-namespace')).toBe(true);
+      expect(calls.some(({ argv }) => argv.includes('delete'))).toBe(false);
+    } finally {
+      process.env.HOUSTON_HOME = firstHome;
+      fs.rmSync(secondHome, { recursive: true, force: true });
+    }
+  });
+
+  it('does not roll back interrupted marker publication', async () => {
+    config.updateConfig((stored) => grant(stored, 'owned-cluster'));
+    route((joined) => {
+      if (joined.includes('get clusters')) return { stdout: '' };
+      if (joined.includes('current-context')) return { stdout: CONTEXT };
+      if (joined.includes('/readyz')) return { stdout: 'ok' };
+      if (joined.includes('apply')) throw new Interrupted();
+      return undefined;
+    });
+    await expect(ensureCluster()).rejects.toBeInstanceOf(Interrupted);
+    expect(calls.some(({ argv }) => argv.includes('delete'))).toBe(false);
+  });
+
+  it('verifies an existing owned marker without Kind for teardown', async () => {
+    config.updateConfig((stored) => grant(stored, 'owned-cluster'));
+    fs.mkdirSync(path.dirname(ownedKubeconfig()), { recursive: true });
+    fs.writeFileSync(ownedKubeconfig(), 'synthetic owned client state');
+    route((joined) =>
+      joined.includes('get configmap')
+        ? { stdout: ownedClusterMarker() }
+        : { returncode: 1, stderr: 'kind missing' },
+    );
+    await expect(adoptIfUnmarked()).resolves.toBeUndefined();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.options.own).toBe(true);
+    expect(calls[0]?.argv).toContain(CONTEXT);
+  });
+
+  it.each(['absent', 'foreign', 'malformed', 'unavailable'])(
+    'refuses teardown when the durable marker is %s and Kind is unavailable',
+    async (state) => {
+      config.updateConfig((stored) => grant(stored, 'owned-cluster'));
+      fs.mkdirSync(path.dirname(ownedKubeconfig()), { recursive: true });
+      fs.writeFileSync(ownedKubeconfig(), 'synthetic owned client state');
+      route((joined) => {
+        if (joined.includes('get configmap'))
+          return state === 'unavailable'
+            ? { returncode: 1, stderr: 'API unavailable' }
+            : { stdout: state === 'absent' ? '' : state === 'foreign' ? '{}' : '{broken' };
+        return { returncode: 1, stderr: 'kind missing' };
+      });
+      await expect(adoptIfUnmarked()).rejects.toThrow();
+      expect(calls.some(({ argv }) => argv.includes('apply') || argv.includes('delete'))).toBe(
+        false,
+      );
+    },
+  );
 
   it('keeps a newly marked cluster when a later progress listener fails', async () => {
     config.updateConfig((stored) => {

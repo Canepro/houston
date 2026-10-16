@@ -1,3 +1,4 @@
+import type * as KubeExecNS from '../../../src/core/kube/exec';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -254,6 +255,7 @@ describe('a whole prune', () => {
 
   interface World {
     namespaces?: string[];
+    realAdoption?: boolean;
     namespaceDeleted?: () => void;
     context?: string;
     owners?: Record<string, string | null>;
@@ -294,7 +296,7 @@ describe('a whole prune', () => {
     }));
     jest.doMock('../../../src/core/kube/cluster', () => ({
       ...jest.requireActual('../../../src/core/kube/cluster'),
-      adoptIfUnmarked: async () => undefined,
+      ...(world.realAdoption ? {} : { adoptIfUnmarked: async () => undefined }),
       clusterReclaimable: async () => {
         if (world.reclaimError !== undefined) throw world.reclaimError();
         return typeof world.reclaimable === 'function'
@@ -367,6 +369,35 @@ describe('a whole prune', () => {
       );
     }
   }
+
+  it('prunes a marked local workspace through the real adoption helper without Kind', async () => {
+    const world = load({ realAdoption: true, workload: false });
+    const { kube, ownedKubeconfig } = require('../../../src/core/kube/exec') as typeof KubeExecNS;
+    fs.mkdirSync(path.dirname(ownedKubeconfig()), { recursive: true });
+    fs.writeFileSync(ownedKubeconfig(), 'synthetic client');
+    const run = jest.spyOn(kube, 'run').mockImplementation(async (argv) => ({
+      argv,
+      returncode: argv[0] === 'kind' ? 1 : 0,
+      stdout: argv.includes('configmap')
+        ? JSON.stringify({
+            metadata: { labels: { 'app.kubernetes.io/managed-by': 'houston' } },
+            data: { cluster: 'houston-local' },
+          })
+        : '',
+      stderr: argv[0] === 'kind' ? 'kind missing' : '',
+    }));
+    config.updateConfig((stored) => grant(stored, 'owned-cluster'));
+    await world.record.writeRecord(
+      'marked',
+      world.record.metadata({
+        name: 'marked',
+        extra: { runtime: 'kubernetes', context: 'kind-houston-local' },
+      }),
+    );
+    const out = await world.pruning.prune({ confirm: true, orphans: false, only: ['marked'] });
+    expect(out.removed).toEqual(['marked']);
+    expect(run.mock.calls.some(([argv]) => argv[0] === 'kind')).toBe(false);
+  });
 
   it('gives back the cluster it created once nothing is left in it', async () => {
     // Measured live: with every workspace gone, `prune` said "Nothing to prune" and left

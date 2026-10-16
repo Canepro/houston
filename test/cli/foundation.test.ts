@@ -109,6 +109,15 @@ function pick(options: Record<string, unknown>, keys: string[]): Record<string, 
 }
 
 describe('the declarative command foundation', () => {
+  test.each(['status', 'complete', 'setup'])(
+    'refuses an onboard %s ID before calling any executor',
+    async (action) => {
+      const result = await invoke(['onboard', action, 'owned-cluster', '--json']);
+      expect(result.exit).toBe(2);
+      expect(result.calls).toEqual([]);
+    },
+  );
+
   test('registers all 41 unique paths and all 183 logical flags from one source', () => {
     const specs: readonly CommandSpec[] = COMMAND_SPECS;
     const root = buildCli({ execute: async () => null });

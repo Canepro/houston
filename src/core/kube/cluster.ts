@@ -81,7 +81,8 @@ async function markClusterOwned(context: string, env?: NodeJS.ProcessEnv): Promi
   );
   if (result.returncode !== 0) {
     throw new CreateFailedError(
-      `cluster ${CLUSTER_NAME} ownership marker could not be recorded: ` + why(result),
+      `cluster ${CLUSTER_NAME} ownership marker publication could not be confirmed; the cluster was left in place: ` +
+        why(result),
     );
   }
 }
@@ -429,15 +430,16 @@ async function ensureClusterLocked(emit: Emit): Promise<ReadyCluster> {
           `answering at '${context}'. Houston left it in place.`,
       );
     }
-    if (createdHere) {
-      await markClusterOwned(context);
-    }
   } catch (error) {
     if (createdHere) {
       await failBeforeOwnershipMarker(error);
     }
     throw error;
   }
+  // Publication may commit even when its response fails or is interrupted. Once it
+  // starts, another home can accept the receipt, so no raw rollback is safe, including
+  // after a later absent or unavailable read that could race the outstanding apply.
+  if (createdHere) await markClusterOwned(context);
   // The marker has been recorded. A downstream progress listener may fail, but that
   // must not turn a healthy marked cluster into a rollback candidate.
   info(emit, `cluster ${CLUSTER_NAME} ready at ${context}`, { phase: 'provision' });
@@ -480,6 +482,17 @@ export async function adoptIfUnmarked(emit: Emit = nullEmit): Promise<void> {
   await reproLock(
     CLUSTER_LOCK,
     async () => {
+      if (fs.existsSync(ownedKubeconfig())) {
+        try {
+          const state = await markerState(CONTEXT);
+          if (state === 'owned') return;
+          if (state === 'not-owned') throw ownershipConflict();
+        } catch (error) {
+          // An unavailable owned client can be recovered through Kind's private probe.
+          // Malformed or foreign receipts remain a refusal, never a migration signal.
+          if (!(error instanceof OwnershipProbeUnavailable)) throw error;
+        }
+      }
       // A successfully deleted cluster needs no migration; a failed list is unknown.
       const [listed, listError] = await clusters();
       if (listError !== '') throw new DockerError(`Kind clusters could not be read: ${listError}`);

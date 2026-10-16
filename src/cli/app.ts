@@ -303,6 +303,15 @@ function normalizeArguments(
     }
     out[argument.name] = value;
   }
+  // Validate before dispatch, before any onboarding or setup writer runs.
+  if (
+    spec.path === 'onboard' &&
+    (out.action === 'status' || out.action === 'complete' || out.action === 'setup') &&
+    typeof out.id === 'string' &&
+    out.id !== ''
+  ) {
+    throw new ValidationError(`\`onboard ${out.action}\` does not take a grant ID`);
+  }
   return out;
 }
 

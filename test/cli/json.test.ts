@@ -449,6 +449,20 @@ describe('onboard --json', () => {
     });
   });
 
+  it.each(['status', 'complete'])(
+    'rejects an ignored ID for %s without writing config',
+    async (action) => {
+      const configPath = path.join(home, 'config.yaml');
+      const original = 'preferences:\n  retain_runs: false\n';
+      fs.writeFileSync(configPath, original);
+      for (const id of ['owned-cluster', 'unknown-grant']) {
+        const result = await run(['onboard', action, id, '--json']);
+        expect(result.code).toBe(2);
+        expect(fs.readFileSync(configPath, 'utf8')).toBe(original);
+      }
+    },
+  );
+
   it('updates only its named grant in an existing config mapping', async () => {
     fs.writeFileSync(
       path.join(home, 'config.yaml'),

@@ -1075,6 +1075,8 @@ async function dispatch(
       const onboarding = require('../lib/onboarding') as typeof OnboardingNS;
       const action = text(a.action) || 'status';
       const id = text(a.id);
+      if (['status', 'complete', 'setup'].includes(action) && id !== '')
+        throw new ValidationError(`\`onboard ${action}\` does not take a grant ID`);
       if (action === 'status') return { ...onboarding.state(), action };
       if (!['grant', 'revoke', 'complete'].includes(action))
         throw new ValidationError(

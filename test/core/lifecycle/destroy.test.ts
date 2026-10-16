@@ -1,4 +1,6 @@
+import type * as KubeExecNS from '../../../src/core/kube/exec';
 import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 
 import * as config from '../../../src/lib/config';
 import { type Emit } from '../../../src/lib/events';
@@ -313,14 +315,18 @@ describe('the repair notes of a workspace that is torn down', () => {
     jest.resetModules();
   });
 
-  function load(adoption?: { events: string[]; fail: boolean }) {
+  function load(adoption?: { events: string[]; fail: boolean }, realAdoption = false) {
     jest.resetModules();
     jest.doMock('../../../src/core/kube/cluster', () => ({
       ...jest.requireActual('../../../src/core/kube/cluster'),
-      adoptIfUnmarked: async () => {
-        adoption?.events.push('adopt');
-        if (adoption?.fail === true) throw new Error('ownership unknown');
-      },
+      ...(realAdoption
+        ? {}
+        : {
+            adoptIfUnmarked: async () => {
+              adoption?.events.push('adopt');
+              if (adoption?.fail === true) throw new Error('ownership unknown');
+            },
+          }),
     }));
     jest.doMock('../../../src/core/lifecycle/ownership', () => ({
       ...jest.requireActual('../../../src/core/lifecycle/ownership'),
@@ -367,6 +373,37 @@ describe('the repair notes of a workspace that is torn down', () => {
       journal: require('../../../src/core/journal') as typeof JournalNS,
     };
   }
+
+  it('tears down a marked local workspace through the real adoption helper without Kind', async () => {
+    const { destroy } = load(undefined, true);
+    const { kube, ownedKubeconfig } = require('../../../src/core/kube/exec') as typeof KubeExecNS;
+    await fs.mkdir(path.dirname(ownedKubeconfig()), { recursive: true });
+    await fs.writeFile(ownedKubeconfig(), 'synthetic client');
+    const run = jest.spyOn(kube, 'run').mockImplementation(async (argv) => ({
+      argv,
+      returncode: argv[0] === 'kind' ? 1 : 0,
+      stdout: argv.includes('configmap')
+        ? JSON.stringify({
+            metadata: { labels: { 'app.kubernetes.io/managed-by': 'houston' } },
+            data: { cluster: 'houston-local' },
+          })
+        : '',
+      stderr: argv[0] === 'kind' ? 'kind missing' : '',
+    }));
+    config.updateConfig((stored) => grant(stored, 'owned-cluster'));
+    await writeRecord(
+      'marked',
+      metadata({ name: 'marked', extra: { runtime: 'kubernetes', context: 'kind-houston-local' } }),
+    );
+    await expect(
+      destroy.teardown('marked', { volumes: true, confirm: true }),
+    ).resolves.toMatchObject({ removed: true });
+    expect(run.mock.calls.some(([argv]) => argv[0] === 'kind')).toBe(false);
+    config.updateConfig((stored) => {
+      delete stored.onboarding;
+      delete stored.grants;
+    });
+  });
 
   it('says it is waiting when another command holds the workspace, then goes ahead', async () => {
     // `down --volumes` behind a running `backup` waited for the whole backup in silence.
