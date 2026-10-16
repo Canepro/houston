@@ -270,20 +270,6 @@ export function discoverTextSecrets(
         if (argv && /\s/u.test(decoded) && commandCarriesCredential(decoded)) {
           add(decoded);
           add(token.slice(1, -1));
-          // Best effort for copies elsewhere: the word after a value-taking credential flag.
-          const words = decoded.split(/[\s'"`;&|()<>]+/u).filter((word) => word !== '');
-          words.forEach((word, index) => {
-            const next = words[index + 1] ?? '';
-            // Only a plain value: a split this naive cannot read quoting or `$(...)`, and a
-            // fragment such as `$` or one letter would be masked across the whole bundle.
-            if (
-              valueTakingCredentialFlag(word) &&
-              /^[^\s$`'"(){}<>;&|\\]{4,}$/u.test(next) &&
-              !/^--[A-Za-z][\w-]*$/u.test(next)
-            ) {
-              add(next);
-            }
-          });
         }
         discoverTextSecrets(decoded, add, level + 1);
         return at + token.length;

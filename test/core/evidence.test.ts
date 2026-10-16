@@ -1557,6 +1557,9 @@ describe('the bundle', () => {
         '  embeddedlist:',
         '    image: example',
         `    environment: { SPEC: '{"command":["sh","-c","client --password EmbeddedListSentinel"]}' }`,
+        '  embeddedquoted:',
+        '    image: example',
+        `    environment: { SPEC: '{"command":["sh","-c","client --password \\"open QuotedPhraseSentinel\\""]}' }`,
         '  embeddedsubst:',
         '    image: example',
         `    environment: { SPEC: '{"command":["sh","-c","client --password \\"$(cat /run/secrets/x)\\""]}' }`,
@@ -1579,9 +1582,9 @@ describe('the bundle', () => {
         'x-backtick-copy: BacktickSentinel',
         'x-registry: registry.example.test',
         'x-dash-copy: -DashSentinel',
-        'x-embedded-copy: EmbeddedListSentinel',
         'x-mount-path: /run/secrets/db',
         "x-dollar: 'cost $5 each'",
+        "x-open: 'open the door'",
         'x-port: 8080:80',
         'x-control: readable',
         '',
@@ -1604,6 +1607,7 @@ describe('the bundle', () => {
       'CurlListSentinel',
       'DashSentinel',
       'EmbeddedListSentinel',
+      'QuotedPhraseSentinel',
     ]) {
       expect(compose).not.toContain(sentinel);
     }
@@ -1618,6 +1622,7 @@ describe('the bundle', () => {
     expect(parsed['x-mount-path']).toBe('/run/secrets/db');
     // A naive split of `"$(cat ...)"` must not make `$` a secret across the bundle.
     expect(parsed['x-dollar']).toBe('cost $5 each');
+    expect(parsed['x-open']).toBe('open the door');
     // A port or an option after -p is the next argument; newlines are never masked.
     // A user flag beside -p withholds the command line, since a short -p value can be either a
     // port or a password; the port spelling elsewhere stays readable.
