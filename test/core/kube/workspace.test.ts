@@ -7,6 +7,11 @@
  * touches a cluster is replaced; every pure function stays real, so a manifest asserted on
  * here is the manifest that would be applied.
  */
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import * as YAML from 'yaml';
+import * as config from '../../../src/lib/config';
+
 import { CreateFailedError, PreflightError } from '../../../src/lib/errors';
 import { Interrupted, sleep, stoppable } from '../../../src/seams/exec';
 import type { Event } from '../../../src/lib/events';
@@ -486,6 +491,122 @@ describe('what the record says', () => {
 describe('the values the release is installed with', () => {
   const valuesOf = () =>
     (mocked(release.install).mock.calls[0]?.[0] as { values: Record<string, unknown> }).values;
+
+  it('promotes effective preset credentials through Secrets before installing and recording values', async () => {
+    const cases = [
+      { label: 'preset', overrides: {}, token: 'preset-token', license: 'preset-license' },
+      {
+        label: 'override',
+        overrides: { REG_TOKEN: '  override-token  ', ROCKETCHAT_LICENSE: 'override-license' },
+        token: 'override-token',
+        license: 'override-license',
+      },
+      {
+        label: 'blank',
+        overrides: { REG_TOKEN: '  ', ROCKETCHAT_LICENSE: ' \t ' },
+        token: '',
+        license: '',
+      },
+      {
+        label: 'remove',
+        overrides: { REG_TOKEN: null, ROCKETCHAT_LICENSE: null },
+        token: '',
+        license: '',
+      },
+      {
+        label: 'dedicated',
+        overrides: { REG_TOKEN: null, ROCKETCHAT_LICENSE: null },
+        directToken: '  direct-token  ',
+        directLicense: 'direct-license',
+        token: 'direct-token',
+        license: 'direct-license',
+      },
+      {
+        label: 'retained Secret',
+        overrides: {},
+        retained: true,
+        token: 'preset-token',
+        license: '',
+      },
+    ];
+    for (const one of cases) {
+      harness();
+      mocked(manifests.recordRendered).mockImplementation(
+        (jest.requireActual('../../../src/core/kube/manifests') as typeof manifests).recordRendered,
+      );
+      const events: Event[] = [];
+      const record = await create({
+        preset: {
+          ...(
+            jest.requireActual('../../../src/lib/presets/types') as typeof presetTypes
+          ).emptyPreset('credentials'),
+          env: {
+            REG_TOKEN: '  preset-token  ',
+            ROCKETCHAT_LICENSE: 'preset-license',
+            UNRELATED: 'kept',
+          },
+        },
+        envOverrides: one.overrides,
+        regToken: one.directToken ?? '',
+        license: one.directLicense ?? '',
+        licensed: one.retained ?? false,
+        emit: (event) => events.push(event),
+      });
+      const docs = applied();
+      const token = docs.find((doc) => doc.includes('name: houston-reg-token'));
+      const license = docs.find((doc) => doc.includes('name: houston-license'));
+      expect([
+        one.label,
+        token === undefined
+          ? ''
+          : (YAML.parse(token) as { stringData: { token: string } }).stringData.token,
+        license === undefined
+          ? ''
+          : (YAML.parse(license) as { stringData: { license: string } }).stringData.license,
+      ]).toEqual([one.label, one.token, one.license]);
+      const env = valuesOf().extraEnv as chart.ChartEnvEntry[];
+      for (const [key, secret, present] of [
+        ['REG_TOKEN', 'houston-reg-token', one.token !== ''],
+        ['ROCKETCHAT_LICENSE', 'houston-license', one.license !== '' || one.retained === true],
+      ] as const) {
+        expect(env.filter((entry) => entry.name === key)).toEqual(
+          present
+            ? [
+                {
+                  name: key,
+                  valueFrom: {
+                    secretKeyRef: { name: secret, key: key === 'REG_TOKEN' ? 'token' : 'license' },
+                  },
+                },
+              ]
+            : [],
+        );
+      }
+      expect(env).toContainEqual({ name: 'UNRELATED', value: 'kept' });
+      const writtenValues = await fs.readFile(
+        path.join(config.reprosDir(), 'tk', 'kubernetes', 'values.yaml'),
+        'utf8',
+      );
+      const persisted = JSON.stringify([
+        writtenValues,
+        valuesOf(),
+        mocked(manifests.recordRendered).mock.calls,
+        record,
+        events,
+        ran,
+      ]);
+      for (const raw of [
+        'preset-token',
+        'preset-license',
+        'override-token',
+        'override-license',
+        'direct-token',
+        'direct-license',
+      ]) {
+        expect(persisted).not.toContain(raw);
+      }
+    }
+  });
 
   it('gives the chart a host OR a root_url, never both', async () => {
     // Two entries for ROOT_URL is a server-side-apply conflict, not an override -- so a

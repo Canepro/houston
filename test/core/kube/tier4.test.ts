@@ -32,7 +32,6 @@ import { KUBERNETES } from '../../../src/core/topology';
 import {
   bestChartAtOrBelow,
   chartEnv,
-  hasEffectiveRegToken,
   refuseChartOwnedEnv,
   resolveChartVersion,
   valuesFor,
@@ -725,20 +724,20 @@ describe('the chart', () => {
     expect(entry?.value).toBeUndefined();
   });
 
-  it('renders the winning registration token trimmed, omitting blank values', () => {
+  it('omits unbacked registration literals and preserves prepared Secret references', () => {
     const cases: {
       preset: string;
       overrides?: Record<string, string | null>;
       secret?: string;
       expected: ChartEnvEntry[];
     }[] = [
-      { preset: '  preset-fixture  ', expected: [{ name: 'REG_TOKEN', value: 'preset-fixture' }] },
+      { preset: '  preset-fixture  ', expected: [] },
       { preset: ' \t\n ', expected: [] },
       { preset: '', expected: [] },
       {
         preset: '  preset-fixture  ',
         overrides: { REG_TOKEN: '  override-fixture  ' },
-        expected: [{ name: 'REG_TOKEN', value: 'override-fixture' }],
+        expected: [],
       },
       { preset: 'preset-fixture', overrides: { REG_TOKEN: ' \t ' }, expected: [] },
       { preset: 'preset-fixture', overrides: { REG_TOKEN: null }, expected: [] },
@@ -767,9 +766,6 @@ describe('the chart', () => {
       });
       const env = values.extraEnv as ChartEnvEntry[];
       expect(env.filter((entry) => entry.name === 'REG_TOKEN')).toEqual(expected);
-      expect(
-        hasEffectiveRegToken(presetEnv, secret === '' ? '' : 'secret-fixture', overrides),
-      ).toBe(expected.length !== 0);
       expect(env.find((entry) => entry.name === 'UNRELATED')?.value).toBe('  retain padding  ');
       expect(presetEnv.REG_TOKEN).toBe(preset);
     }
@@ -833,12 +829,12 @@ describe('the chart', () => {
       {
         literal: 'synthetic-preset-license',
         licensed: false,
-        expected: [{ name: 'ROCKETCHAT_LICENSE', value: 'synthetic-preset-license' }],
+        expected: [],
       },
       {
         literal: ' \t ',
         licensed: false,
-        expected: [{ name: 'ROCKETCHAT_LICENSE', value: ' \t ' }],
+        expected: [],
       },
       {
         literal: '',

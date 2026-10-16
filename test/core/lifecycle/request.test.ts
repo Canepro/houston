@@ -388,7 +388,7 @@ describe('the Enterprise licence warning', () => {
   it('names an Enterprise preset created with neither a licence nor a token, on any version', () => {
     const said = licenceAbsentWarning(ee, false, false, '');
     expect(said).toContain("'ldap+microservices' preset is an Enterprise feature");
-    expect(said).toContain('neither --license nor --reg-token');
+    expect(said).toContain('no effective licence or registration token');
     expect(said).toContain('may not work as licensed');
   });
 

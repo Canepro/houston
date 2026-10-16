@@ -130,9 +130,10 @@ export function premiumAuthWarning(
   if (kinds.length === 0) return '';
   return (
     `Rocket.Chat 9.0 is set to require a Premium plan for ${kinds.join(' and ')} login, and ` +
-    `this workspace has neither --license nor --reg-token: logins through the ` +
+    `this workspace has no effective licence or registration token: logins through the ` +
     `${names.filter((name) => name in PREMIUM_AUTH_PRESETS).join(' and ')} preset may be ` +
-    'refused. Add --license <file> or --reg-token <token> to test with one.'
+    'refused. A supplied credential may be masked by a preset, service, or --env override; ' +
+    'remove or change the conflicting override, or supply --license <file> or --reg-token <token>.'
   );
 }
 
@@ -183,11 +184,12 @@ export function licenceAbsentWarning(
       : '';
   if (what === '') return '';
   return (
-    `${what} and this workspace has neither --license nor --reg-token: it will run, but ` +
+    `${what} and this workspace has no effective licence or registration token: it will run, but ` +
     (microservices
       ? 'Rocket.Chat replicas after the first stop ("Enterprise license not found"). '
       : 'the feature may not work as licensed. ') +
-    'Add --license <file> or --reg-token <token>, or a license later in Rocket.Chat under ' +
+    'A supplied credential may be masked by a preset, service, or --env override; remove or change ' +
+    'the conflicting override, or supply --license <file> or --reg-token <token>, or a license later under ' +
     'Workspace > Subscription.'
   );
 }

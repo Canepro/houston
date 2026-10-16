@@ -321,7 +321,14 @@ describe('the create path end to end, stopped at the write seam', () => {
       { label: 'preset env padded', presetEnv: '  preset-token  ', expected: 'preset-token' },
       { label: 'user env', env: { REG_TOKEN: 'user-token' }, expected: 'user-token' },
       { label: 'user env padded', env: { REG_TOKEN: '  user-token  ' }, expected: 'user-token' },
-      { label: 'flag removed by env', flag: 'flag-token', env: { REG_TOKEN: null }, expected: '' },
+      {
+        label: 'flag removed by env',
+        flag: 'flag-token',
+        env: { REG_TOKEN: null },
+        expected: '',
+        preset: 'ldap+token-licensed',
+        version: '9.0.0',
+      },
       { label: 'service patch removes flag', flag: 'flag-token', servicePatch: '', expected: '' },
       {
         label: 'service patch padded',
@@ -415,6 +422,21 @@ describe('the create path end to end, stopped at the write seam', () => {
       const warns = 'warns' in one ? one.warns : one.expected === '' && !licensed;
       expect(seen.meta?.extra.licensed === true).toBe(licensed);
       expect([one.label, codes.includes('LICENSE_ABSENT_EE_PRESET')]).toEqual([one.label, warns]);
+      if (warns && ('flag' in one || 'license' in one)) {
+        const warnings = messages.filter(
+          (message) =>
+            message.includes('Enterprise feature') ||
+            message.includes('Premium plan for LDAP login'),
+        );
+        expect(warnings.length).toBeGreaterThanOrEqual(1);
+        for (const message of warnings) {
+          expect(message).toContain('no effective licence or registration token');
+          expect(message).toContain('override');
+          expect(message).toMatch(/remove or change/iu);
+          expect(message).not.toContain('neither --license nor --reg-token');
+        }
+        if ('version' in one) expect(warnings).toHaveLength(2);
+      }
       if (!warns) {
         expect(messages.some((message) => message.includes('Premium plan for LDAP login'))).toBe(
           false,

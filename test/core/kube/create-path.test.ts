@@ -395,7 +395,7 @@ describe('a Kubernetes create', () => {
         expect(licence[0]?.phase).toBe('plan');
         expect(licence[0]?.message).toContain('replicas after the first stop');
         expect(licence[0]?.message).toContain('Enterprise license not found');
-        expect(licence[0]?.message).toContain('neither --license nor --reg-token');
+        expect(licence[0]?.message).toContain('no effective licence or registration token');
       } finally {
         await fs.rm(presetPath, { force: true });
       }
@@ -418,15 +418,21 @@ describe('a Kubernetes create', () => {
         [0, 'config', '   ', '', true, false],
         [1, 'flag', '   ', '', true, false],
         [2, 'flag', '  registration-fixture  ', 'registration-fixture', false, false],
-        [3, 'preset', 'preset-token', '', false, false],
-        [4, 'premium preset', 'premium-token', '', false, false],
+        [3, 'preset', 'preset-token', 'preset-token', false, false],
+        [4, 'premium preset', 'premium-token', 'premium-token', false, false],
+        [5, 'config', '  config-wins  ', 'config-wins', false, false],
+        [6, 'flag', '  flag-wins  ', 'flag-wins', false, false],
       ] as const) {
         config.updateConfig((cfg) => {
           cfg.reg_token = source === 'config' ? raw : '';
         });
         const events: Event[] = [];
         const preset =
-          source === 'preset' ? 'token-licensed' : source === 'premium preset' ? 'ldap' : '';
+          source === 'preset' || index >= 5
+            ? 'token-licensed'
+            : source === 'premium preset'
+              ? 'ldap'
+              : '';
         await createKubernetes(
           createReq({
             version: source === 'premium preset' ? '9.0.0' : '8.5.1',
@@ -449,7 +455,7 @@ describe('a Kubernetes create', () => {
         if (preset !== '') {
           expect(
             (mockCreated.at(-1)?.preset as { env: Record<string, string> }).env.REG_TOKEN,
-          ).toBe(raw);
+          ).toBe(preset === 'ldap' ? 'premium-token' : 'preset-token');
         }
       }
     } finally {
@@ -502,7 +508,10 @@ describe('a Kubernetes create', () => {
         );
         const meta = await readMeta(`licence-source-${String(index)}`);
         expect(meta.extra.effective_license).toBe(!warned);
-        expect(meta.extra.licensed === true).toBe(license !== '');
+        expect(meta.extra.licensed === true).toBe(!warned);
+        expect(JSON.stringify(meta)).not.toContain('synthetic-preset-license');
+        expect(JSON.stringify(meta)).not.toContain('synthetic-file-license');
+        expect(mockCreated.at(-1)?.license).toBe(license || (literal.trim() === '' ? '' : literal));
         if (index === 0) {
           await createKubernetes(
             createReq({
@@ -514,7 +523,8 @@ describe('a Kubernetes create', () => {
               offline: true,
             }),
           );
-          expect([mockCreated.at(-1)?.license, mockCreated.at(-1)?.licensed]).toEqual(['', false]);
+          // A preset-only licence now has an installed Secret; re-up retains it.
+          expect([mockCreated.at(-1)?.license, mockCreated.at(-1)?.licensed]).toEqual(['', true]);
           expect((await readMeta('licence-source-0')).extra.effective_license).toBe(true);
         }
       }

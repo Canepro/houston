@@ -24,7 +24,7 @@ import {
 } from './certmanager';
 import { deleteCluster, ensureKubeconfig } from './cluster';
 import { planCluster, type ClusterPlan } from './context';
-import { ensureRepo, resolveChartVersion, valuesFor } from './chart';
+import { credentialInputs, ensureRepo, resolveChartVersion, valuesFor } from './chart';
 import { Interrupted, cleanup } from '../../seams/exec';
 import { updateMeta } from '../runner/record';
 import { forwardAlive, portForward, scenarioUiForwards } from './forward';
@@ -561,6 +561,12 @@ export async function createWorkspace({
   emit = nullEmit,
   sleep = realSleep,
 }: CreateWorkspaceOptions): Promise<Record<string, unknown>> {
+  // Resolve at this API boundary too so callers cannot bypass the Secret path.
+  // Preset credentials must be settled before either manifests or chart values are built.
+  const credentials = credentialInputs(preset?.env, regToken, license, licensed, envOverrides);
+  regToken = credentials.regToken;
+  license = credentials.license;
+  licensed = credentials.licensed;
   const prepared = await prepareCluster(plan, resolved, emit);
   const { context, hadCluster, chartVersion } = prepared;
 

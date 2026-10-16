@@ -23,7 +23,7 @@ import {
   MONGO_OPLOG_URL,
   MONGO_URL,
 } from './names';
-import { LICENSE_KEY, LICENSE_SECRET, REG_TOKEN_KEY, REG_TOKEN_SECRET } from './operator';
+import { LICENSE_KEY, LICENSE_SECRET, REG_TOKEN_KEY } from './operator';
 import { versionKey } from './tools';
 
 /**
@@ -249,6 +249,26 @@ export function refuseChartOwnedEnv(overrides: Record<string, string | null>): v
   }
 }
 
+/** Resolve credential payloads in memory, before any Helm or workspace values are built. */
+export function credentialInputs(
+  presetEnv: Record<string, unknown> | undefined,
+  regToken = '',
+  license = '',
+  licensed = false,
+  overrides: Record<string, string | null> = {},
+): { regToken: string; license: string; licensed: boolean } {
+  const effective = (key: string): string => {
+    const value = Object.hasOwn(overrides, key) ? overrides[key] : presetEnv?.[key];
+    return value === null || value === undefined ? '' : toTextYaml(value, config.yamlDateText);
+  };
+  // Dedicated inputs and a retained licence Secret win over preset/override literals.
+  const token = regToken.trim() || effective('REG_TOKEN').trim();
+  const suppliedLicense = license.trim() === '' ? '' : license;
+  const presetLicense = effective('ROCKETCHAT_LICENSE');
+  const payload = suppliedLicense || (licensed || presetLicense.trim() === '' ? '' : presetLicense);
+  return { regToken: token, license: payload, licensed: licensed || payload !== '' };
+}
+
 /**
  * The environment the chart passes to Rocket.Chat, registration token included.
  *
@@ -301,9 +321,10 @@ export function chartEnv(
     if (value === null) byName.delete(key);
     else byName.set(key, { name: key, value: String(value) });
   }
-  const token = byName.get('REG_TOKEN')?.value?.trim() ?? '';
-  if (token === '') byName.delete('REG_TOKEN');
-  else byName.set('REG_TOKEN', { name: 'REG_TOKEN', value: token });
+  // Credential literals belong only in Secret manifests sent on stdin. Direct values
+  // callers without a prepared Secret fail closed instead of persisting those literals.
+  byName.delete('REG_TOKEN');
+  byName.delete('ROCKETCHAT_LICENSE');
   if (regTokenSecret !== '') {
     // By REFERENCE, so the token is never a value in this document. The chart renders
     // extraEnv verbatim, so valueFrom survives -- verified against the published chart.
@@ -321,50 +342,6 @@ export function chartEnv(
     });
   }
   return [...byName.values()];
-}
-
-/**
- * Whether the chart's final Rocket.Chat environment has a registration token. A supplied
- * token reaches the chart through a Secret reference; otherwise a preset may set REG_TOKEN
- * directly. Use this rather than the request field so warnings follow the rendered chart.
- */
-export function hasEffectiveRegToken(
-  presetEnv: Record<string, unknown> | undefined,
-  regToken: string,
-  overrides: Record<string, string | null> = {},
-): boolean {
-  const env = chartEnv(
-    '',
-    '',
-    presetEnv,
-    regToken.trim() === '' ? '' : REG_TOKEN_SECRET,
-    '',
-    overrides,
-  );
-  for (let index = env.length - 1; index >= 0; index -= 1) {
-    const entry = env[index];
-    if (entry?.name !== 'REG_TOKEN') continue;
-    return entry.valueFrom !== undefined || (entry.value ?? '').trim() !== '';
-  }
-  return false;
-}
-
-/**
- * Whether the chart's final Rocket.Chat environment has a usable licence source. A nonblank
- * literal preset value is supported, and a dedicated licence is always a Secret reference.
- * Keep the lifecycle flag separate: it records whether Houston owns that Secret.
- */
-export function hasEffectiveLicense(
-  presetEnv: Record<string, unknown> | undefined,
-  licensed: boolean,
-  overrides: Record<string, string | null> = {},
-): boolean {
-  const env = chartEnv('', '', presetEnv, '', '', overrides, licensed);
-  return env.some(
-    (entry) =>
-      entry.name === 'ROCKETCHAT_LICENSE' &&
-      (entry.valueFrom?.secretKeyRef !== undefined || (entry.value ?? '').trim() !== ''),
-  );
 }
 
 /** Refuse the two URL shapes the chart cannot render safely. */

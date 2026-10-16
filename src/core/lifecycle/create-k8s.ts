@@ -36,7 +36,7 @@ import {
   applyMongoOverride,
   resolve,
 } from '../../lib/versions';
-import { hasEffectiveLicense, hasEffectiveRegToken, refuseChartOwnedEnv } from '../kube/chart';
+import { credentialInputs, refuseChartOwnedEnv } from '../kube/chart';
 import * as ownership from './ownership';
 import { refuseEnforcedBefore880 } from '../../lib/presets/e2ee';
 import { endpointString } from '../kube/endpoints';
@@ -116,7 +116,7 @@ export interface KubeCreate {
   envOverrides: Record<string, string | null>;
   /** Whether the release references the licence Secret: this run's, or a re-up's earlier one. */
   licensed: boolean;
-  /** Whether the final chart environment carries a nonblank licence, including a preset literal. */
+  /** Whether the final chart environment carries a nonblank licence, including a promoted preset input. */
   effectiveLicense: boolean;
   /** A re-up's forwards, read BEFORE the write-ahead record replaces the record holding them. */
   previous: { pid: number; port: number | null; scenarioForwards: Record<string, unknown> };
@@ -133,6 +133,8 @@ export interface KubeCreate {
   hostPort: number;
   cfg: config.Config;
   regToken: string;
+  /** In-memory payload for the existing licence Secret; never recorded. */
+  license: string;
   bindHost: string;
   root: string;
   microservices: boolean;
@@ -172,6 +174,7 @@ export function kubeCreate(
     hostPort: 0,
     cfg: {},
     regToken: '',
+    license: '',
     bindHost: '',
     root: '',
     microservices: false,
@@ -234,7 +237,7 @@ export async function settleName(job: KubeCreate): Promise<void> {
  */
 export async function settleEnv(job: KubeCreate): Promise<void> {
   job.envOverrides = {};
-  job.licensed = job.req.license !== '';
+  job.licensed = job.req.license.trim() !== '';
   if (job.reused) {
     let old: Metadata | null = null;
     try {
@@ -460,22 +463,19 @@ export function settleAddressing(job: KubeCreate): void {
   // Allocation, deployment and notes share the same resolved scenario.
   requestedPreset(job);
   const names = namesOf(job.req.preset || 'default');
-  // The chart can receive REG_TOKEN through the preset environment as well as the Secret
-  // created for --reg-token or config. Warnings must use the chart's final source.
-  const effectiveToken = hasEffectiveRegToken(
+  const credentials = credentialInputs(
     (job.presetForNotes as Preset).env,
     job.regToken,
-    job.envOverrides,
-  )
-    ? 'present'
-    : '';
-  // `job.licensed` remains the dedicated request/record and Secret-lifecycle state. Warnings
-  // and user-facing metadata follow the final chart environment, where a preset can supply one.
-  job.effectiveLicense = hasEffectiveLicense(
-    (job.presetForNotes as Preset).env,
+    job.req.license,
     job.licensed,
     job.envOverrides,
   );
+  job.regToken = credentials.regToken;
+  job.license = credentials.license;
+  job.licensed = credentials.licensed;
+  // Both provisional/final metadata and warnings describe the Secret we install or retain.
+  job.effectiveLicense = job.licensed;
+  const effectiveToken = job.regToken === '' ? '' : 'present';
   const premium = request.premiumAuthWarning(
     names,
     job.resolved?.rcVersion ?? '',
@@ -795,7 +795,7 @@ export async function createTheWorkspace(job: KubeCreate): Promise<void> {
     // and a compose service on the other runtime -- one intent, two renderings.
     preset: job.presetForNotes,
     envOverrides: job.envOverrides,
-    license: job.req.license,
+    license: job.license,
     licensed: job.licensed,
     plan: job.plan,
     emit: job.emit,
