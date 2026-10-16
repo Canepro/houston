@@ -36,6 +36,14 @@ jest.mock('../../src/core/kube/tools', () => {
   };
 });
 
+/** Version probes answer from a table; every other probe is a test error. */
+function kubeVersions(found: Record<string, string>) {
+  return jest.spyOn(kube, 'run').mockImplementation(async (argv) => {
+    if (argv[1] !== 'version') throw new Error(`unexpected probe ${argv.join(' ')}`);
+    return { argv: [...argv], returncode: 0, stdout: found[argv[0] ?? ''] ?? '', stderr: '' };
+  });
+}
+
 it('previews a draft without changing durable answers, and rejects invalid patch types before writing', async () => {
   config.saveConfig({
     default_deployment: 'monolith',
@@ -56,7 +64,9 @@ it('previews a draft without changing durable answers, and rejects invalid patch
   expect(preview.first_run_command).toBe('');
   config.saveConfig({ default_deployment: 'broken', default_scenarios: ['email'] });
   const invalidBefore = fs.readFileSync(file);
-  await expect(setup.snapshot()).rejects.toThrow(/deployment/u);
+  const described = await setup.snapshot();
+  expect(described.persisted).toMatchObject({ deployment: null, invalid_deployment: true });
+  expect(described.first_run_command).toBe('');
   const repairedDraft = await setup.snapshot({ draft: { deployment: 'monolith' } });
   expect(repairedDraft.selection).toMatchObject({ deployment: 'monolith', scenarios: ['email'] });
   expect(repairedDraft.persisted).toMatchObject({
@@ -254,6 +264,9 @@ it('distinguishes owned runtime readiness from provisioning and refuses an unusa
       const before = fs.readdirSync(config.home(), { recursive: true });
       const run = jest.spyOn(kube, 'run').mockImplementation(async (argv) => {
         const marker = argv.includes('--ignore-not-found');
+        // Tool version probes name no cluster and read no kubeconfig.
+        if (argv[1] === 'version')
+          return { argv: [...argv], returncode: 0, stdout: 'v3.15.0 1.33.0', stderr: '' };
         if (!marker && !argv.includes('/readyz')) throw new Error('unexpected non-read probe');
         return {
           argv: [...argv],
@@ -273,7 +286,8 @@ it('distinguishes owned runtime readiness from provisioning and refuses an unusa
       let view: Awaited<ReturnType<typeof setup.snapshot>>;
       try {
         view = await setup.snapshot({ cfg });
-        if (!evidence.client) expect(run).not.toHaveBeenCalled();
+        const clusterCalls = () => run.mock.calls.filter(([argv]) => argv[1] !== 'version');
+        if (!evidence.client) expect(clusterCalls()).toEqual([]);
         if (state === 'ready') {
           const ungranted = await setup.snapshot({ cfg: { ...cfg, grants: {} } });
           expect(ungranted.gates.map((gate) => gate.code)).toContain('GATE_OWNED_CLUSTER');
@@ -287,7 +301,7 @@ it('distinguishes owned runtime readiness from provisioning and refuses an unusa
           expect(insufficient.gates.some((gate) => gate.kind === 'capacity')).toBe(true);
           expect(insufficient.gates.some((gate) => gate.kind === 'runtime')).toBe(false);
         }
-        for (const [argv, options] of run.mock.calls) {
+        for (const [argv, options] of clusterCalls()) {
           expect(options?.env?.KUBECONFIG).toBe(client);
           expect(argv.slice(0, 3)).toEqual(['kubectl', '--context', CONTEXT]);
           expect(argv).toContain('get');
@@ -424,4 +438,126 @@ it('repairs an invalid saved deployment only when explicitly replaced and preser
     default_deployment: 'monolith',
     future: { keep: true },
   });
+});
+
+it('offers no Docker first run while the engine is down, and says what to do instead', async () => {
+  config.saveConfig({});
+  const healthy = await setup.snapshot();
+  expect(healthy.gates).toEqual([]);
+  expect(healthy.first_run_command).toContain('houston up');
+  const observed = await host.engine();
+  jest.mocked(host.engine).mockResolvedValue(null);
+  let down: Awaited<ReturnType<typeof setup.snapshot>>;
+  try {
+    down = await setup.snapshot();
+  } finally {
+    jest.mocked(host.engine).mockResolvedValue(observed);
+  }
+  expect(down.environment.docker_ready).toBe(false);
+  expect(down.gates).toEqual([
+    expect.objectContaining({ kind: 'engine', code: 'ENGINE_UNAVAILABLE', approve_with: '' }),
+  ]);
+  expect(down.first_run_command).toBe('');
+  const lines = humanLines(down).join('\n');
+  expect(lines).toContain('ENGINE_UNAVAILABLE');
+  expect(lines).toContain('first run   (blocked)');
+});
+
+it.each([
+  ['a scenario no preset provides', { default_scenarios: ['gone-preset'] }, /gone-preset/u],
+  ['an unknown deployment', { default_deployment: 'bogus' }, /deployment must be/u],
+])('describes %s as a repair gate instead of throwing', async (_label, saved, why) => {
+  config.saveConfig(saved);
+  const file = path.join(config.home(), 'config.yaml');
+  const before = fs.readFileSync(file);
+  const view = await setup.snapshot();
+  expect(view.first_run_command).toBe('');
+  expect(view.gates).toEqual([
+    expect.objectContaining({ kind: 'setup', code: 'SETUP_SELECTION_INVALID' }),
+  ]);
+  expect(view.gates[0]?.message).toMatch(why);
+  expect(view.gates[0]?.message).toContain('houston onboard --deployment monolith --scenario none');
+  expect(view.persisted.invalid_deployment).toBe('default_deployment' in saved);
+  expect(humanLines(view).join('\n')).toContain('SETUP_SELECTION_INVALID');
+  expect(fs.readFileSync(file)).toEqual(before);
+});
+
+it('treats an outdated Kubernetes tool as missing from readiness instead of presence alone', async () => {
+  mockKubernetesToolsAvailable = true;
+  const cfg = {
+    default_deployment: 'microservices',
+    onboarding: { completed_at: '2026-10-15T00:00:00Z', completed_by: 'person' },
+    grants: { owned_cluster: true },
+  };
+  try {
+    const modern = {
+      kubectl: 'Client Version: v1.33.0',
+      helm: 'v3.15.0+g1234',
+      kind: 'kind v0.24.0 go1.22 linux/amd64',
+    };
+    kubeVersions(modern);
+    const ready = await setup.snapshot({ cfg });
+    expect(ready.environment).toMatchObject({
+      outdated_kubernetes_tools: [],
+      kubernetes_provisioning_available: true,
+    });
+    expect(ready.first_run_command).toContain('houston up');
+    for (const [name, text, floor] of [
+      ['kubectl', 'Client Version: v1.20.15', '1.21'],
+      ['helm', 'v2.17.0+g1234', '3.0'],
+      ['kind', 'kind v0.19.0 go1.20 linux/amd64', '0.20'],
+    ] as const) {
+      kubeVersions({ ...modern, [name]: text });
+      const view = await setup.snapshot({ cfg });
+      expect(view.environment.outdated_kubernetes_tools).toEqual([name]);
+      expect(view.environment.kubernetes_provisioning_available).toBe(false);
+      expect(view.environment.microservices_ready).toBe(false);
+      expect(view.first_run_command).toBe('');
+      const gate = view.gates.find((item) => item.code === 'KUBERNETES_TOOLS_OUTDATED');
+      expect(gate?.message).toContain(`${name} ${text.match(/\d+\.\d+/u)?.[0] ?? ''}`);
+      expect(gate?.message).toContain(`needs ${floor}`);
+    }
+  } finally {
+    mockKubernetesToolsAvailable = false;
+  }
+});
+
+it('chooses an unused first-run name when first-repro already exists', async () => {
+  config.saveConfig({});
+  const taken = (name: string) => {
+    const directory = path.join(config.home(), 'repros', name);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'repro.json'), '{}');
+  };
+  const name = async () => /--name (\S+)/u.exec((await setup.snapshot()).first_run_command)?.[1];
+  expect(await name()).toBe('first-repro');
+  taken('first-repro');
+  expect(await name()).toBe('first-repro-2');
+  taken('first-repro-2');
+  expect(await name()).toBe('first-repro-3');
+});
+
+it('records whether a person or the defaults completed onboarding, and gates only on a person', async () => {
+  config.saveConfig({});
+  const defaults = await setup.applyPatch({}, { defaults: true, by: 'defaults' });
+  expect(defaults.persisted).toMatchObject({ completed: true, completed_by: 'defaults' });
+  expect(config.loadConfig(false).onboarding).toMatchObject({ completed_by: 'defaults' });
+  config.saveConfig({
+    default_deployment: 'microservices',
+    onboarding: { completed_at: '2026-10-15T00:00:00Z', completed_by: 'defaults' },
+    grants: { owned_cluster: true },
+  });
+  mockKubernetesToolsAvailable = true;
+  kubeVersions({ kubectl: 'v1.33.0', helm: 'v3.15.0', kind: 'kind v0.24.0' });
+  try {
+    const view = await setup.snapshot();
+    expect(view.completed).toBe(true);
+    expect(view.gates.map((gate) => gate.code)).toContain('GATE_NOT_ONBOARDED');
+    expect(view.first_run_command).toBe('');
+    const person = await setup.applyPatch({ retain_runs: true }, { by: 'person' });
+    expect(person.persisted.completed_by).toBe('person');
+    expect(person.gates.map((gate) => gate.code)).not.toContain('GATE_NOT_ONBOARDED');
+  } finally {
+    mockKubernetesToolsAvailable = false;
+  }
 });

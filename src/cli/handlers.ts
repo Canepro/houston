@@ -1262,7 +1262,7 @@ async function dispatch(
       if (action === 'status') return { ...onboarding.state(), action };
       if (!['grant', 'revoke', 'complete'].includes(action))
         throw new ValidationError(
-          `unknown action ${quotedText(action)} (want: status | grant | revoke | complete)`,
+          `unknown action ${quotedText(action)} (want: status | setup | grant | revoke | complete)`,
         );
       // The id is checked BEFORE the lock is taken and the file rewritten, so an unknown
       // grant is a usage error (exit 2) with nothing written, not a stamped onboarding.
@@ -3472,7 +3472,8 @@ export async function renderHuman(
       say(
         io,
         isTruthy(result.completed)
-          ? `onboarded  yes, ${display(result.completed_at)}`
+          ? `onboarded  yes, ${display(result.completed_at)}` +
+              (result.completed_by === 'defaults' ? ' (by defaults, not a person)' : '')
           : 'onboarded  no — a person has not answered any of these yet',
       );
       say(io, `grants     ${held.length > 0 ? held.join(', ') : '(none held)'}`);

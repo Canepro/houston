@@ -11,7 +11,11 @@ type SetupSnapshot = Awaited<ReturnType<typeof setup.snapshot>>;
 export function humanLines(view: SetupSnapshot): string[] {
   const { selection, environment, capacity, compatibility, license } = view;
   const tools = Object.entries(environment.tools)
-    .map(([name, available]) => `${name} ${available ? 'yes' : 'no'}`)
+    .map(
+      ([name, available]) =>
+        `${name} ${available ? 'yes' : 'no'}` +
+        (environment.outdated_kubernetes_tools.includes(name) ? ' (outdated)' : ''),
+    )
     .join(', ');
   const capacityFact = capacity.applicable
     ? `${capacity.status}: ${String(capacity.observed_cpu)} CPU / ` +
@@ -43,6 +47,7 @@ export function humanLines(view: SetupSnapshot): string[] {
     `kernel      ${environment.engine_kernel_version || 'unavailable'} · MongoDB ` +
       `${compatibility.mongo_version}: ${compatibility.status}` +
       (compatibility.remediation !== '' ? ` — ${compatibility.remediation}` : ''),
+    `onboarding  ${view.persisted.completed_by === '' ? 'not completed' : `completed by ${view.persisted.completed_by}`}`,
     `licence     ${licenseFact}`,
     `seed deferred ${seedDeferred}`,
     ...view.gates.map((gate) => `  ${gate.code}: ${gate.message}`),
@@ -103,7 +108,10 @@ export async function run(invocation: Invocation) {
     if (!(await confirm('Apply these setup choices?')))
       return { ...(await setup.snapshot({ section })), action: 'cancelled' };
   }
-  const applied = await setup.applyPatch(patch, { defaults, section });
+  // Only a person at a terminal answering for themselves is a person. --accept-defaults,
+  // JSON and piped writes fill safe answers, so prompts stop but nobody looked.
+  const by = defaults || active() || process.stdin.isTTY !== true ? 'defaults' : 'person';
+  const applied = await setup.applyPatch(patch, { defaults, section, by });
   const { changed, ...view } = applied;
   return {
     ...view,

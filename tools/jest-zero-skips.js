@@ -134,7 +134,11 @@ const ROOT = path.resolve(__dirname, '..');
 // Goal-first setup adds its owner-boundary cases, and four review fixes add one each: the setup
 // envelope schema, the first-run gates, the saved deployment alias probe and the destination
 // notice. A full collection of the merged tree measured 4863 tests.
-const FLOOR = 4863;
+// The seventh PR 62 round adds thirteen: the Docker engine gate, two stale saved selectors, outdated
+// Kubernetes tools, the unused first-run name, who completed onboarding (three in the library, one
+// through the setup snapshot), the unknown-action text, the long help, and the force and fresh
+// rebuilds of a one-preset Docker workspace: total 4876.
+const FLOOR = 4876;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

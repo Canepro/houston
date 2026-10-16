@@ -339,3 +339,38 @@ it('refuses a new workspace when saved microservices would plan a remote context
   expect(fs.existsSync(path.join(config.home(), 'repros', 'rc8-6-1-email'))).toBe(false);
   expect(openEntries()).toEqual([]);
 });
+
+it.each([
+  ['--force', { force: true }],
+  ['--fresh', { fresh: true }],
+])(
+  'keeps the recorded scenario of a one-preset Docker workspace on up %s with a saved scenario',
+  async (_flag, flag) => {
+    removeRepro('rc8-6-1');
+    config.saveConfig({ default_scenarios: ['email'] });
+    const recorded = 'rc8-6-1-email';
+    await writeRecord(
+      recorded,
+      metadata({
+        name: recorded,
+        project: `houston-${recorded}`,
+        preset: 'email',
+        extra: { runtime: 'docker', deployment: 'monolith' },
+      }),
+    );
+    const stop = new Error('stopped before the runtime');
+    const seen: { name: string; preset: string }[] = [];
+    mockDomainFromZone = (req, name) => {
+      seen.push({ name, preset: req.preset });
+      return Promise.reject(stop);
+    };
+    try {
+      await expect(createRepro({ ...flaglessUp(), ...flag })).rejects.toBe(stop);
+    } finally {
+      mockDomainFromZone = null;
+      removeRepro(recorded);
+    }
+    expect(seen).toEqual([{ name: recorded, preset: 'email' }]);
+    expect(openEntries()).toEqual([]);
+  },
+);

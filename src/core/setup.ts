@@ -12,7 +12,20 @@ import { deployment, scenarios, savedSelectors, DEPLOYMENTS } from '../lib/setup
 import * as versions from '../lib/versions';
 import * as host from './runner/host';
 import { updateConfigIf } from './runner/locks';
-import { which } from './kube/tools';
+import {
+  canProvision,
+  makeTool,
+  newEnough,
+  preflight,
+  pretty,
+  toolAt,
+  toolPresent,
+  toolsReady,
+  which,
+} from './kube/tools';
+import type { Tool } from './kube/tools';
+import { tools as toolFloors } from './kube/names';
+import * as paths from './runner/paths';
 import { ownedRuntimeState } from './kube/cluster';
 import { ENGINE_FLOOR_CPUS, ENGINE_FLOOR_MEMORY_GIB } from './lifecycle/sizing';
 
@@ -28,6 +41,22 @@ const PROFILES = ['none', 'small', 'standard', 'large'];
 
 const PREFERENCES = { retain_runs: false, kubernetes_target: 'owned-local', seed_profile: 'small' };
 const FIRST_VERSION = '8.6.1';
+const FIRST_NAME = 'first-repro';
+const FIRST_NAME_TRIES = 50;
+const REPAIR_COMMAND = 'houston onboard --deployment monolith --scenario none';
+
+/** `first-repro`, else `first-repro-2`, `-3` ... the first not yet a workspace; '' if none is. */
+async function firstRunName(): Promise<string> {
+  try {
+    for (let n = 1; n <= FIRST_NAME_TRIES; n += 1) {
+      const name = n === 1 ? FIRST_NAME : `${FIRST_NAME}-${String(n)}`;
+      if (!(await paths.exists(name))) return name;
+    }
+  } catch {
+    /* An unreadable workspace directory is not a free name. */
+  }
+  return '';
+}
 
 /** Config mappings are plain objects; YAML timestamps and tagged collections are not writable maps. */
 function mapping(value: unknown): config.Config | null {
@@ -175,12 +204,56 @@ function selection(cfg: config.Config, patch: SetupPatch) {
   };
 }
 
+/**
+ * The selection a read-only snapshot can describe. A saved scenario no preset provides, or
+ * a saved deployment that is not one, fails validation; the snapshot reports that as a
+ * repair gate and shows the usable part (a valid saved deployment, no scenarios) instead
+ * of throwing. A draft that replaces either value is validated strictly, as before.
+ */
+function describedSelection(cfg: config.Config, patch: SetupPatch) {
+  try {
+    return { view: selection(cfg, patch), problem: '' };
+  } catch (error) {
+    if (
+      !(error instanceof ValidationError) ||
+      patch.deployment !== undefined ||
+      patch.scenarios !== undefined
+    )
+      throw error;
+    let usable = 'monolith';
+    try {
+      usable = savedSelectors({ ...cfg, default_scenarios: [] }).deployment;
+    } catch {
+      /* The saved deployment is the invalid part. */
+    }
+    const clean = { ...cfg, default_deployment: usable, default_scenarios: [] };
+    return { view: selection(clean, patch), problem: error.message };
+  }
+}
+
 /** Read-only probes; no provisioning, context adoption, or engine resize. */
 export async function detectEnvironment() {
   const engine = await host.engine();
-  const tools = Object.fromEntries(
-    ['docker', 'kubectl', 'helm', 'kind'].map((name) => [name, which(name) !== '']),
+  // Presence alone is not readiness: an outdated kubectl, Helm or Kind fails the same floors
+  // `doctor` and the create path enforce. An unreadable version passes, as it does there.
+  const located = Object.fromEntries(
+    ['docker', 'kubectl', 'helm', 'kind'].map((name) => [name, which(name)]),
   );
+  const tools = Object.fromEntries(
+    Object.entries(located).map(([name, where]) => [name, where !== '']),
+  );
+  const versioned: Record<string, Tool> = {};
+  await Promise.all(
+    ['kubectl', 'helm', 'kind'].map(async (name) => {
+      const where = located[name] ?? '';
+      try {
+        versioned[name] = await toolAt(name, where);
+      } catch {
+        versioned[name] = makeTool({ name, path: where });
+      }
+    }),
+  );
+  const found = preflight({ tools: versioned });
   let free: number | null = null;
   try {
     let directory = config.home();
@@ -192,7 +265,16 @@ export async function detectEnvironment() {
     /* A failed probe is unknown, not a measured zero. */
   }
   const missing = ['kubectl', 'helm'].filter((name) => tools[name] !== true);
-  const ownedRuntime = tools.kubectl === true ? await ownedRuntimeState() : 'unknown';
+  const outdated = Object.entries(versioned)
+    .filter(([, tool]) => toolPresent(tool) && !newEnough(tool))
+    .map(([name]) => name);
+  const kubernetesReady = toolsReady(found);
+  // The owned-runtime probe runs kubectl only, so Helm missing or outdated does not hide it.
+  const kubectl = versioned.kubectl;
+  const ownedRuntime =
+    kubectl !== undefined && toolPresent(kubectl) && newEnough(kubectl)
+      ? await ownedRuntimeState()
+      : 'unknown';
   const enoughCapacity =
     engine !== null &&
     engine.cpus >= ENGINE_FLOOR_CPUS &&
@@ -211,10 +293,17 @@ export async function detectEnvironment() {
     engine_memory_gib: (engine?.memBytes ?? 0) / 1024 ** 3,
     engine_kernel_version: engine?.kernel ?? '',
     missing_kubernetes_tools: missing,
-    kubernetes_provisioning_available:
-      tools.kind === true && missing.length === 0 && enoughCapacity,
+    outdated_kubernetes_tools: outdated,
+    kubernetes_tool_versions: Object.fromEntries(
+      Object.entries(versioned).map(([name, tool]) => [
+        name,
+        toolPresent(tool) ? pretty(tool) : '',
+      ]),
+    ),
+    kubernetes_tools_ready: kubernetesReady,
+    kubernetes_provisioning_available: canProvision(found) && kubernetesReady && enoughCapacity,
     owned_kubernetes_runtime: ownedRuntime,
-    microservices_ready: ownedRuntime === 'ready' && missing.length === 0 && enoughCapacity,
+    microservices_ready: ownedRuntime === 'ready' && kubernetesReady && enoughCapacity,
     engine_resize_supported: false,
   };
 }
@@ -234,7 +323,7 @@ export async function snapshot(
 ) {
   const cfg = options.cfg ?? config.loadConfig();
   const patch = validatedPatch(options.draft ?? {});
-  const view = selection(cfg, patch);
+  const { view, problem } = describedSelection(cfg, patch);
   let stored: Omit<ReturnType<typeof savedSelectors>, 'deployment'> & {
     deployment: string | null;
     invalid_deployment: boolean;
@@ -242,11 +331,12 @@ export async function snapshot(
   try {
     stored = { ...savedSelectors(cfg), invalid_deployment: false };
   } catch (error) {
-    if (!(error instanceof ValidationError) || patch.deployment === undefined) throw error;
-    // Selection already validated the replacement. Keep the invalid durable answer
-    // distinct from both the draft and an unanswered default, without writing it.
+    if (!(error instanceof ValidationError)) throw error;
+    // Selection already validated the replacement, or described the problem. Keep the
+    // invalid durable answer distinct from both the draft and an unanswered default,
+    // without writing it.
     stored = {
-      ...savedSelectors({ ...cfg, default_deployment: patch.deployment }),
+      ...savedSelectors({ ...cfg, default_deployment: patch.deployment ?? 'monolith' }),
       deployment: null,
       invalid_deployment: true,
       answered_deployment: true,
@@ -400,7 +490,10 @@ export async function snapshot(
   // Leave topology selectors absent so this command resolves through the saved setup choice.
   // In particular, a saved microservices default reaches the owned-local guard instead of
   // turning the generated command into an explicit remote-adoption request.
-  const commands = ['houston', 'up', '--version', FIRST_VERSION, '--name', 'first-repro', '--wait'];
+  // A flagless `up --name X` revives a workspace already called X, so the command names one
+  // that does not exist yet. With no free name the command is withheld rather than guessed.
+  const firstName = await firstRunName();
+  const commands = ['houston', 'up', '--version', FIRST_VERSION, '--name', firstName, '--wait'];
   if (view.seed_profile !== 'none' && !deferred)
     commands.push('--seed', '--seed-profile', view.seed_profile);
   const shell = (value: string) =>
@@ -411,9 +504,18 @@ export async function snapshot(
     environment.microservices_ready || environment.kubernetes_provisioning_available;
   // The command reaches `requireOnboarded()` and `requireGrant('owned-cluster')` on a local
   // Kubernetes create, so the gates below that a person must clear also block it here.
-  const authorized = state.completed && grants.owned_cluster === true;
+  // Completion by defaults is not a person's, exactly as `requireOnboarded()` reads it.
+  const personOnboarded = state.completed_by === 'person';
+  const authorized = personOnboarded && grants.owned_cluster === true;
+  // A Docker create needs the engine to answer, as a Kubernetes one needs its runtime.
+  const dockerDown = !kube && !environment.docker_ready;
   const firstRun =
-    conflict === '' && Object.keys(patch).length === 0 && (!kube || (runtimeUsable && authorized))
+    firstName !== '' &&
+    problem === '' &&
+    conflict === '' &&
+    Object.keys(patch).length === 0 &&
+    !dockerDown &&
+    (!kube || (runtimeUsable && authorized))
       ? commands.map(shell).join(' ')
       : '';
   const gates: { kind: string; code: string; message: string; approve_with: string }[] = [];
@@ -424,6 +526,22 @@ export async function snapshot(
       message: conflict,
       approve_with: '',
     });
+  if (problem !== '')
+    gates.push({
+      kind: 'setup',
+      code: 'SETUP_SELECTION_INVALID',
+      message: `Saved setup choices no longer validate: ${problem}. Repair them with: ${REPAIR_COMMAND}`,
+      approve_with: '',
+    });
+  if (dockerDown)
+    gates.push({
+      kind: 'engine',
+      code: 'ENGINE_UNAVAILABLE',
+      message:
+        'No container engine is answering. Start Docker Desktop or your container engine, ' +
+        'then run houston doctor --json.',
+      approve_with: '',
+    });
   if (kube && !capacity.ready)
     gates.push({
       kind: 'capacity',
@@ -431,11 +549,13 @@ export async function snapshot(
       message: capacity.remediation,
       approve_with: '',
     });
-  if (kube && !state.completed)
+  if (kube && !personOnboarded)
     gates.push({
       kind: 'onboarding',
       code: 'GATE_NOT_ONBOARDED',
-      message: 'A person must complete onboarding before local Kind lifecycle operations.',
+      message: state.completed
+        ? 'Onboarding was completed by defaults, not by a person. A person must complete it before local Kind lifecycle operations.'
+        : 'A person must complete onboarding before local Kind lifecycle operations.',
       approve_with: onboarding.ONBOARD_COMMAND,
     });
   if (kube && environment.missing_kubernetes_tools.length > 0)
@@ -445,11 +565,27 @@ export async function snapshot(
       message: `Missing local cluster tools: ${environment.missing_kubernetes_tools.join(', ')}`,
       approve_with: '',
     });
+  // Kind only matters while the owned runtime cannot already be used.
+  const outdated = environment.outdated_kubernetes_tools.filter(
+    (name) => name !== 'kind' || !environment.microservices_ready,
+  );
+  if (kube && outdated.length > 0)
+    gates.push({
+      kind: 'tools',
+      code: 'KUBERNETES_TOOLS_OUTDATED',
+      message: `Outdated local cluster tools: ${outdated
+        .map(
+          (name) =>
+            `${name} ${environment.kubernetes_tool_versions[name] ?? '?'} (needs ${(toolFloors()[name] ?? []).join('.')}+)`,
+        )
+        .join(', ')}`,
+      approve_with: '',
+    });
   if (
     kube &&
     !runtimeUsable &&
     environment.owned_kubernetes_runtime !== 'ready' &&
-    environment.missing_kubernetes_tools.length === 0
+    environment.kubernetes_tools_ready
   )
     gates.push({
       kind: 'runtime',
@@ -459,7 +595,7 @@ export async function snapshot(
           : 'OWNED_KUBERNETES_UNKNOWN',
       message:
         `Owned local runtime is ${environment.owned_kubernetes_runtime}; ` +
-        'Kind provisioning is unavailable. Restore the owned client/cluster or install Kind and satisfy the engine capacity prerequisites.',
+        'Kind provisioning is unavailable. Restore the owned client/cluster or install a current Kind and satisfy the engine capacity prerequisites.',
       approve_with: '',
     });
   if (kube && grants.owned_cluster !== true)
@@ -476,6 +612,7 @@ export async function snapshot(
       ...state,
       deployment: stored.deployment,
       invalid_deployment: stored.invalid_deployment,
+      selection_problem: problem,
       scenarios: stored.scenarios,
       answered_deployment: stored.answered_deployment,
       answered_scenarios: stored.answered_scenarios,
@@ -550,8 +687,10 @@ function defaultPatch(
 /** Validate under the config lock, then apply only supplied answers in one atomic write. */
 export async function applyPatch(
   raw: SetupPatch,
-  options: { defaults?: boolean; section?: string } = {},
+  options: { defaults?: boolean; section?: string; by?: onboarding.OnboardedBy } = {},
 ) {
+  // A library caller that does not say who answered never claims it was a person.
+  const by = options.by ?? 'defaults';
   const explicit = validatedPatch(raw);
   const section = options.section ?? '';
   if (section !== '' && !SECTIONS.some((name) => name === section))
@@ -565,8 +704,8 @@ export async function applyPatch(
     writable(cfg, 'onboarding');
     if (patch.grants !== undefined) writable(cfg, 'grants');
     for (const [id, held] of Object.entries(patch.grants ?? {})) {
-      if (held) onboarding.grant(cfg, id);
-      else onboarding.revoke(cfg, id);
+      if (held) onboarding.grant(cfg, id, new Date(), by);
+      else onboarding.revoke(cfg, id, new Date(), by);
     }
     const preferenceKeys = ['seed_profile', 'retain_runs', 'kubernetes_target'] as const;
     if (preferenceKeys.some((key) => own(patch, key))) {
@@ -583,7 +722,7 @@ export async function applyPatch(
         JSON.stringify(saved.scenarios) !== JSON.stringify(view.scenarios))
     )
       cfg.default_scenarios = view.scenarios;
-    onboarding.complete(cfg);
+    onboarding.complete(cfg, new Date(), by);
     return true;
   });
   return { ...(await snapshot({ section })), changed };

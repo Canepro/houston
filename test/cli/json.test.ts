@@ -556,6 +556,7 @@ describe('onboard --json', () => {
     expect(completed.envelope.data).toMatchObject({
       action: 'complete',
       completed: true,
+      completed_by: 'person',
       rc_repro_version: expect.any(String),
       grants: { owned_cluster: false },
       answered_grants: { owned_cluster: false },
@@ -595,6 +596,17 @@ describe('onboard --json', () => {
       answered_grants: { owned_cluster: true },
       clusters: [],
     });
+  });
+
+  it('documents setup, --show and --accept-defaults in the long help, and who completed onboarding', async () => {
+    const help = await run(['onboard', '--help']);
+    for (const text of [
+      'houston onboard --show',
+      'houston onboard setup',
+      'houston onboard --accept-defaults',
+      'completed_by',
+    ])
+      expect(help.stdout).toContain(text);
   });
 
   it.each(['status', 'complete'])(
@@ -917,7 +929,11 @@ describe('goal-first setup CLI', () => {
       default_scenarios: [],
       grants: { owned_cluster: true, engine_resize: false, clusters: ['houston-local', 'future'] },
       preferences: { seed_profile: 'large', retain_runs: false, future: 'keep' },
-      onboarding: { marker: 'keep', completed_at: expect.any(String) },
+      onboarding: {
+        marker: 'keep',
+        completed_at: expect.any(String),
+        completed_by: 'defaults',
+      },
     });
     expect((result.envelope.data as Record<string, unknown>).first_run_command).toContain(
       '--seed-profile large',

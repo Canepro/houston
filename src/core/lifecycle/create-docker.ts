@@ -510,6 +510,10 @@ async function applySavedSelectors(req: CreateReq): Promise<void> {
       if (recorded !== '') {
         req.name = recorded;
         await carryRecordedAxes(req, recorded);
+        // The record holds the scenario the saved selectors chose. Leaving the preset empty
+        // let a forced or fresh rebuild of a one-preset Docker workspace fall back to
+        // `default` and drop it, under a name that still says it has the scenario.
+        await carryRecordedPreset(req, recorded, true);
         return;
       }
       req.deployment = saved.deployment;
@@ -520,6 +524,39 @@ async function applySavedSelectors(req: CreateReq): Promise<void> {
       // wait must not choose another workspace after its lock has already been taken.
       req.preset = 'default';
     }
+  }
+}
+
+/**
+ * Keep an existing workspace's recorded preset, and its params when none were given, as the
+ * rebuild of that workspace. Returns the preset kept, or '' when the record keeps none.
+ *
+ * `always` keeps a one-preset Compose record too. The ordinary rule leaves that to behave as
+ * it always has, but a record reached through the saved setup selectors is the workspace
+ * those selectors named, so its scenario must survive a forced or fresh rebuild.
+ */
+async function carryRecordedPreset(
+  req: CreateReq,
+  existing: string,
+  always: boolean,
+): Promise<string> {
+  try {
+    const meta = await record.readMeta(existing);
+    const composed = namesOf(meta.preset).length > 1;
+    const kept =
+      composed ||
+      ((meta.preset || 'default') !== 'default' &&
+        (always || topology.ofMeta(meta) === topology.KUBERNETES));
+    if (!kept) return '';
+    req.preset = meta.preset;
+    if (Object.keys(req.params).length === 0) {
+      req.params = composed
+        ? qualifiedParams(bag(meta.extra.preset_params))
+        : { ...bag(meta.extra.params) };
+    }
+    return meta.preset;
+  } catch {
+    return ''; // a half-written record: nothing to keep
   }
 }
 
@@ -545,25 +582,11 @@ export async function resolveAxesStep(plan: CreatePlan): Promise<void> {
   // it re-installed Rocket.Chat without the preset's settings while the preset's own
   // objects stayed in the namespace. A one-preset Compose workspace behaves as it always has.
   if (plan.req.preset === '' && existing && (await paths.exists(existing))) {
-    try {
-      const meta = await record.readMeta(existing);
-      const composed = namesOf(meta.preset).length > 1;
-      const kept =
-        composed ||
-        (topology.ofMeta(meta) === topology.KUBERNETES && (meta.preset || 'default') !== 'default');
-      if (kept) {
-        plan.req.preset = meta.preset;
-        if (Object.keys(plan.req.params).length === 0) {
-          plan.req.params = composed
-            ? qualifiedParams(bag(meta.extra.preset_params))
-            : { ...bag(meta.extra.params) };
-        }
-        info(plan.emit, `'${existing}' is a ${meta.preset} workspace — keeping those presets`, {
-          phase: 'plan',
-        });
-      }
-    } catch {
-      // a half-written record: nothing to keep
+    const kept = await carryRecordedPreset(plan.req, existing, false);
+    if (kept !== '') {
+      info(plan.emit, `'${existing}' is a ${kept} workspace — keeping those presets`, {
+        phase: 'plan',
+      });
     }
   }
   const axes = topology.resolveAxes({
