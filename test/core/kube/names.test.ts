@@ -3,6 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import * as YAML from 'yaml';
+import { setImmediate as yieldIo } from 'node:timers/promises';
 
 import * as config from '../../../src/lib/config';
 import {
@@ -25,6 +26,8 @@ import {
   adoptIfUnmarked,
   deleteCluster,
   ensureCluster,
+  ensureKubeconfig,
+  ownedRuntimeState,
 } from '../../../src/core/kube/cluster';
 import { kube, ownedKubeconfig, type RunOptions } from '../../../src/core/kube/exec';
 import { mongoManifest } from '../../../src/core/kube/manifests';
@@ -952,6 +955,7 @@ describe('the cluster houston makes for itself', () => {
   );
 
   it('keeps a newly marked cluster when a later progress listener fails', async () => {
+    fs.rmSync(ownedKubeconfig(), { force: true });
     config.updateConfig((stored) => {
       grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
     });
@@ -1030,6 +1034,7 @@ describe('the cluster houston makes for itself', () => {
   });
 
   it('reconnects a cluster that outlived its kubeconfig, and says so when it cannot', async () => {
+    fs.rmSync(ownedKubeconfig(), { force: true });
     // `kind get clusters` reads Docker, so it sees a cluster houston's OWN kubeconfig knows
     // nothing about -- a fresh HOUSTON_HOME, a deleted config. Without the export, "reusing
     // cluster" was followed by every kubectl call going to localhost:8080.
@@ -1168,4 +1173,133 @@ describe('the replica set a StatefulSet cannot initiate for itself', () => {
     expect(service?.metadata.name).toBe(MONGO_SERVICE);
     expect(RS_INITIATE).toContain(`${MONGO_SERVICE}-0.${MONGO_SERVICE}`);
   });
+});
+
+describe('secure local reuse and full lock acquisition budget', () => {
+  it.each(['create/reuse', 'adopt', 'delete'])(
+    '%s waits beyond Kind create while the real owner still holds the cluster lock',
+    async (operation) => {
+      installTools('kind', 'kubectl');
+      config.updateConfig((stored) => {
+        grant(stored, 'owned-cluster');
+      });
+      route((joined) => {
+        if (joined === 'kind get clusters') return { stdout: CLUSTER_NAME };
+        if (joined.includes('current-context')) return { stdout: CONTEXT };
+        if (joined.includes('get configmap')) return { stdout: ownedClusterMarker() };
+        if (joined.includes('/readyz')) return { stdout: 'ok' };
+        if (joined.includes('get namespace')) return { stdout: JSON.stringify({ items: [] }) };
+        return undefined;
+      });
+      let unlock!: () => void;
+      let acquired!: () => void;
+      const held = new Promise<void>((resolve) => {
+        acquired = resolve;
+      });
+      const release = new Promise<void>((resolve) => {
+        unlock = resolve;
+      });
+      const holder = reproLock(CLUSTER_LOCK, async () => {
+        acquired();
+        await release;
+      });
+      await held;
+      // Linux flock has already acquired before the clock changes. The second call is
+      // outside the holder's async context, so it really queues at the production owner.
+      jest.useFakeTimers();
+      let failure: unknown;
+      let finished = false;
+      const pending =
+        operation === 'adopt'
+          ? adoptIfUnmarked()
+          : operation === 'delete'
+            ? deleteCluster()
+            : ensureCluster();
+      const waiter = pending.then(
+        () => {
+          finished = true;
+        },
+        (error: unknown) => {
+          failure = error;
+        },
+      );
+      try {
+        const admissionDeadline = jest.getRealSystemTime() + 2000;
+        while (jest.getTimerCount() === 0 && jest.getRealSystemTime() < admissionDeadline) {
+          await yieldIo();
+        }
+        expect(failure).toBeUndefined();
+        expect(jest.getTimerCount()).toBeGreaterThan(0);
+        await jest.advanceTimersByTimeAsync((CREATE_TIMEOUT + 1) * 1000);
+        expect(failure).toBeUndefined();
+        expect(finished).toBe(false);
+      } finally {
+        // Restore real time before the waiter can acquire its own OS flock.
+        jest.useRealTimers();
+        unlock();
+        await holder;
+        await waiter;
+      }
+      expect(failure).toBeUndefined();
+      expect(finished).toBe(true);
+    },
+  );
+
+  it.each(['owned', 'absent', 'foreign', 'malformed', 'unavailable', 'down', 'missing'])(
+    'uses only a reachable exact owned receipt without Kind: %s',
+    async (state) => {
+      installTools('kubectl');
+      config.updateConfig((stored) => {
+        grant(stored, 'owned-cluster');
+      });
+      if (state !== 'missing') {
+        fs.mkdirSync(path.dirname(ownedKubeconfig()), { recursive: true });
+        fs.writeFileSync(ownedKubeconfig(), 'synthetic owned client');
+      } else fs.rmSync(ownedKubeconfig(), { force: true });
+      const bytes = state === 'missing' ? null : fs.readFileSync(ownedKubeconfig(), 'utf8');
+      route((joined) => {
+        if (joined.includes('get configmap'))
+          return {
+            returncode: state === 'unavailable' ? 1 : 0,
+            stdout:
+              state === 'absent'
+                ? ''
+                : state === 'foreign'
+                  ? '{}'
+                  : state === 'malformed'
+                    ? '{'
+                    : ownedClusterMarker(),
+          };
+        if (joined.includes('/readyz'))
+          return { returncode: state === 'down' ? 1 : 0, stdout: 'ok' };
+        return { returncode: 1, stderr: 'unexpected external action' };
+      });
+      await expect(ownedRuntimeState()).resolves.toBe(
+        state === 'owned'
+          ? 'ready'
+          : state === 'absent' || state === 'missing'
+            ? 'unavailable'
+            : 'unknown',
+      );
+      const operation = ensureKubeconfig({ context: CONTEXT, distribution: 'kind', create: false });
+      if (state === 'owned') await expect(operation).resolves.toBe(CONTEXT);
+      else await expect(operation).rejects.toThrow();
+      expect(
+        calls.every(
+          ({ argv, options }) =>
+            argv[0] === 'kubectl' &&
+            argv.includes('--context') &&
+            argv.includes(CONTEXT) &&
+            options.own === true &&
+            !argv.includes('apply') &&
+            !argv.includes('delete'),
+        ),
+      ).toBe(true);
+      expect(
+        state === 'missing'
+          ? fs.existsSync(ownedKubeconfig())
+          : fs.readFileSync(ownedKubeconfig(), 'utf8'),
+      ).toBe(state === 'missing' ? false : bytes);
+    },
+  );
 });

@@ -47,7 +47,7 @@ import { installed as edgeInstalled } from '../edge/spec';
 import { assertNamespaceAvailable, namespaceFor, namespaceLabels } from '../kube/namespace';
 import { isOurs, mintNamespace } from '../kube/names';
 import { type ClusterPlan, planCluster } from '../kube/context';
-import { ensureKubeconfig } from '../kube/cluster';
+import { deleteCluster, ensureKubeconfig, type ClusterReceipt } from '../kube/cluster';
 import { helmReachable } from '../kube/reachability';
 import { missingTools } from '../kube/tools';
 import type { Preflight } from '../kube/tools';
@@ -144,6 +144,8 @@ export interface KubeCreate {
   ktls: KubeTls | null;
   /** Whether THIS create put the name's edge route there, so a failure takes back only that. */
   routeIntroduced: boolean;
+  clusterReceipt: ClusterReceipt;
+  workspaceStarted: boolean;
   adminPassword: string;
   provisional: Metadata | null;
   out: Bag;
@@ -180,6 +182,8 @@ export function kubeCreate(
     tlsspec: null,
     ktls: null,
     routeIntroduced: false,
+    clusterReceipt: { createdHere: false },
+    workspaceStarted: false,
     adminPassword: '',
     provisional: null,
     out: {},
@@ -545,7 +549,12 @@ export async function planTls(job: KubeCreate): Promise<void> {
     // HOUSTON_HOME it does not have one: the cluster exists, so nothing was created, so
     // nothing exported the context this is about to ask through. Idempotent, and a no-op
     // for a cluster houston did not make.
-    await ensureKubeconfig(job.plan, job.emit);
+    const receipt: ClusterReceipt = { createdHere: false };
+    try {
+      await ensureKubeconfig(job.plan, job.emit, receipt);
+    } finally {
+      job.clusterReceipt.createdHere ||= receipt.createdHere;
+    }
     // HELM'S OWN ANSWER, and this is the cheapest refusal on the path. houston drives
     // kubectl AND helm, they resolve their configuration differently, and only kubectl was
     // ever asked. Measured: kubectl completely happy while helm refused every call with
@@ -588,6 +597,7 @@ export async function planKubeTls(job: KubeCreate): Promise<void> {
     // nothing.
     job.ktls = await tlsplan.kubernetesTlsPlan(job.req, job.tlsspec, job.plan as ClusterPlan, {
       emit: job.emit,
+      receipt: job.clusterReceipt,
     });
     // A preset's own UIs at paths of that name; `installChart` routes them with an Ingress.
     if (job.presetForNotes !== null) {
@@ -738,6 +748,7 @@ export async function createTheWorkspace(job: KubeCreate): Promise<void> {
     await stopForward(Number(pid) || 0, { namespace: ns, hostPort: Number(port) || null });
   }
   const resolved = job.resolved as Resolved;
+  job.workspaceStarted = true;
   job.out = await createWorkspace({
     name: job.reproName,
     resolved,
@@ -769,6 +780,7 @@ export async function createTheWorkspace(job: KubeCreate): Promise<void> {
     license: job.req.license,
     licensed: job.licensed,
     plan: job.plan,
+    clusterReceipt: job.clusterReceipt,
     emit: job.emit,
   });
 }
@@ -974,31 +986,38 @@ export async function createKubernetes(
   });
   await settleName(job);
   await settleEnv(job);
-  await ports.withPortPublication(async () => {
-    await resolvePairing(job);
-    settleAddressing(job);
-    // Before the cluster is probed or anything is written.
-    refuseEnforcedBefore880(requestedPreset(job), (job.resolved as Resolved).rcVersion);
-    await claimSidecarPorts(job);
-    await planClusterStep(job);
-    // A local Kind context needs the machine-scoped decision before `planTls` exports its
-    // owned kubeconfig or this create writes its provisional record. Adopted contexts retain
-    // their existing per-request rules.
-    if (job.plan !== null && isOurs(job.plan.context)) {
-      requireOnboarded();
-      requireGrant('owned-cluster');
-    }
-    await planTls(job);
-    await planKubeTls(job);
-    await writeProvisionalRecord(job);
-  });
   try {
+    await ports.withPortPublication(async () => {
+      await resolvePairing(job);
+      settleAddressing(job);
+      // Before the cluster is probed or anything is written.
+      refuseEnforcedBefore880(requestedPreset(job), (job.resolved as Resolved).rcVersion);
+      await claimSidecarPorts(job);
+      await planClusterStep(job);
+      // A local Kind context needs the machine-scoped decision before `planTls` exports its
+      // owned kubeconfig or this create writes its provisional record. Adopted contexts retain
+      // their existing per-request rules.
+      if (job.plan !== null && isOurs(job.plan.context)) {
+        requireOnboarded();
+        requireGrant('owned-cluster');
+      }
+      await planTls(job);
+      await planKubeTls(job);
+      await writeProvisionalRecord(job);
+    });
     await routeTheName(job);
     await createTheWorkspace(job);
   } catch (error) {
     forgetTheRouteThisCreateMade(job);
     // As cleanup, so a stopped job's unwind runs it to the end, as the rollback does.
     await cleanup(async () => {
+      if (job.clusterReceipt.createdHere && !job.workspaceStarted) {
+        try {
+          await deleteCluster({ emit: job.emit });
+        } catch {
+          // A refused cleanup preserves uncertain ownership and the original failure.
+        }
+      }
       await forgetARecordWithNothingBehindIt(job);
     });
     throw error;

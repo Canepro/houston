@@ -5,10 +5,9 @@
  * here talks to a cluster, reads a file or spawns a process, so every other module in the
  * package may reach it and it may reach none of them.
  *
- * The label vocabulary is the load-bearing part. Selection is BY LABEL, never by name
- * prefix -- `isOurs` and `OWNER_SELECTOR` are the only two ways to ask "is this
- * houston's", and a name-prefix match was how a workspace called `houston-anything`
- * somebody else made once became eligible for teardown.
+ * Namespace selection uses OWNER_SELECTOR, never a name prefix. `isOurs` selects the
+ * fixed local context; it does not prove ownership. The cluster owner verifies its exact
+ * ConfigMap receipt before reuse or deletion, and namespace owners verify label and UID.
  */
 
 /**

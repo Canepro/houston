@@ -93,8 +93,9 @@ const ROOT = path.resolve(__dirname, '..');
 // collision probes, granted legacy adoption, unknown reads, locked teardown, final-namespace
 // reclamation, the reachability message, and collision-winner startup, rollback and deadline.
 // R4 covers publication uncertainty, durable-marker teardown, and pre-dispatch IDs.
-// Collection measured 4558 tests.
-const FLOOR = 4558;
+// R5 adds complete TLS creation-receipt rollback/reuse and full lock-waiter cases.
+// Collection measured 4584 tests.
+const FLOOR = 4584;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

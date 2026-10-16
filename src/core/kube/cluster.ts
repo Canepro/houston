@@ -27,6 +27,7 @@ import {
   OWNER_LABEL_KEY,
   OWNER_LABEL_VALUE,
   OWNER_SELECTOR,
+  PROBE_TIMEOUT,
 } from './names';
 import { reachable } from './reachability';
 import { which } from './tools';
@@ -44,6 +45,13 @@ export const CLUSTER_LOCK = '__cluster__';
 export const CREATE_TIMEOUT = 600.0;
 
 export const DELETE_TIMEOUT = 120.0;
+
+// A waiter may arrive at the start of the whole critical section: owned-client checks,
+// Kind list/create plus a full collision publication window, private/durable exports,
+// readiness, marker publication or pre-marker rollback. The adoption branch is shorter.
+// Keep the collision deadline at CREATE_TIMEOUT; this is only the lock admission budget.
+const CLUSTER_LOCK_TIMEOUT =
+  2 * CREATE_TIMEOUT + 4 * APPLY_TIMEOUT + 3 * PROBE_TIMEOUT + DELETE_TIMEOUT + 30;
 
 /** A cross-home Kind winner has a brief window to publish its ownership receipt. */
 const MARKER_PUBLICATION_INTERVAL_MS = 500;
@@ -167,6 +175,31 @@ async function markerState(
 /** Whether an existing fixed-name cluster carries Houston's exact ownership receipt. */
 async function clusterIsOurs(context: string, env?: NodeJS.ProcessEnv): Promise<boolean> {
   return (await markerState(context, env)) === 'owned';
+}
+
+/**
+ * Read only the existing owned client. Ready requires the exact marker and /readyz on
+ * the fixed context. No directory creation, Kind export, adoption or grant mutation.
+ * Unavailable means missing client/marker; unknown preserves failed or foreign evidence.
+ */
+export async function ownedRuntimeState(): Promise<'ready' | 'unavailable' | 'unknown'> {
+  if (!fs.existsSync(ownedKubeconfig())) return 'unavailable';
+  const env = { ...process.env, KUBECONFIG: ownedKubeconfig() };
+  try {
+    const marker = await markerState(CONTEXT, env);
+    if (marker === 'absent') return 'unavailable';
+    if (marker !== 'owned') return 'unknown';
+    const ready = await kube.run(['kubectl', '--context', CONTEXT, 'get', '--raw', '/readyz'], {
+      own: true,
+      env,
+      timeout: PROBE_TIMEOUT,
+    });
+    return ready.returncode === 0 && ready.stdout.toLowerCase().includes('ok')
+      ? 'ready'
+      : 'unknown';
+  } catch {
+    return 'unknown';
+  }
 }
 
 /** Export a Kind kubeconfig and read its context through that exact private file. */
@@ -376,6 +409,16 @@ async function createIfAbsent(
   return 'created';
 }
 
+/** Provisioning/recovery needs Kind; secure reuse of an existing client does not. */
+function requireKind(): void {
+  if (which('kind') === '') {
+    throw new PreflightError(
+      'kind is not installed, so houston cannot create a cluster. Install kind, or point ' +
+        'kubectl at a cluster you already have.',
+    );
+  }
+}
+
 /**
  * Create houston's cluster if it is not there, and return its context.
  *
@@ -392,20 +435,24 @@ export async function ensureCluster(
   emit: Emit = nullEmit,
   receipt?: ClusterReceipt,
 ): Promise<string> {
-  if (which('kind') === '') {
-    throw new PreflightError(
-      'kind is not installed, so houston cannot create a cluster. Install kind, or point ' +
-        'kubectl at a cluster you already have.',
-    );
-  }
-  const ready = await reproLock(CLUSTER_LOCK, async () => await ensureClusterLocked(emit), {
-    timeoutMs: CREATE_TIMEOUT * 1000,
-  });
+  // Keep the missing-tool preflight when no owned client exists, before any API probe.
+  if (!fs.existsSync(ownedKubeconfig())) requireKind();
+  const ready = await reproLock(
+    CLUSTER_LOCK,
+    async () => await ensureClusterLocked(emit, receipt),
+    {
+      timeoutMs: CLUSTER_LOCK_TIMEOUT * 1000,
+    },
+  );
   if (receipt !== undefined) receipt.createdHere = ready.createdHere;
   return ready.context;
 }
 
-async function ensureClusterLocked(emit: Emit): Promise<ReadyCluster> {
+async function ensureClusterLocked(emit: Emit, receipt?: ClusterReceipt): Promise<ReadyCluster> {
+  requireOnboarded();
+  requireGrant('owned-cluster');
+  if ((await ownedRuntimeState()) === 'ready') return { context: CONTEXT, createdHere: false };
+  requireKind();
   const kubeconfig = ownedKubeconfig();
   const create = await createIfAbsent(emit, kubeconfig);
   const createdHere = create === 'created';
@@ -440,6 +487,7 @@ async function ensureClusterLocked(emit: Emit): Promise<ReadyCluster> {
   // starts, another home can accept the receipt, so no raw rollback is safe, including
   // after a later absent or unavailable read that could race the outstanding apply.
   if (createdHere) await markClusterOwned(context);
+  if (receipt !== undefined) receipt.createdHere = createdHere;
   // The marker has been recorded. A downstream progress listener may fail, but that
   // must not turn a healthy marked cluster into a rollback candidate.
   info(emit, `cluster ${CLUSTER_NAME} ready at ${context}`, { phase: 'provision' });
@@ -500,7 +548,7 @@ export async function adoptIfUnmarked(emit: Emit = nullEmit): Promise<void> {
       await verifyExistingClusterOwnership(emit);
       await exportKubeconfig(ownedKubeconfig(), ownedEnv());
     },
-    { timeoutMs: CREATE_TIMEOUT * 1000 },
+    { timeoutMs: CLUSTER_LOCK_TIMEOUT * 1000 },
   );
 }
 
@@ -596,6 +644,6 @@ export async function deleteCluster({
       }
       return true;
     },
-    { timeoutMs: DELETE_TIMEOUT * 1000 },
+    { timeoutMs: CLUSTER_LOCK_TIMEOUT * 1000 },
   );
 }
