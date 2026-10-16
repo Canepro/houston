@@ -106,8 +106,9 @@ const ROOT = path.resolve(__dirname, '..');
 // public URL plus byte-preserved cleanup rendering, artifact URL and scalar redaction,
 // metadata-only Docker records, legacy catalogue uncertainty in both licence-output paths,
 // provisional licensing, Compose-list and env-file token presence, legacy sidecar
-// attribution, and a preset-only Kubernetes token: 46 cases over 4551, total 4597.
-const FLOOR = 4597;
+// attribution, a preset-only Kubernetes token, and evidence reading `effective_license` before
+// the Secret lifecycle flag: 47 cases over 4551, total 4598.
+const FLOOR = 4598;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

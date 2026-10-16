@@ -296,6 +296,29 @@ describe('the record', () => {
     });
   });
 
+  it('reports the licence Rocket.Chat ran with, not one a killed create had not installed', async () => {
+    const examples = [
+      { name: 'e3e-not-installed', extra: { licensed: true, effective_license: false } },
+      {
+        name: 'e3e-token-only',
+        extra: { licensed: true, effective_license: false, reg_token_supplied: true },
+      },
+      { name: 'e3e-installed', extra: { licensed: true, effective_license: true } },
+      { name: 'e3e-retained', extra: { effective_license: true, reg_token_supplied: false } },
+    ];
+    const observed: unknown[] = [];
+    for (const example of examples) {
+      await workspaceNamed(example.name, { reg_token_supplied: false, ...example.extra });
+      observed.push([example.name, (await record(example.name)).license]);
+    }
+    expect(observed).toEqual([
+      ['e3e-not-installed', { required: false, supplied: false, source: null }],
+      ['e3e-token-only', { required: false, supplied: true, source: 'reg_token' }],
+      ['e3e-installed', { required: false, supplied: true, source: 'license' }],
+      ['e3e-retained', { required: false, supplied: true, source: 'license' }],
+    ]);
+  });
+
   it('reads a legacy Compose token only from supported Rocket.Chat environments', async () => {
     const examples: Array<{
       name: string;

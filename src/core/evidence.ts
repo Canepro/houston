@@ -278,7 +278,14 @@ async function licenseOf(meta: Metadata, deployment: string): Promise<Record<str
     }
     if (!required && unavailable) required = null;
   }
-  if (extra.licensed === true) return { required, supplied: true, source: 'license' };
+  // Kubernetes `licensed` is the Secret lifecycle flag: a killed create can set it before Helm
+  // installs the licence. `effective_license`, when recorded, is what Rocket.Chat ran with,
+  // and inspect and the notes read it the same way.
+  const licensed =
+    typeof extra.effective_license === 'boolean'
+      ? extra.effective_license
+      : extra.licensed === true;
+  if (licensed) return { required, supplied: true, source: 'license' };
   if (extra.reg_token_supplied === true) return { required, supplied: true, source: 'reg_token' };
   if (extra.reg_token_supplied === false) return { required, supplied: false, source: null };
   const inferred = await tokenInCompose(meta);
