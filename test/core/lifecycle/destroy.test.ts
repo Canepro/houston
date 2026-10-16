@@ -8,6 +8,7 @@ import * as paths from '../../../src/core/runner/paths';
 
 import type * as DestroyNS from '../../../src/core/lifecycle/destroy';
 import type * as JournalNS from '../../../src/core/journal';
+import type * as LocksNS from '../../../src/core/runner/locks';
 
 it('Grafana public URL regression: destroying a TLS workspace removes its shared-namespace resources', async () => {
   jest.resetModules();
@@ -159,7 +160,11 @@ describe('tearing a workspace down when its record will not go', () => {
 
   it('warns, keeps the record and still drops the edge route', async () => {
     const destroy = await load();
-    const ws = await makeUnremovable('kub', { runtime: 'kubernetes', namespace: 'houston-kub' });
+    const ws = await makeUnremovable('kub', {
+      runtime: 'kubernetes',
+      namespace: 'houston-kub',
+      context: 'prod',
+    });
     config.updateConfig((cfg) => {
       cfg.default_repro = 'kub';
     });
@@ -172,7 +177,7 @@ describe('tearing a workspace down when its record will not go', () => {
       removed: true,
       found: true,
       runtime: 'kubernetes',
-      context: 'kind-houston-local',
+      context: 'prod',
     });
 
     expect(await paths.exists('kub')).toBe(true);
@@ -299,6 +304,7 @@ describe('the repair notes of a workspace that is torn down', () => {
       '../../../src/core/edge/routes',
       '../../../src/core/runner/engine',
       '../../../src/core/kube/namespace',
+      '../../../src/core/kube/cluster',
       '../../../src/core/kube/operator',
       '../../../src/core/kube/monitoring',
     ]) {
@@ -307,8 +313,15 @@ describe('the repair notes of a workspace that is torn down', () => {
     jest.resetModules();
   });
 
-  function load() {
+  function load(adoption?: { events: string[]; fail: boolean }) {
     jest.resetModules();
+    jest.doMock('../../../src/core/kube/cluster', () => ({
+      ...jest.requireActual('../../../src/core/kube/cluster'),
+      adoptIfUnmarked: async () => {
+        adoption?.events.push('adopt');
+        if (adoption?.fail === true) throw new Error('ownership unknown');
+      },
+    }));
     jest.doMock('../../../src/core/lifecycle/ownership', () => ({
       ...jest.requireActual('../../../src/core/lifecycle/ownership'),
       mayDestroy: async () => [true, ''],
@@ -336,7 +349,10 @@ describe('the repair notes of a workspace that is torn down', () => {
     }));
     jest.doMock('../../../src/core/kube/namespace', () => ({
       ...jest.requireActual('../../../src/core/kube/namespace'),
-      deleteNamespace: async () => true,
+      deleteNamespace: async () => {
+        adoption?.events.push('delete');
+        return true;
+      },
     }));
     jest.doMock('../../../src/core/kube/operator', () => ({
       ...jest.requireActual('../../../src/core/kube/operator'),
@@ -382,6 +398,70 @@ describe('the repair notes of a workspace that is torn down', () => {
     await down;
     expect(said.at(-1)).toBe("'busy' down (data kept)");
   });
+
+  it('rechecks local-cluster authority after a waiting teardown acquires the workspace lock', async () => {
+    const { destroy } = load();
+    const { reproLock } = require('../../../src/core/runner/locks') as typeof LocksNS;
+    await writeRecord('changed', metadata({ name: 'changed', extra: { runtime: 'docker' } }));
+    let release = (): void => undefined;
+    const gate = { taken: false };
+    const held = reproLock('changed', async () => {
+      await new Promise<void>((done) => {
+        release = done;
+        gate.taken = true;
+      });
+      await writeRecord(
+        'changed',
+        metadata({
+          name: 'changed',
+          extra: { runtime: 'kubernetes', context: 'kind-houston-local' },
+        }),
+      );
+    });
+    for (let wait = 0; wait < 200 && !gate.taken; wait += 1)
+      await new Promise((done) => setTimeout(done, 10));
+    const said: string[] = [];
+    const down = destroy.teardown('changed', { emit: (event) => void said.push(event.message) });
+    const result = down.catch((error: unknown) => error);
+    for (let wait = 0; wait < 200 && said.length === 0; wait += 1)
+      await new Promise((done) => setTimeout(done, 10));
+    expect(said[0]).toContain('waiting');
+    release();
+    await held;
+    expect(await result).toMatchObject({ code: 'GATE_NOT_ONBOARDED' });
+    expect(await paths.exists('changed')).toBe(true);
+  });
+
+  it.each([false, true])(
+    'adopts before deleting the final legacy namespace, unknown=%s',
+    async (fail) => {
+      const adoption = { events: [] as string[], fail };
+      const { destroy } = load(adoption);
+      config.updateConfig((stored) => {
+        grant(stored, 'owned-cluster');
+      });
+      await writeRecord(
+        'legacy',
+        metadata({
+          name: 'legacy',
+          extra: { runtime: 'kubernetes', context: 'kind-houston-local' },
+        }),
+      );
+      const result = destroy.teardown('legacy', { volumes: true, confirm: true });
+      if (fail) {
+        await expect(result).rejects.toThrow('ownership unknown');
+        expect(adoption.events).toEqual(['adopt']);
+        expect(await paths.exists('legacy')).toBe(true);
+      } else {
+        await expect(result).resolves.toMatchObject({ removed: true });
+        expect(adoption.events).toEqual(['adopt', 'delete']);
+      }
+      config.updateConfig((stored) => {
+        delete stored.onboarding;
+        delete stored.grants;
+      });
+    },
+  );
 
   it('takes them on --volumes, keeps them on a plain down, and leaves every other subject alone', async () => {
     // Seen on the owner's box: 28 `create_unfinished` notes for `alice-rc8-5-1`, all still

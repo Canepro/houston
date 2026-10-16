@@ -17,7 +17,7 @@ import { Interrupted } from '../../../src/seams/exec';
 import type { KubectlResult } from '../../../src/seams/kubectl';
 
 import { workspaceNamespaces } from '../../../src/core/kube/capabilities';
-import { deleteCluster, ensureCluster } from '../../../src/core/kube/cluster';
+import { adoptIfUnmarked, deleteCluster, ensureCluster } from '../../../src/core/kube/cluster';
 import { kube, ownedKubeconfig, type RunOptions } from '../../../src/core/kube/exec';
 import { mongoManifest } from '../../../src/core/kube/manifests';
 import {
@@ -397,94 +397,116 @@ describe('the cluster houston makes for itself', () => {
     expect(calls.some(({ argv }) => argv.includes('create'))).toBe(false);
   });
 
-  it('waits for a marker published by the winner of a cross-home create collision', async () => {
-    // Each HOUSTON_HOME has its own lock. A loser that sees Kind's `already exists` response
-    // cannot write a marker, but the winner may still be exporting and publishing its own one.
-    // The only safe wait is private probing for that exact receipt.
-    config.updateConfig((stored) => {
-      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
-    });
-    let reads = 0;
-    route((joined) => {
-      if (joined.includes('get clusters')) return { stdout: '' };
-      if (joined.includes('create cluster')) {
-        return { returncode: 1, stderr: 'ERROR: node(s) already exist' };
+  it.each(['absent', 'export failure', 'marker failure'])(
+    'waits for a marker after a collision and %s',
+    async (failure) => {
+      // Each HOUSTON_HOME has its own lock. A loser that sees Kind's `already exists` response
+      // cannot write a marker, but the winner may still be exporting and publishing its own one.
+      // The only safe wait is private probing for that exact receipt.
+      config.updateConfig((stored) => {
+        grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+      });
+      let reads = 0;
+      let exportsSeen = 0;
+      route((joined) => {
+        if (joined.includes('get clusters')) return { stdout: '' };
+        if (joined.includes('create cluster')) {
+          return { returncode: 1, stderr: 'ERROR: node(s) already exist' };
+        }
+        if (joined.includes('export kubeconfig')) {
+          exportsSeen += 1;
+          if (failure === 'export failure' && exportsSeen === 1)
+            return { returncode: 1, stderr: 'node starting' };
+        }
+        if (joined.includes('current-context')) return { stdout: CONTEXT };
+        if (joined.includes(`get configmap ${CLUSTER_OWNER_CONFIGMAP}`)) {
+          reads += 1;
+          if (failure === 'marker failure' && reads === 1)
+            return { returncode: 1, stderr: 'connection refused' };
+          return {
+            stdout: failure !== 'export failure' && reads === 1 ? '' : ownedClusterMarker(),
+          };
+        }
+        if (joined.includes('/readyz')) return { stdout: 'ok' };
+        return undefined;
+      });
+
+      await expect(ensureCluster()).resolves.toBe(CONTEXT);
+
+      const exports = calls.filter(
+        ({ argv }) => argv.includes('export') && argv.includes('kubeconfig'),
+      );
+      expect(exports).toHaveLength(3);
+      for (const call of exports.slice(0, -1)) {
+        expect(String(call.argv[call.argv.indexOf('--kubeconfig') + 1])).not.toBe(
+          ownedKubeconfig(),
+        );
       }
-      if (joined.includes('current-context')) return { stdout: CONTEXT };
-      if (joined.includes(`get configmap ${CLUSTER_OWNER_CONFIGMAP}`)) {
-        reads += 1;
-        return { stdout: reads === 1 ? '' : ownedClusterMarker() };
-      }
-      if (joined.includes('/readyz')) return { stdout: 'ok' };
-      return undefined;
-    });
+      const durableExport = exports.at(-1);
+      expect(durableExport).toBeDefined();
+      if (durableExport === undefined)
+        throw new Error('durable kubeconfig export was not recorded');
+      expect(String(durableExport.argv[durableExport.argv.indexOf('--kubeconfig') + 1])).toBe(
+        ownedKubeconfig(),
+      );
+      const markerReads = calls.filter(
+        ({ argv }) => argv.includes('get') && argv.includes('configmap'),
+      );
+      expect(markerReads).toHaveLength(failure === 'export failure' ? 1 : 2);
+      expect(markerReads.every((call) => call.options.env?.KUBECONFIG !== ownedKubeconfig())).toBe(
+        true,
+      );
+      expect(calls.some(({ argv }) => argv.includes('apply') && argv.includes('--filename'))).toBe(
+        false,
+      );
+      expect(calls.some(({ argv }) => argv.includes('get') && argv.includes('namespace'))).toBe(
+        false,
+      );
+    },
+  );
 
-    await expect(ensureCluster()).resolves.toBe(CONTEXT);
+  it.each(['absent', 'unavailable'])(
+    'bounds a cross-home collision wait with marker %s',
+    async (state) => {
+      config.updateConfig((stored) => {
+        grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+      });
+      route((joined) => {
+        if (joined.includes('get clusters')) return { stdout: '' };
+        if (joined.includes('create cluster')) {
+          return { returncode: 1, stderr: 'ERROR: node(s) already exist' };
+        }
+        if (joined.includes('current-context')) return { stdout: CONTEXT };
+        if (joined.includes(`get configmap ${CLUSTER_OWNER_CONFIGMAP}`))
+          return state === 'absent'
+            ? { stdout: '' }
+            : { returncode: 1, stderr: 'connection refused' };
+        return undefined;
+      });
 
-    const exports = calls.filter(
-      ({ argv }) => argv.includes('export') && argv.includes('kubeconfig'),
-    );
-    expect(exports).toHaveLength(3);
-    for (const call of exports.slice(0, -1)) {
-      expect(String(call.argv[call.argv.indexOf('--kubeconfig') + 1])).not.toBe(ownedKubeconfig());
-    }
-    const durableExport = exports.at(-1);
-    expect(durableExport).toBeDefined();
-    if (durableExport === undefined) throw new Error('durable kubeconfig export was not recorded');
-    expect(String(durableExport.argv[durableExport.argv.indexOf('--kubeconfig') + 1])).toBe(
-      ownedKubeconfig(),
-    );
-    const markerReads = calls.filter(
-      ({ argv }) => argv.includes('get') && argv.includes('configmap'),
-    );
-    expect(markerReads).toHaveLength(2);
-    expect(markerReads.every((call) => call.options.env?.KUBECONFIG !== ownedKubeconfig())).toBe(
-      true,
-    );
-    expect(calls.some(({ argv }) => argv.includes('apply') && argv.includes('--filename'))).toBe(
-      false,
-    );
-    expect(calls.some(({ argv }) => argv.includes('get') && argv.includes('namespace'))).toBe(
-      false,
-    );
-  });
+      await expect(ensureCluster()).rejects.toBeInstanceOf(
+        state === 'absent' ? ConflictError : DockerError,
+      );
 
-  it('refuses a cross-home create collision when its marker never appears', async () => {
-    config.updateConfig((stored) => {
-      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
-    });
-    route((joined) => {
-      if (joined.includes('get clusters')) return { stdout: '' };
-      if (joined.includes('create cluster')) {
-        return { returncode: 1, stderr: 'ERROR: node(s) already exist' };
-      }
-      if (joined.includes('current-context')) return { stdout: CONTEXT };
-      if (joined.includes(`get configmap ${CLUSTER_OWNER_CONFIGMAP}`)) return { stdout: '' };
-      return undefined;
-    });
+      const exports = calls.filter(
+        ({ argv }) => argv.includes('export') && argv.includes('kubeconfig'),
+      );
+      expect(exports).toHaveLength(20);
+      expect(
+        exports.every(
+          (call) => String(call.argv[call.argv.indexOf('--kubeconfig') + 1]) !== ownedKubeconfig(),
+        ),
+      ).toBe(true);
+      expect(calls.some(({ argv }) => argv.includes('apply') && argv.includes('--filename'))).toBe(
+        false,
+      );
+      expect(calls.some(({ argv }) => argv.includes('get') && argv.includes('namespace'))).toBe(
+        false,
+      );
+    },
+  );
 
-    await expect(ensureCluster()).rejects.toBeInstanceOf(ConflictError);
-
-    const exports = calls.filter(
-      ({ argv }) => argv.includes('export') && argv.includes('kubeconfig'),
-    );
-    expect(exports.length).toBeGreaterThan(1);
-    expect(
-      exports.every(
-        (call) => String(call.argv[call.argv.indexOf('--kubeconfig') + 1]) !== ownedKubeconfig(),
-      ),
-    ).toBe(true);
-    expect(calls.some(({ argv }) => argv.includes('apply') && argv.includes('--filename'))).toBe(
-      false,
-    );
-    expect(calls.some(({ argv }) => argv.includes('get') && argv.includes('namespace'))).toBe(
-      false,
-    );
-  });
-
-  it('refuses an unmarked same-named cluster even when it has a Houston-labelled namespace', async () => {
-    // The namespace label proves only that namespace. Another operator can forge it, so an
-    // unmarked cluster cannot become ours or leave a kubeconfig in Houston's durable state.
+  it('adopts an unmarked legacy cluster with a Houston-labelled workspace through a private probe', async () => {
     config.updateConfig((stored) => {
       grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
     });
@@ -498,21 +520,26 @@ describe('the cluster houston makes for itself', () => {
       }
       return undefined;
     });
-    await expect(ensureCluster()).rejects.toBeInstanceOf(ConflictError);
+    await expect(ensureCluster()).resolves.toBe(CONTEXT);
     expect(calls.some(({ argv }) => argv.includes('create'))).toBe(false);
-    expect(calls.some(({ argv }) => argv.includes('get') && argv.includes('namespace'))).toBe(
-      false,
+    expect(
+      calls.some(({ argv }) => argv.includes('--selector') && argv.includes(OWNER_SELECTOR)),
+    ).toBe(true);
+    const publication = calls.find(
+      ({ argv }) => argv.includes('apply') && argv.includes('--filename'),
     );
-    expect(calls.some(({ argv }) => argv.includes('apply') && argv.includes('--filename'))).toBe(
-      false,
-    );
+    expect(publication).toBeDefined();
     const probe = calls.find(({ argv }) => argv.includes('export') && argv.includes('kubeconfig'));
     const probeConfig = String(probe?.argv[probe.argv.indexOf('--kubeconfig') + 1]);
     expect(probeConfig).not.toBe(ownedKubeconfig());
     expect(probe?.options.env?.KUBECONFIG).toBe(probeConfig);
     const markerRead = calls.find(({ argv }) => argv.includes('get') && argv.includes('configmap'));
     expect(markerRead?.options.env?.KUBECONFIG).toBe(probeConfig);
-    expect(fs.existsSync(ownedKubeconfig())).toBe(false);
+    expect(publication?.options.env?.KUBECONFIG).toBe(probeConfig);
+    const durable = calls.findIndex(
+      ({ argv }) => argv.includes('export') && argv.includes(ownedKubeconfig()),
+    );
+    expect(durable).toBeGreaterThan(calls.indexOf(publication!));
     expect(fs.existsSync(path.dirname(probeConfig))).toBe(false);
   });
 
@@ -533,6 +560,63 @@ describe('the cluster houston makes for itself', () => {
     );
     expect(fs.existsSync(ownedKubeconfig())).toBe(false);
   });
+
+  it.each([
+    { returncode: 1, stderr: 'forbidden' },
+    { stdout: '{broken' },
+    { stdout: '{}' },
+    { stdout: '{"items":[{}]}' },
+  ])('keeps unknown legacy namespace reads unadopted: %j', async (reply) => {
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster');
+    });
+    route((joined) => {
+      if (joined.includes('get clusters')) return { stdout: CLUSTER_NAME };
+      if (joined.includes('current-context')) return { stdout: CONTEXT };
+      if (joined.includes('get namespace')) return reply;
+      return undefined;
+    });
+    await expect(ensureCluster()).rejects.toBeInstanceOf(DockerError);
+    expect(calls.some(({ argv }) => argv.includes('apply') || argv.includes('delete'))).toBe(false);
+    expect(
+      calls.some(({ argv }) => argv.includes('export') && argv.includes(ownedKubeconfig())),
+    ).toBe(false);
+  });
+
+  it('refuses an unknown Kind list before creation or legacy adoption', async () => {
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster');
+    });
+    route((joined) =>
+      joined.includes('get clusters') ? { returncode: 1, stderr: 'Docker unavailable' } : undefined,
+    );
+    await expect(ensureCluster()).rejects.toBeInstanceOf(DockerError);
+    await expect(adoptIfUnmarked()).rejects.toBeInstanceOf(DockerError);
+    expect(calls.every(({ argv }) => argv.join(' ') === 'kind get clusters')).toBe(true);
+  });
+
+  it.each(['foreign', 'malformed'])(
+    'refuses a %s collision marker immediately without adopting or deleting',
+    async (kind) => {
+      config.updateConfig((stored) => {
+        grant(stored, 'owned-cluster');
+      });
+      route((joined) => {
+        if (joined.includes('create cluster')) return { returncode: 1, stderr: 'already exists' };
+        if (joined.includes('get configmap'))
+          return { stdout: kind === 'foreign' ? '{"metadata":{},"data":{}}' : '{broken' };
+        return undefined;
+      });
+      await expect(ensureCluster()).rejects.toThrow();
+      expect(calls.filter(({ argv }) => argv.includes('export'))).toHaveLength(1);
+      expect(
+        calls.some(
+          ({ argv }) =>
+            argv.includes('apply') || argv.includes('delete') || argv.includes('namespace'),
+        ),
+      ).toBe(false);
+    },
+  );
 
   it.each(['kubeconfig export', 'readiness'])(
     'rolls back a newly created unmarked cluster when %s fails',

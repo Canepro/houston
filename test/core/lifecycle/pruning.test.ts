@@ -66,6 +66,7 @@ type Mode = (typeof MODES)[number];
 
 describe('removing one workspace', () => {
   afterEach(() => {
+    jest.dontMock('../../../src/core/kube/cluster');
     jest.resetModules();
   });
 
@@ -86,6 +87,13 @@ describe('removing one workspace', () => {
 
   async function load(mode: Mode): Promise<typeof PruningNS> {
     jest.resetModules();
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster');
+    });
+    jest.doMock('../../../src/core/kube/cluster', () => ({
+      ...jest.requireActual('../../../src/core/kube/cluster'),
+      adoptIfUnmarked: async () => undefined,
+    }));
     const errors = require('../../../src/lib/errors') as typeof ErrorsNS;
     jest.doMock('../../../src/core/runner/engine', () => ({
       ...jest.requireActual('../../../src/core/runner/engine'),
@@ -246,11 +254,12 @@ describe('a whole prune', () => {
 
   interface World {
     namespaces?: string[];
+    namespaceDeleted?: () => void;
     context?: string;
     owners?: Record<string, string | null>;
     deleteCluster?: () => Promise<boolean>;
     reclaimError?: () => Error;
-    reclaimable?: boolean;
+    reclaimable?: boolean | (() => boolean);
     down?: (name: string) => Promise<number>;
     running?: Record<string, string>;
     /** Whether a Kubernetes workspace's workload answers: true is "not down". */
@@ -285,9 +294,12 @@ describe('a whole prune', () => {
     }));
     jest.doMock('../../../src/core/kube/cluster', () => ({
       ...jest.requireActual('../../../src/core/kube/cluster'),
+      adoptIfUnmarked: async () => undefined,
       clusterReclaimable: async () => {
         if (world.reclaimError !== undefined) throw world.reclaimError();
-        return world.reclaimable ?? false;
+        return typeof world.reclaimable === 'function'
+          ? world.reclaimable()
+          : (world.reclaimable ?? false);
       },
       deleteCluster: async (options: unknown) => {
         reclaimed.push(options);
@@ -304,7 +316,10 @@ describe('a whole prune', () => {
         return true;
       },
       // Reached only by a Kubernetes workspace that is prunable, which `workload` decides.
-      deleteNamespace: async () => true,
+      deleteNamespace: async () => {
+        world.namespaceDeleted?.();
+        return true;
+      },
     }));
     jest.doMock('../../../src/core/kube/exec', () => {
       const actual = jest.requireActual('../../../src/core/kube/exec');
@@ -314,6 +329,7 @@ describe('a whole prune', () => {
           run: async (argv: string[]): Promise<KubectlResult> => {
             if (argv.includes('delete') && argv.includes('namespace')) {
               deleted.push(argv[argv.indexOf('namespace') + 1] as string);
+              world.namespaceDeleted?.();
             }
             return { returncode: 0, stdout: '', stderr: '' } as KubectlResult;
           },
@@ -445,6 +461,45 @@ describe('a whole prune', () => {
     expect(out.cluster).toBe(true);
     expect(world.reclaimed).toHaveLength(1);
   });
+
+  it.each(['workspace', 'orphan'])(
+    'rechecks reclamation after the last local %s is removed',
+    async (kind) => {
+      const state = { empty: false };
+      const world = load({
+        namespaces: kind === 'orphan' ? ['houston-last'] : [],
+        owners: { 'houston-last': 'me' },
+        workload: false,
+        reclaimable: () => state.empty,
+        deleteCluster: async () => true,
+        namespaceDeleted: () => {
+          state.empty = true;
+        },
+      });
+      config.updateConfig((stored) => {
+        grant(stored, 'owned-cluster');
+      });
+      if (kind === 'workspace') {
+        await world.record.writeRecord(
+          'last',
+          world.record.metadata({
+            name: 'last',
+            extra: { runtime: 'kubernetes', context: 'kind-houston-local' },
+          }),
+        );
+      }
+      const out = await world.pruning.prune({
+        confirm: true,
+        orphans: kind === 'orphan',
+        only: kind === 'workspace' ? ['last'] : [],
+      });
+      expect(out.cluster).toBe(true);
+      expect(world.reclaimed).toHaveLength(1);
+      expect(kind === 'workspace' ? out.removed : out.orphans).toEqual(
+        kind === 'workspace' ? ['last'] : ['houston-last'],
+      );
+    },
+  );
 
   it('audits the namespaces it swept, not only the records', async () => {
     // The subject was the local records alone, so a sweep of namespaces and no records

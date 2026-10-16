@@ -89,10 +89,10 @@ const ROOT = path.resolve(__dirname, '..');
 // monitoring, pin and port, the operator password off every argv, the operator's memory and
 // PodMonitor, serve's shutdown, and the usage and wording answers it found untrue.
 // Eight onboarding-grant and local-Kind lifecycle boundary cases complete the port.
-// A later ownership follow-up replaces its adoption case with a forgeable-label refusal and
-// adds the ownership and rollback cases. A failed-create review adds one race-preservation
-// case for each failure channel. The measured registered suite is 4525 tests.
-const FLOOR = 4525;
+// Ownership and rollback cases preserve concurrent creators. Fifteen landing cases cover
+// transient collision probes, granted legacy adoption, unknown reads, locked teardown,
+// and reclaiming the cluster after the final namespace. Collection measured 4540 tests.
+const FLOOR = 4540;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

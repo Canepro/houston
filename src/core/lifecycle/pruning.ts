@@ -19,7 +19,7 @@ import { deregister as deregisterRoute } from '../edge/routes';
 import { detach } from '../edge/networks';
 import { clearWorkspace } from '../journal';
 import { workspaceNamespaces } from '../kube/capabilities';
-import { clusterReclaimable, deleteCluster } from '../kube/cluster';
+import { adoptIfUnmarked, clusterReclaimable, deleteCluster } from '../kube/cluster';
 import { planCluster } from '../kube/context';
 import { kube } from '../kube/exec';
 import { CONTEXT as KUBE_CONTEXT, APPLY_TIMEOUT, isOurs } from '../kube/names';
@@ -253,7 +253,10 @@ export async function sweepOrphanNamespaces(
   // wait further down used the hardcoded `CONTEXT` -- so on any cluster houston did not
   // create the two disagreed and the wait read the failure as "gone".
   const ctx = context || (await orphanContext());
-  if (stray.length > 0) requireOwnedClusterAuthority(ctx);
+  if (stray.length > 0) {
+    requireOwnedClusterAuthority(ctx);
+    if (isOurs(ctx)) await adoptIfUnmarked(emit);
+  }
   if (stray.length > 0) {
     const me = auditActor();
     for (const ns of stray) {
@@ -345,6 +348,8 @@ export async function pruneKubernetes(name: string, emit: Emit, removed: string[
   const context = isTruthy(extra[config.EXTRA_CONTEXT])
     ? String(extra[config.EXTRA_CONTEXT])
     : KUBE_CONTEXT;
+  requireOwnedClusterAuthority(context);
+  if (isOurs(context)) await adoptIfUnmarked(emit);
   const ns = await namespaceFor(name);
   const forwards = bag(extra.scenario_forwards);
   for (const uiPid of Object.values(forwards)) {
@@ -527,13 +532,12 @@ export async function prune({
   }
   // Consult this before a mixed prune starts. Otherwise a denied local-cluster cleanup
   // could arrive after Compose workspaces had already been removed.
-  if (
-    clusterPlan.kind === 'reclaim' ||
-    (await targetsUseOwnedCluster(targets)) ||
-    (stray.length > 0 && isOurs(orphanCtx))
-  ) {
+  const removesLocalNamespaces =
+    (await targetsUseOwnedCluster(targets)) || (stray.length > 0 && isOurs(orphanCtx));
+  if (clusterPlan.kind === 'reclaim' || removesLocalNamespaces) {
     requireOwnedClusterAuthority(KUBE_CONTEXT);
   }
+  if (removesLocalNamespaces) await adoptIfUnmarked(emit);
   // The NAMESPACES go in the subject too. Recording only `targets` meant a sweep that
   // deleted three namespaces and no local records wrote `- prune - system ok`, with no
   // trace anywhere of what it destroyed.
@@ -546,6 +550,9 @@ export async function prune({
     targets,
     removed,
     orphans: swept,
-    cluster: await reclaimPlannedCluster(clusterPlan, emit),
+    cluster: await reclaimPlannedCluster(
+      removesLocalNamespaces ? await planClusterReclaim() : clusterPlan,
+      emit,
+    ),
   };
 }

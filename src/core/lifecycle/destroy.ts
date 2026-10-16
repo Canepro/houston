@@ -16,6 +16,7 @@ import { actor as auditActor, record as auditRecord } from '../audit';
 import { detach } from '../edge/networks';
 import { deregister as deregisterRoute } from '../edge/routes';
 import { clearWorkspace } from '../journal';
+import { adoptIfUnmarked } from '../kube/cluster';
 import { deleteNamespace, namespaceFor } from '../kube/namespace';
 import {
   MONITORING_NAMESPACE,
@@ -190,6 +191,12 @@ export async function teardownKubernetes(
   const context = isTruthy(extra[config.EXTRA_CONTEXT])
     ? String(extra[config.EXTRA_CONTEXT])
     : KUBE_CONTEXT;
+  if (isOurs(context)) {
+    requireOnboarded();
+    requireGrant('owned-cluster');
+    await adoptIfUnmarked(emit);
+  }
+  auditRecord(volumes ? 'down-volumes' : 'down', target);
   await stopTheForwards(meta, target);
   const found = await deleteNamespace(target, { context, volumes, emit });
   // BRANCHED ON, at last. This value was returned to the caller as `{"found": ...}` and
@@ -258,23 +265,6 @@ export async function teardown(
       throw new ConflictError(why);
     }
   }
-  if ((await topology.ofRepro(target)) === topology.KUBERNETES) {
-    const meta = await readMeta(target);
-    const extra = bag(meta.extra);
-    const context = isTruthy(extra[config.EXTRA_CONTEXT])
-      ? String(extra[config.EXTRA_CONTEXT])
-      : KUBE_CONTEXT;
-    // This is the public lifecycle boundary. An adopted cluster retains its
-    // namespace-only teardown contract; a local Kind workspace needs the
-    // machine-scoped decision before forwards or namespaces are touched.
-    if (isOurs(context)) {
-      requireOnboarded();
-      requireGrant('owned-cluster');
-    }
-  }
-  // Recorded BEFORE the work, not after: a teardown that dies half way through has still
-  // destroyed containers, and that is exactly the event someone will come looking for.
-  auditRecord(volumes ? 'down-volumes' : 'down', target);
   // Locked: `down` during a create races `docker compose up` and leaves orphaned
   // containers behind.
   const body = async (): Promise<Record<string, unknown> | null> => {
@@ -283,6 +273,8 @@ export async function teardown(
     if ((await topology.ofRepro(target)) === topology.KUBERNETES) {
       return await teardownKubernetes(target, volumes, emit);
     }
+    // Record admitted work under the lock, before its first destructive operation.
+    auditRecord(volumes ? 'down-volumes' : 'down', target);
     await teardownCompose(target, volumes);
     return null;
   };

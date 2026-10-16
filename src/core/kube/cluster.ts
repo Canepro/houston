@@ -26,6 +26,7 @@ import {
   CONTEXT,
   OWNER_LABEL_KEY,
   OWNER_LABEL_VALUE,
+  OWNER_SELECTOR,
 } from './names';
 import { reachable } from './reachability';
 import { which } from './tools';
@@ -68,21 +69,29 @@ function ownershipManifest(): string {
   });
 }
 
-/** Write the receipt only after this invocation created the cluster. */
-async function markClusterOwned(context: string): Promise<void> {
+/** Publish ownership after creation or a granted legacy adoption. */
+async function markClusterOwned(context: string, env?: NodeJS.ProcessEnv): Promise<void> {
   const result = await kube.run(
     ['kubectl', '--context', context, '--namespace', 'kube-system', 'apply', '--filename', '-'],
-    { timeout: APPLY_TIMEOUT, own: true, input: ownershipManifest() },
+    {
+      timeout: APPLY_TIMEOUT,
+      own: true,
+      input: ownershipManifest(),
+      ...(env === undefined ? {} : { env }),
+    },
   );
   if (result.returncode !== 0) {
     throw new CreateFailedError(
-      `cluster ${CLUSTER_NAME} was created but its ownership marker could not be recorded: ` +
-        why(result),
+      `cluster ${CLUSTER_NAME} ownership marker could not be recorded: ` + why(result),
     );
   }
 }
 
 type MarkerState = 'owned' | 'absent' | 'not-owned';
+
+/** Transport failures can be retried only by the bounded create-collision waiter. */
+class OwnershipProbeUnavailable extends DockerError {}
+class KubeconfigUnavailable extends CreateFailedError {}
 
 /**
  * Read an existing fixed-name cluster's exact ownership receipt.
@@ -108,7 +117,9 @@ async function markerState(context: string, env?: NodeJS.ProcessEnv): Promise<Ma
     { timeout: APPLY_TIMEOUT, own: true, ...(env === undefined ? {} : { env }) },
   );
   if (result.returncode !== 0) {
-    throw new DockerError(`cluster ownership marker could not be read: ${why(result)}`);
+    throw new OwnershipProbeUnavailable(
+      `cluster ownership marker could not be read: ${why(result)}`,
+    );
   }
   // --ignore-not-found makes an absent ConfigMap a successful empty response.
   if (result.stdout.trim() === '') return 'absent';
@@ -142,7 +153,7 @@ async function exportKubeconfig(kubeconfig: string, env: NodeJS.ProcessEnv): Pro
     { timeout: APPLY_TIMEOUT, own: true, env },
   );
   if (exported.returncode !== 0) {
-    throw new CreateFailedError(
+    throw new KubeconfigUnavailable(
       `cluster ${CLUSTER_NAME} exists but its kubeconfig could not be read: ${why(exported)}`,
     );
   }
@@ -169,34 +180,87 @@ function ownershipConflict(): ConflictError {
 }
 
 /** Probe through a disposable kubeconfig before Houston accepts an existing cluster. */
-async function privateMarkerState(): Promise<MarkerState> {
+async function privateMarkerState(adopt = false, emit: Emit = nullEmit): Promise<MarkerState> {
   const directory = makeTempDir('houston-kind-probe-');
   const kubeconfig = path.join(directory, 'config');
   const env = { ...process.env, KUBECONFIG: kubeconfig };
   try {
     const context = await exportKubeconfig(kubeconfig, env);
-    return await markerState(context, env);
+    const state = await markerState(context, env);
+    if (state !== 'absent' || !adopt) return state;
+    const result = await kube.run(
+      [
+        'kubectl',
+        '--context',
+        context,
+        'get',
+        'namespace',
+        '--selector',
+        OWNER_SELECTOR,
+        '--output',
+        'json',
+      ],
+      { timeout: APPLY_TIMEOUT, own: true, env },
+    );
+    if (result.returncode !== 0) {
+      throw new DockerError(`legacy cluster workspaces could not be read: ${why(result)}`);
+    }
+    let payload: Record<string, unknown> | null;
+    try {
+      payload = object(JSON.parse(result.stdout) as unknown);
+    } catch {
+      throw new DockerError('legacy cluster workspaces could not be read: invalid JSON');
+    }
+    if (
+      !Array.isArray(payload?.items) ||
+      payload.items.some((item: unknown) => {
+        const metadata = object(object(item)?.metadata);
+        return typeof metadata?.name !== 'string' || metadata.name === '';
+      })
+    ) {
+      throw new DockerError('legacy cluster workspaces could not be read: invalid namespace list');
+    }
+    if (payload.items.length === 0) return 'absent';
+    // The held machine-scoped grant and successful labelled namespace query authorize
+    // migration of this fixed-name legacy cluster, before its last workspace is removed.
+    requireOnboarded();
+    requireGrant('owned-cluster');
+    await markClusterOwned(context, env);
+    info(emit, `adopted legacy cluster ${CLUSTER_NAME} holding Houston workspaces`, {
+      phase: 'provision',
+    });
+    return 'owned';
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 }
 
 /** Prove an existing fixed-name cluster before writing it into Houston's durable kubeconfig. */
-async function verifyExistingClusterOwnership(): Promise<void> {
-  if ((await privateMarkerState()) !== 'owned') throw ownershipConflict();
+async function verifyExistingClusterOwnership(emit: Emit): Promise<void> {
+  if ((await privateMarkerState(true, emit)) !== 'owned') throw ownershipConflict();
 }
 
 /**
  * Wait only after our Kind create lost a cross-home collision. The winner can still be
- * publishing its receipt, but an existing or malformed marker remains a refusal immediately.
+ * publishing its receipt. Retry unavailable transport reads without treating them as absent;
+ * an existing foreign or malformed marker remains a refusal immediately.
  */
 async function waitForCollisionMarker(): Promise<void> {
+  let unavailable: OwnershipProbeUnavailable | KubeconfigUnavailable | undefined;
   for (let attempt = 0; attempt < MARKER_PUBLICATION_TRIES; attempt += 1) {
-    const state = await privateMarkerState();
-    if (state === 'owned') return;
-    if (state !== 'absent') throw ownershipConflict();
+    try {
+      const state = await privateMarkerState();
+      if (state === 'owned') return;
+      if (state !== 'absent') throw ownershipConflict();
+      unavailable = undefined;
+    } catch (error) {
+      if (!(error instanceof OwnershipProbeUnavailable || error instanceof KubeconfigUnavailable))
+        throw error;
+      unavailable = error;
+    }
     if (attempt + 1 < MARKER_PUBLICATION_TRIES) await sleep(MARKER_PUBLICATION_INTERVAL_MS);
   }
+  if (unavailable !== undefined) throw unavailable;
   throw ownershipConflict();
 }
 
@@ -237,7 +301,9 @@ async function createIfAbsent(
   // local lifecycle action as creation. Check before the existing-cluster return.
   requireOnboarded();
   requireGrant('owned-cluster');
-  if ((await clusters())[0].includes(CLUSTER_NAME)) {
+  const [listed, listError] = await clusters();
+  if (listError !== '') throw new DockerError(`Kind clusters could not be read: ${listError}`);
+  if (listed.includes(CLUSTER_NAME)) {
     info(emit, `checking ownership of existing cluster ${CLUSTER_NAME}`, {
       phase: 'provision',
     });
@@ -297,7 +363,7 @@ async function ensureClusterLocked(emit: Emit): Promise<string> {
   const kubeconfig = ownedKubeconfig();
   const create = await createIfAbsent(emit, kubeconfig);
   const createdHere = create === 'created';
-  if (create === 'existing') await verifyExistingClusterOwnership();
+  if (create === 'existing') await verifyExistingClusterOwnership(emit);
   if (create === 'collision') await waitForCollisionMarker();
 
   let context: string;
@@ -350,6 +416,24 @@ export async function ensureKubeconfig(plan: ClusterPlan, emit: Emit = nullEmit)
     return await ensureCluster(emit);
   }
   return plan.context;
+}
+
+/** Preserve legacy ownership before deleting a local workspace's namespace. */
+export async function adoptIfUnmarked(emit: Emit = nullEmit): Promise<void> {
+  requireOnboarded();
+  requireGrant('owned-cluster');
+  await reproLock(
+    CLUSTER_LOCK,
+    async () => {
+      // A successfully deleted cluster needs no migration; a failed list is unknown.
+      const [listed, listError] = await clusters();
+      if (listError !== '') throw new DockerError(`Kind clusters could not be read: ${listError}`);
+      if (!listed.includes(CLUSTER_NAME)) return;
+      await verifyExistingClusterOwnership(emit);
+      await exportKubeconfig(ownedKubeconfig(), ownedEnv());
+    },
+    { timeoutMs: CREATE_TIMEOUT * 1000 },
+  );
 }
 
 /**
