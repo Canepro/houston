@@ -1,6 +1,6 @@
 ---
 name: verify-houston
-description: Verify recurring Houston v2 CLI migrations through bin/houston with isolated state and durable command receipts. Use for capability discovery, missing-workspace failures, offline resource inspection, evidence JSON or bundles, SSH access handoff, onboarding persistence and teardown authority refusals, and capture preflight; consult pending recipes for live engine behavior, goal-first setup, and successful browser capture.
+description: Verify recurring Houston v2 CLI migrations through bin/houston with isolated state and durable command receipts. Use for capability discovery, missing-workspace failures, offline resource inspection, evidence JSON or bundles, SSH access handoff, onboarding persistence and teardown authority refusals, goal-first setup, and capture preflight; consult pending recipes for live engine behavior and successful browser capture.
 ---
 
 # Verify Houston
@@ -85,7 +85,8 @@ grant and revoke drives in the run's disposable home. The helper checks the
 persisted grant state, cluster scope and preservation of legacy settings.
 The helper also requires local teardown to refuse missing onboarding and a denied
 grant before invoking its kubectl trap. These synthetic answers grant nothing in
-the operator's real home. Live engine behavior, goal-first setup and successful capture require their pending
+the operator's real home. When `onboard` advertises `--show`, it also drives the [setup recipe](features/setup.md).
+Live engine behavior and successful capture require their pending
 recipes to be extended against the candidate's actual help, source, and tests
 before acceptance. A scoped baseline
 pass leaves those paths pending until their actual consumer contracts are
@@ -109,9 +110,12 @@ plants a synthetic secret to detect leaks.
 ## Cleanup
 
 The helper removes only the scratch directory it created, including the fixture,
-in a `finally` block on success or ordinary failure. Timeout terminates the CLI
-child. The allowed commands start no persistent workers. No `down`, `prune`,
-Docker, Kubernetes, cloud, or service mutation command is used. A hard interpreter
+in a `finally` block on success or ordinary failure. A timeout terminates the
+whole CLI process group. The onboarding path runs two guarded synthetic
+`down --name verify-owned-kube-fixture --yes --json` probes. Its isolated home
+and `kubectl` trap require the missing-onboarding and denied-grant gates to stop
+before a cluster client or mutation can run. No `prune`, Docker, Kubernetes,
+cloud, or service mutation command reaches a real target. A hard interpreter
 termination can leave its uniquely named `verify-houston-*` scratch directory;
 remove only that run's confirmed directory after checking its owner and retaining
 proof. Never clean by a shared name or glob.

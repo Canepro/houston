@@ -21,15 +21,21 @@ bytes. Require `manifest.artifact.sanitized.name` to name the attachment and its
 `sha256` to match the attached bytes. The raw and sanitized hashes must differ for
 this secret-bearing fixture.
 
-Require the known seed profile and user counts to survive. Unknown fields under
-`planned`, plus `history`, `locations`, `run_id` and other unapproved seed keys,
-must be absent. Scan JSON and every bundle file for the synthetic secret and fail
-on any occurrence. Raw artifact copying that leaks the sentinel is a product
-failure.
+Require the exact seed projection `{profile, planned.users, actual.users}` in
+the JSON response, bundle response, and manifest. Require the bundle response to
+list exactly `README.md`, `docker-compose.yml`, and `manifest.json`; each must be
+a self-contained regular file. Compare the manifest projection with the bundle
+response and fixture. The README must identify the fixture, and the parsed Compose
+attachment must preserve the Rocket.Chat service while masking its synthetic
+credentials. Scan JSON stdout and stderr plus every bundle file for the synthetic
+secret and fail on any occurrence. Raw artifact copying that leaks the sentinel is
+a product failure.
 
 Keep stdout, stderr, bundle files, exit receipts, and hashes after scratch
-cleanup. Check the synthetic workspace bytes remain unchanged. This proves the
-CLI's offline projection and attachable artifact handling only. The restricted
-PATH makes engine tools unavailable, so real service state, engine versions,
-container/pod log redaction, Kubernetes bundles, and teardown receipts remain
-pending live-runtime prerequisites. Never substitute invented engine output.
+cleanup. Record the before/after topology manifest for the synthetic workspace
+and the full candidate fingerprint on both passing and failing runs. Re-read every
+retained bundle attachment after cleanup. This proves the CLI's offline projection
+and attachable artifact handling only. The restricted PATH makes engine tools
+unavailable, so real service state, engine versions, container/pod log redaction,
+Kubernetes bundles, and teardown receipts remain pending live-runtime
+prerequisites. Never substitute invented engine output.

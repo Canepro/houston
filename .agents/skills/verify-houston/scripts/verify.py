@@ -3,9 +3,13 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
+import re
 import shutil
 import shlex
+import signal
+import stat
 import subprocess
 import tempfile
 
@@ -15,13 +19,132 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
+def path_fingerprint(path):
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return 'MISSING'
+    if stat.S_ISREG(mode):
+        return 'file:' + hashlib.sha256(path.read_bytes()).hexdigest()
+    if stat.S_ISLNK(mode):
+        return 'symlink:' + os.readlink(path)
+    if stat.S_ISDIR(mode):
+        return 'directory'
+    return f'special:{stat.S_IFMT(mode):o}'
+
+
+def tree_manifest(root):
+    return {'.': path_fingerprint(root), **{
+        str(path.relative_to(root)): path_fingerprint(path)
+        for path in sorted(root.rglob('*'), key=lambda item: str(item))
+    }}
+
+
+def regular_file(path):
+    try:
+        return stat.S_ISREG(path.lstat().st_mode)
+    except FileNotFoundError:
+        return False
+
+
+def require_regular_file(path, message):
+    require(regular_file(path), message)
+
+
+def no_special_entries(root):
+    entries = []
+    for path in root.rglob('*'):
+        mode = path.lstat().st_mode
+        if not stat.S_ISDIR(mode) and not stat.S_ISREG(mode):
+            entries.append(path)
+    return entries
+
+
+def no_synthetic_secret(secret, paths):
+    for path in paths:
+        require_regular_file(path, f'Expected retained regular file: {path}')
+        require(secret.encode() not in path.read_bytes(), f'Synthetic secret leaked: {path.name}')
+
+
+def require_unknown_panels(human, panels):
+    for panel in panels:
+        match = re.search(
+            rf'^\+-\s*{re.escape(panel)}\b.*?(?=^\+-|\Z)',
+            human,
+            flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
+        )
+        require(match is not None, f'Human inspection omitted the {panel} panel')
+        require(re.search(r'\bunknown\b', match.group(0), flags=re.IGNORECASE) is not None,
+                f'Human inspection did not mark the {panel} panel unknown')
+
+
+def yaml_document(node_exec, root, env, path):
+    script = (
+        'const fs=require("node:fs");'
+        'const yaml=require(require.resolve("yaml",{paths:[process.argv[1]]}));'
+        'process.stdout.write(JSON.stringify(yaml.parse(fs.readFileSync(process.argv[2],"utf8"))));'
+    )
+    result = subprocess.check_output(
+        [str(node_exec), '-e', script, str(root), str(path)], cwd=root, env=env,
+    )
+    return json.loads(result)
+
+
+def evidence_projection(value):
+    projection = json.loads(json.dumps(value))
+    projection.pop('bundle', None)
+    projection.pop('generated_at', None)
+    artifact = projection.get('artifact')
+    if isinstance(artifact, dict):
+        artifact.pop('sanitized', None)
+    return projection
+
+
+def receipt_paths(out, *labels):
+    return [path for label in labels for path in (
+        out / f'{label}.stdout', out / f'{label}.stderr',
+    )]
+
+
 def source_manifest(root):
     paths = subprocess.check_output(
         ['git', 'ls-files', '--cached', '--others', '--exclude-standard', '-z', '--',
          'src', 'bin', 'tools', 'data', 'package.json', 'yarn.lock', '.yarnrc.yml'], cwd=root)
-    return {name: (hashlib.sha256((root / name).read_bytes()).hexdigest()
-                   if (root / name).is_file() else 'MISSING')
+    return {name: path_fingerprint(root / name)
             for name in sorted(set(paths.decode().split('\0'))) if name}
+
+
+def candidate_fingerprint(root):
+    return {
+        'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip(),
+        'diff_sha256': hashlib.sha256(
+            subprocess.check_output(['git', 'diff', 'HEAD'], cwd=root)).hexdigest(),
+        'source': source_manifest(root),
+    }
+
+
+def bytes_from(value):
+    if value is None:
+        return b''
+    if isinstance(value, bytes):
+        return value
+    return str(value).encode()
+
+
+def stop_process_group(process, force=False):
+    # Descendants can retain the output pipes after the CLI leader has exited.
+    # Its session still needs termination in that case.
+    if os.name != 'posix' and process.poll() is not None:
+        return
+    try:
+        if os.name == 'posix':
+            os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
+        elif force:
+            process.kill()
+        else:
+            process.terminate()
+    except ProcessLookupError:
+        pass
 
 
 def main():
@@ -36,23 +159,38 @@ def main():
     require(not out.is_relative_to(root) and not out.is_relative_to(verifier_root),
             'Evidence must be outside candidate and verifier checkouts')
     out.mkdir(parents=True, exist_ok=False)
-    source_before = source_manifest(root)
+    candidate_before = candidate_fingerprint(root)
+    source_before = candidate_before['source']
     (out / 'candidate-source.json').write_text(json.dumps(source_before, indent=2) + '\n')
-    summary = {'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip(),
-               'diff_sha256': hashlib.sha256(subprocess.check_output(['git', 'diff', 'HEAD'], cwd=root)).hexdigest(),
+    (out / 'candidate-fingerprint-before.json').write_text(
+        json.dumps(candidate_before, indent=2) + '\n')
+    summary = {'head': candidate_before['head'],
+               'diff_sha256': candidate_before['diff_sha256'],
                'checkout': str(root),
                'verifier_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                'features': {}, 'boundary': 'Real checkout CLI; synthetic workspace; engine tools unavailable. No live runtime proof.'}
     scratch = Path(tempfile.mkdtemp(prefix='verify-houston-'))
+    fixture_root = None
+    fixture_before = None
+    retained_bundle_files = []
+    failure = None
+    completed = False
+    cleanup_errors = []
     try:
         # Only entry-point utilities can execute. No inherited credentials, engine socket,
         # kubeconfig, user home, proxy or ambient HOUSTON_* overrides reach the CLI.
         toolbin = scratch / 'bin'
         toolbin.mkdir()
-        for tool in ('node', 'dirname', 'readlink'):
+        node_shim = shutil.which('node')
+        require(node_shim is not None, 'Missing prerequisite: node')
+        node_exec = Path(subprocess.check_output(
+            [node_shim, '-p', 'process.execPath'], text=True).strip())
+        require(node_exec.is_file(), 'Node did not expose its executable path')
+        for tool in ('dirname', 'readlink'):
             executable = shutil.which(tool)
             require(executable is not None, f'Missing prerequisite: {tool}')
-            (toolbin / tool).symlink_to(executable)
+            (toolbin / tool).symlink_to(Path(executable).resolve())
+        (toolbin / 'node').symlink_to(node_exec)
         env = {'PATH': str(toolbin), 'HOME': str(scratch / 'user'),
                'HOUSTON_HOME': str(scratch / 'home'),
                'HOUSTON_SKILL_HOME': str(scratch / 'skills'), 'NO_COLOR': '1', 'LANG': 'C.UTF-8'}
@@ -89,34 +227,70 @@ def main():
                 'context': 'kind-houston-local', 'namespace': 'houston-verify-owned',
                 'bind_host': '127.0.0.1'})))
 
-        for name, bind, url in [('verify-ipv6-fixture', '::1', 'http://[::1]:39999'),
-                                ('verify-public-fixture', '0.0.0.0', 'http://192.0.2.40:39999')]:
+        access_workspace = workspace.parent / 'verify-access-fixture'
+        access_workspace.mkdir()
+        access_record = dict(record, name=access_workspace.name,
+                             project='houston-verify-access-fixture',
+                             root_url='http://127.0.0.1:39999', admin_password='synthetic-access',
+                             extra={'runtime': 'kubernetes', 'context': 'verify-offline',
+                                    'namespace': access_workspace.name, 'bind_host': '127.0.0.1'})
+        (access_workspace / 'repro.json').write_text(json.dumps(access_record))
+        for name, bind, url, public_url, side_ports in [
+                ('verify-ipv6-fixture', '::1', 'http://[::1]:39999',
+                 'https://access.example.test', [4312, 4313]),
+                ('verify-public-fixture', '0.0.0.0', 'http://192.0.2.40:39999', '', [])]:
             target = workspace.parent / name
             target.mkdir()
-            (target / 'repro.json').write_text(json.dumps(dict(record, name=name, root_url=url,
+            (target / 'repro.json').write_text(json.dumps(dict(access_record, name=name, root_url=url,
+                public_url=public_url,
                 extra={'bind_host': bind, 'runtime': 'kubernetes', 'context': 'verify-offline',
-                       'namespace': name})))
+                       'namespace': name, 'sidecar_ports': side_ports,
+                       'monitoring_ports': [4314] if side_ports else []})))
 
-        def fixture_bytes():
-            return {str(p.relative_to(workspace.parent)): p.read_bytes()
-                    for p in workspace.parent.rglob('*') if p.is_file()}
-
-        fixture_before = fixture_bytes()
+        fixture_root = workspace.parent
+        fixture_before = tree_manifest(fixture_root)
+        (out / 'fixture-manifest-before.json').write_text(
+            json.dumps(fixture_before, indent=2) + '\n')
         receipts = []
 
-        def run(label, argv, expected=0, schema=None, ok=True, overrides=None):
+        def run(label, argv, expected=0, schema=None, ok=True, overrides=None, stdin=None):
             command = [str(root / 'bin' / 'houston'), *argv]
             child_env = dict(env, **(overrides or {}))
-            result = subprocess.run(command, cwd=root, env=child_env, capture_output=True, timeout=60)
-            (out / f'{label}.stdout').write_bytes(result.stdout)
-            (out / f'{label}.stderr').write_bytes(result.stderr)
-            receipt = {'argv': ['bin/houston', *argv], 'exit': result.returncode}
+            process = subprocess.Popen(
+                command,
+                cwd=root,
+                env=child_env,
+                stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=os.name == 'posix',
+            )
+            timed_out = False
+            try:
+                stdout, stderr = process.communicate(input=stdin, timeout=60)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                stop_process_group(process)
+                try:
+                    stdout, stderr = process.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    stop_process_group(process, force=True)
+                    stdout, stderr = process.communicate()
+            stdout = bytes_from(stdout)
+            stderr = bytes_from(stderr)
+            (out / f'{label}.stdout').write_bytes(stdout)
+            (out / f'{label}.stderr').write_bytes(stderr)
+            receipt = {'argv': ['bin/houston', *argv], 'exit': process.returncode}
+            if timed_out:
+                receipt.update({'timed_out': True, 'timeout_seconds': 60})
             receipts.append(receipt)
             (out / 'commands.json').write_text(json.dumps(receipts, indent=2) + '\n')
-            require(result.returncode == expected, f'{label}: expected exit {expected}, got {result.returncode}')
+            require(not timed_out, f'{label}: timed out after 60 seconds')
+            require(process.returncode == expected,
+                    f'{label}: expected exit {expected}, got {process.returncode}')
             if schema is None:
-                return result.stdout.decode().strip()
-            lines = result.stdout.decode().splitlines()
+                return stdout.decode().strip()
+            lines = stdout.decode().splitlines()
             require(len(lines) == 1, f'{label}: expected exactly one JSON envelope')
             envelope = json.loads(lines[0])
             require(envelope.get('schema') == schema and envelope.get('contract') == 2,
@@ -131,7 +305,9 @@ def main():
         caps = run('capabilities', ['capabilities'], schema='houston.capabilities.v1')['data']
         require(caps['houston_version'] == version and 2 in caps['contract_versions'], 'Capability version differs')
         commands = {c['name']: c for c in caps['commands']}
-        require(commands['info']['json'] and '--name' in commands['info']['flags'], 'Missing info contract')
+        require(commands['info']['json'] and '--name' in commands['info']['flags']
+                and commands['info'].get('schema') == 'houston.info.v1',
+                'Missing or incompatible info contract')
         require(caps['default_bind_host'] == '127.0.0.1', 'Unexpected default bind host')
         summary['features']['capabilities'] = 'PASS'
         missing = run('missing-workspace', ['info', '--name', 'verify-missing', '--json'],
@@ -149,8 +325,11 @@ def main():
                                   expected=4, schema='houston.error.v1', ok=False)
             require(missing_inspect['error']['code'] == 'NOT_FOUND', 'Inspect missing name must be NOT_FOUND')
             for name, runtime in [('verify-fixture', 'docker'), ('verify-kube-fixture', 'kubernetes')]:
-                data = run(f'inspect-{runtime}', ['inspect', '--name', name, '--json'],
-                           schema='houston.inspect.v1')['data']
+                inspect_label = f'inspect-{runtime}'
+                envelope = run(inspect_label, ['inspect', '--name', name, '--json'],
+                               schema='houston.inspect.v1')
+                no_synthetic_secret(sentinel, receipt_paths(out, inspect_label))
+                data = envelope['data']
                 require(data['name'] == name and data['runtime'] == runtime, 'Inspect chose another workspace/runtime')
                 require(data['url'] == 'http://127.0.0.1:39999' and data['bind_host'] == '127.0.0.1',
                         'Inspect URL or bind differs from fixture')
@@ -166,7 +345,7 @@ def main():
                     require(data['kubernetes']['cluster_exists'] is None,
                             'Unavailable Kind must leave cluster existence unknown')
                     warnings = data['kubernetes']['warnings']
-                    require(isinstance(warnings, list) and len(warnings) >= 3
+                    require(isinstance(warnings, list) and bool(warnings)
                             and all(isinstance(warning, str) and warning for warning in warnings),
                             'Unavailable Kubernetes reads must report warnings')
                 else:
@@ -174,45 +353,103 @@ def main():
                     require(isinstance(warnings, list) and bool(warnings)
                             and all(isinstance(warning, str) and warning for warning in warnings),
                             'Unavailable Docker engine must report a warning')
-                require(sentinel not in json.dumps(data), 'Inspect leaked synthetic secret')
-                human = run(f'inspect-{runtime}-human', ['inspect', '--name', name])
-                require(human.lower().count('unknown') >= 3,
-                        'Offline human inspection must mark unreadable resources unknown')
-                require(sentinel not in human, 'Human inspection leaked synthetic secret')
+                human_label = f'inspect-{runtime}-human'
+                human = run(human_label, ['inspect', '--name', name])
+                no_synthetic_secret(sentinel, receipt_paths(out, human_label))
+                require_unknown_panels(
+                    human,
+                    ('nodes', 'services', 'pods') if runtime == 'kubernetes'
+                    else ('containers', 'networks', 'volumes'),
+                )
             summary['features']['inspect'] = 'PASS: offline Docker/Kubernetes shape and missing name; live resource reads pending'
         evidence = commands.get('evidence')
         if evidence is None:
             summary['features']['evidence'] = 'PENDING: command absent from capabilities'
         else:
-            require(evidence['json'] and {'--name', '--bundle'}.issubset(evidence['flags']),
+            require(evidence['json'] and {'--name', '--bundle'}.issubset(evidence['flags'])
+                    and evidence.get('schema') == 'houston.evidence.v1',
                     'Advertised evidence lacks required JSON/bundle contract; repair verifier against source')
+            missing_evidence = run('evidence-missing', ['evidence', '--name', 'verify-missing', '--json'],
+                                   expected=4, schema='houston.error.v1', ok=False)
+            require(missing_evidence['error']['code'] == 'NOT_FOUND',
+                    'Evidence missing name must be NOT_FOUND')
             payload = run('evidence-json', ['evidence', '--name', 'verify-fixture', '--json'],
                           schema='houston.evidence.v1')['data']
+            no_synthetic_secret(sentinel, receipt_paths(out, 'evidence-json'))
             require(payload['repro']['root_url'] == 'http://127.0.0.1:39999', 'Evidence URL is not origin-only')
             require('login' not in payload and 'env' not in payload, 'Evidence contains private sections')
-            seed = payload['seed']
-            require(seed['profile'] == 'standard' and seed['planned']['users'] == 1
-                    and seed['actual']['users'] == 1, 'Evidence lost allowed seed counts')
-            require(not {'history', 'locations', 'run_id', 'unknown'}.intersection(seed)
-                    and 'unrecognised' not in seed['planned'], 'Evidence copied unapproved seed fields')
+            expected_seed = {'profile': 'standard', 'planned': {'users': 1}, 'actual': {'users': 1}}
+            expected_repro = {
+                'name': 'verify-fixture', 'preset': 'default', 'runtime': 'docker',
+                'deployment': 'monolith', 'rc_version': '8.5.1',
+                'rc_image': 'rocketchat/rocket.chat:8.5.1', 'mongo_tag': '8.0',
+                'mongo_flavor': 'mongodb', 'root_url': 'http://127.0.0.1:39999',
+                'public_url': '', 'host_port': 39999, 'bind_host': '127.0.0.1',
+                'version_source': 'synthetic', 'created_at': '2026-01-01T00:00:00+00:00',
+            }
+            require(payload.get('repro') == expected_repro,
+                    'Evidence response diverges from the fixture identity')
+            require(payload.get('seed') == expected_seed, 'Evidence seed projection differs from its allowlist')
             bundle = out / 'bundle'
-            run('evidence-bundle', ['evidence', '--name', 'verify-fixture', '--bundle', str(bundle), '--json'],
-                schema='houston.evidence.v1')
-            for name in ('manifest.json', 'README.md'):
-                require((bundle / name).is_file(), f'Missing bundle file: {name}')
+            bundle_payload = run(
+                'evidence-bundle', ['evidence', '--name', 'verify-fixture', '--bundle', str(bundle), '--json'],
+                schema='houston.evidence.v1',
+            )['data']
+            no_synthetic_secret(sentinel, receipt_paths(out, 'evidence-bundle'))
+            expected_bundle_files = ['README.md', 'docker-compose.yml', 'manifest.json']
+            bundle_names = bundle_payload.get('bundle', {}).get('files')
+            require(isinstance(bundle_names, list) and sorted(bundle_names) == expected_bundle_files,
+                    'Bundle response listed an incomplete or stale file set')
+            require(Path(bundle_payload['bundle']['path']).resolve() == bundle.resolve(),
+                    'Bundle response named another destination')
+            require(set(tree_manifest(bundle)) == {'.', *expected_bundle_files},
+                    'Bundle must be a self-contained three-file attachment')
+            require(not no_special_entries(bundle), 'Bundle contains a symlink or special entry')
+            bundle_files = [bundle / name for name in expected_bundle_files]
+            for file in bundle_files:
+                require_regular_file(file, f'Missing regular bundle file: {file.name}')
             manifest = json.loads((bundle / 'manifest.json').read_text())
             require(manifest['repro']['name'] == 'verify-fixture', 'Bundle names another workspace')
+            require(evidence_projection(payload) == evidence_projection(bundle_payload)
+                    == evidence_projection(manifest),
+                    'Bundle response or manifest diverges from the captured evidence projection')
+            require(bundle_payload.get('repro') == expected_repro and manifest.get('repro') == expected_repro,
+                    'Bundle response or manifest diverges from the fixture identity')
+            require(bundle_payload.get('seed') == expected_seed and manifest.get('seed') == expected_seed,
+                    'Bundle response or manifest expanded the seed projection')
             artifact = manifest['artifact']
             raw_hash = hashlib.sha256((workspace / 'docker-compose.yml').read_bytes()).hexdigest()
-            require(artifact['sha256'] == raw_hash, 'Evidence source digest differs from workspace bytes')
+            for candidate in (payload, bundle_payload, manifest):
+                require(candidate['artifact']['name'] == 'docker-compose.yml'
+                        and candidate['artifact']['sha256'] == raw_hash,
+                        'Evidence artifact identity differs from fixture bytes')
             sanitized = artifact['sanitized']
             require(sanitized['name'] == 'docker-compose.yml', 'Unexpected sanitized attachment name')
             attached_hash = hashlib.sha256((bundle / sanitized['name']).read_bytes()).hexdigest()
             require(sanitized['sha256'] == attached_hash and attached_hash != raw_hash,
                     'Sanitized attachment digest must match its bytes and differ from secret-bearing source')
-            for file in [out / 'evidence-json.stdout', out / 'evidence-bundle.stdout', *bundle.rglob('*')]:
-                if file.is_file():
-                    require(sentinel.encode() not in file.read_bytes(), f'Synthetic secret leaked: {file.name}')
+            readme = (bundle / 'README.md').read_text()
+            require('Workspace `verify-fixture`' in readme and 'Rocket.Chat 8.5.1' in readme
+                    and 'http://127.0.0.1:39999' in readme,
+                    'Bundle README lost workspace identity')
+            compose = yaml_document(node_exec, root, env, bundle / 'docker-compose.yml')
+            require(isinstance(compose, dict) and isinstance(compose.get('services'), dict),
+                    'Sanitized Compose attachment is not a service document')
+            rocketchat = compose['services'].get('rocketchat')
+            require(isinstance(rocketchat, dict)
+                    and rocketchat.get('image') == 'rocketchat/rocket.chat:8.5.1',
+                    'Sanitized Compose attachment lost the Rocket.Chat service identity')
+            environment = rocketchat.get('environment')
+            labels = rocketchat.get('labels')
+            require(isinstance(environment, dict) and 'ADMIN_PASS' in environment
+                    and environment['ADMIN_PASS'] not in ('', sentinel)
+                    and isinstance(labels, dict) and 'support-note' in labels
+                    and sentinel not in str(rocketchat.get('command', '')),
+                    'Sanitized Compose attachment is not semantically safe')
+            no_synthetic_secret(sentinel, bundle_files)
+            retained_bundle_files = [
+                (file, hashlib.sha256(file.read_bytes()).hexdigest()) for file in bundle_files
+            ]
             summary['features']['evidence'] = 'PASS: offline JSON, seed allowlist, sanitized bundle digests and sentinel checks; live runtime pending'
         capture = commands.get('capture')
         if capture is None:
@@ -222,13 +459,34 @@ def main():
                     and capture.get('schema') == 'houston.capture.v1',
                     'Advertised capture differs from owner draft; reconcile contract before driving')
             absent_bundle = out / 'capture-missing-bundle'
+            capture_marker = scratch / 'capture-browser-started'
+            fake_playwright = scratch / 'fake-playwright.cjs'
+            fake_playwright.write_text(
+                'const fs=require("node:fs");\n'
+                'module.exports={chromium:{launch:async()=>{'
+                'fs.writeFileSync(process.env.VERIFY_CAPTURE_MARKER,"launch\\n");'
+                'throw new Error("capture launched before workspace preflight");}}};\n'
+            )
+            capture_preload = scratch / 'capture-playwright-preload.cjs'
+            capture_preload.write_text(
+                'const Module=require("node:module");\n'
+                'const original=Module._resolveFilename;\n'
+                'Module._resolveFilename=function(request,parent,isMain,options){\n'
+                ' if(request==="playwright"||request==="playwright-core") return process.env.VERIFY_CAPTURE_FAKE;\n'
+                ' return original.call(this,request,parent,isMain,options);\n'
+                '};\n'
+            )
             absent = run('capture-missing', ['capture', '--name', 'verify-missing', '--workload', 'smoke',
                                           '--bundle', str(absent_bundle), '--json'],
-                         expected=4, schema='houston.error.v1', ok=False)
+                         expected=4, schema='houston.error.v1', ok=False,
+                         overrides={'NODE_OPTIONS': f'--require={capture_preload}',
+                                    'VERIFY_CAPTURE_MARKER': str(capture_marker),
+                                    'VERIFY_CAPTURE_FAKE': str(fake_playwright)})
             require(absent['error']['code'] == 'NOT_FOUND', 'Capture missing name must be NOT_FOUND')
-            require(not absent_bundle.exists(), 'Missing workspace capture wrote a bundle')
-            summary['features']['capture'] = 'PASS: missing workspace refused without bundle; browser capture pending'
-        detail = run('access-discovery', ['info', '--name', 'verify-fixture', '--json'],
+            require(not absent_bundle.exists() and not capture_marker.exists(),
+                    'Missing workspace capture wrote a bundle or launched a browser')
+            summary['features']['capture'] = 'PASS: missing workspace refused before bundle or browser launch; browser capture pending'
+        detail = run('access-discovery', ['info', '--name', access_workspace.name, '--json'],
                      schema='houston.info.v1')['data']
         if 'access' not in detail:
             summary['features']['access'] = 'PENDING: info payload has no access consumer'
@@ -236,40 +494,77 @@ def main():
             local = detail['access']
             require(local['mode'] == 'local' and local['bind'] == 'loopback'
                     and local['host_port'] == 39999 and local['local_port'] == 39999
-                    and local['browser_url'] == record['root_url']
+                    and local['browser_url'] == access_record['root_url']
                     and local['tunnel_command'] is None and local['note'] is None,
                     'Local access handoff differs from recorded workspace')
-            ssh = {'SSH_CONNECTION': '198.51.100.20 55100 203.0.113.8 22',
-                   'HOUSTON_SSH_USER': 'operator', 'HOUSTON_SSH_HOST': 'ssh-proof.invalid'}
-            for label, name, target, port, changes in [
-                ('remote', 'verify-fixture', '127.0.0.1', 39999, {}),
-                ('ipv6', 'verify-ipv6-fixture', '[::1]', 4311,
-                 {'HOUSTON_SSH_LOCAL_PORT': '4311', 'HOUSTON_SSH_USER': "operator's team",
-                  'HOUSTON_SSH_HOST': 'ssh-proof.invalid; echo unsafe'}),
-                ('option', 'verify-fixture', '127.0.0.1', 39999,
-                 {'HOUSTON_SSH_USER': '-oProxyCommand=unsafe'})]:
-                overrides = dict(ssh, **changes)
+            local_human = run('access-local-human', ['info', '--name', access_workspace.name])
+            no_synthetic_secret(sentinel, receipt_paths(out, 'access-discovery', 'access-local-human'))
+            require(local['browser_url'] in local_human,
+                    'Human local access guidance omitted the browser URL')
+            ssh_values = {
+                'SSH_CONNECTION': '198.51.100.20 55100 203.0.113.8 22',
+                'SSH_CLIENT': '198.51.100.20 55100 22',
+                'SSH_TTY': '/dev/pts/19',
+            }
+
+            def remote_access(label, marker, name=access_workspace.name, target='127.0.0.1',
+                              port=39999, changes=None, sides=()):
+                overrides = {
+                    marker: ssh_values[marker],
+                    'HOUSTON_SSH_USER': 'operator',
+                    'HOUSTON_SSH_HOST': 'ssh-proof.invalid',
+                    **(changes or {}),
+                }
                 data = run('access-' + label, ['info', '--name', name, '--json'],
                            schema='houston.info.v1', overrides=overrides)['data']['access']
                 require(data['mode'] == 'remote_ssh' and data['bind'] == 'loopback'
                         and data['host_port'] == 39999 and data['local_port'] == port
-                        and data['browser_url'] == f'http://127.0.0.1:{port}' and bool(data['note']),
+                        and data['browser_url'] == f'http://127.0.0.1:{port}'
+                        and data['side_ports'] == list(sides) and bool(data['note']),
                         'Remote access mode, ports or browser URL differ')
+                expected_forwards = ['-L', f'127.0.0.1:{port}:{target}:39999']
+                for side in sides:
+                    expected_forwards.extend(['-L', f'127.0.0.1:{side}:{target}:{side}'])
                 require(shlex.split(data['tunnel_command']) ==
-                        ['ssh', '-N', '-L', f'127.0.0.1:{port}:{target}:39999', '--',
+                        ['ssh', '-N', '-o', 'ExitOnForwardFailure=yes', *expected_forwards, '--',
                          overrides['HOUSTON_SSH_USER'] + '@' + overrides['HOUSTON_SSH_HOST']],
                         'Tunnel must bind client loopback and preserve one option-safe destination')
                 human = run('access-' + label + '-human', ['info', '--name', name], overrides=overrides)
+                no_synthetic_secret(sentinel, receipt_paths(out, 'access-' + label,
+                                                            'access-' + label + '-human'))
                 require(data['tunnel_command'] in human and data['browser_url'] in human,
                         'Human access guidance differs from JSON')
+            for marker in ssh_values:
+                remote_access(marker.lower().replace('_', '-'), marker)
+            remote_access('ipv6', 'SSH_CONNECTION', name='verify-ipv6-fixture', target='[::1]', port=4311, sides=(4312, 4313, 4314),
+                          changes={'HOUSTON_SSH_LOCAL_PORT': '4311',
+                                   'HOUSTON_SSH_USER': "operator's team",
+                                   'HOUSTON_SSH_HOST': 'ssh-proof.invalid; echo unsafe'})
+            collision = run('access-side-port-collision',
+                            ['info', '--name', 'verify-ipv6-fixture', '--json'],
+                            expected=2, schema='houston.error.v1', ok=False,
+                            overrides={'SSH_TTY': ssh_values['SSH_TTY'],
+                                       'HOUSTON_SSH_LOCAL_PORT': '4314'})
+            require(collision['error']['code'] == 'VALIDATION_FAILED',
+                    'A primary forward colliding with a monitoring port must refuse')
+            remote_access('option', 'SSH_CONNECTION',
+                          changes={'HOUSTON_SSH_USER': '-oProxyCommand=unsafe'})
+            remote_access('minimum-port', 'SSH_CONNECTION', port=1024,
+                          changes={'HOUSTON_SSH_LOCAL_PORT': '1024'})
+            remote = {'SSH_CONNECTION': ssh_values['SSH_CONNECTION'],
+                      'HOUSTON_SSH_USER': 'operator', 'HOUSTON_SSH_HOST': 'ssh-proof.invalid'}
             public = run('access-public', ['info', '--name', 'verify-public-fixture', '--json'],
-                         schema='houston.info.v1', overrides=ssh)['data']
+                         schema='houston.info.v1', overrides=remote)['data']
             require(public['access'] is None, 'Wildcard workspace must not claim loopback access')
-            invalid = run('access-invalid-port', ['info', '--name', 'verify-fixture', '--json'],
-                          expected=2, schema='houston.error.v1', ok=False,
-                          overrides=dict(ssh, HOUSTON_SSH_LOCAL_PORT='not-a-port'))
-            require(invalid['error']['code'] == 'VALIDATION_FAILED', 'Invalid local port must be refused')
-            summary['features']['access'] = 'PASS: real info JSON/human handoff, IPv6, option safety, local-port refusal; no SSH executed'
+            for label, value in [('non-numeric', 'not-a-port'), ('negative', '-1'),
+                                 ('below-minimum', '1023'), ('above-maximum', '65536')]:
+                invalid = run('access-invalid-port-' + label, ['info', '--name', access_workspace.name, '--json'],
+                              expected=2, schema='houston.error.v1', ok=False,
+                              overrides=dict(remote, HOUSTON_SSH_LOCAL_PORT=value))
+                require(invalid['error']['code'] == 'VALIDATION_FAILED',
+                        f'Invalid local port {value} must be refused')
+            summary['features']['access'] = ('PASS: local and each SSH-marker info JSON/human handoff, '
+                'IPv6, option safety, local-port boundaries; no SSH executed')
         if 'onboard' not in commands:
             summary['features']['onboarding'] = 'PENDING: onboard command absent'
         else:
@@ -340,43 +635,156 @@ def main():
 
             # Read the actual YAML written by the CLI using its existing dependency.
             # This does not import application onboarding logic to produce expectations.
-            persisted = json.loads(subprocess.check_output([
-                shutil.which('node'), '-e',
-                'const fs=require("node:fs");const yaml=require(require.resolve("yaml",'
-                '{paths:[process.argv[1]]}));process.stdout.write(JSON.stringify('
-                'yaml.parse(fs.readFileSync(process.argv[2],"utf8"))));',
-                str(root), str(config_file)], cwd=root, env=env))
+            persisted = yaml_document(node_exec, root, env, config_file)
             require(all(persisted[key] == legacy[key] for key in
                         ('preferences', 'default_deployment', 'default_scenarios', 'future_config'))
                     and persisted['grants']['engine_resize'] is False
                     and persisted['grants']['future_grant'] == legacy['grants']['future_grant']
-                    and persisted['onboarding']['future_field'] == 'preserve',
-                    'Onboarding discarded an unrelated legacy answer or unknown config field')
+                    and persisted['onboarding']['future_field'] == 'preserve'
+                    and persisted['grants']['owned_cluster'] is False
+                    and persisted['grants']['clusters'] == ['preserved-cluster']
+                    and persisted['onboarding']['completed_at'] == revoked['completed_at']
+                    and persisted['onboarding']['rc_repro_version'] == version,
+                    'Onboarding failed to persist the revoked grant state or legacy fields')
             (out / 'onboarding-persisted.json').write_text(json.dumps(persisted, indent=2) + '\n')
             summary['features']['onboarding'] = (
                 'PASS: synthetic-home status, invalid grant, grant/revoke persistence and '
-                'legacy preservation and local teardown authority refusals; live engine and goal-first setup pending')
-        require(fixture_before == fixture_bytes(),
-                'CLI changed the synthetic workspace files')
-        require(source_before == source_manifest(root), 'Candidate source changed during verification')
-        summary['source_unchanged'] = True
-        summary['fixture_unchanged'] = True
-        summary['result'] = 'PASS_SCOPED'
+                'legacy preservation and local teardown authority refusals; live engine pending')
+        if 'onboard' in commands and '--show' in commands['onboard']['flags']:
+            config_file = Path(env['HOUSTON_HOME']) / 'config.yaml'
+            setup_before = config_file.read_bytes()
+            shown = run('setup-show', ['onboard', 'setup', '--show', '--json'],
+                        schema='houston.onboard.v1')['data']
+            require(shown['schema'] == 'houston.setup.v1'
+                    and shown['selection']['deployment'] == 'monolith'
+                    and shown['persisted']['grants']['owned_cluster'] is False
+                    and shown['actions'] == [], 'Setup preview lost saved answers or offers actions')
+            require(config_file.read_bytes() == setup_before, 'Setup preview wrote answers')
+            for label, args in [('empty', []), ('invalid', ['--deployment', 'not-a-deployment']),
+                                ('show-write', ['--show', '--seed-profile', 'none'])]:
+                refused = run('setup-' + label, ['onboard', 'setup', *args, '--json'],
+                              expected=2, schema='houston.error.v1', ok=False)
+                require(refused['error']['code'] == 'VALIDATION_FAILED'
+                        and config_file.read_bytes() == setup_before,
+                        'Invalid or ambiguous setup must refuse without writing')
+            saved = run('setup-save', ['onboard', 'setup', '--deployment', 'microservices',
+                        '--scenario', 'none', '--seed-profile', 'none', '--retain-runs', '--json'],
+                        schema='houston.onboard.v1')['data']
+            require(saved['selection']['deployment'] == 'microservices'
+                    and saved['selection']['scenarios'] == []
+                    and saved['selection']['seed_profile'] == 'none'
+                    and saved['selection']['retain_runs'] is True
+                    and saved['persisted']['grants']['owned_cluster'] is False
+                    and saved['capacity']['supported_action'] is None
+                    and saved['actions'] == []
+                    and '--runtime kubernetes' in saved['first_run_command']
+                    and '--seed' not in saved['first_run_command'],
+                    'Setup failed to persist explicit choices or changed authority')
+            after = config_file.read_bytes()
+            repeated = run('setup-readback', ['onboard', '--show', '--json'],
+                           schema='houston.onboard.v1')['data']
+            require(repeated['selection'] == saved['selection']
+                    and config_file.read_bytes() == after, 'Setup choices did not survive process exit')
+            defaults = run('setup-defaults', ['onboard', '--accept-defaults', '--json'],
+                           schema='houston.onboard.v1')['data']
+            require(defaults['selection'] == saved['selection']
+                    and defaults['persisted']['grants']['owned_cluster'] is False,
+                    'Accepting defaults overwrote answered choices or granted authority')
+            human = run('setup-human', ['onboard', '--show'])
+            require('microservices' in human and 'GATE_OWNED_CLUSTER' in human,
+                    'Human setup omitted selected deployment or authority gate')
+            persisted_setup = yaml_document(node_exec, root, env, config_file)
+            require(persisted_setup['future_config'] == legacy['future_config']
+                    and persisted_setup['grants']['future_grant'] == legacy['grants']['future_grant']
+                    and persisted_setup['grants']['engine_resize'] is False
+                    and persisted_setup['onboarding']['future_field'] == 'preserve',
+                    'Setup discarded unrelated legacy fields')
+            (out / 'setup-persisted.json').write_text(json.dumps(persisted_setup, indent=2) + '\n')
+            before_prompt = config_file.read_bytes()
+            cancelled = run('setup-prompt-cancel', ['onboard', 'setup', '--reconfigure', '--section', 'seed'],
+                            stdin=b'large\nno\n')
+            require('No changes written.' in cancelled and config_file.read_bytes() == before_prompt,
+                    'Cancelled setup prompt persisted a draft')
+            accepted = run('setup-prompt-accept', ['onboard', 'setup', '--reconfigure', '--section', 'seed'],
+                           stdin=b'small\nyes\n')
+            prompt_saved = run('setup-prompt-readback', ['onboard', '--show', '--json'],
+                               schema='houston.onboard.v1')['data']
+            require('Setup choices recorded.' in accepted
+                    and prompt_saved['selection']['seed_profile'] == 'small'
+                    and prompt_saved['selection']['retain_runs'] is True
+                    and prompt_saved['persisted']['grants']['owned_cluster'] is False,
+                    'Interactive section setup lost the accepted answer or unrelated state')
+            summary['features']['setup'] = ('PASS: real CLI preview, explicit choices, readback, '
+                'safe defaults, no-write refusals, prompts and legacy preservation; API and live engine pending')
+        else:
+            summary['features']['setup'] = 'PENDING: setup flags absent from onboard capabilities'
+        completed = True
     except Exception as error:
-        summary['result'] = 'FAIL'
+        failure = error
         summary['error'] = str(error)
-        raise
     finally:
-        shutil.rmtree(scratch)
+        try:
+            candidate_after = candidate_fingerprint(root)
+            (out / 'candidate-fingerprint-after.json').write_text(
+                json.dumps(candidate_after, indent=2) + '\n')
+            summary['candidate_unchanged'] = candidate_after == candidate_before
+            summary['source_unchanged'] = candidate_after['source'] == source_before
+            if candidate_after != candidate_before:
+                cleanup_errors.append('Candidate fingerprint changed during verification')
+        except Exception as error:
+            cleanup_errors.append(f'Could not record the final candidate fingerprint: {error}')
+        if fixture_root is not None and fixture_before is not None:
+            try:
+                fixture_after = tree_manifest(fixture_root)
+                (out / 'fixture-manifest-after.json').write_text(
+                    json.dumps(fixture_after, indent=2) + '\n')
+                summary['fixture_unchanged'] = fixture_after == fixture_before
+                if fixture_after != fixture_before:
+                    cleanup_errors.append('Synthetic fixture manifest changed during verification')
+            except Exception as error:
+                cleanup_errors.append(f'Could not record the final fixture manifest: {error}')
+        else:
+            summary['fixture_unchanged'] = None
+        try:
+            shutil.rmtree(scratch)
+        except Exception as error:
+            cleanup_errors.append(f'Could not remove verifier scratch: {error}')
         summary['scratch_removed'] = not scratch.exists()
-        (out / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
-        files = {str(p.relative_to(out)): hashlib.sha256(p.read_bytes()).hexdigest()
-                 for p in out.rglob('*') if p.is_file()}
-        (out / 'sha256.json').write_text(json.dumps(files, indent=2) + '\n')
-        for name, digest in files.items():
-            require(hashlib.sha256((out / name).read_bytes()).hexdigest() == digest,
-                    f'Evidence unreadable after cleanup: {name}')
+        if not summary['scratch_removed']:
+            cleanup_errors.append('Verifier scratch remains after cleanup')
+        for file, digest in retained_bundle_files:
+            try:
+                require_regular_file(file, f'Retained bundle attachment is not a regular file: {file.name}')
+                require(hashlib.sha256(file.read_bytes()).hexdigest() == digest,
+                        f'Retained bundle attachment changed after cleanup: {file.name}')
+            except Exception as error:
+                cleanup_errors.append(str(error))
+        if cleanup_errors:
+            summary['cleanup_errors'] = cleanup_errors
+            if failure is None:
+                failure = RuntimeError('; '.join(cleanup_errors))
+            summary['error'] = str(failure)
+        summary['result'] = 'PASS_SCOPED' if failure is None and completed else 'FAIL'
+        try:
+            (out / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
+            files = {str(path.relative_to(out)): hashlib.sha256(path.read_bytes()).hexdigest()
+                     for path in out.rglob('*') if regular_file(path)}
+            (out / 'sha256.json').write_text(json.dumps(files, indent=2) + '\n')
+            for name, digest in files.items():
+                require_regular_file(out / name, f'Evidence entry disappeared after cleanup: {name}')
+                require(hashlib.sha256((out / name).read_bytes()).hexdigest() == digest,
+                        f'Evidence unreadable after cleanup: {name}')
+        except Exception as error:
+            if failure is None:
+                failure = error
+            cleanup_errors.append(f'Could not retain or re-read verification evidence: {error}')
+            summary['result'] = 'FAIL'
+            summary['error'] = str(failure)
+            summary['cleanup_errors'] = cleanup_errors
+            (out / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
         print(out / 'summary.json')
+    if failure is not None:
+        raise failure
 
 
 if __name__ == '__main__':

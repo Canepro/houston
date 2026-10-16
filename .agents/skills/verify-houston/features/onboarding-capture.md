@@ -17,15 +17,16 @@ the next-action command. A disposable executable trap satisfies kubectl discover
 its marker must remain absent, proving the refusal happened before invoking
 any cluster client. The recorded workspace and configuration must remain unchanged
 by each refusal. No real engine or cluster operation runs. Create, orphan-prune
-and granted live-engine behavior remain outside this helper. Goal-first setup
-remains pending until its actual CLI and shared GUI contract are available.
+and granted live-engine behavior remain outside this helper. Goal-first setup has a separate [recipe](setup.md).
 
 Capture's draft contract is `capture --name NAME --workload smoke --bundle PATH
 --json`, schema `houston.capture.v1`. Read `src/core/capture.ts` and
 `test/cli/capture-commands.test.ts` on the candidate. When capabilities advertise
 that contract, the helper drives an explicit missing workspace and requires exit
 4, error code `NOT_FOUND`, no bundle directory and unchanged fixture bytes. This
-refusal occurs before browser startup. A successful capture
+refusal occurs before browser startup. The helper injects a scratch-only Node
+preload that resolves `playwright` and `playwright-core` to a fake Chromium whose
+launch writes a marker. The marker must remain absent. A successful capture
 claim needs a supported browser, an explicitly approved synthetic target, and a
 retained nonempty capture artifact that can be opened after cleanup. Record the
 exact target and prerequisite versions. If it starts a temporary listener, bind

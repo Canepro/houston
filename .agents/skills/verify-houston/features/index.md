@@ -6,7 +6,8 @@
 | Attachable evidence | [evidence](evidence.md) | Drive when `evidence` is advertised; otherwise pending. |
 | Resource inspection | [inspect](inventory.md) | Drive offline fixtures when `inspect` is advertised; live resources pending. |
 | SSH access handoff | [access](access.md) | Drive when `info` includes `data.access`; otherwise pending. No SSH execution. |
-| Onboarding and capture | [onboarding and capture](onboarding-capture.md) | Drive synthetic-home onboarding persistence and local teardown authority refusals when `onboard` is advertised. Live engine behavior, goal-first setup and successful browser capture remain pending. |
+| Onboarding and capture | [onboarding and capture](onboarding-capture.md) | Drive synthetic-home onboarding persistence and local teardown authority refusals when `onboard` is advertised. Live engine behavior and successful browser capture remain pending. |
+| Goal-first setup | [setup](setup.md) | Drive when `onboard` advertises `--show`; buffered prompts included; shared API requires its separate check. |
 
 Read capability command paths and their flags at each exact candidate revision.
 An entry being present establishes discovery only. It does not prove that feature
