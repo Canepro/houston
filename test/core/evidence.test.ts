@@ -1614,8 +1614,32 @@ describe('the bundle', () => {
         '  copyarchive:',
         '    image: example',
         '    command: cp -a production /dst',
+        '  dockerlogin:',
+        '    image: example',
+        '    command: docker login -u admin -p DockerLoginSentinel registry.example.test',
+        '  oauth:',
+        '    image: example',
+        '    command: curl --oauth2-bearer OauthSentinel https://x',
+        '  ansi:',
+        '    image: example',
+        `    command: bash -c "client --password $'AnsiSentinel'"`,
+        '  heredoc:',
+        '    image: example',
+        '    command: ["sh", "-c", "cat <<EOF\\nclient --password HeredocData\\nEOF"]',
+        '  shellheredoc:',
+        '    image: example',
+        '    command: ["sh", "-c", "sh <<EOF\\nclient --password ShellHeredocSentinel\\nEOF"]',
+        '  jq:',
+        '    image: example',
+        '    command: jq --sort-keys input.json',
         'x-copy: QuotedSentinel',
         'x-split-copy: SplitSentinel',
+        'x-dup-docker: DockerLoginSentinel',
+        'x-dup-oauth: OauthSentinel',
+        'x-dup-ansi: AnsiSentinel',
+        'x-dup-shell-heredoc: ShellHeredocSentinel',
+        'x-heredoc: HeredocData',
+        'x-input: input.json',
         'x-dup-attached: AttachedSentinel',
         'x-dup-redis: RedisSentinel',
         'x-dup-ssl: PassinSentinel',
@@ -1660,6 +1684,10 @@ describe('the bundle', () => {
       'PassinSentinel',
       'CurlPairSentinel',
       'JsonPairSentinel',
+      'DockerLoginSentinel',
+      'OauthSentinel',
+      'AnsiSentinel',
+      'ShellHeredocSentinel',
     ]) {
       expect(compose).not.toContain(sentinel);
     }
@@ -1687,6 +1715,10 @@ describe('the bundle', () => {
     // in both keys, while python's split command stays readable.
     expect(pick(parsed, 'services', 'split', 'entrypoint')).toBe('********');
     expect(pick(parsed, 'services', 'split', 'command')).toBe('********');
+    // A heredoc fed to `cat` is data, and `--sort-keys` sorts: their values stay readable.
+    expect(parsed['x-heredoc']).toBe('HeredocData');
+    expect(parsed['x-input']).toBe('input.json');
+    expect(pick(parsed, 'services', 'jq', 'command')).toBe('jq --sort-keys input.json');
     // `-a` is a password only for redis-cli; `cp -a` keeps its argument readable.
     expect(pick(parsed, 'services', 'copyarchive', 'command')).toBe('cp -a production /dst');
     expect(pick(parsed, 'services', 'pysplit', 'command')).toEqual([

@@ -747,11 +747,25 @@ interface ShellWord {
   readonly quoted: boolean;
 }
 
+/** Bash's single-character ANSI-C escapes; any other escaped character stands for itself. */
+const ANSI_C_ESCAPES: Readonly<Record<string, string>> = {
+  a: '\x07',
+  b: '\b',
+  e: '\x1b',
+  E: '\x1b',
+  f: '\f',
+  n: '\n',
+  r: '\r',
+  t: '\t',
+  v: '\v',
+};
+
 /**
  * The simple commands in one shell string, as words. Adjacent quoted and unquoted parts join
  * into one word, backslash escapes one character (inside double quotes only before `"`, `\`,
- * `$` or a backtick), and `;`, `&`, `|`, parentheses and newlines end a command. Redirections
- * end a word. This is enough to find a flag's value; it does not expand anything.
+ * `$` or a backtick), `$'...'` decodes its escapes, and `;`, `&`, `|`, parentheses and newlines
+ * end a command. Redirections end a word, and a heredoc's body is skipped unless a shell reads
+ * it. This is enough to find a flag's value; it does not expand anything.
  */
 function shellCommands(text: string): ShellWord[][] {
   const commands: ShellWord[][] = [];
@@ -775,9 +789,56 @@ function shellCommands(text: string): ShellWord[][] {
     if (command.length > 0) commands.push(command);
     command = [];
   };
+  // Heredoc delimiters on the current line; their bodies start at the next newline.
+  let heredocs: { delimiter: string; tabs: boolean }[] = [];
   for (let index = 0; index < text.length; index += 1) {
     const char = text[index] ?? '';
-    if (char === "'") {
+    if (char === '$' && text[index + 1] === "'") {
+      // Bash's ANSI-C quoting, `$'pa\x73s'`, passes the decoded text.
+      begin(index);
+      quoted = true;
+      for (index += 2; index < text.length && text[index] !== "'"; index += 1) {
+        const inner = text[index] ?? '';
+        if (inner !== '\\') {
+          word += inner;
+          continue;
+        }
+        const escape = /^(?:x([0-9A-Fa-f]{1,2})|([0-7]{1,3})|(.))/su.exec(text.slice(index + 1));
+        const [match, hex, octal, single] = escape ?? ['', undefined, undefined, undefined];
+        if (hex !== undefined) word += String.fromCharCode(parseInt(hex, 16));
+        else if (octal !== undefined) word += String.fromCharCode(parseInt(octal, 8));
+        else if (single !== undefined) word += ANSI_C_ESCAPES[single] ?? single;
+        index += match.length;
+      }
+    } else if (char === '<' && text[index + 1] === '<' && text[index + 2] !== '<') {
+      // `cat <<EOF` feeds the following lines as data; only a shell runs them.
+      endWord(index);
+      const tabs = text[index + 2] === '-';
+      const spec = /^[ \t]*(['"]?)([^\s'"<>;&|()]+)\1/u.exec(text.slice(index + (tabs ? 3 : 2)));
+      // `$((1<<2))` shifts a number; a delimiter is a word.
+      if (spec !== null && !/^\d+$/u.test(spec[2] ?? '')) {
+        heredocs.push({ delimiter: spec[2] ?? '', tabs });
+        index += (tabs ? 3 : 2) + spec[0].length - 1;
+      } else index += 1;
+    } else if (char === '\n' && heredocs.length > 0) {
+      // A shell reading the heredoc runs it, so its lines stay commands then.
+      const program = (command[0]?.text ?? '').split('/').pop() ?? '';
+      const shell = /^(?:sh|bash|zsh|dash|ash|ksh)$/u.test(program);
+      endCommand(index);
+      let line = index + 1;
+      for (const heredoc of heredocs) {
+        for (;;) {
+          const newline = text.indexOf('\n', line);
+          const end = newline < 0 ? text.length : newline;
+          const body = text.slice(line, end);
+          line = end + 1;
+          if ((heredoc.tabs ? body.replace(/^\t+/u, '') : body) === heredoc.delimiter) break;
+          if (newline < 0) break;
+        }
+      }
+      heredocs = [];
+      if (!shell) index = line - 1;
+    } else if (char === "'") {
       begin(index);
       const close = text.indexOf("'", index + 1);
       const end = close < 0 ? text.length : close;

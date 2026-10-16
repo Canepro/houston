@@ -145,11 +145,22 @@ export function credentialFlag(item: string): boolean {
   return (
     HEADER_KEY.test(words) ||
     /(?:^|_)rocketchat_license(?:_|$)/u.test(words) ||
+    /(?:^|_)oauth2_bearer$/u.test(words) ||
     words
       .split('_')
-      .some((word, index) => credentialWord(word) || (index > 0 && /^keys?$/u.test(word)))
+      .some(
+        (word, index, all) =>
+          credentialWord(word) || (/^keys?$/u.test(word) && KEY_OWNER.test(all[index - 1] ?? '')),
+      )
   );
 }
+
+/**
+ * The words before `key` that make an option a key's value: `--api-key`, `--client-key`.
+ * Elsewhere `key` names a sort or a column (`jq --sort-keys`, `--primary-key`), not a secret.
+ */
+const KEY_OWNER =
+  /^(?:api|access|secret|private|priv|license|licence|master|client|encryption|encrypt|decryption|signing|sign|auth|session|shared|psk|ssh|gpg|pgp|account|app|service|storage|sas|kms|join|registration|bootstrap|root|admin|consumer|hmac|jwt|cookie|unseal|recovery|wrap|enc|tls|ssl|server|ca|rsa|deploy|token|bearer|cluster|node|user|owner|identity|cert|crypt)$/u;
 
 /**
  * Whether the text before an `=` names a credential: a key (`DB_PASSWORD`), or the last word of
@@ -293,7 +304,7 @@ export function userArgument(word: string): boolean {
 
 /**
  * The passwords a client's short option carries: MySQL's attached `-pS3cret`, the only form in
- * which its `-p` takes a value, and `redis-cli -a S3cret`. Elsewhere `-pX` and `-a` mean other
+ * which its `-p` takes a value, `redis-cli -a S3cret` and `docker login -p S3cret`. Elsewhere `-pX` and `-a` mean other
  * things (`mkdir -pv`, `cp -a`), so the program decides.
  */
 export function shortOptionPasswords(words: readonly string[]): string[] {
@@ -301,12 +312,17 @@ export function shortOptionPasswords(words: readonly string[]): string[] {
   const redis = words.some((word) =>
     /^(?:redis|valkey|keydb)-cli[\w.-]*$/u.test(word.split(/[/\\]/u).pop() ?? ''),
   );
+  // `docker login -p`; Docker's other `-p` publishes a port.
+  const dockerLogin =
+    words.some((word) => /^docker(?:\.exe)?$/u.test(word.split(/[/\\]/u).pop() ?? '')) &&
+    words.includes('login');
   const values: string[] = [];
   words.forEach((word, index) => {
     const attached = /^-p(.+)$/su.exec(word)?.[1];
     if (mysql && attached !== undefined) values.push(attached);
     const next = words[index + 1] ?? '';
     if (redis && word === '-a' && next !== '') values.push(next);
+    if (dockerLogin && word === '-p' && next !== '' && !next.startsWith('-')) values.push(next);
   });
   return values;
 }

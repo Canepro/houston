@@ -257,6 +257,9 @@ describe('credentialFlag', () => {
       '--sanopass',
       '--pass2word',
       '--passw0rd',
+      '--oauth2-bearer',
+      '--api-key',
+      '--client-key',
     ];
     const readable = [
       '--bypass',
@@ -271,6 +274,8 @@ describe('credentialFlag', () => {
       '--skippass',
       '--lowpass',
       '--bypassfile',
+      '--sort-keys',
+      '--primary-key',
     ];
     expect([...credentials, ...readable].filter(credentialFlag)).toEqual(credentials);
   });
