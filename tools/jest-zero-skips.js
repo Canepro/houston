@@ -113,7 +113,8 @@ const ROOT = path.resolve(__dirname, '..');
 // interrupted Docker replacement: CI on 23f3b8e collected 4601. Three more follow an env change
 // to the recorded credentials, keep a loaded record's spellings through an interrupted write and
 // clear its marker on retry, and restrict the record a Compose write makes last: total 4604.
-const FLOOR = 4604;
+// One more reports an env credential change only once a recreate deploys it: total 4605.
+const FLOOR = 4605;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

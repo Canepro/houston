@@ -7,6 +7,7 @@
  * them, so a typo breaks both directions at once and the round-trip test sees it -- two
  * hand-written mappings is how a field silently stops surviving a write.
  */
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
@@ -357,7 +358,12 @@ export async function write(
   await paths.restrict(ws);
   // A failed replacement can leave the previous Compose file beside the new request.
   // Keep the request discoverable, but withhold its artifact until all writes finish.
-  await paths.atomicWrite(joinPath(ws, 'repro.json'), serialise(withIncomplete(meta, true)));
+  const replacement = fingerprint(composeYaml, files);
+  const pending = pendingReplacement(meta);
+  await paths.atomicWrite(
+    joinPath(ws, 'repro.json'),
+    serialise(withIncomplete(meta, pending === undefined ? replacement : pending)),
+  );
   await paths.atomicWrite(joinPath(ws, 'docker-compose.yml'), composeYaml);
 
   for (const [relative, content] of files) {
@@ -370,26 +376,57 @@ export async function write(
     const advertised = String(meta.extra.advertised_url ?? '') || meta.rootUrl;
     await fs.writeFile(target, content.split('{{ROOT_URL}}').join(advertised), 'utf8');
   }
-  // The caller may pass back the provisional record an earlier interrupted write left.
-  const extra: unknown = meta.extra;
-  const finished =
-    typeof extra === 'object' && extra !== null && Object.hasOwn(extra, 'incomplete')
-      ? withIncomplete(meta, false)
-      : meta;
+  // The caller may pass back the provisional record an earlier interrupted write left. Only
+  // the replacement that write was making finishes it. `env`, `monitor`, `upgrade`, its
+  // rollback and `edge adopt` all edit whichever Compose file survived, so an edit of the
+  // previous release's file must not mark the record as describing it.
+  let finished = meta;
+  if (pending === replacement) finished = withIncomplete(meta, null);
+  else if (pending !== undefined) finished = withIncomplete(meta, pending);
+  else if (hasIncomplete(meta)) finished = withIncomplete(meta, null);
   await paths.atomicWrite(joinPath(ws, 'repro.json'), serialise(finished));
   await paths.restrict(ws); // again: covers the files just written, the record included
 }
 
+/** The `extra` key naming the deployment files an unfinished `write` was replacing. */
+const REPLACEMENT_KEY = 'incomplete_sha256';
+
+/** What `write` puts on disk besides the record: the Compose document and generated files. */
+function fingerprint(composeYaml: string, files: readonly (readonly [string, string])[]): string {
+  return createHash('sha256')
+    .update(JSON.stringify([composeYaml, files]))
+    .digest('hex');
+}
+
+function hasIncomplete(meta: Metadata): boolean {
+  const extra: unknown = meta.extra;
+  return typeof extra === 'object' && extra !== null && Object.hasOwn(extra, 'incomplete');
+}
+
 /**
- * `meta` with `extra.incomplete` set or removed, for the two records `write` makes. A copy, so
- * the caller's record is unchanged however the write ends, and one that keeps what was read:
- * the top-level spellings in `READ_SPELLINGS`, and `extra`'s key order and numbers, which a
- * spread copy loses. The interrupted record is the one earlier releases read next.
+ * For a record an interrupted `write` left, the fingerprint of the replacement it was making,
+ * or `''` when it did not record one (an earlier build of this release line); undefined for a
+ * finished record. Only `up --force`, which builds a new record, finishes one without it.
  */
-function withIncomplete(meta: Metadata, incomplete: boolean): Metadata {
+function pendingReplacement(meta: Metadata): string | undefined {
+  if (!hasIncomplete(meta) || meta.extra.incomplete !== true) return undefined;
+  const recorded = meta.extra[REPLACEMENT_KEY];
+  return typeof recorded === 'string' ? recorded : '';
+}
+
+/**
+ * `meta` marked unfinished by the replacement `pending` names (`''` when unknown), or with the
+ * marker removed for `null`. A copy, so the caller's record is unchanged however the write
+ * ends, and one that keeps what was read: the top-level spellings in `READ_SPELLINGS`, and
+ * `extra`'s key order and numbers, which a spread copy loses. The interrupted record is the one
+ * earlier releases read next.
+ */
+function withIncomplete(meta: Metadata, pending: string | null): Metadata {
   const extra = orderedDict(meta.extra);
-  if (incomplete) extra.incomplete = true;
-  else delete extra.incomplete;
+  if (pending === null) delete extra.incomplete;
+  else extra.incomplete = true;
+  if (pending === null || pending === '') delete extra[REPLACEMENT_KEY];
+  else extra[REPLACEMENT_KEY] = pending;
   const copy = { ...meta, extra };
   const kept = READ_SPELLINGS.get(meta);
   if (kept !== undefined) READ_SPELLINGS.set(copy, kept);

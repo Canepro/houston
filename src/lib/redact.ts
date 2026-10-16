@@ -30,6 +30,32 @@ export const SECRET_KEY_HINTS: readonly string[] = Object.freeze([
 export const REDACTED = '********';
 
 /**
+ * Hints for a key that runs its words together, which only an attachable artifact checks: a
+ * YAML or JSON key such as `privatekey` has no boundary to split, where `SECRET_KEY_HINTS` is
+ * also the list earlier releases mask env and log output by.
+ */
+const JOINED_KEY_HINTS: readonly string[] = ['privatekey', 'sshkey'];
+
+/**
+ * Whether a key names a credential, for an artifact a person attaches. The hints are written in
+ * environment spelling (`_key`, `rocketchat_license`), and an artifact also holds keys spelled
+ * `privateKey`, `private-key` or `SSHKey`, so each word boundary also becomes `_` before
+ * matching, an acronym's end included. The key as written is matched too, so a split cannot
+ * hide a hint it already held. `keycloakUrl` and `monkeyPatch` hold no word `key`.
+ */
+export function credentialKey(key: string): boolean {
+  const words = key
+    .replace(/(\p{Lu})(\p{Lu}\p{Ll})/gu, '$1_$2')
+    .replace(/(\p{Ll}|\p{Nd})(\p{Lu})/gu, '$1_$2')
+    .replace(/[^\p{L}\p{Nd}]/gu, '_')
+    .toLowerCase();
+  const lowered = key.toLowerCase();
+  return [...SECRET_KEY_HINTS, ...JOINED_KEY_HINTS].some(
+    (hint) => lowered.includes(hint) || words.includes(hint),
+  );
+}
+
+/**
  * The whitespace of `STRIP_CHARS`, as the inside of a character class.
  *
  * NOT JavaScript's `\s`, which the pattern below used to be written with: JavaScript's
@@ -74,38 +100,98 @@ export const URL_USERINFO = new RegExp(
  */
 const URL_ANY_USERINFO = new RegExp(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^/${SPACE_CLASS}?#]+@`, 'gu');
 
+/** One JSON string token; the text is already known to be valid JSON. */
+const JSON_STRING = /"(?:[^"\\]|\\.)*"/y;
+const JSON_SPACE = /[ \t\n\r]*/y;
+/** A number, `true`, `false` or `null`: everything else a JSON value can start with. */
+const JSON_LITERAL = /[^,\]}\s]+/y;
+
+function jsonToken(pattern: RegExp, text: string, at: number): string {
+  pattern.lastIndex = at;
+  return pattern.exec(text)?.[0] ?? '';
+}
+
 /**
- * Each string of a complete JSON text masked on its own, the rest kept byte for byte; null when
- * `text` is not JSON. A URL ends with its string, so a match must not run on into the next
- * string's `@`, which made `{"url":"https://idp","admin":"ops@example.com"}` lose its email.
+ * The JSON value at `at`, masked, and the index after it. A string is masked on its own, so a
+ * URL ends with its string and a match cannot run on into the next string's `@`. A member a
+ * credential key names is masked whole, each scalar below it included, as the same key in YAML
+ * is. Everything else keeps its bytes, number spellings and member order included.
  */
-function redactJsonStrings(text: string): string | null {
+function maskJsonValue(text: string, at: number, secret: boolean): [string, number] {
+  const open = text[at];
+  if (open === '"') {
+    const token = jsonToken(JSON_STRING, text, at);
+    if (secret) return [JSON.stringify(REDACTED), at + token.length];
+    const decoded = JSON.parse(token) as string;
+    const masked = redactAllUserinfo(decoded);
+    return [masked === decoded ? token : JSON.stringify(masked), at + token.length];
+  }
+  if (open !== '{' && open !== '[') {
+    const token = jsonToken(JSON_LITERAL, text, at);
+    return [secret ? JSON.stringify(REDACTED) : token, at + token.length];
+  }
+  const close = open === '{' ? '}' : ']';
+  let out = open;
+  let i = at + 1;
+  for (;;) {
+    const space = jsonToken(JSON_SPACE, text, i);
+    out += space;
+    i += space.length;
+    if (text[i] === close) return [out + close, i + 1];
+    if (text[i] === ',') {
+      out += ',';
+      i += 1;
+      continue;
+    }
+    let member = secret;
+    if (open === '{') {
+      const [key, afterKey] = maskJsonValue(text, i, false);
+      const name = JSON.parse(text.slice(i, afterKey)) as string;
+      member ||= key !== text.slice(i, afterKey) || credentialKey(name);
+      const colon = jsonToken(JSON_SPACE, text, afterKey);
+      const valueAt = afterKey + colon.length + 1;
+      const beforeValue = jsonToken(JSON_SPACE, text, valueAt);
+      out += `${key}${colon}:${beforeValue}`;
+      i = valueAt + beforeValue.length;
+    }
+    const [value, after] = maskJsonValue(text, i, member);
+    out += value;
+    i = after;
+  }
+}
+
+/** `text` masked by `maskJsonValue` when it is one complete JSON value; null when it is not. */
+function redactJson(text: string): string | null {
   try {
     JSON.parse(text);
   } catch {
     return null;
   }
-  // In valid JSON every `"` outside a string opens one, so this finds exactly its strings.
-  return text.replace(/"(?:[^"\\]|\\.)*"/gu, (token) => {
-    const decoded = JSON.parse(token) as string;
-    const masked = redactAllUserinfo(decoded);
-    return masked === decoded ? token : JSON.stringify(masked);
-  });
+  const leading = jsonToken(JSON_SPACE, text, 0);
+  try {
+    const [value, after] = maskJsonValue(text, leading.length, false);
+    return `${leading}${value}${text.slice(after)}`;
+  } catch (error) {
+    // Nesting deeper than the stack: JSON.parse reads it, and walking it cannot. Withhold it.
+    if (error instanceof RangeError) return REDACTED;
+    throw error;
+  }
 }
 
 /**
  * Mask every URL's user info, user name included, for an artifact a person attaches.
  *
  * A JSON value, or `KEY=` followed by one, is masked string by string, a string holding JSON
- * included. Anything else is masked whole, which can mask more than the user info, never less.
+ * included, and its credential members are masked too. Anything else is masked whole, which
+ * can mask more than the user info, never less.
  */
 export function redactAllUserinfo(value: string): string {
-  const json = redactJsonStrings(value);
+  const json = redactJson(value);
   if (json !== null) return json;
   const equals = value.indexOf('=');
   // Not when the key holds a URL: `https://u:p=["x"]@h` is one URL whose password has a `=`.
   if (equals > 0 && !value.slice(0, equals).includes('://')) {
-    const assigned = redactJsonStrings(value.slice(equals + 1));
+    const assigned = redactJson(value.slice(equals + 1));
     if (assigned !== null) return `${value.slice(0, equals + 1)}${assigned}`;
   }
   return value.replace(URL_ANY_USERINFO, `$1${REDACTED}@`);

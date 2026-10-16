@@ -27,12 +27,17 @@ import * as path from 'node:path';
 import * as YAML from 'yaml';
 
 import { renderMarkdown as renderBundleMarkdown } from '../lib/capture-render';
-import { type ComposeDoc, imageRef, suppliedCredentials } from '../lib/compose';
+import {
+  CREDENTIALS_PENDING,
+  type ComposeDoc,
+  imageRef,
+  suppliedCredentials,
+} from '../lib/compose';
 import * as config from '../lib/config';
 import { ValidationError } from '../lib/errors';
 import { isTruthy, quotedText, toText } from '../lib/format';
 import { pathExpandUser } from '../lib/home';
-import { REDACTED, redactAllUserinfo, SECRET_KEY_HINTS } from '../lib/redact';
+import { credentialKey, REDACTED, redactAllUserinfo } from '../lib/redact';
 import { namesOf } from '../lib/presets/composite';
 import * as presets from '../lib/presets/index';
 import { PROFILES } from '../lib/seed-profiles';
@@ -246,9 +251,10 @@ async function ownershipOf(meta: Metadata, runtime: string): Promise<Record<stri
  * microservices deployment remains true; an unavailable preset makes the requirement unknown
  * unless another recorded component establishes that it was required. `supplied` is `null`
  * when the record cannot say: a Kubernetes record from before `reg_token_supplied` existed put
- * the token in a Secret this reader does not open, and a Docker write that did not finish may
- * have left the previous compose file. A Docker record from before the markers is asked through
- * its compose file, which is where the token went.
+ * the token in a Secret this reader does not open, a Docker write that did not finish may
+ * have left the previous compose file, and an `env` credential change waits for a recreate. A
+ * Docker record from before the markers is asked through its compose file, which is where the
+ * token went.
  */
 async function licenseOf(meta: Metadata, deployment: string): Promise<Record<string, unknown>> {
   const extra = bag(meta.extra);
@@ -279,9 +285,14 @@ async function licenseOf(meta: Metadata, deployment: string): Promise<Record<str
     if (!required && unavailable) required = null;
   }
   // An unfinished Docker write recorded the request, and its Compose file can still be the
-  // previous one, so neither says what Rocket.Chat was handed. A Kubernetes provisional
-  // record states what is deployed, and keeps its markers.
-  if (topology.ofMeta(meta) !== topology.KUBERNETES && extra.incomplete === true) {
+  // previous one, so neither says what Rocket.Chat was handed. Nor does a credential `env`
+  // configured before a recreate succeeded: the markers and the Compose file describe the
+  // configuration, and the running container can still have the previous one. A Kubernetes
+  // provisional record states what is deployed, and keeps its markers.
+  if (
+    topology.ofMeta(meta) !== topology.KUBERNETES &&
+    (extra.incomplete === true || extra[CREDENTIALS_PENDING] === true)
+  ) {
     return { required, supplied: null, source: 'unknown' };
   }
   // Kubernetes `licensed` is the Secret lifecycle flag: a killed create can set it before Helm
@@ -558,21 +569,6 @@ export async function record(
 }
 
 /**
- * Whether a key names a credential. The hints are written in environment spelling
- * (`_key`, `rocketchat_license`), and a bundle also holds YAML keys spelled `privateKey` or
- * `private-key`, so each word boundary also becomes `_` before matching. The key as written
- * is matched too, so a split cannot hide a hint it already held.
- */
-function secretKey(key: string): boolean {
-  const words = key
-    .replace(/(\p{Ll}|\p{Nd})(\p{Lu})/gu, '$1_$2')
-    .replace(/[^\p{L}\p{Nd}]/gu, '_')
-    .toLowerCase();
-  const lowered = key.toLowerCase();
-  return SECRET_KEY_HINTS.some((hint) => lowered.includes(hint) || words.includes(hint));
-}
-
-/**
  * Mask exact credentials the workspace record names, even below a benign YAML key. Key-name
  * redaction still protects standard deployment fields, but cannot discover an unknown secret in
  * arbitrary YAML.
@@ -652,7 +648,7 @@ function redactArtifactText(
   if (equals > 0) {
     const key = urlRedacted.slice(0, equals);
     return redactKnownSecrets(
-      `${key}=${secretKey(key) ? REDACTED : urlRedacted.slice(equals + 1)}`,
+      `${key}=${credentialKey(key) ? REDACTED : urlRedacted.slice(equals + 1)}`,
       knownSecrets,
     );
   }
@@ -678,14 +674,14 @@ function redactArtifactValue(
 
   const fields = value as Record<string, unknown>;
   const name = toText(fields.name);
-  const namedSecret = secretKey(name) || matchesKnownSecret(name, knownSecrets);
+  const namedSecret = credentialKey(name) || matchesKnownSecret(name, knownSecrets);
   const out: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(fields)) {
     const safeKey = redactArtifactText(key, false, knownSecrets);
     out[safeKey] = redactArtifactValue(
       item,
       knownSecrets,
-      secret || safeKey !== key || secretKey(key) || (key === 'value' && namedSecret),
+      secret || safeKey !== key || credentialKey(key) || (key === 'value' && namedSecret),
       seen,
     );
   }

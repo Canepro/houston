@@ -12,7 +12,7 @@
  *
  * Same shape as `core/monitor.ts`, which mutates a running repro the same way.
  */
-import { suppliedCredentials, toYaml } from '../lib/compose';
+import { CREDENTIALS_PENDING, suppliedCredentials, toYaml } from '../lib/compose';
 import type { ComposeDoc } from '../lib/compose';
 import * as config from '../lib/config';
 import { DockerError, ValidationError } from '../lib/errors';
@@ -40,7 +40,14 @@ import { up } from './runner/engine';
 import { reproLock } from './runner/locks';
 import { workspace } from './runner/paths';
 import { rcContainerEnv } from './runner/queries';
-import { type Metadata, adminPass, readCompose, readMeta, write } from './runner/record';
+import {
+  type Metadata,
+  adminPass,
+  readCompose,
+  readMeta,
+  write,
+  writeRecord,
+} from './runner/record';
 import * as topology from './topology';
 
 type Bag = Record<string, unknown>;
@@ -501,17 +508,25 @@ export async function mergedOverrides(
  * A change here can add, blank or remove either, so the recorded markers follow the document
  * being written, env files included. A record without them is left as earlier releases write
  * it back, and evidence asks its Compose file instead.
+ *
+ * Either way the document describes the configuration. A change to what it hands Rocket.Chat
+ * also records `CREDENTIALS_PENDING` until a recreate succeeds, so evidence does not report a
+ * credential the running container may not have.
  */
 async function refreshCredentialMarkers(
   extra: Bag,
+  before: { license: boolean; token: boolean },
   doc: ComposeDoc,
   target: string,
 ): Promise<void> {
+  const supplied = await suppliedCredentials(doc, workspace(target));
+  if (supplied.license !== before.license || supplied.token !== before.token) {
+    extra[CREDENTIALS_PENDING] = true;
+  }
   const tokenMarker = typeof extra.reg_token_supplied === 'boolean';
   if (!tokenMarker && extra.licensed !== true && typeof extra.effective_license !== 'boolean') {
     return;
   }
-  const supplied = await suppliedCredentials(doc, workspace(target));
   if (tokenMarker) extra.reg_token_supplied = supplied.token;
   // Absent means unlicensed once the token marker exists; before it, absent sends evidence to
   // the Compose file, which finds a licence added here.
@@ -535,13 +550,17 @@ export async function setEnvLocked(
 
   const { meta, overrides } = await mergedOverrides(emit, sets, target, unset);
 
+  const before = await suppliedCredentials(
+    (await readCompose(target)) as unknown as ComposeDoc,
+    workspace(target),
+  );
   const { doc, rcServices } = await applyToCompose(overrides, target);
 
   // `meta.extra["env"] = overrides`, which is a TypeError when `extra` is not a mapping --
   // raised before anything is written. Assigned into `bagOf`'s throwaway `{}`, the override
   // reached docker-compose.yml and not repro.json, so the next `up --force` rebuilt it away.
   setItemChecked(meta.extra, 'env', overrides);
-  await refreshCredentialMarkers(meta.extra, doc as unknown as ComposeDoc, target);
+  await refreshCredentialMarkers(meta.extra, before, doc as unknown as ComposeDoc, target);
   await write(target, toYaml(doc as unknown as ComposeDoc), meta);
   const changed = [...Object.keys(sets), ...unset].sort().join(', ');
   info(emit, `env updated on ${quotedText(target)}: ${changed}`, { phase: 'config' });
@@ -569,13 +588,20 @@ export async function setEnvLocked(
   if ((await up(target, { pull: false, forceRecreate: rcServices[0] })) !== 0) {
     throw new DockerError('`docker compose up` failed applying the env change');
   }
+  // Rocket.Chat now runs what the Compose file says, a change an earlier `env` deferred or
+  // failed to apply included.
+  const deployed = await readMeta(target);
+  if (Object.hasOwn(bagOf(deployed.extra), CREDENTIALS_PENDING)) {
+    delete bagOf(deployed.extra)[CREDENTIALS_PENDING];
+    await writeRecord(target, deployed);
+  }
   // WAITED FOR, so the command returns when Rocket.Chat answers again. It returned as soon
   // as compose had recreated the container, and a `seed` typed straight after refused
   // "repro not ready" while the new container booted. No line of its own: the wait sits
   // under the "recreating" line, and "restarted" is said once it is true. A container the
   // new environment stops from serving is a NotReadyError (exit 5) naming why, not a
   // success; the change is written either way, so `env --unset` is the way back.
-  await waitServing(await readMeta(target), emit, 300.0);
+  await waitServing(deployed, emit, 300.0);
   info(emit, `${quotedText(target)} restarted with the new environment`, { phase: 'done' });
   return { name: target, restarted: true, overrides: shown(overrides) };
 }

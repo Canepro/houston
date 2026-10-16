@@ -483,6 +483,13 @@ export async function suppliedCredentials(
   };
 }
 
+/**
+ * The record key `env` sets when it changes whether the Compose file hands Rocket.Chat a licence
+ * or a registration token, and removes once a recreate succeeds. Until then the Compose file
+ * says what is configured, and the running container can still have the previous one.
+ */
+export const CREDENTIALS_PENDING = 'credentials_pending';
+
 /** Every replica needs a credential, but replicas may use different credential types. */
 export function hasEffectiveCredential(
   doc: ComposeDoc,

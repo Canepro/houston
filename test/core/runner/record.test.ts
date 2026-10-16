@@ -438,10 +438,18 @@ describe('the write-ahead ordering', () => {
     expect(interrupted).toContain('"incomplete": true');
 
     fs.rmdirSync(path.join(ws, 'docker-compose.yml'));
+    // A loaded write of any other document edits whatever file survived, so it is not the
+    // replacement and leaves the record exactly as unfinished as it was.
+    await write(name, 'services: {other: {}}\n', await readMeta(name));
+    expect(fs.readFileSync(recordFile, 'utf8')).toBe(interrupted);
+
     await write(name, 'services: {}\n', await readMeta(name));
 
     expect(fs.readFileSync(recordFile, 'utf8')).toBe(
-      interrupted.replace(',\n    "incomplete": true', ''),
+      interrupted.replace(
+        /,\n {4}"incomplete": true,\n {4}"incomplete_sha256": "[0-9a-f]{64}"/u,
+        '',
+      ),
     );
     // Not left for the tests below, which list every workspace.
     fs.rmSync(ws, { recursive: true, force: true });
