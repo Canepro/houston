@@ -39,10 +39,14 @@ import { isTruthy, quotedText, toText } from '../lib/format';
 import { pathExpandUser } from '../lib/home';
 import {
   argumentListKey,
+  authorizationCredentials,
+  authorizationHeaders,
   commandCarriesCredential,
   credentialArgument,
   credentialFlagWord,
   httpUserPassword,
+  healthcheckKey,
+  HTTP_USER_PREFIX,
   httpUsers,
   userArgument,
   valueTakingCredentialFlag,
@@ -719,7 +723,8 @@ function argumentsCarryCredential(value: unknown): boolean {
   return (
     words.some((word) => credentialFlagWord(word) || commandCarriesCredential(word)) ||
     (words.includes('-p') && words.some(userArgument)) ||
-    httpUserPassword(words)
+    httpUserPassword(words) ||
+    authorizationHeaders(words).length > 0
   );
 }
 
@@ -789,6 +794,10 @@ function shellCommands(text: string): ShellWord[][] {
       begin(index);
       word += text[index + 1] ?? '';
       index += 1;
+    } else if (char === '#' && word === '' && !quoted) {
+      // A `#` that starts a word begins a comment: the shell never runs the rest of the line.
+      const newline = text.indexOf('\n', index);
+      index = newline < 0 ? text.length : newline - 1;
     } else if (/[;&|()`\n]/u.test(char)) {
       endCommand(index);
     } else if (/[\s<>]/u.test(char)) {
@@ -821,8 +830,12 @@ function discoverCommandText(text: string, add: (value: string) => void, depth =
     // `curl -u user:password`: the user value as a whole and its password are both credentials.
     for (const user of httpUsers(command.map((word) => word.text))) {
       const word = command[user.index] as ShellWord;
-      spellings(user.value, user.attached ? word.raw.replace(/^(?:--user=|-u)/u, '') : word.raw);
+      spellings(user.value, user.attached ? word.raw.replace(HTTP_USER_PREFIX, '') : word.raw);
       spellings(user.password);
+    }
+    // `-H 'Authorization: Bearer token'`: the header's credential, not the whole header line.
+    for (const header of authorizationHeaders(command.map((word) => word.text))) {
+      for (const credential of authorizationCredentials(header)) spellings(credential);
     }
     for (let index = 0; index < command.length; index += 1) {
       const word = command[index] as ShellWord;
@@ -847,15 +860,21 @@ function discoverArtifactSecrets(
   secrets: Set<string>,
   wholeSecrets: Set<string>,
   secret = false,
-  seen = new WeakMap<object, boolean>(),
+  seen = new WeakMap<object, number>(),
   depth = 0,
   parentKey = '',
 ): void {
   if (typeof node !== 'object' || node === null) return;
-  // A benign alias visited first must still be revisited under a credential key.
-  if (seen.has(node) && (seen.get(node) === true || !secret)) return;
+  // A benign alias visited first must still be revisited under a credential key, and under a
+  // healthcheck key: `test` is an argument list there and nowhere else. A visit as a credential
+  // covers a plain one in the same context. Bits: 1 plain, 2 plain in a healthcheck, 4 as a
+  // credential, 8 as a credential in a healthcheck.
+  const health = healthcheckKey(parentKey);
+  const visited = seen.get(node) ?? 0;
+  const covering = (health ? 8 : 4) | (secret ? 0 : health ? 2 : 1);
+  if ((visited & covering) !== 0) return;
   if (depth > 100) throw new RangeError('artifact credential nesting exceeds limit');
-  seen.set(node, secret);
+  seen.set(node, visited | (secret ? (health ? 8 : 4) : health ? 2 : 1));
   const visit = (child: unknown, credential = secret, key = ''): void =>
     discoverArtifactSecrets(child, doc, secrets, wholeSecrets, credential, seen, depth + 1, key);
   const add = (text: string, whole = false): void => {
@@ -892,6 +911,9 @@ function discoverArtifactSecrets(
     for (const user of httpUsers(words)) {
       add(user.value);
       add(user.password);
+    }
+    for (const header of authorizationHeaders(words)) {
+      for (const credential of authorizationCredentials(header)) add(credential);
     }
     for (let index = 0; index < items.length; index += 1) {
       const flag = items[index];

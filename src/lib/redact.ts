@@ -39,11 +39,26 @@ const JOINED_KEY_HINTS: readonly string[] = ['privatekey', 'sshkey'];
 const HEADER_KEY = /^(?:(?:proxy|http)_)?(?:authorization(?:_?headers?)?|auth_?headers?)$/u;
 
 /**
- * A credential word, alone or ending a joined option name (`--accesstoken`, `--rootpassword`).
- * `pass` counts only as a whole word: `bypass` and `compass` end with it.
+ * Services whose own name prefixes `pass` in an option (`--dbpass`, `--rootpass`). A closed list,
+ * because a word merely ending in `pass` is usually not a credential: `bypass`, `compass`.
  */
-const CREDENTIAL_WORD =
-  /^pass$|(?:password|passwd|passphrase|secret|token|apikey|credential|privatekey|sshkey)s?$/u;
+const PASS_PREFIX =
+  'db|admin|root|user|sql|mysql|pg|redis|mongo|ldap|smtp|ftp|ssh|vnc|bind|master|auth';
+
+/**
+ * One word of an option name that names a credential:
+ * - `pass` and its named forms: `-passin`, `-passout` (openssl), `--passcode`, `--passfile`,
+ *   with an optional service prefix. `pass` counts only as a whole word or with those forms.
+ * - A credential stem, alone or ending a joined name (`--accesstoken`, `--rootpassword`).
+ * - A credential stem followed by `key`, `accesskey` or `file`: `--secretkey`,
+ *   `--secretaccesskey`, `--passwordfile`.
+ */
+const CREDENTIAL_WORD = new RegExp(
+  `^(?:${PASS_PREFIX})?pass(?:in|out|code|file|key)?$|` +
+    '(?:password|passwd|passphrase|secret|token|apikey|credential|privatekey|sshkey|accesskey)s?$|' +
+    '^(?:password|passwd|passphrase|secret|token|credential)(?:key|accesskey|file)s?$',
+  'u',
+);
 
 /**
  * Whether a key names a credential, for an artifact a person attaches. The hints are written in
@@ -86,14 +101,18 @@ export const ARGUMENT_LIST_KEYS: readonly string[] = Object.freeze([
   'args',
 ]);
 
+/** Whether `key` names a healthcheck: `healthcheck`, or an extension field such as `x-healthcheck`. */
+export function healthcheckKey(key: string): boolean {
+  return /health[-_]?check/iu.test(key);
+}
+
 /**
  * Whether `key`, inside an object held under `parent`, is an argument list. `test` is one only
- * in a healthcheck (`healthcheck`, or an extension field such as `x-healthcheck` that an anchor
- * shares); anywhere else it is arbitrary data, such as a chart value, and masking it would
- * erase whatever it holds from the whole bundle.
+ * in a healthcheck; anywhere else it is arbitrary data, such as a chart value, and masking it
+ * would erase whatever it holds from the whole bundle.
  */
 export function argumentListKey(key: string, parent = ''): boolean {
-  return ARGUMENT_LIST_KEYS.includes(key) || (key === 'test' && /health[-_]?check/iu.test(parent));
+  return ARGUMENT_LIST_KEYS.includes(key) || (key === 'test' && healthcheckKey(parent));
 }
 
 /**
@@ -111,7 +130,7 @@ export function credentialFlag(item: string): boolean {
     /(?:^|_)rocketchat_license(?:_|$)/u.test(words) ||
     words
       .split('_')
-      .some((word, index) => CREDENTIAL_WORD.test(word) || (index > 0 && word === 'key'))
+      .some((word, index) => CREDENTIAL_WORD.test(word) || (index > 0 && /^keys?$/u.test(word)))
   );
 }
 
@@ -143,18 +162,56 @@ export function credentialFlagWord(word: string): boolean {
 export function commandCarriesCredential(text: string): boolean {
   const words = text.split(/[\s'"`;&|()<>\\]+/u).filter((word) => word !== '');
   if (words.some(credentialFlagWord)) return true;
-  return (words.includes('-p') && words.some(userArgument)) || httpUserPassword(words);
-}
-
-/** `curl -u user:pass` and wget's `--user=user:pass` carry a password in the user value. */
-export function httpUserPassword(words: readonly string[]): boolean {
-  if (!words.some((word) => /(?:^|\/)(?:curl|wget)$/u.test(word))) return false;
-  return words.some((word, index) =>
-    /^(?:-u|--user)$/u.test(word)
-      ? (words[index + 1] ?? '').includes(':')
-      : /^(?:-u|--user=).*:/u.test(word),
+  return (
+    (words.includes('-p') && words.some(userArgument)) ||
+    httpUserPassword(words) ||
+    authorizationHeaders(words).length > 0
   );
 }
+
+/** `curl -u user:pass`, `--proxy-user` and wget's `--user=user:pass` carry a password. */
+export function httpUserPassword(words: readonly string[]): boolean {
+  return httpUsers(words).length > 0;
+}
+
+/** A header flag whose value, or `--header=value`, is one request header. */
+const HEADER_FLAG = /^(?:-H|--header|--proxy-header)$/u;
+const HEADER_ATTACHED = /^(?:--header=|--proxy-header=|-H)(.*)$/su;
+const AUTHORIZATION_HEADER = /^\s*(?:proxy-)?authorization\s*:\s*(.*)$/isu;
+
+/**
+ * The values of the `Authorization:` and `Proxy-Authorization:` headers that `words` hand to a
+ * header flag (`-H`, `--header`, `--proxy-header`, attached or not), empty when the header has
+ * none. Other headers are not credentials.
+ */
+export function authorizationHeaders(words: readonly string[]): string[] {
+  const values: string[] = [];
+  words.forEach((word, index) => {
+    const header = HEADER_FLAG.test(word) ? words[index + 1] : HEADER_ATTACHED.exec(word)?.[1];
+    const value = AUTHORIZATION_HEADER.exec(header ?? '')?.[1];
+    if (value !== undefined) values.push(value.trim());
+  });
+  return values;
+}
+
+/** Schemes that name how a credential is sent and are not the credential. */
+const AUTHORIZATION_SCHEME = /^(?:bearer|basic|digest|negotiate|ntlm|token)$/iu;
+
+/**
+ * The strings that give away an `Authorization:` header value, for copies elsewhere: the value
+ * and the credential after its scheme (`Bearer abc` holds `abc`). A bare scheme and a shell
+ * variable (`$TOKEN`) hold no secret, and registering either would mask it everywhere.
+ */
+export function authorizationCredentials(value: string): string[] {
+  const scheme = /^(\S+)[ \t]+(\S.*)$/su.exec(value);
+  const credential = scheme?.[2] ?? value;
+  if (credential === '' || credential.startsWith('$')) return [];
+  if (scheme === null && AUTHORIZATION_SCHEME.test(value)) return [];
+  return scheme === null ? [value] : [value, credential];
+}
+
+/** The start of a word that holds its own user value: `--user=`, `--proxy-user=`, `-u`, `-U`. */
+export const HTTP_USER_PREFIX = /^(?:--(?:proxy-)?user=|-[uU])/u;
 
 /** A `user:password` value of a curl or wget command, and the word that holds it. */
 export interface HttpUser {
@@ -166,18 +223,26 @@ export interface HttpUser {
 }
 
 /**
- * The `user:password` values after a curl or wget in `words`: `-u v`, `--user v`, `--user=v` and
- * `-uv`. Only words after the program count, so `docker run -u root:root curlimage/curl` names
- * a user and group, not a password. A value without a colon has no password in it.
+ * The `user:password` values after a curl or wget in `words`: `-u v`, `--user v`, `--user=v`,
+ * `-uv`, and curl's `-U`, `--proxy-user` in the same four spellings (`-U` is wget's
+ * `--user-agent`, so it counts for curl only). A long option is never read as an attached `-u`:
+ * an attached short option is a single dash and one letter. Only words after the program count,
+ * so `docker run -u root:root curlimage/curl` names a user and group, not a password. A value
+ * without a colon has no password in it.
  */
 export function httpUsers(words: readonly string[]): HttpUser[] {
   const program = words.findIndex((word) => /(?:^|\/)(?:curl|wget)$/u.test(word));
   if (program < 0) return [];
+  const curl = /curl$/u.test(words[program] ?? '');
+  const separateFlag = curl ? /^(?:-[uU]|--user|--proxy-user)$/u : /^(?:-u|--user|--proxy-user)$/u;
+  const attachedFlag = curl
+    ? /^(?:--(?:proxy-)?user=|-[uU](?!-))(.*)$/su
+    : /^(?:--(?:proxy-)?user=|-u(?!-))(.*)$/su;
   const users: HttpUser[] = [];
   for (let index = program + 1; index < words.length; index += 1) {
     const word = words[index] ?? '';
-    const separate = /^(?:-u|--user)$/u.test(word);
-    const attached = separate ? undefined : /^(?:--user=|-u)(.*)$/su.exec(word)?.[1];
+    const separate = separateFlag.test(word);
+    const attached = separate ? undefined : attachedFlag.exec(word)?.[1];
     const next = words[index + 1] ?? '';
     const value = separate ? next : attached;
     const colon = value?.indexOf(':') ?? -1;
@@ -428,6 +493,9 @@ export function discoverTextSecrets(
       for (const user of httpUsers(items)) {
         add(user.value);
         add(user.password);
+      }
+      for (const header of authorizationHeaders(items)) {
+        for (const credential of authorizationCredentials(header)) add(credential);
       }
       let flag = '';
       let i = at + 1;
