@@ -60,7 +60,7 @@ import { LAST_BACKUP_KEY, UPGRADE_FROM_KEY } from './lifecycle/types';
 import { releaseFetcher } from './lifecycle/request';
 import { recreateRocketChat, waitAndFinalize } from './lifecycle/ready';
 import { apiInfo } from './rcapi';
-import { composeLogsCapture, startServices } from './runner/engine';
+import { composeLogsCapture, startServices, up } from './runner/engine';
 import { containerDetails, rcState, runningWriterServices } from './runner/queries';
 import {
   type Metadata,
@@ -943,6 +943,20 @@ async function warnIfUnfinished(target: string, emit: Emit): Promise<void> {
   );
 }
 
+/**
+ * Rollback also supports stopped workspaces. Start the project, including MongoDB, then
+ * prove every Rocket.Chat container was replaced before restore quiesces its writers.
+ * A plain up alone cannot clear deferred credentials or prove the old image is running.
+ */
+async function startRollbackProject(target: string): Promise<void> {
+  if ((await up(target, { pull: true })) !== 0) {
+    throw new DockerError('`docker compose up` failed starting the project for rollback');
+  }
+  if ((await recreateRocketChat(target, { pull: false })) !== 0) {
+    throw new DockerError('`docker compose up` failed rolling back the image');
+  }
+}
+
 /** Put the workspace back: old compose, old metadata, pre-upgrade data. */
 export async function rollbackCompose(
   target: string,
@@ -962,7 +976,7 @@ export async function rollbackCompose(
   }
   await write(target, previousCompose, meta);
   await warnIfUnfinished(target, emit);
-  await recreateRocketChat(target, { pull: true });
+  await startRollbackProject(target);
   await backup.restoreLocked(target, bundle, await backup.readManifest(bundle), emit, {
     allowUpgrade: false,
     force: true,
@@ -1009,9 +1023,7 @@ export async function rollbackUnderLock(
       reverting,
     });
     await warnIfUnfinished(target, emit);
-    if ((await recreateRocketChat(target, { pull: true })) !== 0) {
-      throw new DockerError('`docker compose up` failed rolling back the image');
-    }
+    await startRollbackProject(target);
     return await backup.restoreLocked(target, bundle, manifest, emit, {
       allowUpgrade: false,
       force: true,

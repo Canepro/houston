@@ -118,7 +118,9 @@ const ROOT = path.resolve(__dirname, '..');
 // (one test became two rows, plus one); a deferred credential change is deployed by an upgrade
 // or its rollback, and an interrupted upgrade is finished only by the rollback that undoes it
 // (two); and by an `up` that starts the stopped workspace (one): total 4610.
-const FLOOR = 4610;
+// Two more exercise automatic and explicit rollback startup, all-replica recreation,
+// and refusal before restore after either engine failure: total 4612.
+const FLOOR = 4612;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

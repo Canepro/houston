@@ -570,7 +570,8 @@ export async function setEnvLocked(
     info(
       emit,
       'not restarting; Rocket.Chat keeps its current environment until the change is ' +
-        `applied: \`houston env --name ${target} ${again}\` without --no-restart`,
+        `applied: if the workspace is stopped, run \`houston up --name ${target}\`; ` +
+        `if it is running, repeat \`houston env --name ${target} ${again}\` without --no-restart`,
       { phase: 'done' },
     );
     return { name: target, restarted: false, overrides: shown(overrides) };

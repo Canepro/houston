@@ -1,8 +1,15 @@
 {
   "names": {
     "parse": [
-      { "value": { "A": "1", "B_2": "x=y" } },
-      { "value": {} },
+      {
+        "value": {
+          "A": "1",
+          "B_2": "x=y"
+        }
+      },
+      {
+        "value": {}
+      },
       {
         "kind": "ValidationError",
         "message": "--set 'JUST_A_KEY' is not KEY=VALUE (to remove a key, use --unset JUST_A_KEY)"
@@ -23,94 +30,239 @@
         "kind": "ValidationError",
         "message": "'' is not a valid environment variable name (letters, digits and underscore; not starting with a digit)"
       },
-      { "value": { "PADDED": "v" } },
-      { "value": { "A": "" } },
-      { "value": { "__proto__": "x", "constructor": "c", "toString": "t", "hasOwnProperty": "h" } }
+      {
+        "value": {
+          "PADDED": "v"
+        }
+      },
+      {
+        "value": {
+          "A": ""
+        }
+      },
+      {
+        "value": {
+          "__proto__": "x",
+          "constructor": "c",
+          "toString": "t",
+          "hasOwnProperty": "h"
+        }
+      }
     ],
     "settings": [
-      { "value": { "OVERWRITE_SETTING_Message_AllowEditing": "false" } },
-      { "value": { "OVERWRITE_SETTING_A_B": "x=y" } },
-      { "value": {} },
+      {
+        "value": {
+          "OVERWRITE_SETTING_Message_AllowEditing": "false"
+        }
+      },
+      {
+        "value": {
+          "OVERWRITE_SETTING_A_B": "x=y"
+        }
+      },
+      {
+        "value": {}
+      },
       {
         "kind": "ValidationError",
         "message": "--set 'Message_AllowEditing' is not KEY=VALUE (to remove a key, use --unset Message_AllowEditing)"
       },
-      { "value": { "OVERWRITE_SETTING_Message_AllowEditing": "false" } },
-      { "value": { "OVERWRITE_SETTING_Already_Prefixed": "1" } },
-      { "value": { "OVERWRITE_SETTING_Spaced_Id": "v" } },
-      { "value": { "OVERWRITE_SETTING___proto__": "1" } }
+      {
+        "value": {
+          "OVERWRITE_SETTING_Message_AllowEditing": "false"
+        }
+      },
+      {
+        "value": {
+          "OVERWRITE_SETTING_Already_Prefixed": "1"
+        }
+      },
+      {
+        "value": {
+          "OVERWRITE_SETTING_Spaced_Id": "v"
+        }
+      },
+      {
+        "value": {
+          "OVERWRITE_SETTING___proto__": "1"
+        }
+      }
     ],
     "names": [
       {
         "kind": "ValidationError",
         "message": "'has-hyphen' is not a valid environment variable name"
       },
-      { "value": null },
-      { "kind": "ValidationError", "message": "'2lead' is not a valid environment variable name" },
-      { "kind": "ValidationError", "message": "'' is not a valid environment variable name" }
+      {
+        "value": null
+      },
+      {
+        "kind": "ValidationError",
+        "message": "'2lead' is not a valid environment variable name"
+      },
+      {
+        "kind": "ValidationError",
+        "message": "'' is not a valid environment variable name"
+      }
     ],
     "prefix": "OVERWRITE_SETTING_"
   },
   "strip": {
     "parse": [
-      { "value": { "FOO": "1" } },
+      {
+        "value": {
+          "FOO": "1"
+        }
+      },
       {
         "kind": "ValidationError",
         "message": "'\\ufeffFOO' is not a valid environment variable name (letters, digits and underscore; not starting with a digit)"
       },
-      { "value": { "FOO": "1" } },
-      { "value": { "FOO": "1" } }
+      {
+        "value": {
+          "FOO": "1"
+        }
+      },
+      {
+        "value": {
+          "FOO": "1"
+        }
+      }
     ],
     "settings": [
-      { "value": { "OVERWRITE_SETTING_Id": "1" } },
+      {
+        "value": {
+          "OVERWRITE_SETTING_Id": "1"
+        }
+      },
       {
         "kind": "ValidationError",
         "message": "'\\ufeffId' is not a valid environment variable name (letters, digits and underscore; not starting with a digit)"
       }
     ],
     "prefix": [
-      { "value": { "OVERWRITE_SETTING_Id": "1" } },
+      {
+        "value": {
+          "OVERWRITE_SETTING_Id": "1"
+        }
+      },
       {
         "kind": "ValidationError",
         "message": "'\\ufeffId' is not a valid environment variable name"
       },
-      { "value": { "OVERWRITE_SETTING_Id": "1" } }
+      {
+        "value": {
+          "OVERWRITE_SETTING_Id": "1"
+        }
+      }
     ],
     "names": [
-      { "value": null },
+      {
+        "value": null
+      },
       {
         "kind": "ValidationError",
         "message": "'\\ufeffok' is not a valid environment variable name"
       },
-      { "value": null }
+      {
+        "value": null
+      }
     ]
   },
   "rows": {
     "rows": [
-      { "key": "EMPTY", "value": "", "override": false },
-      { "key": "GONE", "value": "x", "override": false, "drift": true, "live": "" },
-      { "key": "KEEP", "value": "1", "override": true, "drift": true, "live": "changed" },
-      { "key": "PORT", "value": "3000", "override": false },
-      { "key": "constructor", "value": "c", "override": false },
-      { "key": "toString", "value": "t", "override": false }
+      {
+        "key": "EMPTY",
+        "value": "",
+        "override": false
+      },
+      {
+        "key": "GONE",
+        "value": "x",
+        "override": false,
+        "drift": true,
+        "live": ""
+      },
+      {
+        "key": "KEEP",
+        "value": "1",
+        "override": true,
+        "drift": true,
+        "live": "changed"
+      },
+      {
+        "key": "PORT",
+        "value": "3000",
+        "override": false
+      },
+      {
+        "key": "constructor",
+        "value": "c",
+        "override": false
+      },
+      {
+        "key": "toString",
+        "value": "t",
+        "override": false
+      }
     ],
     "drift": ["GONE", "KEEP"],
     "live_read": true,
     "single": [
-      { "key": "EMPTY", "value": "", "override": false },
-      { "key": "GONE", "value": "x", "override": false },
-      { "key": "KEEP", "value": "1", "override": true },
-      { "key": "PORT", "value": "3000", "override": false },
-      { "key": "constructor", "value": "c", "override": false },
-      { "key": "toString", "value": "t", "override": false }
+      {
+        "key": "EMPTY",
+        "value": "",
+        "override": false
+      },
+      {
+        "key": "GONE",
+        "value": "x",
+        "override": false
+      },
+      {
+        "key": "KEEP",
+        "value": "1",
+        "override": true
+      },
+      {
+        "key": "PORT",
+        "value": "3000",
+        "override": false
+      },
+      {
+        "key": "constructor",
+        "value": "c",
+        "override": false
+      },
+      {
+        "key": "toString",
+        "value": "t",
+        "override": false
+      }
     ]
   },
   "current": {
     "name": "s",
     "env": [
-      { "key": "BLANK", "value": "old", "override": false, "drift": true, "live": "" },
-      { "key": "KEEP", "value": "1", "override": true, "drift": true, "live": "" },
-      { "key": "PORT", "value": "3000", "override": false }
+      {
+        "key": "BLANK",
+        "value": "old",
+        "override": false,
+        "drift": true,
+        "live": ""
+      },
+      {
+        "key": "KEEP",
+        "value": "1",
+        "override": true,
+        "drift": true,
+        "live": ""
+      },
+      {
+        "key": "PORT",
+        "value": "3000",
+        "override": false
+      }
     ],
     "overrides": ["KEEP", "MY"],
     "drift": ["BLANK", "KEEP"],
@@ -123,10 +275,26 @@
         "name": "e",
         "restarted": true,
         "overrides": [
-          { "key": "BLANK", "removed": false, "value": "" },
-          { "key": "KEEP", "removed": true, "value": "" },
-          { "key": "MONGO_URL", "removed": false, "value": "mongodb://elsewhere" },
-          { "key": "MY", "removed": false, "value": "v" }
+          {
+            "key": "BLANK",
+            "removed": false,
+            "value": ""
+          },
+          {
+            "key": "KEEP",
+            "removed": true,
+            "value": ""
+          },
+          {
+            "key": "MONGO_URL",
+            "removed": false,
+            "value": "mongodb://elsewhere"
+          },
+          {
+            "key": "MY",
+            "removed": false,
+            "value": "v"
+          }
         ]
       },
       "error": null,
@@ -151,7 +319,12 @@
         },
         "volumes": {}
       },
-      "env": { "KEEP": null, "MONGO_URL": "mongodb://elsewhere", "MY": "v", "BLANK": "" },
+      "env": {
+        "KEEP": null,
+        "MONGO_URL": "mongodb://elsewhere",
+        "MY": "v",
+        "BLANK": ""
+      },
       "up": ["e", false, ["rocketchat", "rocketchat-2"]],
       "events": [
         {
@@ -169,33 +342,59 @@
           "phase": "boot",
           "level": "info"
         },
-        { "message": "'e' restarted with the new environment", "phase": "done", "level": "info" }
+        {
+          "message": "'e' restarted with the new environment",
+          "phase": "done",
+          "level": "info"
+        }
       ]
     },
     {
       "result": {
         "name": "e",
         "restarted": false,
-        "overrides": [{ "key": "A", "removed": false, "value": "1" }]
+        "overrides": [
+          {
+            "key": "A",
+            "removed": false,
+            "value": "1"
+          }
+        ]
       },
       "error": null,
       "doc": {
         "services": {
           "rocketchat": {
-            "environment": { "PORT": "3000", "KEEP": "1", "BLANK": "old", "A": "1" }
+            "environment": {
+              "PORT": "3000",
+              "KEEP": "1",
+              "BLANK": "old",
+              "A": "1"
+            }
           },
           "rocketchat-2": {
-            "environment": { "PORT": "3000", "KEEP": "1", "BLANK": "old", "A": "1" }
+            "environment": {
+              "PORT": "3000",
+              "KEEP": "1",
+              "BLANK": "old",
+              "A": "1"
+            }
           }
         },
         "volumes": {}
       },
-      "env": { "A": "1" },
+      "env": {
+        "A": "1"
+      },
       "up": null,
       "events": [
-        { "message": "env updated on 'e': A", "phase": "config", "level": "info" },
         {
-          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: `houston env --name e --set A=<value>` without --no-restart",
+          "message": "env updated on 'e': A",
+          "phase": "config",
+          "level": "info"
+        },
+        {
+          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: if the workspace is stopped, run `houston up --name e`; if it is running, repeat `houston env --name e --set A=<value>` without --no-restart",
           "phase": "done",
           "level": "info"
         }
@@ -206,33 +405,67 @@
         "name": "e",
         "restarted": true,
         "overrides": [
-          { "key": "ADDED", "removed": false, "value": "x" },
-          { "key": "KEEP", "removed": true, "value": "" },
-          { "key": "OLD", "removed": false, "value": "kept" }
+          {
+            "key": "ADDED",
+            "removed": false,
+            "value": "x"
+          },
+          {
+            "key": "KEEP",
+            "removed": true,
+            "value": ""
+          },
+          {
+            "key": "OLD",
+            "removed": false,
+            "value": "kept"
+          }
         ]
       },
       "error": null,
       "doc": {
         "services": {
           "rocketchat": {
-            "environment": { "PORT": "3000", "BLANK": "old", "OLD": "kept", "ADDED": "x" }
+            "environment": {
+              "PORT": "3000",
+              "BLANK": "old",
+              "OLD": "kept",
+              "ADDED": "x"
+            }
           },
           "rocketchat-2": {
-            "environment": { "PORT": "3000", "BLANK": "old", "OLD": "kept", "ADDED": "x" }
+            "environment": {
+              "PORT": "3000",
+              "BLANK": "old",
+              "OLD": "kept",
+              "ADDED": "x"
+            }
           }
         },
         "volumes": {}
       },
-      "env": { "KEEP": null, "OLD": "kept", "ADDED": "x" },
+      "env": {
+        "KEEP": null,
+        "OLD": "kept",
+        "ADDED": "x"
+      },
       "up": ["e", false, ["rocketchat", "rocketchat-2"]],
       "events": [
-        { "message": "env updated on 'e': ADDED", "phase": "config", "level": "info" },
+        {
+          "message": "env updated on 'e': ADDED",
+          "phase": "config",
+          "level": "info"
+        },
         {
           "message": "recreating the Rocket.Chat container (data is kept)...",
           "phase": "boot",
           "level": "info"
         },
-        { "message": "'e' restarted with the new environment", "phase": "done", "level": "info" }
+        {
+          "message": "'e' restarted with the new environment",
+          "phase": "done",
+          "level": "info"
+        }
       ]
     },
     {
@@ -240,8 +473,16 @@
         "name": "e",
         "restarted": true,
         "overrides": [
-          { "key": "MONGO_URL", "removed": false, "value": "y" },
-          { "key": "constructor", "removed": false, "value": "x" }
+          {
+            "key": "MONGO_URL",
+            "removed": false,
+            "value": "y"
+          },
+          {
+            "key": "constructor",
+            "removed": false,
+            "value": "x"
+          }
         ]
       },
       "error": null,
@@ -268,7 +509,10 @@
         },
         "volumes": {}
       },
-      "env": { "constructor": "x", "MONGO_URL": "y" },
+      "env": {
+        "constructor": "x",
+        "MONGO_URL": "y"
+      },
       "up": ["e", false, ["rocketchat", "rocketchat-2"]],
       "events": [
         {
@@ -286,7 +530,11 @@
           "phase": "boot",
           "level": "info"
         },
-        { "message": "'e' restarted with the new environment", "phase": "done", "level": "info" }
+        {
+          "message": "'e' restarted with the new environment",
+          "phase": "done",
+          "level": "info"
+        }
       ]
     },
     {
@@ -294,9 +542,21 @@
         "name": "e",
         "restarted": true,
         "overrides": [
-          { "key": "A", "removed": false, "value": "1" },
-          { "key": "FLAG", "removed": false, "value": "True" },
-          { "key": "NUM", "removed": false, "value": "8080" }
+          {
+            "key": "A",
+            "removed": false,
+            "value": "1"
+          },
+          {
+            "key": "FLAG",
+            "removed": false,
+            "value": "True"
+          },
+          {
+            "key": "NUM",
+            "removed": false,
+            "value": "8080"
+          }
         ]
       },
       "error": null,
@@ -325,16 +585,28 @@
         },
         "volumes": {}
       },
-      "env": { "NUM": 8080, "FLAG": true, "A": "1" },
+      "env": {
+        "NUM": 8080,
+        "FLAG": true,
+        "A": "1"
+      },
       "up": ["e", false, ["rocketchat", "rocketchat-2"]],
       "events": [
-        { "message": "env updated on 'e': A", "phase": "config", "level": "info" },
+        {
+          "message": "env updated on 'e': A",
+          "phase": "config",
+          "level": "info"
+        },
         {
           "message": "recreating the Rocket.Chat container (data is kept)...",
           "phase": "boot",
           "level": "info"
         },
-        { "message": "'e' restarted with the new environment", "phase": "done", "level": "info" }
+        {
+          "message": "'e' restarted with the new environment",
+          "phase": "done",
+          "level": "info"
+        }
       ]
     },
     {
@@ -342,10 +614,26 @@
         "name": "e",
         "restarted": false,
         "overrides": [
-          { "key": "__proto__", "removed": false, "value": "x" },
-          { "key": "constructor", "removed": false, "value": "c" },
-          { "key": "hasOwnProperty", "removed": true, "value": "" },
-          { "key": "toString", "removed": false, "value": "t" }
+          {
+            "key": "__proto__",
+            "removed": false,
+            "value": "x"
+          },
+          {
+            "key": "constructor",
+            "removed": false,
+            "value": "c"
+          },
+          {
+            "key": "hasOwnProperty",
+            "removed": true,
+            "value": ""
+          },
+          {
+            "key": "toString",
+            "removed": false,
+            "value": "t"
+          }
         ]
       },
       "error": null,
@@ -374,7 +662,12 @@
         },
         "volumes": {}
       },
-      "env": { "hasOwnProperty": null, "__proto__": "x", "constructor": "c", "toString": "t" },
+      "env": {
+        "hasOwnProperty": null,
+        "__proto__": "x",
+        "constructor": "c",
+        "toString": "t"
+      },
       "up": null,
       "events": [
         {
@@ -383,32 +676,7 @@
           "level": "info"
         },
         {
-          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: `houston env --name e --set __proto__=<value> --set constructor=<value> --set toString=<value> --unset hasOwnProperty` without --no-restart",
-          "phase": "done",
-          "level": "info"
-        }
-      ]
-    },
-    {
-      "result": {
-        "name": "e",
-        "restarted": false,
-        "overrides": [{ "key": "A", "removed": false, "value": "1" }]
-      },
-      "error": null,
-      "doc": {
-        "services": {
-          "rocketchat": { "environment": { "PORT": "3000", "__proto__": "old", "A": "1" } },
-          "rocketchat-2": { "environment": { "PORT": "3000", "__proto__": "old", "A": "1" } }
-        },
-        "volumes": {}
-      },
-      "env": { "A": "1" },
-      "up": null,
-      "events": [
-        { "message": "env updated on 'e': A", "phase": "config", "level": "info" },
-        {
-          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: `houston env --name e --set A=<value>` without --no-restart",
+          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: if the workspace is stopped, run `houston up --name e`; if it is running, repeat `houston env --name e --set __proto__=<value> --set constructor=<value> --set toString=<value> --unset hasOwnProperty` without --no-restart",
           "phase": "done",
           "level": "info"
         }
@@ -419,28 +687,102 @@
         "name": "e",
         "restarted": false,
         "overrides": [
-          { "key": "A", "removed": false, "value": "1" },
-          { "key": "__proto__", "removed": true, "value": "" }
+          {
+            "key": "A",
+            "removed": false,
+            "value": "1"
+          }
         ]
       },
       "error": null,
       "doc": {
         "services": {
           "rocketchat": {
-            "environment": { "PORT": "3000", "KEEP": "1", "BLANK": "old", "A": "1" }
+            "environment": {
+              "PORT": "3000",
+              "__proto__": "old",
+              "A": "1"
+            }
           },
           "rocketchat-2": {
-            "environment": { "PORT": "3000", "KEEP": "1", "BLANK": "old", "A": "1" }
+            "environment": {
+              "PORT": "3000",
+              "__proto__": "old",
+              "A": "1"
+            }
           }
         },
         "volumes": {}
       },
-      "env": { "__proto__": null, "A": "1" },
+      "env": {
+        "A": "1"
+      },
       "up": null,
       "events": [
-        { "message": "env updated on 'e': A, __proto__", "phase": "config", "level": "info" },
         {
-          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: `houston env --name e --set A=<value> --unset __proto__` without --no-restart",
+          "message": "env updated on 'e': A",
+          "phase": "config",
+          "level": "info"
+        },
+        {
+          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: if the workspace is stopped, run `houston up --name e`; if it is running, repeat `houston env --name e --set A=<value>` without --no-restart",
+          "phase": "done",
+          "level": "info"
+        }
+      ]
+    },
+    {
+      "result": {
+        "name": "e",
+        "restarted": false,
+        "overrides": [
+          {
+            "key": "A",
+            "removed": false,
+            "value": "1"
+          },
+          {
+            "key": "__proto__",
+            "removed": true,
+            "value": ""
+          }
+        ]
+      },
+      "error": null,
+      "doc": {
+        "services": {
+          "rocketchat": {
+            "environment": {
+              "PORT": "3000",
+              "KEEP": "1",
+              "BLANK": "old",
+              "A": "1"
+            }
+          },
+          "rocketchat-2": {
+            "environment": {
+              "PORT": "3000",
+              "KEEP": "1",
+              "BLANK": "old",
+              "A": "1"
+            }
+          }
+        },
+        "volumes": {}
+      },
+      "env": {
+        "__proto__": null,
+        "A": "1"
+      },
+      "up": null,
+      "events": [
+        {
+          "message": "env updated on 'e': A, __proto__",
+          "phase": "config",
+          "level": "info"
+        },
+        {
+          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: if the workspace is stopped, run `houston up --name e`; if it is running, repeat `houston env --name e --set A=<value> --unset __proto__` without --no-restart",
           "phase": "done",
           "level": "info"
         }
@@ -453,30 +795,67 @@
         "name": "e",
         "restarted": false,
         "overrides": [
-          { "key": "A", "removed": false, "value": "1" },
-          { "key": "FOO", "removed": false, "value": "5" },
-          { "key": "KEEP", "removed": true, "value": "" },
-          { "key": "NEW", "removed": false, "value": "1" }
+          {
+            "key": "A",
+            "removed": false,
+            "value": "1"
+          },
+          {
+            "key": "FOO",
+            "removed": false,
+            "value": "5"
+          },
+          {
+            "key": "KEEP",
+            "removed": true,
+            "value": ""
+          },
+          {
+            "key": "NEW",
+            "removed": false,
+            "value": "1"
+          }
         ]
       },
       "error": null,
       "doc": {
         "services": {
           "rocketchat": {
-            "environment": { "PORT": "3000", "BLANK": "old", "A": "1", "FOO": "5", "NEW": "1" }
+            "environment": {
+              "PORT": "3000",
+              "BLANK": "old",
+              "A": "1",
+              "FOO": "5",
+              "NEW": "1"
+            }
           },
           "rocketchat-2": {
-            "environment": { "PORT": "3000", "BLANK": "old", "A": "1", "FOO": "5", "NEW": "1" }
+            "environment": {
+              "PORT": "3000",
+              "BLANK": "old",
+              "A": "1",
+              "FOO": "5",
+              "NEW": "1"
+            }
           }
         },
         "volumes": {}
       },
-      "env": { "A": "1", "KEEP": null, "FOO": 5, "NEW": "1" },
+      "env": {
+        "A": "1",
+        "KEEP": null,
+        "FOO": 5,
+        "NEW": "1"
+      },
       "up": null,
       "events": [
-        { "message": "env updated on 'e': KEEP, NEW", "phase": "config", "level": "info" },
         {
-          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: `houston env --name e --set NEW=<value> --unset KEEP` without --no-restart",
+          "message": "env updated on 'e': KEEP, NEW",
+          "phase": "config",
+          "level": "info"
+        },
+        {
+          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: if the workspace is stopped, run `houston up --name e`; if it is running, repeat `houston env --name e --set NEW=<value> --unset KEEP` without --no-restart",
           "phase": "done",
           "level": "info"
         }
@@ -487,30 +866,67 @@
         "name": "e",
         "restarted": false,
         "overrides": [
-          { "key": "A", "removed": false, "value": "B" },
-          { "key": "C", "removed": false, "value": "D" },
-          { "key": "KEEP", "removed": true, "value": "" },
-          { "key": "NEW", "removed": false, "value": "1" }
+          {
+            "key": "A",
+            "removed": false,
+            "value": "B"
+          },
+          {
+            "key": "C",
+            "removed": false,
+            "value": "D"
+          },
+          {
+            "key": "KEEP",
+            "removed": true,
+            "value": ""
+          },
+          {
+            "key": "NEW",
+            "removed": false,
+            "value": "1"
+          }
         ]
       },
       "error": null,
       "doc": {
         "services": {
           "rocketchat": {
-            "environment": { "PORT": "3000", "BLANK": "old", "A": "B", "C": "D", "NEW": "1" }
+            "environment": {
+              "PORT": "3000",
+              "BLANK": "old",
+              "A": "B",
+              "C": "D",
+              "NEW": "1"
+            }
           },
           "rocketchat-2": {
-            "environment": { "PORT": "3000", "BLANK": "old", "A": "B", "C": "D", "NEW": "1" }
+            "environment": {
+              "PORT": "3000",
+              "BLANK": "old",
+              "A": "B",
+              "C": "D",
+              "NEW": "1"
+            }
           }
         },
         "volumes": {}
       },
-      "env": { "A": "B", "C": "D", "KEEP": null, "NEW": "1" },
+      "env": {
+        "A": "B",
+        "C": "D",
+        "KEEP": null,
+        "NEW": "1"
+      },
       "up": null,
       "events": [
-        { "message": "env updated on 'e': KEEP, NEW", "phase": "config", "level": "info" },
         {
-          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: `houston env --name e --set NEW=<value> --unset KEEP` without --no-restart",
+          "message": "env updated on 'e': KEEP, NEW",
+          "phase": "config",
+          "level": "info"
+        },
+        {
+          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: if the workspace is stopped, run `houston up --name e`; if it is running, repeat `houston env --name e --set NEW=<value> --unset KEEP` without --no-restart",
           "phase": "done",
           "level": "info"
         }
@@ -521,27 +937,59 @@
         "name": "e",
         "restarted": false,
         "overrides": [
-          { "key": "K", "removed": false, "value": "V" },
-          { "key": "KEEP", "removed": true, "value": "" },
-          { "key": "NEW", "removed": false, "value": "1" }
+          {
+            "key": "K",
+            "removed": false,
+            "value": "V"
+          },
+          {
+            "key": "KEEP",
+            "removed": true,
+            "value": ""
+          },
+          {
+            "key": "NEW",
+            "removed": false,
+            "value": "1"
+          }
         ]
       },
       "error": null,
       "doc": {
         "services": {
-          "rocketchat": { "environment": { "PORT": "3000", "BLANK": "old", "K": "V", "NEW": "1" } },
+          "rocketchat": {
+            "environment": {
+              "PORT": "3000",
+              "BLANK": "old",
+              "K": "V",
+              "NEW": "1"
+            }
+          },
           "rocketchat-2": {
-            "environment": { "PORT": "3000", "BLANK": "old", "K": "V", "NEW": "1" }
+            "environment": {
+              "PORT": "3000",
+              "BLANK": "old",
+              "K": "V",
+              "NEW": "1"
+            }
           }
         },
         "volumes": {}
       },
-      "env": { "K": "V", "KEEP": null, "NEW": "1" },
+      "env": {
+        "K": "V",
+        "KEEP": null,
+        "NEW": "1"
+      },
       "up": null,
       "events": [
-        { "message": "env updated on 'e': KEEP, NEW", "phase": "config", "level": "info" },
         {
-          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: `houston env --name e --set NEW=<value> --unset KEEP` without --no-restart",
+          "message": "env updated on 'e': KEEP, NEW",
+          "phase": "config",
+          "level": "info"
+        },
+        {
+          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: if the workspace is stopped, run `houston up --name e`; if it is running, repeat `houston env --name e --set NEW=<value> --unset KEEP` without --no-restart",
           "phase": "done",
           "level": "info"
         }
@@ -552,27 +1000,59 @@
         "name": "e",
         "restarted": false,
         "overrides": [
-          { "key": "A", "removed": false, "value": "2" },
-          { "key": "KEEP", "removed": true, "value": "" },
-          { "key": "NEW", "removed": false, "value": "1" }
+          {
+            "key": "A",
+            "removed": false,
+            "value": "2"
+          },
+          {
+            "key": "KEEP",
+            "removed": true,
+            "value": ""
+          },
+          {
+            "key": "NEW",
+            "removed": false,
+            "value": "1"
+          }
         ]
       },
       "error": null,
       "doc": {
         "services": {
-          "rocketchat": { "environment": { "PORT": "3000", "BLANK": "old", "A": "2", "NEW": "1" } },
+          "rocketchat": {
+            "environment": {
+              "PORT": "3000",
+              "BLANK": "old",
+              "A": "2",
+              "NEW": "1"
+            }
+          },
           "rocketchat-2": {
-            "environment": { "PORT": "3000", "BLANK": "old", "A": "2", "NEW": "1" }
+            "environment": {
+              "PORT": "3000",
+              "BLANK": "old",
+              "A": "2",
+              "NEW": "1"
+            }
           }
         },
         "volumes": {}
       },
-      "env": { "A": "2", "KEEP": null, "NEW": "1" },
+      "env": {
+        "A": "2",
+        "KEEP": null,
+        "NEW": "1"
+      },
       "up": null,
       "events": [
-        { "message": "env updated on 'e': KEEP, NEW", "phase": "config", "level": "info" },
         {
-          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: `houston env --name e --set NEW=<value> --unset KEEP` without --no-restart",
+          "message": "env updated on 'e': KEEP, NEW",
+          "phase": "config",
+          "level": "info"
+        },
+        {
+          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: if the workspace is stopped, run `houston up --name e`; if it is running, repeat `houston env --name e --set NEW=<value> --unset KEEP` without --no-restart",
           "phase": "done",
           "level": "info"
         }
@@ -591,7 +1071,10 @@
     },
     {
       "result": null,
-      "error": { "kind": "TypeError", "message": "expected an object or a list of KEY/VALUE pairs, got an integer" },
+      "error": {
+        "kind": "TypeError",
+        "message": "expected an object or a list of KEY/VALUE pairs, got an integer"
+      },
       "doc": null,
       "env": null,
       "up": null,
@@ -599,7 +1082,10 @@
     },
     {
       "result": null,
-      "error": { "kind": "TypeError", "message": "expected an object or a list of KEY/VALUE pairs, got a number" },
+      "error": {
+        "kind": "TypeError",
+        "message": "expected an object or a list of KEY/VALUE pairs, got a number"
+      },
       "doc": null,
       "env": null,
       "up": null,
@@ -607,7 +1093,10 @@
     },
     {
       "result": null,
-      "error": { "kind": "TypeError", "message": "expected an object or a list of KEY/VALUE pairs, got a boolean" },
+      "error": {
+        "kind": "TypeError",
+        "message": "expected an object or a list of KEY/VALUE pairs, got a boolean"
+      },
       "doc": null,
       "env": null,
       "up": null,
@@ -659,7 +1148,10 @@
     },
     {
       "result": null,
-      "error": { "kind": "TypeError", "message": "a list cannot be a key" },
+      "error": {
+        "kind": "TypeError",
+        "message": "a list cannot be a key"
+      },
       "doc": null,
       "env": null,
       "up": null,
@@ -667,7 +1159,10 @@
     },
     {
       "result": null,
-      "error": { "kind": "TypeError", "message": "an object cannot be a key" },
+      "error": {
+        "kind": "TypeError",
+        "message": "an object cannot be a key"
+      },
       "doc": null,
       "env": null,
       "up": null,
@@ -678,24 +1173,51 @@
         "name": "e",
         "restarted": false,
         "overrides": [
-          { "key": "KEEP", "removed": true, "value": "" },
-          { "key": "NEW", "removed": false, "value": "1" }
+          {
+            "key": "KEEP",
+            "removed": true,
+            "value": ""
+          },
+          {
+            "key": "NEW",
+            "removed": false,
+            "value": "1"
+          }
         ]
       },
       "error": null,
       "doc": {
         "services": {
-          "rocketchat": { "environment": { "PORT": "3000", "BLANK": "old", "NEW": "1" } },
-          "rocketchat-2": { "environment": { "PORT": "3000", "BLANK": "old", "NEW": "1" } }
+          "rocketchat": {
+            "environment": {
+              "PORT": "3000",
+              "BLANK": "old",
+              "NEW": "1"
+            }
+          },
+          "rocketchat-2": {
+            "environment": {
+              "PORT": "3000",
+              "BLANK": "old",
+              "NEW": "1"
+            }
+          }
         },
         "volumes": {}
       },
-      "env": { "KEEP": null, "NEW": "1" },
+      "env": {
+        "KEEP": null,
+        "NEW": "1"
+      },
       "up": null,
       "events": [
-        { "message": "env updated on 'e': KEEP, NEW", "phase": "config", "level": "info" },
         {
-          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: `houston env --name e --set NEW=<value> --unset KEEP` without --no-restart",
+          "message": "env updated on 'e': KEEP, NEW",
+          "phase": "config",
+          "level": "info"
+        },
+        {
+          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: if the workspace is stopped, run `houston up --name e`; if it is running, repeat `houston env --name e --set NEW=<value> --unset KEEP` without --no-restart",
           "phase": "done",
           "level": "info"
         }
@@ -706,24 +1228,51 @@
         "name": "e",
         "restarted": false,
         "overrides": [
-          { "key": "KEEP", "removed": true, "value": "" },
-          { "key": "NEW", "removed": false, "value": "1" }
+          {
+            "key": "KEEP",
+            "removed": true,
+            "value": ""
+          },
+          {
+            "key": "NEW",
+            "removed": false,
+            "value": "1"
+          }
         ]
       },
       "error": null,
       "doc": {
         "services": {
-          "rocketchat": { "environment": { "PORT": "3000", "BLANK": "old", "NEW": "1" } },
-          "rocketchat-2": { "environment": { "PORT": "3000", "BLANK": "old", "NEW": "1" } }
+          "rocketchat": {
+            "environment": {
+              "PORT": "3000",
+              "BLANK": "old",
+              "NEW": "1"
+            }
+          },
+          "rocketchat-2": {
+            "environment": {
+              "PORT": "3000",
+              "BLANK": "old",
+              "NEW": "1"
+            }
+          }
         },
         "volumes": {}
       },
-      "env": { "KEEP": null, "NEW": "1" },
+      "env": {
+        "KEEP": null,
+        "NEW": "1"
+      },
       "up": null,
       "events": [
-        { "message": "env updated on 'e': KEEP, NEW", "phase": "config", "level": "info" },
         {
-          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: `houston env --name e --set NEW=<value> --unset KEEP` without --no-restart",
+          "message": "env updated on 'e': KEEP, NEW",
+          "phase": "config",
+          "level": "info"
+        },
+        {
+          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: if the workspace is stopped, run `houston up --name e`; if it is running, repeat `houston env --name e --set NEW=<value> --unset KEEP` without --no-restart",
           "phase": "done",
           "level": "info"
         }
@@ -734,24 +1283,51 @@
         "name": "e",
         "restarted": false,
         "overrides": [
-          { "key": "KEEP", "removed": true, "value": "" },
-          { "key": "NEW", "removed": false, "value": "1" }
+          {
+            "key": "KEEP",
+            "removed": true,
+            "value": ""
+          },
+          {
+            "key": "NEW",
+            "removed": false,
+            "value": "1"
+          }
         ]
       },
       "error": null,
       "doc": {
         "services": {
-          "rocketchat": { "environment": { "PORT": "3000", "BLANK": "old", "NEW": "1" } },
-          "rocketchat-2": { "environment": { "PORT": "3000", "BLANK": "old", "NEW": "1" } }
+          "rocketchat": {
+            "environment": {
+              "PORT": "3000",
+              "BLANK": "old",
+              "NEW": "1"
+            }
+          },
+          "rocketchat-2": {
+            "environment": {
+              "PORT": "3000",
+              "BLANK": "old",
+              "NEW": "1"
+            }
+          }
         },
         "volumes": {}
       },
-      "env": { "KEEP": null, "NEW": "1" },
+      "env": {
+        "KEEP": null,
+        "NEW": "1"
+      },
       "up": null,
       "events": [
-        { "message": "env updated on 'e': KEEP, NEW", "phase": "config", "level": "info" },
         {
-          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: `houston env --name e --set NEW=<value> --unset KEEP` without --no-restart",
+          "message": "env updated on 'e': KEEP, NEW",
+          "phase": "config",
+          "level": "info"
+        },
+        {
+          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: if the workspace is stopped, run `houston up --name e`; if it is running, repeat `houston env --name e --set NEW=<value> --unset KEEP` without --no-restart",
           "phase": "done",
           "level": "info"
         }
@@ -781,7 +1357,10 @@
     },
     {
       "result": null,
-      "error": { "kind": "TypeError", "message": "expected an object, got a string" },
+      "error": {
+        "kind": "TypeError",
+        "message": "expected an object, got a string"
+      },
       "doc": null,
       "env": null,
       "up": null,
@@ -789,7 +1368,10 @@
     },
     {
       "result": null,
-      "error": { "kind": "TypeError", "message": "expected an object, got an integer" },
+      "error": {
+        "kind": "TypeError",
+        "message": "expected an object, got an integer"
+      },
       "doc": null,
       "env": null,
       "up": null,
@@ -797,7 +1379,10 @@
     },
     {
       "result": null,
-      "error": { "kind": "TypeError", "message": "expected an object, got a boolean" },
+      "error": {
+        "kind": "TypeError",
+        "message": "expected an object, got a boolean"
+      },
       "doc": null,
       "env": null,
       "up": null,
@@ -808,27 +1393,59 @@
         "name": "e",
         "restarted": false,
         "overrides": [
-          { "key": "A", "removed": false, "value": "1" },
-          { "key": "KEEP", "removed": true, "value": "" },
-          { "key": "NEW", "removed": false, "value": "1" }
+          {
+            "key": "A",
+            "removed": false,
+            "value": "1"
+          },
+          {
+            "key": "KEEP",
+            "removed": true,
+            "value": ""
+          },
+          {
+            "key": "NEW",
+            "removed": false,
+            "value": "1"
+          }
         ]
       },
       "error": null,
       "doc": {
         "services": {
-          "rocketchat": { "environment": { "PORT": "3000", "BLANK": "old", "A": "1", "NEW": "1" } },
+          "rocketchat": {
+            "environment": {
+              "PORT": "3000",
+              "BLANK": "old",
+              "A": "1",
+              "NEW": "1"
+            }
+          },
           "rocketchat-2": {
-            "environment": { "PORT": "3000", "BLANK": "old", "A": "1", "NEW": "1" }
+            "environment": {
+              "PORT": "3000",
+              "BLANK": "old",
+              "A": "1",
+              "NEW": "1"
+            }
           }
         },
         "volumes": {}
       },
-      "env": { "A": "1", "KEEP": null, "NEW": "1" },
+      "env": {
+        "A": "1",
+        "KEEP": null,
+        "NEW": "1"
+      },
       "up": null,
       "events": [
-        { "message": "env updated on 'e': KEEP, NEW", "phase": "config", "level": "info" },
         {
-          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: `houston env --name e --set NEW=<value> --unset KEEP` without --no-restart",
+          "message": "env updated on 'e': KEEP, NEW",
+          "phase": "config",
+          "level": "info"
+        },
+        {
+          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: if the workspace is stopped, run `houston up --name e`; if it is running, repeat `houston env --name e --set NEW=<value> --unset KEEP` without --no-restart",
           "phase": "done",
           "level": "info"
         }
