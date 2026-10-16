@@ -6,6 +6,7 @@
  * green. One file is what the fixture-vs-real invariant test points at.
  */
 import * as fs from 'node:fs';
+import { isIP } from 'node:net';
 
 import * as config from '../../lib/config';
 import { storedText, toText } from '../../lib/format';
@@ -149,8 +150,8 @@ export async function bindHostOf(meta: Metadata): Promise<string> {
     if (parts.length < 3) continue;
     const address = parts.slice(0, -2).join(':');
     const bracketed = address.startsWith('[') && address.endsWith(']') ? address.slice(1, -1) : '';
-    if (bracketed !== '' && !bracketed.includes('[') && !bracketed.includes(']')) return bracketed;
-    if (address !== '' && !address.includes('[') && !address.includes(']')) return address;
+    if (isIP(bracketed) === 6) return bracketed;
+    if (isIP(address) !== 0) return address;
   }
   return '';
 }
