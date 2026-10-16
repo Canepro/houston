@@ -109,16 +109,25 @@ function pick(options: Record<string, unknown>, keys: string[]): Record<string, 
 }
 
 describe('the declarative command foundation', () => {
-  test('registers all 43 unique paths and all 191 logical flags from one source', () => {
+  test.each(['status', 'complete', 'setup'])(
+    'refuses an onboard %s ID before calling any executor',
+    async (action) => {
+      const result = await invoke(['onboard', action, 'owned-cluster', '--json']);
+      expect(result.exit).toBe(2);
+      expect(result.calls).toEqual([]);
+    },
+  );
+
+  test('registers all 45 unique paths and all 194 logical flags from one source', () => {
     const specs: readonly CommandSpec[] = COMMAND_SPECS;
     const root = buildCli({ execute: async () => null });
     const paths = specs.map((spec) => spec.path);
-    expect(paths).toHaveLength(43);
-    expect(new Set(paths).size).toBe(43);
-    expect(specs.reduce((total, spec) => total + spec.options.length, 0)).toBe(178);
+    expect(paths).toHaveLength(45);
+    expect(new Set(paths).size).toBe(45);
+    expect(specs.reduce((total, spec) => total + spec.options.length, 0)).toBe(179);
     const described = describeCommands();
-    expect(described.reduce((total, command) => total + command.flags.length, 0)).toBe(191);
-    expect(described.filter((command) => command.json)).toHaveLength(14);
+    expect(described.reduce((total, command) => total + command.flags.length, 0)).toBe(194);
+    expect(described.filter((command) => command.json)).toHaveLength(16);
     expect(described.filter((command) => command.streams).map((command) => command.name)).toEqual([
       'ready',
       'up',

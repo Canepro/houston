@@ -27,12 +27,24 @@ import * as path from 'node:path';
 import * as YAML from 'yaml';
 
 import { renderMarkdown as renderBundleMarkdown } from '../lib/capture-render';
-import { imageRef } from '../lib/compose';
+import {
+  CREDENTIALS_PENDING,
+  type ComposeDoc,
+  imageRef,
+  suppliedCredentials,
+} from '../lib/compose';
 import * as config from '../lib/config';
 import { ValidationError } from '../lib/errors';
 import { isTruthy, quotedText, toText } from '../lib/format';
 import { pathExpandUser } from '../lib/home';
-import { REDACTED, redactEnv, SECRET_KEY_HINTS } from '../lib/redact';
+import {
+  credentialKey,
+  discoverTextSecrets,
+  type KnownSecret,
+  REDACTED,
+  redactAssignedText,
+  redactKnownValues,
+} from '../lib/redact';
 import { namesOf } from '../lib/presets/composite';
 import * as presets from '../lib/presets/index';
 import { PROFILES } from '../lib/seed-profiles';
@@ -181,6 +193,11 @@ async function artifactOf(meta: Metadata): Promise<CapturedArtifact> {
   // by filesystem order and attach the stale one.
   const candidate =
     topology.ofMeta(meta) === topology.KUBERNETES ? KUBERNETES_ARTIFACT : DOCKER_ARTIFACT;
+  // Both runtimes mark the record incomplete before replacing deployment files.
+  // Until the write finishes, the file on disk can be the previous release's, and attaching it
+  // beside the new request would describe a deployment that may not exist. Unavailable is
+  // what evidence can truthfully say.
+  if (bag(meta.extra).incomplete === true) return { name: '', sha256: '', bytes: null };
   try {
     const bytes = await fs.readFile(path.join(paths.workspace(meta.name), ...candidate.path));
     return {
@@ -241,8 +258,10 @@ async function ownershipOf(meta: Metadata, runtime: string): Promise<Record<stri
  * microservices deployment remains true; an unavailable preset makes the requirement unknown
  * unless another recorded component establishes that it was required. `supplied` is `null`
  * when the record cannot say: a Kubernetes record from before `reg_token_supplied` existed put
- * the token in a Secret this reader does not open. A Docker record of that age is asked through
- * its compose file, which is where the token went.
+ * the token in a Secret this reader does not open, a Docker write that did not finish may
+ * have left the previous compose file, and an `env` credential change waits for a recreate. A
+ * Docker record from before the markers is asked through its compose file, which is where the
+ * token went.
  */
 async function licenseOf(meta: Metadata, deployment: string): Promise<Record<string, unknown>> {
   const extra = bag(meta.extra);
@@ -272,16 +291,54 @@ async function licenseOf(meta: Metadata, deployment: string): Promise<Record<str
     }
     if (!required && unavailable) required = null;
   }
-  if (extra.licensed === true) return { required, supplied: true, source: 'license' };
-  if (extra.reg_token_supplied === true) return { required, supplied: true, source: 'reg_token' };
+  // An unfinished Docker write recorded the request, and its Compose file can still be the
+  // previous one, so neither says what Rocket.Chat was handed. Nor does a credential `env`
+  // configured before a recreate succeeded: the markers and the Compose file describe the
+  // configuration, and the running container can still have the previous one. A Kubernetes
+  // provisional record states what is deployed, and keeps its markers.
+  if (
+    topology.ofMeta(meta) !== topology.KUBERNETES &&
+    (extra.incomplete === true || extra[CREDENTIALS_PENDING] === true)
+  ) {
+    return { required, supplied: null, source: 'unknown' };
+  }
+  // Kubernetes `licensed` is the Secret lifecycle flag: a killed create can set it before Helm
+  // installs the licence. `effective_license`, when recorded, is what Rocket.Chat ran with,
+  // and inspect and the notes read it the same way.
+  const licensed =
+    extra.effective_license === null
+      ? false
+      : typeof extra.effective_license === 'boolean'
+        ? extra.effective_license
+        : extra.licensed === true;
+  if (licensed) return { required, supplied: true, source: 'license' };
+  const licenseUnknown = extra.effective_license === null;
+  if (extra.reg_token_supplied === true)
+    return { required, supplied: true, source: licenseUnknown ? 'unknown' : 'reg_token' };
+  if (licenseUnknown || extra.reg_token_supplied === null)
+    return { required, supplied: null, source: 'unknown' };
   if (extra.reg_token_supplied === false) return { required, supplied: false, source: null };
-  const inferred = await tokenInCompose(meta);
+  const inferred = await credentialsInCompose(meta);
   if (inferred === null) return { required, supplied: null, source: 'unknown' };
-  return { required, supplied: inferred, source: inferred ? 'reg_token' : null };
+  if (inferred.license === true) return { required, supplied: true, source: 'license' };
+  if (inferred.token === true)
+    return {
+      required,
+      supplied: true,
+      source: inferred.license === 'unknown' ? 'unknown' : 'reg_token',
+    };
+  if (inferred.license === 'unknown' || inferred.token === 'unknown')
+    return { required, supplied: null, source: 'unknown' };
+  return { required, supplied: false, source: null };
 }
 
-/** Whether the generated compose file hands Rocket.Chat a REG_TOKEN; `null` when it cannot be read. */
-async function tokenInCompose(meta: Metadata): Promise<boolean | null> {
+/**
+ * What the generated compose file hands Rocket.Chat, for a record from before the markers
+ * existed; `null` when it cannot be read.
+ */
+async function credentialsInCompose(
+  meta: Metadata,
+): Promise<Awaited<ReturnType<typeof suppliedCredentials>> | null> {
   if (topology.ofMeta(meta) === topology.KUBERNETES) return null;
   let doc: Record<string, unknown>;
   try {
@@ -289,15 +346,7 @@ async function tokenInCompose(meta: Metadata): Promise<boolean | null> {
   } catch {
     return null;
   }
-  for (const service of Object.values(bag(doc.services))) {
-    const environment = bag(service).environment;
-    if (Array.isArray(environment)) {
-      if (environment.some((entry) => /^REG_TOKEN=\S/u.test(String(entry)))) return true;
-    } else if (toText(bag(environment).REG_TOKEN).trim() !== '') {
-      return true;
-    }
-  }
-  return false;
+  return await suppliedCredentials(doc as ComposeDoc, paths.workspace(meta.name));
 }
 
 /**
@@ -327,11 +376,17 @@ function retentionOf(
   meta: Metadata,
   requested: { retained?: boolean | null; reason?: string },
 ): { retained: boolean; reason: string | null } {
-  // The pin is the one persisted state `prune` honours, so it is the one persisted
-  // retention evidence may claim. A config key nothing enforces is not a policy.
   const selected = resolveRetention(requested);
-  if (selected.retained || !isTruthy(meta.pinned)) return selected;
-  return { retained: true, reason: 'persisted preference' };
+  // This records selection, not enforcement: prune preserves a pin, while an unpinned
+  // preference remains a request for the current evidence task. An explicit false wins
+  // unless that existing pin keeps the workspace.
+  if (selected.retained) return selected;
+  if (isTruthy(meta.pinned)) return { retained: true, reason: 'persisted preference' };
+  if (requested.retained === false) return selected;
+  if (bag(config.loadConfig(false).preferences).retain_runs === true) {
+    return { retained: true, reason: 'persisted preference' };
+  }
+  return selected;
 }
 
 function servicesOf(containers: unknown): { service: string; state: string; status: string }[] {
@@ -444,15 +499,21 @@ async function snapshotOf(
   const runtime = topology.ofMeta(meta);
   const axes = topology.axesOfMeta(meta);
   const artifact = await artifactOf(meta);
+  const extra = bag(meta.extra);
   // `write()` makes repro.json visible before docker-compose.yml. That incomplete but valid
   // workspace still has attachable metadata; do not call detail(), whose Docker path reads the
-  // absent file. A present artifact still takes the normal detail path, including every error.
+  // absent file. The record already holds the create-time bind, while runtime and artifact stay
+  // unknown. A present artifact still takes the normal detail path, including every error.
   const d =
     runtime === topology.DOCKER && artifact.bytes === null
-      ? { deployment: toText(axes.deployment), bind_host: '', state: '?', containers: [] }
+      ? {
+          deployment: toText(axes.deployment),
+          bind_host: toText(extra.bind_host),
+          state: '?',
+          containers: [],
+        }
       : await detail(target);
   const deployment = toText(d.deployment) || toText(axes.deployment);
-  const extra = bag(meta.extra);
 
   let engine: Record<string, unknown>;
   if (runtime === topology.KUBERNETES) {
@@ -526,30 +587,23 @@ export async function record(
   return await reproLock(target, async () => (await snapshotOf(target, retention)).payload);
 }
 
-function secretKey(key: string): boolean {
-  const lowered = key.toLowerCase();
-  return SECRET_KEY_HINTS.some((hint) => lowered.includes(hint));
-}
-
 /**
  * Mask exact credentials the workspace record names, even below a benign YAML key. Key-name
  * redaction still protects standard deployment fields, but cannot discover an unknown secret in
  * arbitrary YAML.
  */
-function redactKnownSecrets(value: string, knownSecrets: readonly string[]): string {
-  return [...new Set(knownSecrets.filter((secret) => secret !== ''))]
-    .sort((left, right) => right.length - left.length)
-    .reduce((masked, secret) => masked.replaceAll(secret, REDACTED), value);
+function redactKnownSecrets(value: string, knownSecrets: readonly KnownSecret[]): string {
+  return redactKnownValues(value, knownSecrets);
 }
 
-function matchesKnownSecret(value: string, knownSecrets: readonly string[]): boolean {
+function matchesKnownSecret(value: string, knownSecrets: readonly KnownSecret[]): boolean {
   return redactKnownSecrets(value, knownSecrets) !== value;
 }
 
 /** YAML's canonical scalar spelling can differ from JavaScript's `String`, such as `-0`. */
 function matchesKnownScalar(
   value: number | boolean | null,
-  knownSecrets: readonly string[],
+  knownSecrets: readonly KnownSecret[],
 ): boolean {
   return (
     matchesKnownSecret(String(value), knownSecrets) ||
@@ -564,7 +618,7 @@ function matchesKnownScalar(
  */
 function redactKnownScalarNodes(
   node: unknown,
-  knownSecrets: readonly string[],
+  knownSecrets: readonly KnownSecret[],
   forceValue = false,
   mapKey = false,
   seen = new WeakSet<object>(),
@@ -600,69 +654,146 @@ function redactKnownScalarNodes(
 function redactArtifactText(
   value: string,
   secret: boolean,
-  knownSecrets: readonly string[],
+  knownSecrets: readonly KnownSecret[],
 ): string {
   if (secret) return REDACTED;
-  // A URL password or query can contain `=`. Mask userinfo in the complete string before
-  // treating an equals sign as a list-form environment assignment.
-  const urlRedacted = redactEnv('', value);
-  const equals = urlRedacted.indexOf('=');
-  if (equals > 0) {
-    const key = urlRedacted.slice(0, equals);
-    return redactKnownSecrets(
-      `${key}=${redactEnv(key, urlRedacted.slice(equals + 1))}`,
-      knownSecrets,
-    );
-  }
-  return redactKnownSecrets(urlRedacted, knownSecrets);
+  // A bundle also masks the URL user name, which log redaction leaves readable and which can
+  // be the credential itself. The same rule masks a JSON string inside the value.
+  return redactAssignedText(value, knownSecrets);
 }
 
 /** Redact standard credential fields and the workspace's known secret values in parsed YAML. */
 function redactArtifactValue(
   value: unknown,
-  knownSecrets: readonly string[],
+  knownSecrets: readonly KnownSecret[],
   secret = false,
   seen = new WeakSet<object>(),
 ): unknown {
   if (typeof value === 'string') return redactArtifactText(value, secret, knownSecrets);
-  if (Array.isArray(value))
-    return value.map((item) => redactArtifactValue(item, knownSecrets, secret, seen));
   if (typeof value === 'number' || typeof value === 'boolean' || value === null) {
     return secret || matchesKnownScalar(value, knownSecrets) ? REDACTED : value;
   }
   if (typeof value !== 'object') return secret ? REDACTED : value;
   if (seen.has(value)) return REDACTED;
   seen.add(value);
+  if (Array.isArray(value))
+    return value.map((item) => redactArtifactValue(item, knownSecrets, secret, seen));
 
   const fields = value as Record<string, unknown>;
   const name = toText(fields.name);
-  const namedSecret = secretKey(name) || matchesKnownSecret(name, knownSecrets);
+  const namedSecret = credentialKey(name) || matchesKnownSecret(name, knownSecrets);
   const out: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(fields)) {
     const safeKey = redactArtifactText(key, false, knownSecrets);
     out[safeKey] = redactArtifactValue(
       item,
       knownSecrets,
-      secret || safeKey !== key || secretKey(key) || (key === 'value' && namedSecret),
+      secret || safeKey !== key || credentialKey(key) || (key === 'value' && namedSecret),
       seen,
     );
   }
   return out;
 }
 
+/** Discover before `toJS` loses duplicate members and original numeric spellings. */
+function discoverArtifactSecrets(
+  node: unknown,
+  doc: YAML.Document,
+  secrets: Set<string>,
+  wholeSecrets: Set<string>,
+  secret = false,
+  seen = new WeakMap<object, boolean>(),
+  depth = 0,
+): void {
+  if (typeof node !== 'object' || node === null) return;
+  // A benign alias visited first must still be revisited under a credential key.
+  if (seen.has(node) && (seen.get(node) === true || !secret)) return;
+  if (depth > 100) throw new RangeError('artifact credential nesting exceeds limit');
+  seen.set(node, secret);
+  const visit = (child: unknown, credential = secret): void =>
+    discoverArtifactSecrets(child, doc, secrets, wholeSecrets, credential, seen, depth + 1);
+  const add = (text: string, whole = false): void => {
+    if (text === '') return;
+    // Once a header value is known to be a credential, its bare token is a credential
+    // too. Copies may omit the scheme, including copies encountered before the header.
+    const authorization = /^(?:Bearer|Basic)[ \t]+(\S+)$/iu.exec(text);
+    if (authorization?.[1] !== undefined) add(authorization[1]);
+    // Numeric text is still a credential, but its digits must not erase ports or replica
+    // suffixes. Use the same core scalar parser as the artifact, including hex and .inf.
+    const numeric = /^[-+.0-9]/u.test(text)
+      ? YAML.parseDocument(text, { uniqueKeys: false })
+      : null;
+    if (
+      numeric !== null &&
+      numeric.errors.length === 0 &&
+      YAML.isScalar(numeric.contents) &&
+      typeof numeric.contents.value === 'number' &&
+      numeric.contents.source === text
+    ) {
+      wholeSecrets.add(text);
+      wholeSecrets.add(String(numeric.contents.value));
+      wholeSecrets.add(YAML.stringify(numeric.contents.value).replace(/\n$/u, ''));
+    } else (whole ? wholeSecrets : secrets).add(text);
+  };
+  if (YAML.isAlias(node)) {
+    visit(node.resolve(doc));
+  } else if (YAML.isScalar(node)) {
+    const value: unknown = node.value;
+    if (typeof value === 'string') {
+      if (secret) add(value);
+      discoverTextSecrets(value, add);
+    } else if (secret) {
+      add(String(value), true);
+      add(YAML.stringify(value).replace(/\n$/u, ''), true);
+      if (typeof node.source === 'string') add(node.source, true);
+    }
+  } else if (YAML.isSeq(node)) {
+    for (const item of node.items) visit(item);
+  } else if (YAML.isMap(node)) {
+    // `get` selects the first duplicate, while `toJS` selects the last. Conservatively
+    // discover all values when any name identifies a credential, including aliased keys.
+    const named = node.items.some((pair) => {
+      const key = YAML.isAlias(pair.key) ? pair.key.resolve(doc) : pair.key;
+      const name = YAML.isAlias(pair.value) ? pair.value.resolve(doc) : pair.value;
+      return (
+        YAML.isScalar(key) &&
+        key.value === 'name' &&
+        YAML.isScalar(name) &&
+        credentialKey(String(name.value))
+      );
+    });
+    for (const pair of node.items) {
+      visit(pair.key, false);
+      const key = YAML.isAlias(pair.key) ? pair.key.resolve(doc) : pair.key;
+      const text = YAML.isScalar(key) ? String(key.value) : '';
+      visit(pair.value, secret || credentialKey(text) || (text === 'value' && named));
+    }
+  }
+}
+
 /** Render an artifact for attachment, or omit it rather than copying unparseable bytes. */
 function redactedArtifact(
   artifact: CapturedArtifact,
-  knownSecrets: readonly string[],
+  knownSecrets: readonly KnownSecret[],
 ): string | null {
   if (artifact.bytes === null) return null;
   try {
     const docs = YAML.parseAllDocuments(artifact.bytes.toString('utf8'), { uniqueKeys: false });
     if (docs.length === 0 || docs.some((doc) => doc.errors.length > 0)) return null;
+    const secrets = new Set(
+      knownSecrets.filter((item): item is string => typeof item === 'string'),
+    );
+    const wholeSecrets = new Set<string>();
+    // Keep aliases under the parser's existing expansion limit and visit every document first.
+    for (const doc of docs) discoverArtifactSecrets(doc.contents, doc, secrets, wholeSecrets);
+    const discovered: KnownSecret[] = [
+      ...secrets,
+      ...[...wholeSecrets].map((value) => ({ value, whole: true as const })),
+    ];
     return docs
       .map((doc) => {
-        redactKnownScalarNodes(doc.contents, knownSecrets);
-        return YAML.stringify(redactArtifactValue(doc.toJS() as unknown, knownSecrets));
+        redactKnownScalarNodes(doc.contents, discovered);
+        return YAML.stringify(redactArtifactValue(doc.toJS() as unknown, discovered));
       })
       .join('---\n');
   } catch {
@@ -734,7 +865,7 @@ async function writeBundleAt(
   dest: string,
   payload: Record<string, unknown>,
   artifact: CapturedArtifact,
-  knownSecrets: readonly string[],
+  knownSecrets: readonly KnownSecret[],
   capture?: unknown,
 ): Promise<Bundle> {
   // The manifest records the digest of the raw deployment file. Only attach the rendered

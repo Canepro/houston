@@ -6,6 +6,7 @@ import type * as OsNS from 'node:os';
 import * as config from '../../../src/lib/config';
 import { CreateFailedError, DockerError } from '../../../src/lib/errors';
 import type { Event } from '../../../src/lib/events';
+import { grant } from '../../../src/lib/onboarding';
 import { LAUNCH_FAILURE_CODE, kubectl, type KubectlResult } from '../../../src/seams/kubectl';
 
 import { ensureCluster } from '../../../src/core/kube/cluster';
@@ -21,7 +22,13 @@ import {
   type RunOptions,
 } from '../../../src/core/kube/exec';
 import { scenarioUiForwards } from '../../../src/core/kube/forward';
-import { CONTEXT } from '../../../src/core/kube/names';
+import {
+  CLUSTER_NAME,
+  CLUSTER_OWNER_CONFIGMAP,
+  CONTEXT,
+  OWNER_LABEL_KEY,
+  OWNER_LABEL_VALUE,
+} from '../../../src/core/kube/names';
 import { namespaceLabels } from '../../../src/core/kube/namespace';
 import { helmReachable } from '../../../src/core/kube/reachability';
 import { releaseValues } from '../../../src/core/kube/release';
@@ -309,12 +316,25 @@ describe('creating houston’s own cluster', () => {
   beforeEach(() => installTools('kind'));
 
   it('takes a create that lost a race as success, and any other failure as terminal', async () => {
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
     // Somebody ran `kind create cluster --name houston-local` by hand while we held the
     // lock. "already exist" means the thing we wanted is true.
     route((joined, argv) => {
       if (joined.includes('get clusters')) return { stdout: '' };
       if (joined.includes('current-context')) return { stdout: CONTEXT };
       if (joined.includes('/readyz')) return { stdout: 'ok' };
+      if (joined.includes(`get configmap ${CLUSTER_OWNER_CONFIGMAP}`)) {
+        // This is the other Houston process that won the race. A manual same-named
+        // cluster lacks this receipt and is refused by the ownership test above.
+        return {
+          stdout: JSON.stringify({
+            metadata: { labels: { [OWNER_LABEL_KEY]: OWNER_LABEL_VALUE } },
+            data: { cluster: CLUSTER_NAME },
+          }),
+        };
+      }
       if (argv.includes('create')) {
         return { returncode: 1, stderr: 'node(s) already exist for a cluster with the name' };
       }

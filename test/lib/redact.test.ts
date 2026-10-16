@@ -6,6 +6,7 @@ import {
   REDACTED,
   SECRET_KEY_HINTS,
   URL_USERINFO,
+  redactAllUserinfo,
   redactArgv,
   redactEnv,
 } from '../../src/lib/redact';
@@ -157,6 +158,75 @@ describe('redactEnv', () => {
       '',
     ];
     expect(corpus.map((c) => c.replace(URL_USERINFO, '<M>'))).toEqual(recorded);
+  });
+});
+
+describe('redactAllUserinfo', () => {
+  it('masks the whole URL user info an attachable bundle cannot assume is public', () => {
+    const masked = (value: string) => redactAllUserinfo(value);
+    expect(
+      [
+        '{"url":"https://idp.example","admin":"ops@example.com"}',
+        '["https://a.example","ops@example.com"]',
+        'https://BEARER_TOKEN@example.test/x',
+        'https://TOKEN:@h',
+        'https://ghp_SECRETTOKEN:x-oauth-basic@github.com/org/repo.git',
+        'https://user:pw@h',
+        'https://a@b@h/p',
+        'https://example.com/a@b',
+        'https://example.com?next=a@b',
+        'mongodb://rc:s3cret@mongo:27017/db',
+        'https://:pw@h',
+        'https://@h',
+        'x https://t@h y https://u:p@h2',
+        // Characters a URL parser accepts raw in user info, and percent-encodes.
+        'mongodb://rc:p{a}ss@mongo/rc',
+        'mongodb://rc:Pa^ss|w0rd@mongo/rc',
+        'https://u:p`x@h',
+        'https://u:a\\b@h',
+        'https://u:p"q@h',
+        'https://u:p<q>[r]@h/p?q=a@b',
+        'https://TOK{EN@h/x',
+        'mongodb://rc:p{w@[::1]:27017/rc',
+        // JSON is masked string by string, so one string's URL cannot reach into the next.
+        '{"url":"https://u:p{a}\\"q@idp/x","admin":"ops@example.com"}',
+        '{ "a": "\\u00e9",\n  "u": "https://T|K@h", "n": 1 }',
+        '{"cfg":"{\\"url\\":\\"https://idp.example\\",\\"admin\\":\\"ops@example.com\\"}"}',
+        '{"cfg":"{\\"url\\":\\"https://u:p{a}@idp\\"}"}',
+        'OIDC={"url":"https://idp.example","admin":"ops@example.com"}',
+        'OIDC={"url":"https://u:p^q@idp","admin":"ops@example.com"}',
+        'https://u:p=["x"]@h',
+      ].map(masked),
+    ).toEqual([
+      '{"url":"https://idp.example","admin":"ops@example.com"}',
+      '["https://a.example","ops@example.com"]',
+      `https://${REDACTED}@example.test/x`,
+      `https://${REDACTED}@h`,
+      `https://${REDACTED}@github.com/org/repo.git`,
+      `https://${REDACTED}@h`,
+      `https://${REDACTED}@h/p`,
+      'https://example.com/a@b',
+      'https://example.com?next=a@b',
+      `mongodb://${REDACTED}@mongo:27017/db`,
+      `https://${REDACTED}@h`,
+      'https://@h',
+      `x https://${REDACTED}@h y https://${REDACTED}@h2`,
+      `mongodb://${REDACTED}@mongo/rc`,
+      `mongodb://${REDACTED}@mongo/rc`,
+      `https://${REDACTED}@h`,
+      `https://${REDACTED}@h`,
+      `https://${REDACTED}@h`,
+      `https://${REDACTED}@h/p?q=a@b`,
+      `https://${REDACTED}@h/x`,
+      `mongodb://${REDACTED}@[::1]:27017/rc`,
+      `{"url":"https://${REDACTED}@idp/x","admin":"ops@example.com"}`,
+      `{ "a": "\\u00e9",\n  "u": "https://${REDACTED}@h", "n": 1 }`,
+      '{"cfg":"{\\"url\\":\\"https://idp.example\\",\\"admin\\":\\"ops@example.com\\"}"}',
+      `{"cfg":"{\\"url\\":\\"https://${REDACTED}@idp\\"}"}`,
+      'OIDC={"url":"https://idp.example","admin":"ops@example.com"}',
+      `OIDC={"url":"https://${REDACTED}@idp","admin":"ops@example.com"}`,
+      `https://${REDACTED}@h`,
+    ]);
   });
 });
 

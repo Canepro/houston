@@ -69,7 +69,7 @@ const RANKS = [
     '^src/lib/seed-profiles\\.ts$',
   ],
   [
-    '^src/lib/(monitoring|version-spec|json-text|seed-options)\\.ts$',
+    '^src/lib/(monitoring|version-spec|json-text|seed-options|onboarding)\\.ts$',
     '^src/lib/presets/registry\\.ts$',
   ],
   // `targz` sits ABOVE `format`, because its only refusal message is
@@ -100,7 +100,7 @@ const RANKS = [
   ['^src/seams/(?!exec\\.ts$)'],
   ['^src/core/runner/(paths|locks)\\.ts$'],
   ['^src/core/runner/(engine|record)\\.ts$'],
-  ['^src/core/runner/(cache|host|ports|queries)\\.ts$'],
+  ['^src/core/runner/(cache|host|inventory|ports|queries)\\.ts$'],
   // The database lookup mongoprof, scaleseed and backup all need. Hoisted out of
   // `backup` so the two lower modules reach it DOWNWARD; see its docstring.
   ['^src/core/database-of\\.ts$'],
@@ -122,6 +122,8 @@ const RANKS = [
   ['^src/core/kube/context\\.ts$'],
   ['^src/core/kube/(cluster|endpoints|namespace)\\.ts$'],
   ['^src/core/kube/(manifests|probe|scale|status|transfer)\\.ts$'],
+  // Inspection reuses the canonical pod row mapper, so it belongs one tier above status.
+  ['^src/core/kube/inventory\\.ts$'],
   ['^src/core/kube/release\\.ts$'],
   ['^src/core/kube/operator\\.ts$'],
   ['^src/core/kube/(chart|monitoring)\\.ts$'],
@@ -210,9 +212,10 @@ const RANKS = [
   // nearly all of it. Collapsing any two adjacent tiers would permit exactly the
   // sideways edge the tiers forbid.
   //
-  // `admin`, `notes` and `types` have no lifecycle imports at all; they share the bottom
-  // rank with the modules whose only edges are to `types`.
+  // `access`, `admin`, `notes` and `types` have no lifecycle imports at all; they share the
+  // bottom rank with modules whose dependencies are strictly lower layers.
   [
+    '^src/core/lifecycle/access\\.ts$',
     '^src/core/lifecycle/types\\.ts$',
     '^src/core/lifecycle/notes\\.ts$',
     '^src/core/lifecycle/admin\\.ts$',

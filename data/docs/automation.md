@@ -19,8 +19,8 @@ On a shared machine, set `HOUSTON_USER=<account>` so the audit log names who ran
 
 ## `--json`
 
-`up`, `ready`, `down`, `list`, `info`, `evidence`, `capture`, `doctor`, `loadtest`, `capacity`,
-`cluster` and `skill` take `--json`; `capabilities` always prints JSON. Every reply is one envelope:
+`up`, `ready`, `down`, `list`, `info`, `inspect`, `evidence`, `capture`, `doctor`, `loadtest`,
+`capacity`, `cluster`, `onboard` and `skill` take `--json`; `capabilities` always prints JSON. Every reply is one envelope:
 
 ```json
 {"schema":"houston.info.v1","contract":2,"houston_version":"2.1.1",
@@ -40,8 +40,8 @@ On a shared machine, set `HOUSTON_USER=<account>` so the audit log names who ran
 ## `houston capabilities`
 
 JSON, no Docker needed, and the authority for **this build**: its commands and which take
-`--json` or stream, runtimes and deployments, presets, seed profiles, phases, error codes
-and exit codes. Read it instead of assuming a flag exists.
+`--json` or stream, runtimes and deployments, presets, seed profiles, onboarding state, phases,
+error codes and exit codes. Read it instead of assuming a flag exists.
 
 ## Exit codes
 
@@ -70,10 +70,17 @@ and exit codes. Read it instead of assuming a flag exists.
 | `GATE_DELETE_UNOWNED`, `GATE_KEEP_UNOWNED`, `GATE_SHARE_UNOWNED` | `cluster delete`, `keep` or `share` on a cluster houston did not build |
 | `GATE_WRONG_ACCOUNT` | `cluster connect` or `cluster delete` when the AWS sign-in is a different account from the cluster's |
 | `GATE_WRONG_CLUSTER` | `cluster delete` when AWS returns a different cluster than the one selected |
+| `GATE_NOT_ONBOARDED` | a local-cluster lifecycle action before onboarding is recorded |
+| `GATE_OWNED_CLUSTER` | creating or reclaiming `houston-local`, or tearing down or pruning one of its recorded local workspaces |
 | `GATE_UNAPPROVED_CLUSTER` | `--https` on a cluster that is not on this machine |
 
 `error.gate.approve_with` is the command or action to **ask a person for**. A script or
 agent never runs it itself, and `--force` does not get past a gate.
+
+For the local-cluster decision above, a person can review the current state with
+`houston onboard --json`, record that review with `houston onboard complete`, or run the
+`houston onboard grant owned-cluster` command named in the gate. It does not authorise
+copying houston's private CA key to another cluster.
 
 ## The event log
 

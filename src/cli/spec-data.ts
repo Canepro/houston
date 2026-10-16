@@ -1,6 +1,6 @@
 import { defineCommand } from './spec-types';
 
-/** The declared command paths; root invocation is separate. */
+/** The frozen command surface; its invariant counts routable paths, and root invocation is separate. */
 export const COMMAND_SPECS = [
   defineCommand({
     id: 'up',
@@ -861,6 +861,36 @@ export const COMMAND_SPECS = [
     },
   }),
   defineCommand({
+    id: 'inspect',
+    path: 'inspect',
+    description:
+      'Show what a repro runs on and what is reachable: its nodes, services and pods on Kubernetes, its containers with their published ports, networks and volumes on Docker. Secret-safe: no login, no environment.',
+    arguments: [],
+    options: [
+      {
+        key: 'name',
+        long: '--name',
+        short: '-n',
+        value: 'string',
+        required: false,
+        repeatable: false,
+        defaultValue: '',
+        description: '',
+        hidden: false,
+        negatablePair: false,
+      },
+    ],
+    json: {
+      mode: 'flag',
+      schema: 'houston.inspect.v1',
+      streams: false,
+      option: {
+        index: 1,
+        description: 'print the result as one JSON envelope on stdout; prose moves to stderr',
+      },
+    },
+  }),
+  defineCommand({
     id: 'users',
     path: 'users',
     description:
@@ -1001,6 +1031,38 @@ export const COMMAND_SPECS = [
     json: {
       mode: 'none',
       streams: false,
+    },
+  }),
+  defineCommand({
+    id: 'onboard',
+    path: 'onboard',
+    description:
+      "Settle, once, the machine-scoped decision houston otherwise asks a person before\ncreating or reclaiming its local Kind cluster, or tearing down its recorded local\nworkspaces. A gate (exit 6) is a decision houston is not authorised to make.\n`status` lists the grants this build knows, what each unlocks and whether it is\ngranted, denied, or unanswered; `grant` and `revoke` record one answer; `complete`\nrecords that a person has looked without granting anything. Stored as additive\nmappings in ~/.houston/config.yaml.\n\n\b\n    houston onboard                          # what is held, denied, or unanswered\n    houston onboard grant owned-cluster      # let houston manage houston-local\n    houston onboard revoke owned-cluster     # record that the answer is no\n\nA grant never authorises copying houston's private CA key to another cluster. A\ngate's `error.gate.approve_with` names a person-only action; an agent reports it\nand never runs it itself.",
+    arguments: [
+      {
+        name: 'action',
+        value: 'string',
+        required: false,
+        defaultValue: 'status',
+        description: 'status | grant | revoke | complete',
+      },
+      {
+        name: 'id',
+        value: 'string',
+        required: false,
+        defaultValue: '',
+        description: 'the grant, for `grant` and `revoke`: owned-cluster',
+      },
+    ],
+    options: [],
+    json: {
+      mode: 'flag',
+      schema: 'houston.onboard.v1',
+      streams: false,
+      option: {
+        index: 0,
+        description: 'print the state as one JSON envelope',
+      },
     },
   }),
   defineCommand({

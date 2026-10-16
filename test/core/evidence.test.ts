@@ -5,8 +5,17 @@ import * as path from 'node:path';
 
 import * as YAML from 'yaml';
 
+import type * as PathsNS from '../../src/core/runner/paths';
 import type * as PayloadNS from '../../src/core/lifecycle/payload';
 import type * as KubeNamespaceNS from '../../src/core/kube/namespace';
+import type * as AdminNS from '../../src/core/lifecycle/admin';
+import type * as DockerCliNS from '../../src/seams/docker-cli';
+import type * as EngineNS from '../../src/core/runner/engine';
+
+jest.mock('../../src/core/runner/paths', () => {
+  const actual = jest.requireActual<typeof PathsNS>('../../src/core/runner/paths');
+  return { ...actual, atomicWrite: jest.fn(actual.atomicWrite) };
+});
 
 jest.mock('../../src/core/lifecycle/payload', () => {
   const actual = jest.requireActual<typeof PayloadNS>('../../src/core/lifecycle/payload');
@@ -18,10 +27,40 @@ jest.mock('../../src/core/kube/namespace', () => {
   return { ...actual, namespaceLabels: jest.fn() };
 });
 
+// `env` asks a serving workspace which keys are settings; these workspaces never serve.
+jest.mock('../../src/core/lifecycle/admin', () => {
+  const actual = jest.requireActual<typeof AdminNS>('../../src/core/lifecycle/admin');
+  return {
+    ...actual,
+    login: jest.fn(async () => {
+      throw new Error('not serving');
+    }),
+  };
+});
+
+// The Compose process, for a test that drives the real `engine.up` to see what it is asked for.
+jest.mock('../../src/seams/docker-cli', () => {
+  const actual = jest.requireActual<typeof DockerCliNS>('../../src/seams/docker-cli');
+  return { ...actual, compose: jest.fn(actual.compose) };
+});
+
+// `env` recreates Rocket.Chat and waits for it; no engine runs here.
+jest.mock('../../src/core/runner/engine', () => ({
+  ...jest.requireActual<object>('../../src/core/runner/engine'),
+  up: jest.fn(async () => 0),
+}));
+jest.mock('../../src/core/lifecycle/ready', () => ({
+  ...jest.requireActual<object>('../../src/core/lifecycle/ready'),
+  waitServing: jest.fn(async () => undefined),
+}));
+
+import { setEnvLocked } from '../../src/core/envvars';
+import * as engine from '../../src/core/runner/engine';
 import * as lifecyclePayload from '../../src/core/lifecycle/payload';
 import * as kubeNamespace from '../../src/core/kube/namespace';
 import * as config from '../../src/lib/config';
 import { ValidationError } from '../../src/lib/errors';
+import * as dockerCli from '../../src/seams/docker-cli';
 import { Interrupted } from '../../src/seams/exec';
 import {
   cleanupCommand,
@@ -32,8 +71,8 @@ import {
   safeOrigin,
   writeBundle,
 } from '../../src/core/evidence';
-import { workspace } from '../../src/core/runner/paths';
-import { metadata, write } from '../../src/core/runner/record';
+import { atomicWrite, workspace } from '../../src/core/runner/paths';
+import { metadata, readMeta, updateMeta, write } from '../../src/core/runner/record';
 
 const namespaceLabels = kubeNamespace.namespaceLabels as jest.MockedFunction<
   typeof kubeNamespace.namespaceLabels
@@ -104,10 +143,11 @@ async function workspaceNamed(
   name: string,
   extra: Record<string, unknown> = {},
   fields: Partial<ReturnType<typeof metadata>> = {},
+  compose = COMPOSE,
 ): Promise<void> {
   await write(
     name,
-    COMPOSE,
+    compose,
     metadata({
       name,
       project: `houston-${name}`,
@@ -201,7 +241,7 @@ describe('the record', () => {
 
   it('keeps a Docker record attachable when a killed create wrote only metadata', async () => {
     const name = 'e1-metadata-only';
-    await workspaceNamed(name);
+    await workspaceNamed(name, { bind_host: '0.0.0.0' });
     fs.unlinkSync(path.join(workspace(name), 'docker-compose.yml'));
     const detail = lifecyclePayload.detail as jest.MockedFunction<typeof lifecyclePayload.detail>;
     detail.mockClear();
@@ -211,7 +251,7 @@ describe('the record', () => {
     expect(rec.repro).toMatchObject({
       runtime: 'docker',
       deployment: 'monolith',
-      bind_host: '',
+      bind_host: '0.0.0.0',
     });
     expect(rec.runtime).toEqual({
       state: '?',
@@ -224,6 +264,63 @@ describe('the record', () => {
     });
     expect(rec.artifact).toEqual({ name: '', sha256: '' });
     expect(detail).not.toHaveBeenCalled();
+  });
+
+  it('withholds the old Docker artifact after a failed replacement and restores it after retry', async () => {
+    const name = 'e1-interrupted-replacement';
+    await workspaceNamed(name);
+    const original = jest.requireActual<typeof PathsNS>('../../src/core/runner/paths').atomicWrite;
+    const writer = jest.mocked(atomicWrite);
+    writer.mockImplementation(async (target, content, options) => {
+      if (path.basename(target) === 'docker-compose.yml')
+        throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+      return await original(target, content, options);
+    });
+    try {
+      await expect(
+        workspaceNamed(name, {}, { rcVersion: '8.6.0' }, COMPOSE.replaceAll('8.5.1', '8.6.0')),
+      ).rejects.toMatchObject({ code: 'ENOSPC' });
+    } finally {
+      writer.mockImplementation(original);
+    }
+    expect(fs.readFileSync(path.join(workspace(name), 'docker-compose.yml'), 'utf8')).toBe(COMPOSE);
+    const rec = await record(name);
+    expect(rec.artifact).toEqual({ name: '', sha256: '' });
+    // The Compose file on disk may still be the previous one, so it cannot say what was supplied.
+    expect(rec.license).toEqual({ required: false, supplied: null, source: 'unknown' });
+    const dest = path.join(workspace(name), 'out', 'interrupted');
+    const collected = await collect(name, { bundle: dest });
+    expect(collected.artifact).toEqual({ name: '', sha256: '' });
+    expect(collected.runtime).toMatchObject({ state: '?' });
+    expect(fs.readdirSync(dest).sort()).toEqual(['README.md', 'manifest.json']);
+    const readme = fs.readFileSync(path.join(dest, 'README.md'), 'utf8');
+    expect(readme).toContain(
+      'This bundle records workspace metadata and any available configuration.',
+    );
+    expect(readme).toContain('Runtime deployment was not verified.');
+    expect(readme).toContain('No scripted capture was run, so user actions were not recorded.');
+    expect(readme).not.toContain('proves what was deployed');
+
+    // An edit of the file that survived is not the replacement. It writes the 8.5.1 image beside
+    // the 8.6.0 record, so the record must stay unfinished and the artifact withheld.
+    await setEnvLocked(name, { SOME_FLAG: '1' }, [], { restart: false });
+    const edited = await record(name);
+    expect((edited.repro as Record<string, unknown>).rc_version).toBe('8.6.0');
+    expect(fs.readFileSync(path.join(workspace(name), 'docker-compose.yml'), 'utf8')).toContain(
+      'rocketchat/rocket.chat:8.5.1',
+    );
+    expect(edited.artifact).toEqual({ name: '', sha256: '' });
+    expect(edited.license).toEqual({ required: false, supplied: null, source: 'unknown' });
+
+    // `env`, `monitor` and `upgrade` retry with the record they load, the provisional one. The
+    // retry that writes the replacement it was interrupted in finishes the record.
+    await write(name, COMPOSE.replaceAll('8.5.1', '8.6.0'), await readMeta(name));
+    const complete = await record(name);
+    expect(complete.artifact).toEqual({
+      name: 'docker-compose.yml',
+      sha256: createHash('sha256').update(COMPOSE.replaceAll('8.5.1', '8.6.0')).digest('hex'),
+    });
+    expect(complete.license).toEqual({ required: false, supplied: true, source: 'reg_token' });
   });
 
   it('does not relabel an invalid Docker artifact as absent metadata', async () => {
@@ -306,6 +403,346 @@ describe('the record', () => {
       supplied: true,
       source: 'license',
     });
+  });
+
+  it('reports the licence Rocket.Chat ran with, not one a killed create had not installed', async () => {
+    const examples = [
+      { name: 'e3e-not-installed', extra: { licensed: true, effective_license: false } },
+      {
+        name: 'e3e-token-only',
+        extra: { licensed: true, effective_license: false, reg_token_supplied: true },
+      },
+      { name: 'e3e-installed', extra: { licensed: true, effective_license: true } },
+      { name: 'e3e-retained', extra: { effective_license: true, reg_token_supplied: false } },
+      {
+        name: 'e3e-unknown',
+        extra: { licensed: true, effective_license: null, reg_token_supplied: false },
+      },
+      {
+        name: 'e3e-known-token-unknown-license',
+        extra: { licensed: true, effective_license: null, reg_token_supplied: true },
+      },
+    ];
+    const observed: unknown[] = [];
+    for (const example of examples) {
+      await workspaceNamed(example.name, { reg_token_supplied: false, ...example.extra });
+      observed.push([example.name, (await record(example.name)).license]);
+    }
+    expect(observed).toEqual([
+      ['e3e-not-installed', { required: false, supplied: false, source: null }],
+      ['e3e-token-only', { required: false, supplied: true, source: 'reg_token' }],
+      ['e3e-installed', { required: false, supplied: true, source: 'license' }],
+      ['e3e-retained', { required: false, supplied: true, source: 'license' }],
+      ['e3e-unknown', { required: false, supplied: null, source: 'unknown' }],
+      ['e3e-known-token-unknown-license', { required: false, supplied: true, source: 'unknown' }],
+    ]);
+  });
+
+  it('follows an env change to the registration token and licence', async () => {
+    // `env --set` and `--unset` rewrite the Compose environment after create stamped what it
+    // supplied. Real files; the change is written without recreating a container, so the
+    // record's markers describe the Compose file, and evidence does not claim a changed
+    // credential reached Rocket.Chat before a recreate.
+    const examples: Array<{
+      name: string;
+      extra: Record<string, unknown>;
+      services: Record<
+        string,
+        { environment?: Record<string, unknown> | string[]; env_file?: string[] }
+      >;
+      files?: Record<string, string>;
+      sets?: Record<string, string>;
+      unset?: string[];
+    }> = [
+      {
+        name: 'e3-env-blank-token',
+        extra: { reg_token_supplied: true },
+        services: { rocketchat: { environment: { REG_TOKEN: 'token' } } },
+        sets: { REG_TOKEN: '' },
+      },
+      {
+        name: 'e3-env-set-token',
+        extra: { reg_token_supplied: false },
+        services: { rocketchat: { environment: { PORT: '3000' } } },
+        sets: { REG_TOKEN: 'token' },
+      },
+      {
+        name: 'e3-env-unset-list-token',
+        extra: { reg_token_supplied: true },
+        services: { rocketchat: { environment: ['PORT=3000', 'REG_TOKEN=token'] } },
+        unset: ['REG_TOKEN'],
+      },
+      {
+        // The env file still hands Rocket.Chat a token once the environment key is gone.
+        name: 'e3-env-unset-file-token',
+        extra: { reg_token_supplied: true },
+        services: { rocketchat: { environment: { REG_TOKEN: 'token' }, env_file: ['token.env'] } },
+        files: { 'token.env': 'REG_TOKEN=file-token\n' },
+        unset: ['REG_TOKEN'],
+      },
+      {
+        name: 'e3-env-blank-licence',
+        extra: { licensed: true, reg_token_supplied: true },
+        services: {
+          rocketchat: { environment: { ROCKETCHAT_LICENSE: 'licence', REG_TOKEN: 'token' } },
+        },
+        sets: { ROCKETCHAT_LICENSE: '' },
+      },
+      {
+        name: 'e3-env-set-licence',
+        extra: { reg_token_supplied: true },
+        services: { rocketchat: { environment: { REG_TOKEN: 'token' } } },
+        sets: { ROCKETCHAT_LICENSE: 'licence' },
+      },
+      {
+        name: 'e3-env-sidecar-token',
+        extra: { reg_token_supplied: false },
+        services: {
+          rocketchat: { environment: { PORT: '3000' } },
+          'registration-helper': { environment: { REG_TOKEN: 'sidecar-only-token' } },
+        },
+        sets: { PORT: '3001' },
+      },
+    ];
+    const observed: unknown[] = [];
+    for (const example of examples) {
+      for (const [file, text] of Object.entries(example.files ?? {})) {
+        fs.mkdirSync(workspace(example.name), { recursive: true });
+        fs.writeFileSync(path.join(workspace(example.name), file), text);
+      }
+      await workspaceNamed(
+        example.name,
+        example.extra,
+        {},
+        YAML.stringify({ services: example.services }),
+      );
+      await setEnvLocked(example.name, example.sets ?? {}, example.unset ?? [], {
+        restart: false,
+      });
+      const rec = await record(example.name);
+      const extra = (await readMeta(example.name)).extra;
+      const markers = { licensed: extra.licensed, reg_token_supplied: extra.reg_token_supplied };
+      observed.push([example.name, markers, rec.license, (rec.artifact as { name: string }).name]);
+    }
+    const artifact = 'docker-compose.yml';
+    const pending = { required: false, supplied: null, source: 'unknown' };
+    expect(observed).toEqual([
+      ['e3-env-blank-token', { licensed: undefined, reg_token_supplied: false }, pending, artifact],
+      ['e3-env-set-token', { licensed: undefined, reg_token_supplied: true }, pending, artifact],
+      [
+        'e3-env-unset-list-token',
+        { licensed: undefined, reg_token_supplied: false },
+        pending,
+        artifact,
+      ],
+      // The env file still hands Rocket.Chat the token, so nothing it was given changed.
+      [
+        'e3-env-unset-file-token',
+        { licensed: undefined, reg_token_supplied: true },
+        { required: false, supplied: true, source: 'reg_token' },
+        artifact,
+      ],
+      [
+        'e3-env-blank-licence',
+        { licensed: undefined, reg_token_supplied: true },
+        pending,
+        artifact,
+      ],
+      ['e3-env-set-licence', { licensed: true, reg_token_supplied: true }, pending, artifact],
+      [
+        'e3-env-sidecar-token',
+        { licensed: undefined, reg_token_supplied: false },
+        { required: false, supplied: false, source: null },
+        artifact,
+      ],
+    ]);
+  });
+
+  it('reports a changed credential once Rocket.Chat is recreated with it, and not before', async () => {
+    const up = jest.mocked(engine.up);
+    const services = (environment: Record<string, string>) =>
+      YAML.stringify({ services: { rocketchat: { environment } } });
+    const unknown = { required: false, supplied: null, source: 'unknown' };
+    const token = { required: false, supplied: true, source: 'reg_token' };
+    const none = { required: false, supplied: false, source: null };
+
+    // A recreate that succeeds deploys the change.
+    await workspaceNamed('e3-env-restarted', { reg_token_supplied: false }, {}, services({}));
+    await setEnvLocked('e3-env-restarted', { REG_TOKEN: 'token' }, []);
+    expect((await record('e3-env-restarted')).license).toEqual(token);
+
+    // A recreate that fails leaves the running container as it was, and the next one that
+    // succeeds, for any change, deploys the Compose file with it.
+    await workspaceNamed(
+      'e3-env-failed',
+      { reg_token_supplied: true },
+      {},
+      services({ REG_TOKEN: 'token' }),
+    );
+    up.mockResolvedValueOnce(1);
+    await expect(setEnvLocked('e3-env-failed', {}, ['REG_TOKEN'])).rejects.toThrow(
+      'failed applying the env change',
+    );
+    expect((await record('e3-env-failed')).license).toEqual(unknown);
+    await setEnvLocked('e3-env-failed', { PORT: '3001' }, [], { restart: false });
+    expect((await record('e3-env-failed')).license).toEqual(unknown);
+    await setEnvLocked('e3-env-failed', { PORT: '3002' }, []);
+    expect((await record('e3-env-failed')).license).toEqual(none);
+
+    // A record from before the markers is asked through its Compose file, which describes the
+    // change before Rocket.Chat has it.
+    await workspaceNamed('e3-env-legacy', {}, {}, services({ PORT: '3000' }));
+    await setEnvLocked('e3-env-legacy', { REG_TOKEN: 'token' }, [], { restart: false });
+    expect((await record('e3-env-legacy')).license).toEqual(unknown);
+    await setEnvLocked('e3-env-legacy', { PORT: '3001' }, []);
+    expect((await record('e3-env-legacy')).license).toEqual(token);
+
+    // Every replica of a multi-instance workspace has the change only once each one is
+    // recreated. The real engine is asked for all of them in one Compose call, MongoDB left
+    // out, and only that call's success deploys the change.
+    const seam = jest.mocked(dockerCli.compose);
+    const actualUp = jest.requireActual<typeof EngineNS>('../../src/core/runner/engine').up;
+    const calls: string[][] = [];
+    let exitCode = 0;
+    up.mockImplementation(actualUp);
+    seam.mockImplementation(async (args) => {
+      calls.push([...args]);
+      return {
+        argv: ['docker', 'compose', ...args],
+        exitCode,
+        signal: null,
+        stdout: '',
+        stderr: '',
+      };
+    });
+    try {
+      await workspaceNamed(
+        'e3-env-replicas',
+        { reg_token_supplied: true, instances: 2 },
+        {},
+        YAML.stringify({
+          services: {
+            'rocketchat-1': { environment: { REG_TOKEN: 'token' } },
+            'rocketchat-2': { environment: { REG_TOKEN: 'token' } },
+            mongodb: { image: 'mongo:7.0' },
+          },
+        }),
+      );
+      exitCode = 1;
+      await expect(setEnvLocked('e3-env-replicas', {}, ['REG_TOKEN'])).rejects.toThrow(
+        'failed applying the env change',
+      );
+      expect((await record('e3-env-replicas')).license).toEqual(unknown);
+      exitCode = 0;
+      await setEnvLocked('e3-env-replicas', {}, ['REG_TOKEN']);
+      expect(calls.at(-1)).toEqual([
+        'up',
+        '-d',
+        '--remove-orphans',
+        '--force-recreate',
+        '--no-deps',
+        'rocketchat-1',
+        'rocketchat-2',
+      ]);
+      expect((await record('e3-env-replicas')).license).toEqual(none);
+    } finally {
+      up.mockImplementation(async () => 0);
+      seam.mockImplementation(
+        jest.requireActual<typeof DockerCliNS>('../../src/seams/docker-cli').compose,
+      );
+    }
+  });
+
+  it('reads a legacy Compose token only from supported Rocket.Chat environments', async () => {
+    const examples: Array<{
+      name: string;
+      extra?: Record<string, unknown>;
+      services: Record<
+        string,
+        { environment?: Record<string, unknown> | string[]; env_file?: string[] }
+      >;
+      files?: Record<string, string>;
+      supplied: boolean | null;
+      source?: string;
+    }> = [
+      {
+        name: 'e3-legacy-sidecar-only',
+        services: {
+          rocketchat: { environment: { PORT: '3000' } },
+          'registration-helper': { environment: { REG_TOKEN: 'sidecar-only-token' } },
+        },
+        supplied: false,
+      },
+      {
+        name: 'e3-legacy-multi-list',
+        extra: { deployment: 'multi-instance', instances: 2 },
+        services: {
+          'rocketchat-1': { environment: ['PORT=3000', 'REG_TOKEN=  multi-list-token'] },
+          'rocketchat-2': { environment: ['PORT=3000'] },
+        },
+        supplied: true,
+      },
+      {
+        name: 'e3-legacy-list-blank',
+        services: { rocketchat: { environment: ['REG_TOKEN=  \t'] } },
+        supplied: false,
+      },
+      {
+        name: 'e3-legacy-interpolated',
+        services: { rocketchat: { environment: ['REG_TOKEN=${HOST_REG_TOKEN}'] } },
+        supplied: null,
+        source: 'unknown',
+      },
+      {
+        name: 'e3-legacy-env-file',
+        services: { rocketchat: { env_file: ['token.env'] } },
+        files: { 'token.env': 'REG_TOKEN=file-token\n' },
+        supplied: true,
+      },
+      {
+        // A legacy record set `licensed` only for --license; a preset or --env licence lives
+        // in the compose file alone, and wins over a token as the markers do.
+        name: 'e3-legacy-env-licence',
+        services: {
+          rocketchat: { environment: { ROCKETCHAT_LICENSE: 'licence', REG_TOKEN: 'token' } },
+        },
+        supplied: true,
+        source: 'license',
+      },
+      {
+        name: 'e3-legacy-file-licence',
+        services: { rocketchat: { env_file: ['licence.env'] } },
+        files: { 'licence.env': 'ROCKETCHAT_LICENSE=licence\n' },
+        supplied: true,
+        source: 'license',
+      },
+      {
+        name: 'e3-legacy-sidecar-licence',
+        services: {
+          rocketchat: { environment: { PORT: '3000' } },
+          'licence-helper': { environment: { ROCKETCHAT_LICENSE: 'licence' } },
+        },
+        supplied: false,
+      },
+    ];
+
+    for (const example of examples) {
+      for (const [file, text] of Object.entries(example.files ?? {})) {
+        fs.mkdirSync(workspace(example.name), { recursive: true });
+        fs.writeFileSync(path.join(workspace(example.name), file), text);
+      }
+      await workspaceNamed(
+        example.name,
+        example.extra,
+        {},
+        YAML.stringify({ services: example.services }),
+      );
+      expect((await record(example.name)).license).toEqual({
+        required: false,
+        supplied: example.supplied,
+        source: example.source ?? (example.supplied ? 'reg_token' : null),
+      });
+    }
   });
 
   it('reports an unknown requirement when a legacy preset is no longer available', async () => {
@@ -407,13 +844,24 @@ describe('the record', () => {
     });
   });
 
-  it('ignores a retain_runs preference, which nothing enforces, and keeps the pin', async () => {
-    // `prune` skips pinned workspaces and reads no preference, so a config key that says
-    // "retain" would be evidence of a policy that does not exist.
+  it('records a literal retained-run preference without claiming prune enforces it', async () => {
+    // The preference selects the retention evidence. `prune` still enforces only the pin,
+    // so an explicit false wins for an unpinned workspace and the pin test above stays separate.
     await workspaceNamed('e3-preference');
     try {
       config.updateConfig((cfg) => {
         cfg.preferences = { retain_runs: true };
+      });
+      expect((await record('e3-preference')).retention).toMatchObject({
+        retained: true,
+        reason: 'persisted preference',
+      });
+      expect((await record('e3-preference', { retained: false })).retention).toMatchObject({
+        retained: false,
+        reason: null,
+      });
+      config.updateConfig((cfg) => {
+        cfg.preferences = { retain_runs: 'true' };
       });
       expect((await record('e3-preference')).retention).toMatchObject({
         retained: false,
@@ -438,6 +886,12 @@ describe('the record', () => {
       name: 'kubernetes/values.yaml',
       sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
     });
+    // An interrupted re-up leaves the previous release's values beside its new request. The
+    // Kubernetes path writes its provisional record alone.
+    await updateMeta('e3-kubernetes', (meta) => {
+      meta.extra.incomplete = true;
+    });
+    expect((await recordKubernetes('e3-kubernetes')).artifact).toEqual({ name: '', sha256: '' });
   });
 
   it('uses a live namespace label read before claiming Kubernetes ownership', async () => {
@@ -680,6 +1134,424 @@ describe('the bundle', () => {
     expect(out.files).not.toContain('logs/compose.log');
   });
 
+  it('collects artifact credentials before masking aliases and earlier copies', async () => {
+    const name = 'e7-credential-copies';
+    await workspaceNamed(name);
+    const embedded =
+      '{"copy":"EmbeddedCopySentinel","password":"EmbeddedCopySentinel","keep":1.50}';
+    const doc = [
+      'x-before: &copy AliasCopySentinel',
+      'x-json-copy: EmbeddedCopySentinel',
+      'x-list-copy: ListCopySentinel',
+      'x-named-copy: NamedCopySentinel',
+      'x-url-copy: UrlCopySentinel',
+      'x-control: readable',
+      'services:',
+      '  rocketchat:',
+      '    environment:',
+      '      DB_PASSWORD: *copy',
+      `      CONFIG: '${embedded}'`,
+      '      URL: https://UrlCopySentinel@example.test',
+      'x-list: [DB_PASSWORD=ListCopySentinel]',
+      'x-named: {value: NamedCopySentinel, name: DB_PASSWORD}',
+      '',
+    ].join('\n');
+    fs.writeFileSync(path.join(workspace(name), 'docker-compose.yml'), doc);
+    const dest = path.join(workspace(name), 'out', 'bundle');
+    await writeBundle(name, dest, await record(name));
+    const text = fs.readFileSync(path.join(dest, 'docker-compose.yml'), 'utf8');
+    for (const secret of [
+      'AliasCopySentinel',
+      'EmbeddedCopySentinel',
+      'ListCopySentinel',
+      'NamedCopySentinel',
+      'UrlCopySentinel',
+    ])
+      expect(text).not.toContain(secret);
+    const parsed = YAML.parse(text) as {
+      'x-control': string;
+      services: { rocketchat: { environment: { CONFIG: string } } };
+    };
+    expect(parsed['x-control']).toBe('readable');
+    expect(parsed.services.rocketchat.environment.CONFIG).toBe(
+      '{"copy":"********","password":"********","keep":1.50}',
+    );
+  });
+
+  it('collects authorization headers and their earlier copies without hiding policy fields', async () => {
+    const name = 'e7-authorization';
+    await workspaceNamed(name);
+    const headers = [
+      'Authorization',
+      'authorization',
+      'AUTHORIZATION',
+      'authHeader',
+      'auth-header',
+      'AUTH_HEADER',
+      'proxyAuthorization',
+      'authorizationHeader',
+    ];
+    const secrets = headers.map((_, index) => `HeaderSentinel${String(index)}END`);
+    const doc = {
+      'x-copies': secrets.map((secret, index) => ({
+        text: `${index % 2 === 0 ? 'Bearer' : 'Basic'} ${secret}`,
+        copyBare: secret,
+      })),
+      'x-controls': {
+        authorizationEnabled: true,
+        authorizationPolicy: 'readable',
+        authorizerUrl: 'https://example.test',
+        authHeaderCount: 2,
+        author: 'support',
+      },
+      services: { rocketchat: { image: 'rocketchat/rocket.chat:8.5.1' } },
+      'x-headers': Object.fromEntries(
+        headers.map((key, index) => [
+          key,
+          `${index % 2 === 0 ? 'Bearer' : 'Basic'} ${secrets[index] ?? ''}`,
+        ]),
+      ),
+      'x-named': { value: 'Bearer NamedHeaderSentinelEND', name: 'AUTH_HEADER' },
+      'x-named-copy': 'NamedHeaderSentinelEND',
+      'x-json': JSON.stringify({
+        before: 'EmbeddedHeaderSentinelEND',
+        authorization: 'Basic EmbeddedHeaderSentinelEND',
+        keep: 'readable',
+      }),
+    };
+    fs.writeFileSync(path.join(workspace(name), 'docker-compose.yml'), YAML.stringify(doc));
+    const dest = path.join(workspace(name), 'out', 'bundle');
+    await collect(name, { bundle: dest });
+    const files = fs.readdirSync(dest);
+    expect(files).toContain('docker-compose.yml');
+    for (const file of files) {
+      const text = fs.readFileSync(path.join(dest, file), 'utf8');
+      for (const secret of [...secrets, 'NamedHeaderSentinelEND', 'EmbeddedHeaderSentinelEND'])
+        expect(text).not.toContain(secret);
+    }
+    const rendered = YAML.parse(
+      fs.readFileSync(path.join(dest, 'docker-compose.yml'), 'utf8'),
+    ) as typeof doc;
+    expect(rendered['x-controls']).toEqual(doc['x-controls']);
+    expect(JSON.parse(rendered['x-json']) as unknown).toEqual({
+      before: '********',
+      authorization: '********',
+      keep: 'readable',
+    });
+  });
+
+  it('collects nested JSON, scalar and cross-document credentials without erasing controls', async () => {
+    const name = 'e7-deep-credential-copies';
+    const cfg =
+      '{"copy":"NestedCopySentinel","password":"NestedCopySentinel","numberCopy":4.500,"numberText":"4.50","apiKey":4.50,"named":[{"value":"ValueFirstSentinel","name":"DB_PASSWORD"},{"name":"client_secret","value":"NameFirstSentinel"}],"assignments":["DB_PASSWORD=AssignedCopySentinel"],"escapedCopy":"Escaped\\u0043opySentinel","secret":"EscapedCopySentinel","password":"DuplicateMemberSentinel","keep":1.50}';
+    const nested = JSON.stringify({ payload: cfg, copy: 'NestedCopySentinel' });
+    const doc = [
+      'x-cross-doc: CrossDocSentinel',
+      'x-before: [NestedCopySentinel, ValueFirstSentinel, NameFirstSentinel, AssignedCopySentinel, DuplicateMemberSentinel]',
+      `x-json: '${nested}'`,
+      'x-raw-scalar: "-0"',
+      'x-original-scalar: -0',
+      'x-url-name: rocket',
+      'x-url-copy: UrlPasswordSentinel',
+      'x-control: rocketchat',
+      'x-port: 27017',
+      'x-password-number: 7',
+      'x-auth-url: https://rocket:UrlPasswordSentinel@example.test',
+      'x-scalar-password: -0',
+      '---',
+      'x-password: CrossDocSentinel',
+      'x-last-control: readable',
+      '',
+    ].join('\n');
+    await workspaceNamed(name, { runtime: 'kubernetes' });
+    fs.mkdirSync(path.join(workspace(name), 'kubernetes'), { recursive: true });
+    fs.writeFileSync(path.join(workspace(name), 'kubernetes', 'values.yaml'), doc);
+    const dest = path.join(workspace(name), 'out', 'bundle');
+    await writeBundle(name, dest, await recordKubernetes(name));
+    const text = fs.readFileSync(path.join(dest, 'values.yaml'), 'utf8');
+    for (const value of [
+      'CrossDocSentinel',
+      'NestedCopySentinel',
+      'ValueFirstSentinel',
+      'NameFirstSentinel',
+      'AssignedCopySentinel',
+      'DuplicateMemberSentinel',
+      'EscapedCopySentinel',
+      'UrlPasswordSentinel',
+    ])
+      expect(text).not.toContain(value);
+    const parsed = YAML.parseAllDocuments(text).map(
+      (document) => document.toJS() as Record<string, unknown>,
+    );
+    expect(parsed[0]?.['x-control']).toBe('rocketchat');
+    expect(parsed[0]?.['x-url-name']).toBe('********');
+    expect(parsed[0]?.['x-port']).toBe(27017);
+    expect(parsed[0]?.['x-raw-scalar']).toBe('********');
+    expect(parsed[0]?.['x-original-scalar']).toBe('********');
+    const json = JSON.parse(String(parsed[0]?.['x-json'])) as { payload: string; copy: string };
+    expect(json.copy).toBe('********');
+    expect(json.payload).toContain('"keep":1.50');
+    const inner = JSON.parse(json.payload) as Record<string, unknown>;
+    expect(inner.escapedCopy).toBe('********');
+    expect(inner.numberCopy).toBe('********');
+    expect(inner.numberText).toBe('********');
+    expect(parsed[1]?.['x-last-control']).toBe('readable');
+  });
+
+  it('discovers every duplicate YAML credential name before rendering earlier copies', async () => {
+    const name = 'e7-duplicate-names';
+    const doc = [
+      'x-copy: DuplicateYamlSentinel',
+      'x-alias-copy: AliasNameSentinel',
+      'x-label-copy: AliasKeySentinel',
+      'x-value-copy: DuplicateValueSentinel',
+      'x-name: &credentialName DB_PASSWORD',
+      'x-label: &nameKey name',
+      'x-pair: {name: benign, name: DB_PASSWORD, value: DuplicateYamlSentinel}',
+      'x-alias-pair: {name: benign, name: *credentialName, value: AliasNameSentinel}',
+      'x-label-pair: {name: benign, *nameKey : DB_PASSWORD, value: AliasKeySentinel}',
+      'x-values: {name: benign, name: DB_PASSWORD, value: DuplicateValueSentinel, value: last}',
+      'x-control: readable',
+      '',
+    ].join('\n');
+    await workspaceNamed(name, {}, {}, doc);
+    const dest = path.join(workspace(name), 'out', 'bundle');
+    await collect(name, { bundle: dest });
+    const text = fs.readFileSync(path.join(dest, 'docker-compose.yml'), 'utf8');
+    for (const secret of [
+      'DuplicateYamlSentinel',
+      'AliasNameSentinel',
+      'AliasKeySentinel',
+      'DuplicateValueSentinel',
+    ])
+      expect(text).not.toContain(secret);
+    const parsed = YAML.parse(text) as Record<string, unknown>;
+    expect(parsed['x-control']).toBe('readable');
+    expect(parsed['x-pair']).toEqual({ name: 'DB_PASSWORD', value: '********' });
+  });
+
+  it.each(['yaml', 'assignment', 'json', 'named', 'alias', 'nested-json'])(
+    'keeps numeric text credentials whole through %s discovery in actual bundles',
+    async (origin) => {
+      // Each route is isolated: another credential representation must not supply its match class.
+      for (const spelling of ['7', '+7', '-0', '4.50', '2E3', '0x7', '0o7', '.inf', '.nan']) {
+        const name = `e7-numeric-${origin}`;
+        const json = JSON.stringify({ password: spelling });
+        const sources: Record<string, string> = {
+          yaml: `x-password: ${JSON.stringify(spelling)}`,
+          assignment: `x-list: [${JSON.stringify(`DB_PASSWORD=${spelling}`)}]`,
+          json: `x-source: ${JSON.stringify(json)}`,
+          named: `x-pair: {value: ${JSON.stringify(spelling)}, name: DB_PASSWORD}`,
+          alias: `x-alias: &numeric ${JSON.stringify(spelling)}\nx-password: *numeric`,
+          'nested-json': `x-source: ${JSON.stringify(JSON.stringify({ payload: JSON.stringify({ value: spelling, name: 'DB_PASSWORD' }) }))}`,
+        };
+        const canonical: Record<string, string> = {
+          '+7': '7',
+          '-0': '0',
+          '4.50': '4.5',
+          '2E3': '2000',
+          '0x7': '7',
+          '0o7': '7',
+        };
+        const copied = `{ "keep":27017, "decimal":1.50, "exponent":2E4, "copy":${JSON.stringify(spelling)} }`;
+        const doc = [
+          `x-copy: ${JSON.stringify(spelling)}`,
+          `x-canonical-copy: ${canonical[spelling] ?? spelling}`,
+          `x-embedded-copy: ${JSON.stringify(copied)}`,
+          'x-port: 27017',
+          `x-service: ${JSON.stringify(`rocketchat-${spelling}`)}`,
+          sources[origin],
+          'x-long-password: LongCredentialSentinel',
+          'x-long-copy: prefix-LongCredentialSentinel-suffix',
+          'x-control: readable',
+          '',
+        ].join('\n');
+        await workspaceNamed(name, {}, {}, doc);
+        const dest = path.join(workspace(name), 'out', `bundle-${spelling}`);
+        await collect(name, { bundle: dest });
+        const text = fs.readFileSync(path.join(dest, 'docker-compose.yml'), 'utf8');
+        const parsed = YAML.parse(text) as Record<string, unknown>;
+        expect(parsed['x-port']).toBe(27017);
+        expect(parsed['x-service']).toBe(`rocketchat-${spelling}`);
+        expect(parsed['x-copy']).toBe('********');
+        expect(parsed['x-canonical-copy']).toBe('********');
+        expect(parsed['x-embedded-copy']).toBe(
+          '{ "keep":27017, "decimal":1.50, "exponent":2E4, "copy":"********" }',
+        );
+        expect(parsed['x-long-copy']).toBe('prefix-********-suffix');
+        expect(parsed['x-control']).toBe('readable');
+        expect(text).not.toContain('LongCredentialSentinel');
+      }
+    },
+  );
+
+  it('bounds cyclic YAML aliases while still masking credentials discovered through aliases', async () => {
+    const name = 'e7-cycle-credentials';
+    await workspaceNamed(
+      name,
+      {},
+      {},
+      [
+        'x-first: &secret {value: CycleCopySentinel}',
+        'x-cycle: &cycle [*cycle]',
+        'x-password: *secret',
+        'x-before-copy: CycleCopySentinel',
+        'x-control: readable',
+        '',
+      ].join('\n'),
+    );
+    const dest = path.join(workspace(name), 'out', 'bundle');
+    await writeBundle(name, dest, await record(name));
+    const text = fs.readFileSync(path.join(dest, 'docker-compose.yml'), 'utf8');
+    expect(text).not.toContain('CycleCopySentinel');
+    const parsed = YAML.parse(text) as Record<string, unknown>;
+    expect(parsed['x-control']).toBe('readable');
+    expect(parsed['x-cycle']).toEqual(['********']);
+  });
+
+  it('resolves credential uncertainty at real env-file and replica boundaries', async () => {
+    const cases: {
+      env?: Record<string, unknown> | string[];
+      files?: [string, string][];
+      refs?: unknown[];
+      services?: Record<string, unknown>;
+      supplied: boolean | null;
+      source: string | null;
+    }[] = [
+      { env: ['REG_TOKEN'], supplied: null, source: 'unknown' },
+      { env: { REG_TOKEN: null }, supplied: false, source: null },
+      { env: { REG_TOKEN: '' }, supplied: false, source: null },
+      { env: { REG_TOKEN: '$$literal' }, supplied: true, source: 'reg_token' },
+      {
+        env: { ROCKETCHAT_LICENSE: '${LICENCE}', REG_TOKEN: 'literal' },
+        supplied: true,
+        source: 'unknown',
+      },
+      {
+        env: { ROCKETCHAT_LICENSE: 'literal', REG_TOKEN: '${TOKEN}' },
+        supplied: true,
+        source: 'license',
+      },
+      {
+        refs: ['creds.env'],
+        files: [['creds.env', 'REG_TOKEN=${TOKEN:-fallback}\n']],
+        supplied: null,
+        source: 'unknown',
+      },
+      {
+        refs: ['creds.env'],
+        files: [['creds.env', "REG_TOKEN='${TOKEN}'\n"]],
+        supplied: true,
+        source: 'reg_token',
+      },
+      {
+        refs: [{ path: 'creds.env', format: 'raw' }],
+        files: [['creds.env', 'REG_TOKEN=${TOKEN}\n']],
+        supplied: true,
+        source: 'reg_token',
+      },
+      {
+        refs: ['earlier.env', 'later.env'],
+        files: [
+          ['earlier.env', 'REG_TOKEN=literal\n'],
+          ['later.env', 'REG_TOKEN=${TOKEN:+alt}\n'],
+        ],
+        supplied: null,
+        source: 'unknown',
+      },
+      {
+        refs: ['earlier.env', 'later.env'],
+        files: [
+          ['earlier.env', 'REG_TOKEN=${TOKEN}\n'],
+          ['later.env', 'REG_TOKEN\n'],
+        ],
+        supplied: false,
+        source: null,
+      },
+      { refs: ['${ENV_FILE}'], supplied: null, source: 'unknown' },
+      { refs: [{ path: 'missing.env', required: false }], supplied: false, source: null },
+      {
+        services: {
+          'rocketchat-1': { environment: { REG_TOKEN: 'literal' } },
+          'rocketchat-2': { environment: { REG_TOKEN: '${TOKEN}' } },
+        },
+        supplied: true,
+        source: 'reg_token',
+      },
+      {
+        services: {
+          'rocketchat-1': { environment: { ROCKETCHAT_LICENSE: 'literal' } },
+          'rocketchat-2': { environment: { ROCKETCHAT_LICENSE: '${LICENCE}' } },
+        },
+        supplied: null,
+        source: 'unknown',
+      },
+    ];
+    for (const [index, example] of cases.entries()) {
+      const name = `e3-uncertain-files-${index}`;
+      await workspaceNamed(
+        name,
+        {},
+        {},
+        YAML.stringify({
+          services: example.services ?? {
+            rocketchat: { environment: example.env ?? {}, env_file: example.refs ?? [] },
+          },
+        }),
+      );
+      for (const [file, text] of example.files ?? [])
+        fs.writeFileSync(path.join(workspace(name), file), text);
+      const evidence = await record(name);
+      if (example.supplied === null)
+        expect(renderMarkdown(evidence)).toContain(
+          'unknown (credential presence could not be determined)',
+        );
+      else if (example.source === 'unknown')
+        expect(renderMarkdown(evidence)).toContain('credential supplied (type unknown)');
+      expect([index, evidence.license]).toEqual([
+        index,
+        { required: false, supplied: example.supplied, source: example.source },
+      ]);
+    }
+  });
+
+  it('retains unknown credential presence through evidence and environment mutation', async () => {
+    const values = [
+      '${TOKEN}',
+      '$TOKEN',
+      '${TOKEN:-fallback}',
+      '${TOKEN-fallback}',
+      '${TOKEN:+alternate}',
+      '${TOKEN?required}',
+    ];
+    for (const [index, value] of values.entries()) {
+      const name = `e3-interpolation-${index}`;
+      await workspaceNamed(
+        name,
+        {},
+        {},
+        YAML.stringify({ services: { rocketchat: { environment: { REG_TOKEN: value } } } }),
+      );
+      expect((await record(name)).license).toMatchObject({ supplied: null, source: 'unknown' });
+    }
+    const name = 'e3-marker-interpolation';
+    await workspaceNamed(
+      name,
+      { reg_token_supplied: false },
+      {},
+      YAML.stringify({ services: { rocketchat: { environment: {} } } }),
+    );
+    await setEnvLocked(name, { REG_TOKEN: '${TOKEN}' }, []);
+    expect((await readMeta(name)).extra.reg_token_supplied).toBeNull();
+    expect((await record(name)).license).toMatchObject({ supplied: null, source: 'unknown' });
+    await setEnvLocked(name, { PORT: '3001' }, []);
+    expect((await record(name)).license).toMatchObject({ supplied: null, source: 'unknown' });
+    await setEnvLocked(name, { REG_TOKEN: '$$literal' }, []);
+    expect((await record(name)).license).toMatchObject({ supplied: true, source: 'reg_token' });
+    await setEnvLocked(name, {}, ['REG_TOKEN']);
+    expect((await record(name)).license).toMatchObject({ supplied: false, source: null });
+  });
+
   it('redacts URL userinfo before treating a Compose value as KEY=VALUE', async () => {
     const name = 'e7-compose-url-userinfo';
     await workspaceNamed(name);
@@ -694,6 +1566,13 @@ describe('the bundle', () => {
         '  - APP_URL=https://reader:ListRaw@AtValueSentinel@example.test/?q=a=b',
         '  - PORT=3000',
         '  - MONGO_URL=https://reader:ListMongoUrlSentinel@example.test/?q=a=b',
+        '  - HOOK_URL=https://ListBearerSentinel@example.test/hook',
+        '  - PUNCT_LIST=https://u:List[Punct]SecretSentinel@example.test/x',
+        `  - 'OIDC_PAIR={"url":"https://idp.example","admin":"ops@example.com"}'`,
+        `  - 'INITIAL_USER_PAIR={"password":"JsonPairSentinel","username":"ops"}'`,
+        `  - 'NESTED_CFG={"inner":"{\\"secret\\":\\"JsonNestedSentinel\\"}"}'`,
+        '  - JWTKey=JwtListSentinel',
+        `  - 'EXTRA_PAIR=[{"name":"SMTP_PASSWORD","value":"JsonPairNamedSentinel"},"ADMIN_EMAIL=ops@x.example"]'`,
         COMPOSE.replace(
           'MONGO_URL: mongodb://rocket:MongoUrlSecret@mongodb:27017/rocketchat',
           [
@@ -701,6 +1580,20 @@ describe('the bundle', () => {
             '      SERVICE_URL: postgresql://reader:Compose=PasswordSentinel@db:5432/rocketchat',
             '      EMPTY_USER_URL: https://:EmptyUserValueSentinel@example.test/?q=a=b',
             '      RAW_AT_URL: https://reader:Raw@AtValueSentinel@example.test/?q=a=b',
+            '      BEARER_URL: https://BearerOnlySentinel@example.test/x',
+            '      GIT_URL: https://GitTokenSentinel:x-oauth-basic@github.com/org/repo.git',
+            `      OIDC_CONFIG: '{"url":"https://idp.example","admin":"ops@example.com"}'`,
+            `      OIDC_LIST: '["https://a.example","ops@example.com"]'`,
+            '      BLANK_SECOND_URL: https://EmptyPasswordSentinel:@example.test',
+            '      PUNCT_URL: "mongodb://rc:Punct{a}^|SecretSentinel@mongo/rc"',
+            '      BRACE_USER_URL: "https://Brace{TokenSentinel@example.test/x"',
+            `      QUOTE_URL: 'https://u:Quote"SecretSentinel@example.test'`,
+            `      OIDC_IDP_CONFIG: '{"url":"https://u:Json{SecretSentinel@idp","admin":"ops@example.com"}'`,
+            `      INITIAL_USER: '{"_id":"u1","username":"ops","email":"ops@x.example","password":"JsonPasswordSentinel"}'`,
+            `      OAUTH_CFG: '{"client_secret":"JsonClientSecretSentinel", "nested":{"apiKey":1234567,"token":["JsonListSentinel",{"a":true}],"keycloakUrl":"https://kc.example"},"hosts":[1.0,"ops@x.example"]}'`,
+            `      EXTRA_ENV: '["PORT=3000","DB_PASSWORD=JsonKvSentinel"]'`,
+            `      EXTRA_LIST: '[{"name":"DB_PASSWORD","value":"JsonNameValueSentinel"},{"value":"JsonValueFirstSentinel","name":"client_secret"}, {"name":"LOG_LEVEL", "value": 1.50},{"name":"api_token","value":{"id":7,"key":"JsonNamedObjectSentinel"}}]'`,
+            `      NESTED_LIST: '{"cfg":"[\\"DB_PASSWORD=JsonNestedKvSentinel\\"]"}'`,
           ].join('\n'),
         ),
         '',
@@ -721,31 +1614,98 @@ describe('the bundle', () => {
     expect(artifact).not.toContain('Raw@AtValueSentinel');
     expect(artifact).not.toContain('ListRaw@AtValueSentinel');
     expect(artifact).not.toContain('ListMongoUrlSentinel');
+    expect(artifact).not.toContain('BearerOnlySentinel');
+    expect(artifact).not.toContain('GitTokenSentinel');
+    expect(artifact).not.toContain('EmptyPasswordSentinel');
+    expect(artifact).not.toContain('ListBearerSentinel');
+    expect(artifact).not.toContain('SecretSentinel');
+    expect(artifact).not.toContain('TokenSentinel');
+    expect(artifact).not.toContain('JsonPasswordSentinel');
+    expect(artifact).not.toContain('JsonListSentinel');
+    expect(artifact).not.toContain('1234567');
+    expect(artifact).not.toContain('JsonPairSentinel');
+    expect(artifact).not.toContain('JsonNestedSentinel');
+    expect(artifact).not.toContain('JwtListSentinel');
+    expect(artifact).not.toContain('JsonPairNamedSentinel');
+    expect(artifact).not.toContain('JsonKvSentinel');
+    expect(artifact).not.toContain('JsonNameValueSentinel');
+    expect(artifact).not.toContain('JsonValueFirstSentinel');
+    expect(artifact).not.toContain('JsonNamedObjectSentinel');
+    expect(artifact).not.toContain('JsonNestedKvSentinel');
     const rendered = YAML.parse(artifact) as {
       services: { rocketchat: { environment: Record<string, string> } };
       'x-reference': Record<string, string>;
       'list-environment': string[];
     };
+    expect(rendered.services.rocketchat.environment.OIDC_CONFIG).toBe(
+      '{"url":"https://idp.example","admin":"ops@example.com"}',
+    );
+    expect(rendered.services.rocketchat.environment.OIDC_LIST).toBe(
+      '["https://a.example","ops@example.com"]',
+    );
     expect(rendered.services.rocketchat.environment.MONGO_URL).toBe(
-      'mongodb://rocket:********@mongodb:27017/rocketchat?replicaSet=rs0',
+      'mongodb://********@mongodb:27017/rocketchat?replicaSet=rs0',
     );
     expect(rendered.services.rocketchat.environment.SERVICE_URL).toBe(
-      'postgresql://reader:********@db:5432/rocketchat',
+      'postgresql://********@db:5432/rocketchat',
     );
     expect(rendered.services.rocketchat.environment.EMPTY_USER_URL).toBe(
-      'https://:********@example.test/?q=a=b',
+      'https://********@example.test/?q=a=b',
     );
     expect(rendered.services.rocketchat.environment.RAW_AT_URL).toBe(
-      'https://reader:********@example.test/?q=a=b',
+      'https://********@example.test/?q=a=b',
+    );
+    expect(rendered.services.rocketchat.environment.BEARER_URL).toBe(
+      'https://********@example.test/x',
+    );
+    expect(rendered.services.rocketchat.environment.BLANK_SECOND_URL).toBe(
+      'https://********@example.test',
+    );
+    expect(rendered.services.rocketchat.environment.PUNCT_URL).toBe('mongodb://********@mongo/rc');
+    expect(rendered.services.rocketchat.environment.BRACE_USER_URL).toBe(
+      'https://********@example.test/x',
+    );
+    expect(rendered.services.rocketchat.environment.QUOTE_URL).toBe(
+      'https://********@example.test',
+    );
+    expect(rendered.services.rocketchat.environment.OIDC_IDP_CONFIG).toBe(
+      '{"url":"https://********@idp","admin":"ops@example.com"}',
+    );
+    // A credential member of a JSON value is masked as the same key in YAML would be, every
+    // scalar below it included; the other members keep their bytes.
+    expect(rendered.services.rocketchat.environment.INITIAL_USER).toBe(
+      '{"_id":"u1","username":"ops","email":"ops@x.example","password":"********"}',
+    );
+    expect(rendered.services.rocketchat.environment.OAUTH_CFG).toBe(
+      '{"client_secret":"********", "nested":{"apiKey":"********","token":["********",{"a":"********"}],' +
+        '"keycloakUrl":"https://kc.example"},"hosts":[1.0,"ops@x.example"]}',
+    );
+    // A JSON `KEY=VALUE` string, and the `value` beside a credential `name` in either order,
+    // are masked as the same YAML list entry and mapping are; a benign one keeps its bytes.
+    expect(rendered.services.rocketchat.environment.EXTRA_ENV).toBe(
+      '["PORT=3000","DB_PASSWORD=********"]',
+    );
+    expect(rendered.services.rocketchat.environment.EXTRA_LIST).toBe(
+      '[{"name":"DB_PASSWORD","value":"********"},{"value":"********","name":"client_secret"}, ' +
+        '{"name":"LOG_LEVEL", "value": 1.50},{"name":"api_token","value":{"id":"********","key":"********"}}]',
+    );
+    expect(rendered.services.rocketchat.environment.NESTED_LIST).toBe(
+      '{"cfg":"[\\"DB_PASSWORD=********\\"]"}',
     );
     expect(Object.keys(rendered['x-reference']).sort()).toEqual([
-      'https://:********@example.test?mode=read',
-      'https://reader:********@example.test?mode=read',
+      'https://********@example.test?mode=read',
     ]);
     expect(rendered['list-environment']).toEqual([
-      'APP_URL=https://reader:********@example.test/?q=a=b',
+      'APP_URL=https://********@example.test/?q=a=b',
       'PORT=3000',
-      'MONGO_URL=https://reader:********@example.test/?q=a=b',
+      'MONGO_URL=https://********@example.test/?q=a=b',
+      'HOOK_URL=https://********@example.test/hook',
+      'PUNCT_LIST=https://********@example.test/x',
+      'OIDC_PAIR={"url":"https://idp.example","admin":"ops@example.com"}',
+      'INITIAL_USER_PAIR={"password":"********","username":"ops"}',
+      'NESTED_CFG={"inner":"{\\"secret\\":\\"********\\"}"}',
+      'JWTKey=********',
+      'EXTRA_PAIR=[{"name":"SMTP_PASSWORD","value":"********"},"ADMIN_EMAIL=ops@x.example"]',
     ]);
   });
 
@@ -805,6 +1765,25 @@ describe('the bundle', () => {
         '    value: KubeAdminSecret',
         '  - name: MONGO_URL',
         '    value: mongodb://rocket:KubeMongoUrlSecret@mongodb:27017/rocketchat?replicaSet=rs0',
+        '  - name: privateKey',
+        '    value: KubeNamedPrivateKeySentinel',
+        'tls:',
+        '  privateKey: KubeCamelPrivateKeySentinel',
+        '  private-key: KubeDashedPrivateKeySentinel',
+        '  keycloakUrl: https://kc.example',
+        '  monkeyPatch: enabled',
+        '  SSHKey: KubeSshKeySentinel',
+        '  TLSKey: KubeTlsKeySentinel',
+        '  JWTKey: KubeJwtKeySentinel',
+        '  HMACKey: KubeHmacKeySentinel',
+        '  privatekey: KubeLowerPrivateKeySentinel',
+        '  sshkey: KubeLowerSshKeySentinel',
+        '  APIKeyId: KubeApiKeyIdSentinel',
+        '  KEYCLOAKUrl: https://kc.example',
+        '  MONKEYPatch: enabled',
+        'listEnvironment:',
+        '  - privateKey=KubeListPrivateKeySentinel',
+        '  - keycloakUrl=https://kc.example',
         'x-reference:',
         '  "https://reader:KubeKeySentinel@example.test?mode=read": diagnostic',
         'scriptedCommand:',
@@ -829,18 +1808,44 @@ describe('the bundle', () => {
     expect(artifact).not.toContain('KubeAdminSecret');
     expect(artifact).not.toContain('KubeMongoUrlSecret');
     expect(artifact).not.toContain('KubeKeySentinel');
+    expect(artifact).not.toContain('PrivateKeySentinel');
+    expect(artifact).not.toContain('KeySentinel');
+    expect(artifact).not.toContain('KeyIdSentinel');
     expect(artifact).not.toContain('S3cretPass');
     const rendered = YAML.parse(artifact) as {
       scriptedCommand: string[];
       supportNote: string;
       extraSecret: { stringData: Record<string, string> };
       'x-reference': Record<string, string>;
+      tls: Record<string, string>;
+      listEnvironment: string[];
     };
+    // A key names a credential however it is cased or separated; a key that only contains
+    // the letters `key` does not.
+    expect(rendered.tls).toEqual({
+      privateKey: '********',
+      'private-key': '********',
+      keycloakUrl: 'https://kc.example',
+      monkeyPatch: 'enabled',
+      SSHKey: '********',
+      TLSKey: '********',
+      JWTKey: '********',
+      HMACKey: '********',
+      privatekey: '********',
+      sshkey: '********',
+      APIKeyId: '********',
+      KEYCLOAKUrl: 'https://kc.example',
+      MONKEYPatch: 'enabled',
+    });
+    expect(rendered.listEnvironment).toEqual([
+      'privateKey=********',
+      'keycloakUrl=https://kc.example',
+    ]);
     expect(rendered.scriptedCommand).toEqual(['/bin/sh', '-c', 'echo ********']);
     expect(rendered.supportNote).toBe('********');
     expect(rendered.extraSecret.stringData.ordinary).toBe('********');
     expect(Object.keys(rendered['x-reference'])).toEqual([
-      'https://reader:********@example.test?mode=read',
+      'https://********@example.test?mode=read',
     ]);
   });
 
@@ -907,6 +1912,12 @@ describe('the bundle', () => {
       fs.readFileSync(path.join(dest, 'manifest.json'), 'utf8'),
     ) as Record<string, unknown>;
 
+    const readme = fs.readFileSync(path.join(dest, 'README.md'), 'utf8');
+    expect(readme).toContain(
+      'This bundle records workspace metadata and any available configuration.',
+    );
+    expect(readme).toContain('Runtime deployment was not verified.');
+    expect(readme).not.toContain('proves what was deployed');
     expect(manifest.artifact).toMatchObject(payload.artifact as Record<string, unknown>);
     expect(payload.bundle).toEqual({
       path: dest,

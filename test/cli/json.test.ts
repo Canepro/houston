@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import type * as DoctorNS from '../../src/core/doctor';
 import type * as CreateDockerNS from '../../src/core/lifecycle/create-docker';
 import type * as EksNS from '../../src/core/eks';
+import type * as ConfigNS from '../../src/lib/config';
 import type { Emit } from '../../src/lib/events';
 import type * as EventsNS from '../../src/lib/events';
 import type * as ErrorsNS from '../../src/lib/errors';
@@ -94,7 +95,7 @@ async function run(argv: string[]): Promise<Ran> {
 
 const errorOf = (ran: Ran) => (ran.envelope.error ?? {}) as Record<string, unknown>;
 
-function writeWorkspace(name: string, compose = true): void {
+function writeWorkspace(name: string, compose = true, bindHost = ''): void {
   const record = require('../../src/core/runner/record') as typeof RecordNS;
   const dir = path.join(home, 'repros', name);
   fs.mkdirSync(dir, { recursive: true });
@@ -109,6 +110,7 @@ function writeWorkspace(name: string, compose = true): void {
           rootUrl: 'http://localhost:3001',
           hostPort: 3001,
           versionSource: 'x',
+          ...(bindHost === '' ? {} : { extra: { bind_host: bindHost } }),
         }),
       ),
     ),
@@ -138,6 +140,149 @@ describe('a command that fails', () => {
     const ran = await run(['info', '--name', 'nope', '--json']);
     expect(errorOf(ran).code).toBe('NOT_FOUND');
     expect(ran.code).toBe(4);
+  });
+
+  it.each([null, []])(
+    'recovers legacy SSH access when the persisted extra bag is %j',
+    async (extra) => {
+      writeWorkspace('ssh-extra');
+      const file = path.join(home, 'repros', 'ssh-extra', 'repro.json');
+      const doc = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+      fs.writeFileSync(file, JSON.stringify({ ...doc, extra }));
+      fs.writeFileSync(
+        path.join(home, 'repros', 'ssh-extra', 'docker-compose.yml'),
+        'services:\n  rocketchat:\n    ports: ["127.0.0.1:3001:3000"]\n',
+      );
+      const keys = [
+        'SSH_CONNECTION',
+        'SSH_CLIENT',
+        'SSH_TTY',
+        'HOUSTON_SSH_LOCAL_PORT',
+        'HOUSTON_SSH_PORT',
+      ] as const;
+      const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+      try {
+        for (const key of keys) delete process.env[key];
+        process.env.SSH_TTY = '/dev/ttys001';
+        const ran = await run(['info', '--name', 'ssh-extra', '--json']);
+        expect([ran.code, ran.envelope.ok]).toEqual([0, true]);
+        expect((ran.envelope.data as Record<string, unknown>).access).toMatchObject({
+          mode: 'remote_ssh',
+          browser_url: 'http://127.0.0.1:3001',
+          side_ports: [],
+          tunnel_command: expect.stringContaining('-L 127.0.0.1:3001:127.0.0.1:3001 --'),
+        });
+      } finally {
+        for (const key of keys) {
+          if (saved[key] === undefined) delete process.env[key];
+          else process.env[key] = saved[key];
+        }
+      }
+    },
+  );
+
+  it('includes copy-safe SSH handoff guidance in the real info JSON payload', async () => {
+    writeWorkspace('ssh-access', true, '127.0.0.1');
+    const saved = {
+      connection: process.env.SSH_CONNECTION,
+      user: process.env.USER,
+      host: process.env.HOUSTON_SSH_HOST,
+      sshUser: process.env.HOUSTON_SSH_USER,
+      localPort: process.env.HOUSTON_SSH_LOCAL_PORT,
+    };
+    try {
+      process.env.SSH_CONNECTION = '198.51.100.20 55100 203.0.113.8 22';
+      process.env.USER = 'operator';
+      delete process.env.HOUSTON_SSH_HOST;
+      delete process.env.HOUSTON_SSH_USER;
+      delete process.env.HOUSTON_SSH_LOCAL_PORT;
+      const ran = await run(['info', '--name', 'ssh-access', '--json']);
+      expect(ran.code).toBe(0);
+      expect((ran.envelope.data as Record<string, unknown>).access).toEqual({
+        mode: 'remote_ssh',
+        bind: 'loopback',
+        host_port: 3001,
+        local_port: 3001,
+        side_ports: [],
+        browser_url: 'http://127.0.0.1:3001',
+        public_url: null,
+        tunnel_command:
+          'ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:3001:127.0.0.1:3001 -- operator@203.0.113.8',
+        note:
+          'The workspace listens on loopback on the remote host only. Run the tunnel command on your ' +
+          'machine, then open the browser URL there. Credentials stay private to that tunnel. If the ' +
+          'local port is occupied, set HOUSTON_SSH_LOCAL_PORT on the remote command and request the ' +
+          'handoff again. ' +
+          "Rocket.Chat's ROOT_URL is http://localhost:3001: absolute links (invitations, password resets, " +
+          "OAuth callbacks) use that origin rather than the tunnel's http://127.0.0.1:3001.",
+      });
+    } finally {
+      if (saved.connection === undefined) delete process.env.SSH_CONNECTION;
+      else process.env.SSH_CONNECTION = saved.connection;
+      if (saved.user === undefined) delete process.env.USER;
+      else process.env.USER = saved.user;
+      if (saved.host === undefined) delete process.env.HOUSTON_SSH_HOST;
+      else process.env.HOUSTON_SSH_HOST = saved.host;
+      if (saved.sshUser === undefined) delete process.env.HOUSTON_SSH_USER;
+      else process.env.HOUSTON_SSH_USER = saved.sshUser;
+      if (saved.localPort === undefined) delete process.env.HOUSTON_SSH_LOCAL_PORT;
+      else process.env.HOUSTON_SSH_LOCAL_PORT = saved.localPort;
+    }
+  });
+
+  it('recovers a legacy IPv6 Compose bind for the real info JSON payload', async () => {
+    writeWorkspace('ssh-access-ipv6');
+    fs.writeFileSync(
+      path.join(home, 'repros', 'ssh-access-ipv6', 'docker-compose.yml'),
+      'services:\n  rocketchat:\n    ports: ["[::1]:3001:3000"]\n',
+    );
+    const saved = {
+      connection: process.env.SSH_CONNECTION,
+      user: process.env.USER,
+      host: process.env.HOUSTON_SSH_HOST,
+      sshUser: process.env.HOUSTON_SSH_USER,
+      localPort: process.env.HOUSTON_SSH_LOCAL_PORT,
+    };
+    try {
+      process.env.SSH_CONNECTION = '198.51.100.20 55100 203.0.113.8 22';
+      process.env.USER = 'operator';
+      delete process.env.HOUSTON_SSH_HOST;
+      delete process.env.HOUSTON_SSH_USER;
+      delete process.env.HOUSTON_SSH_LOCAL_PORT;
+      const ran = await run(['info', '--name', 'ssh-access-ipv6', '--json']);
+      expect(ran.code).toBe(0);
+      expect((ran.envelope.data as Record<string, unknown>).access).toEqual({
+        mode: 'remote_ssh',
+        bind: 'loopback',
+        host_port: 3001,
+        local_port: 3001,
+        side_ports: [],
+        browser_url: 'http://127.0.0.1:3001',
+        public_url: null,
+        tunnel_command:
+          "ssh -N -o ExitOnForwardFailure=yes -L '127.0.0.1:3001:[::1]:3001' -- operator@203.0.113.8",
+        note:
+          'The workspace listens on loopback on the remote host only. Run the tunnel command on your ' +
+          'machine, then open the browser URL there. Credentials stay private to that tunnel. If the ' +
+          'local port is occupied, set HOUSTON_SSH_LOCAL_PORT on the remote command and request the ' +
+          'handoff again. ' +
+          "Rocket.Chat's ROOT_URL is http://localhost:3001: absolute links (invitations, password resets, " +
+          "OAuth callbacks) use that origin rather than the tunnel's http://127.0.0.1:3001." +
+          ' The tunnel listens on client 127.0.0.1 only. Absolute links, redirects, callbacks, and ' +
+          'printed side-service URLs using ::1 cannot use this handoff.',
+      });
+    } finally {
+      if (saved.connection === undefined) delete process.env.SSH_CONNECTION;
+      else process.env.SSH_CONNECTION = saved.connection;
+      if (saved.user === undefined) delete process.env.USER;
+      else process.env.USER = saved.user;
+      if (saved.host === undefined) delete process.env.HOUSTON_SSH_HOST;
+      else process.env.HOUSTON_SSH_HOST = saved.host;
+      if (saved.sshUser === undefined) delete process.env.HOUSTON_SSH_USER;
+      else process.env.HOUSTON_SSH_USER = saved.sshUser;
+      if (saved.localPort === undefined) delete process.env.HOUSTON_SSH_LOCAL_PORT;
+      else process.env.HOUSTON_SSH_LOCAL_PORT = saved.localPort;
+    }
   });
 
   it('keeps stdout a document and moves the human line to stderr', async () => {
@@ -388,6 +533,106 @@ describe('the capabilities document', () => {
   });
 });
 
+describe('onboard --json', () => {
+  it('persists an explicit answer and exposes the same state through capabilities', async () => {
+    const untouched = await run(['onboard', '--json']);
+    expect(untouched.code).toBe(0);
+    expect(untouched.envelope.schema).toBe('houston.onboard.v1');
+    expect(untouched.envelope.data).toMatchObject({
+      action: 'status',
+      completed: false,
+      rc_repro_version: '',
+      grants: { owned_cluster: false },
+      answered_grants: { owned_cluster: false },
+      clusters: [],
+    });
+
+    const completed = await run(['onboard', 'complete', '--json']);
+    expect(completed.code).toBe(0);
+    expect(completed.envelope.data).toMatchObject({
+      action: 'complete',
+      completed: true,
+      rc_repro_version: expect.any(String),
+      grants: { owned_cluster: false },
+      answered_grants: { owned_cluster: false },
+      clusters: [],
+    });
+
+    const granted = await run(['onboard', 'grant', 'owned-cluster', '--json']);
+    expect(granted.code).toBe(0);
+    expect(granted.envelope.data).toMatchObject({
+      action: 'grant',
+      rc_repro_version: expect.any(String),
+      grants: { owned_cluster: true },
+      answered_grants: { owned_cluster: true },
+      clusters: ['houston-local'],
+    });
+
+    const caps = await run(['capabilities']);
+    expect(caps.code).toBe(0);
+    expect((caps.envelope.data as Record<string, unknown>).onboarding).toMatchObject({
+      completed: true,
+      rc_repro_version: expect.any(String),
+      grants: { owned_cluster: true },
+      answered_grants: { owned_cluster: true },
+      clusters: ['houston-local'],
+      grants_available: expect.arrayContaining([
+        expect.objectContaining({ id: 'owned-cluster', held: true }),
+      ]),
+    });
+
+    const revoked = await run(['onboard', 'revoke', 'owned-cluster', '--json']);
+    expect(revoked.code).toBe(0);
+    expect(revoked.envelope.data).toMatchObject({
+      action: 'revoke',
+      completed: true,
+      rc_repro_version: expect.any(String),
+      grants: { owned_cluster: false },
+      answered_grants: { owned_cluster: true },
+      clusters: [],
+    });
+  });
+
+  it.each(['status', 'complete'])(
+    'rejects an ignored ID for %s without writing config',
+    async (action) => {
+      const configPath = path.join(home, 'config.yaml');
+      const original = 'preferences:\n  retain_runs: false\n';
+      fs.writeFileSync(configPath, original);
+      for (const id of ['owned-cluster', 'unknown-grant']) {
+        const result = await run(['onboard', action, id, '--json']);
+        expect(result.code).toBe(2);
+        expect(fs.readFileSync(configPath, 'utf8')).toBe(original);
+      }
+    },
+  );
+
+  it('updates only its named grant in an existing config mapping', async () => {
+    fs.writeFileSync(
+      path.join(home, 'config.yaml'),
+      'grants:\n  future_decision: true\n  owned_cluster: false\nonboarding:\n  external_marker: keep\npreferences:\n  retain_runs: false\n',
+    );
+
+    const granted = await run(['onboard', 'grant', 'owned-cluster', '--json']);
+    expect(granted.code).toBe(0);
+    expect(granted.envelope.data).toMatchObject({
+      grants: { owned_cluster: true },
+      answered_grants: { owned_cluster: true },
+    });
+
+    const config = require('../../src/lib/config') as typeof ConfigNS;
+    expect(config.loadConfig(false)).toMatchObject({
+      grants: { future_decision: true, owned_cluster: true, clusters: ['houston-local'] },
+      onboarding: {
+        external_marker: 'keep',
+        completed_at: expect.any(String),
+        rc_repro_version: expect.any(String),
+      },
+      preferences: { retain_runs: false },
+    });
+  });
+});
+
 describe('cluster guide --path --json', () => {
   it('narrows the data and keeps stdout one envelope', async () => {
     const ran = await run(['cluster', 'guide', '--path', '--json']);
@@ -574,6 +819,45 @@ describe('up --json', () => {
   afterEach(() => {
     jest.dontMock('../../src/core/lifecycle/create-docker');
   });
+
+  it.each(['HOUSTON_SSH_LOCAL_PORT', 'HOUSTON_SSH_PORT'])(
+    'ignores unused %s overrides for JSON creation while human creation refuses them',
+    async (key) => {
+      const saved = { tty: process.env.SSH_TTY, override: process.env[key] };
+      const create = jest.fn(async () => ({ name: 'alpha', status: 'created' }));
+      jest.doMock('../../src/core/lifecycle/create-docker', () => ({
+        ...jest.requireActual<typeof CreateDockerNS>('../../src/core/lifecycle/create-docker'),
+        createRepro: create,
+      }));
+      try {
+        process.env.SSH_TTY = '/dev/ttys001';
+        process.env[key] = 'not-a-port';
+        const argv = [
+          'up',
+          '--version',
+          '8.5.1',
+          '--offline',
+          '--name',
+          'alpha',
+          '--bind',
+          '127.0.0.1',
+        ];
+        const human = await run(argv);
+        expect(human.code).toBe(2);
+        expect(human.stderr).toContain(key);
+        expect(create).not.toHaveBeenCalled();
+        const json = await run([...argv, '--json']);
+        expect(json.code).toBe(0);
+        expect(json.envelope.data).toEqual({ name: 'alpha', status: 'created' });
+        expect(create).toHaveBeenCalledTimes(1);
+      } finally {
+        if (saved.tty === undefined) delete process.env.SSH_TTY;
+        else process.env.SSH_TTY = saved.tty;
+        if (saved.override === undefined) delete process.env[key];
+        else process.env[key] = saved.override;
+      }
+    },
+  );
 
   it('leaves compose on the terminal: none of its lines becomes an NDJSON boot event', async () => {
     // Earlier releases do not stream compose's output under --json either, so compose draws

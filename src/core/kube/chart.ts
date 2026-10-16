@@ -205,10 +205,9 @@ export interface ChartEnvEntry {
 }
 
 /**
- * Env the chart's Rocket.Chat Deployment writes ITSELF, always or under a value houston sets
- * or leaves at its default. Measured from chart 7.0.2's `chat-deployment.yaml`, the only
- * template that renders `extraEnv`. One of these in `extraEnv` is a duplicate key, which
- * server-side apply refuses -- after MongoDB is already up, rolling the whole create back.
+ * Variables `--env` and `--setting` must not add to the chart's `extraEnv`. Most are emitted
+ * by the chart itself; `ROCKETCHAT_LICENSE` is reserved for the existing `--license` Secret
+ * lifecycle, which reaches the container through `extraEnv`.
  */
 export const CHART_OWNED_ENV: Readonly<Record<string, string>> = Object.freeze({
   ROOT_URL: 'use --root-url, or --domain for a public name',
@@ -217,7 +216,7 @@ export const CHART_OWNED_ENV: Readonly<Record<string, string>> = Object.freeze({
   MAIL_URL: 'the chart owns it',
   INSTANCE_IP: 'the chart sets it to the pod IP',
   DEPLOY_PLATFORM: 'the chart owns it',
-  ROCKETCHAT_LICENSE: 'the chart owns it',
+  ROCKETCHAT_LICENSE: 'use --license',
   LICENSE_DEBUG: 'the chart owns it',
   OVERWRITE_SETTING_Prometheus_Enabled: 'the chart sets it (prometheusScraping)',
   OVERWRITE_SETTING_Prometheus_Port: 'the chart sets it (prometheusScraping)',
@@ -230,18 +229,44 @@ export const CHART_OWNED_ENV: Readonly<Record<string, string>> = Object.freeze({
   RETRY_ENABLED: 'the chart owns it',
 });
 
-/** Refuse an override the chart would duplicate, before anything is created. */
+/** Refuse an override that would duplicate chart output or bypass a dedicated contract. */
 export function refuseChartOwnedEnv(overrides: Record<string, string | null>): void {
   for (const key of Object.keys(overrides)) {
     const reason =
       CHART_OWNED_ENV[key] ?? (key.startsWith('DEPLOY_') ? 'the chart owns it' : undefined);
     if (reason === undefined) continue;
+    if (key === 'ROCKETCHAT_LICENSE') {
+      throw new ValidationError(
+        'ROCKETCHAT_LICENSE cannot be set with --env or --setting on Kubernetes: use --license. ' +
+          "It is reserved for Houston's existing licence Secret reference.",
+      );
+    }
     throw new ValidationError(
       `${key} cannot be set with --env or --setting on Kubernetes: ${reason}. A second ` +
         'entry for a variable the chart writes is a server-side-apply conflict, not an ' +
         'override.',
     );
   }
+}
+
+/** Resolve credential payloads in memory, before any Helm or workspace values are built. */
+export function credentialInputs(
+  presetEnv: Record<string, unknown> | undefined,
+  regToken = '',
+  license = '',
+  retainedLicense = false,
+  overrides: Record<string, string | null> = {},
+): { regToken: string; license: string; licensed: boolean } {
+  const effective = (key: string): string => {
+    const value = Object.hasOwn(overrides, key) ? overrides[key] : presetEnv?.[key];
+    return value === null || value === undefined ? '' : toTextYaml(value, config.yamlDateText);
+  };
+  // Dedicated inputs and a retained licence Secret win over preset/override literals.
+  const token = regToken.trim() || effective('REG_TOKEN').trim();
+  const suppliedLicense = license.trim();
+  const presetLicense = effective('ROCKETCHAT_LICENSE').trim();
+  const payload = suppliedLicense || (retainedLicense ? '' : presetLicense);
+  return { regToken: token, license: payload, licensed: retainedLicense || payload !== '' };
 }
 
 /**
@@ -296,22 +321,27 @@ export function chartEnv(
     if (value === null) byName.delete(key);
     else byName.set(key, { name: key, value: String(value) });
   }
-  env.splice(0, env.length, ...byName.values());
+  // Credential literals belong only in Secret manifests sent on stdin. Direct values
+  // callers without a prepared Secret fail closed instead of persisting those literals.
+  byName.delete('REG_TOKEN');
+  byName.delete('ROCKETCHAT_LICENSE');
   if (regTokenSecret !== '') {
     // By REFERENCE, so the token is never a value in this document. The chart renders
     // extraEnv verbatim, so valueFrom survives -- verified against the published chart.
-    env.push({
+    byName.set('REG_TOKEN', {
       name: 'REG_TOKEN',
       valueFrom: { secretKeyRef: { name: regTokenSecret, key: REG_TOKEN_KEY } },
     });
   }
   if (licensed) {
-    env.push({
+    // Replace a preset literal in the same map before serializing `extraEnv`: a second entry
+    // is an apply conflict, while the dedicated Secret remains the final effective source.
+    byName.set('ROCKETCHAT_LICENSE', {
       name: 'ROCKETCHAT_LICENSE',
       valueFrom: { secretKeyRef: { name: LICENSE_SECRET, key: LICENSE_KEY } },
     });
   }
-  return env;
+  return [...byName.values()];
 }
 
 /** Refuse the two URL shapes the chart cannot render safely. */

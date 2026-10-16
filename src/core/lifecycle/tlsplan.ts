@@ -48,7 +48,7 @@ import { running as edgeRunning, portHolder } from '../edge/engine';
 import { ensureRunning } from '../edge/runtime';
 import { type IssuerSpec, ensureCertManager } from '../kube/certmanager';
 import { ensureIngress } from '../kube/ingress';
-import { ensureKubeconfig } from '../kube/cluster';
+import { ensureKubeconfig, type ClusterReceipt } from '../kube/cluster';
 import { type ClusterPlan, isLocalCluster } from '../kube/context';
 import { preflight } from '../kube/probe';
 import { type Preflight } from '../kube/tools';
@@ -673,8 +673,16 @@ export async function probeTheCluster(
   emit: Emit,
   plan: ClusterPlan,
   spec: { mode: string },
+  receipt?: ClusterReceipt,
 ): Promise<[string, Preflight]> {
-  const context = plan.create ? await ensureKubeconfig(plan, emit) : plan.context;
+  const current: ClusterReceipt = { createdHere: false };
+  let context = plan.context;
+  try {
+    if (plan.create) context = await ensureKubeconfig(plan, emit, current);
+  } finally {
+    // A later reuse probe must not erase this create job's earlier successful receipt.
+    if (receipt !== undefined) receipt.createdHere ||= current.createdHere;
+  }
   const pre = await preflight(context);
   // WHERE THE CA KEY WOULD GO. `tls-local.ts`: this key "can mint a certificate for any name
   // the browser will trust". On this machine's own cluster that is the same trust boundary
@@ -708,7 +716,7 @@ export async function kubernetesTlsPlan(
   req: CreateReq,
   tlsspec: TlsSpec,
   plan: ClusterPlan,
-  { emit = nullEmit }: { emit?: Emit } = {},
+  { emit = nullEmit, receipt }: { emit?: Emit; receipt?: ClusterReceipt } = {},
 ): Promise<KubeTls> {
   // Both modes are honoured now, and they are the same code path with a different
   // ClusterIssuer -- which is what the official values.yaml already implies.
@@ -720,7 +728,7 @@ export async function kubernetesTlsPlan(
   // Which request every refusal below is about. Defined here, beside the spec it is
   // derived from, because the first refusal comes before the cluster is even probed.
   const asked = spec.mode === 'acme' ? '--domain' : '--https';
-  const [context, pre] = await probeTheCluster(emit, plan, spec);
+  const [context, pre] = await probeTheCluster(emit, plan, spec, receipt);
   const [claim, endpoint, ingressClass] = await installTheIngressMachinery(
     asked,
     context,

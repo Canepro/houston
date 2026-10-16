@@ -15,6 +15,8 @@ import type * as PruningNS from '../../../src/core/lifecycle/pruning';
 import type * as SizingNS from '../../../src/core/lifecycle/sizing';
 import type * as TlsPlanNS from '../../../src/core/lifecycle/tlsplan';
 
+import { updateConfig } from '../../../src/lib/config';
+import { grant } from '../../../src/lib/onboarding';
 import { nullEmit, type Event } from '../../../src/lib/events';
 import { createReq } from '../../../src/core/lifecycle/types';
 
@@ -64,6 +66,7 @@ describe('a bind that reaches past loopback', () => {
 
 describe('a prune', () => {
   it('waits for the namespaces it swept before reclaiming the cluster', async () => {
+    updateConfig((stored) => grant(stored, 'owned-cluster'));
     const order: string[] = [];
     jest.resetModules();
     jest.doMock('../../../src/core/kube/namespace', () => ({

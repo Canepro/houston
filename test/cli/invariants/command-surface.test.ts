@@ -44,9 +44,9 @@ function program(): Command {
 }
 
 describe('the command table against the built parser', () => {
-  it('registers exactly the forty-three commands the table declares', () => {
+  it('registers exactly the forty-five commands the table declares', () => {
     const declared = COMMAND_SPECS.map((spec) => spec.path).sort();
-    expect(declared).toHaveLength(43);
+    expect(declared).toHaveLength(45);
     expect(new Set(declared).size).toBe(declared.length);
     // THE BUILT PROGRAM, not a second list. A stray registration -- a command registered
     // in a module nobody listed -- appears here and nowhere else.
@@ -76,7 +76,7 @@ describe('the command table against the built parser', () => {
       COMMAND_SPECS.filter((spec) => spec.json.mode !== 'none').map((spec) => spec.path),
     );
     expect([...advertised].sort()).toEqual([...real].sort());
-    expect(advertised.size).toBe(14);
+    expect(advertised.size).toBe(16);
     // `capabilities` answers in an envelope and always has -- it has no `--json` because
     // it has no other mode -- so deriving purely from the flag made the one document
     // whose purpose is saying which commands speak JSON report that this one does not.
@@ -87,11 +87,11 @@ describe('the command table against the built parser', () => {
 
   it('publishes a flag list that comes from the same declaration the parser reads', () => {
     const described = describeCommands();
-    expect(described).toHaveLength(43);
+    expect(described).toHaveLength(45);
     const flags = described.reduce((total, command) => total + command.flags.length, 0);
     // The number the frozen `capabilities` baseline carries. A flag that exists in the
     // parser and not in the document is a caller hardcoding a list it was told not to.
-    expect(flags).toBe(191);
+    expect(flags).toBe(194);
     for (const command of described) {
       expect([...command.flags].sort()).toEqual(command.flags);
       expect(new Set(command.flags).size).toBe(command.flags.length);

@@ -4,6 +4,7 @@ import { DEPLOYMENTS, DOCKER, REGISTERED } from '../core/topology';
 import { DEFAULT_BIND_HOST } from '../lib/config';
 import { errorCodes, EXIT_CODES } from '../lib/errors';
 import { CONTRACT, getHoustonVersion, PHASES } from '../lib/jsonout';
+import { state as onboardingState } from '../lib/onboarding';
 import { listPresets } from '../lib/presets';
 import { compareCodePoints } from '../lib/format';
 import { PROFILES } from '../lib/seed-profiles';
@@ -61,6 +62,16 @@ export function capabilities(): Record<string, unknown> {
   } catch {
     // Optional host state must not hide the command contract.
   }
+  // Whether a person has onboarded this machine and which grants they handed over. A
+  // caller reads this instead of config.yaml, which keeps the file an implementation
+  // detail rather than a second contract. A config that cannot be read answers as a
+  // fresh machine: discovery must not fail on it.
+  let onboarding: Record<string, unknown>;
+  try {
+    onboarding = onboardingState() as unknown as Record<string, unknown>;
+  } catch {
+    onboarding = onboardingState({}) as unknown as Record<string, unknown>;
+  }
   return {
     contract_versions: [CONTRACT],
     houston_version: getHoustonVersion(),
@@ -82,5 +93,6 @@ export function capabilities(): Record<string, unknown> {
     default_runtime: DOCKER,
     default_bind_host: DEFAULT_BIND_HOST,
     skill,
+    onboarding,
   };
 }

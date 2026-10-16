@@ -18,6 +18,8 @@ import {
   NotFoundError,
 } from '../../../src/lib/errors';
 import type { Event } from '../../../src/lib/events';
+import { updateConfig } from '../../../src/lib/config';
+import { grant } from '../../../src/lib/onboarding';
 import { installTeamModeProbe } from '../../../src/lib/teammode';
 import type { KubectlResult } from '../../../src/seams/kubectl';
 
@@ -877,6 +879,7 @@ describe('the cluster houston owns', () => {
   const realPath = process.env.PATH;
 
   beforeEach(() => {
+    updateConfig((stored) => grant(stored, 'owned-cluster'));
     kindDir = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-kind-'));
     fs.writeFileSync(path.join(kindDir, 'kind'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     process.env.PATH = `${kindDir}${path.delimiter}${realPath ?? ''}`;
@@ -892,6 +895,13 @@ describe('the cluster houston owns', () => {
     // pods and an 8 Gi Bound PVC in it.
     script([
       [has('get', 'clusters'), { stdout: `${CLUSTER_NAME}\n` }],
+      [
+        has('get', 'configmap'),
+        json({
+          metadata: { labels: { [OWNER_LABEL_KEY]: 'houston' } },
+          data: { cluster: CLUSTER_NAME },
+        }),
+      ],
       [has('current-context'), { stdout: `${CONTEXT}\n` }],
       [has('--raw'), { returncode: 1, stderr: 'connection refused' }],
     ]);
@@ -901,6 +911,13 @@ describe('the cluster houston owns', () => {
   it('refuses to delete a cluster whose contents cannot be read', async () => {
     script([
       [has('get', 'clusters'), { stdout: `${CLUSTER_NAME}\n` }],
+      [
+        has('get', 'configmap'),
+        json({
+          metadata: { labels: { [OWNER_LABEL_KEY]: 'houston' } },
+          data: { cluster: CLUSTER_NAME },
+        }),
+      ],
       [has('current-context'), { stdout: `${CONTEXT}\n` }],
       [has('--raw'), { returncode: 1, stderr: 'connection refused' }],
     ]);
@@ -908,6 +925,13 @@ describe('the cluster houston owns', () => {
 
     script([
       [has('get', 'clusters'), { stdout: `${CLUSTER_NAME}\n` }],
+      [
+        has('get', 'configmap'),
+        json({
+          metadata: { labels: { [OWNER_LABEL_KEY]: 'houston' } },
+          data: { cluster: CLUSTER_NAME },
+        }),
+      ],
       [has('current-context'), { stdout: `${CONTEXT}\n` }],
       [has('--raw'), { stdout: 'ok' }],
       [has('namespace'), REFUSED],
@@ -916,6 +940,13 @@ describe('the cluster houston owns', () => {
 
     script([
       [has('get', 'clusters'), { stdout: `${CLUSTER_NAME}\n` }],
+      [
+        has('get', 'configmap'),
+        json({
+          metadata: { labels: { [OWNER_LABEL_KEY]: 'houston' } },
+          data: { cluster: CLUSTER_NAME },
+        }),
+      ],
       [has('current-context'), { stdout: `${CONTEXT}\n` }],
       [has('--raw'), { stdout: 'ok' }],
       [has('namespace'), json({ items: [{ metadata: { name: 'houston-a' } }] })],
@@ -927,6 +958,13 @@ describe('the cluster houston owns', () => {
   function ownCluster({ reachable, held }: { reachable: boolean; held: string[] }): void {
     script([
       [has('get', 'clusters'), { stdout: `${CLUSTER_NAME}\n` }],
+      [
+        has('get', 'configmap'),
+        json({
+          metadata: { labels: { [OWNER_LABEL_KEY]: 'houston' } },
+          data: { cluster: CLUSTER_NAME },
+        }),
+      ],
       [has('current-context'), { stdout: `${CONTEXT}\n` }],
       [
         has('--raw'),

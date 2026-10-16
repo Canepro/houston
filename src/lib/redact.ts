@@ -30,6 +30,37 @@ export const SECRET_KEY_HINTS: readonly string[] = Object.freeze([
 export const REDACTED = '********';
 
 /**
+ * Hints for a key that runs its words together, which only an attachable artifact checks: a
+ * YAML or JSON key such as `privatekey` has no boundary to split, where `SECRET_KEY_HINTS` is
+ * also the list earlier releases mask env and log output by.
+ */
+const JOINED_KEY_HINTS: readonly string[] = ['privatekey', 'sshkey'];
+
+/**
+ * Whether a key names a credential, for an artifact a person attaches. The hints are written in
+ * environment spelling (`_key`, `rocketchat_license`), and an artifact also holds keys spelled
+ * `privateKey`, `private-key` or `SSHKey`, so each word boundary also becomes `_` before
+ * matching, an acronym's end included. The key as written is matched too, so a split cannot
+ * hide a hint it already held. `keycloakUrl` and `monkeyPatch` hold no word `key`.
+ */
+export function credentialKey(key: string): boolean {
+  const words = key
+    .replace(/(\p{Lu})(\p{Lu}\p{Ll})/gu, '$1_$2')
+    .replace(/(\p{Ll}|\p{Nd})(\p{Lu})/gu, '$1_$2')
+    .replace(/[^\p{L}\p{Nd}]/gu, '_')
+    .toLowerCase();
+  const lowered = key.toLowerCase();
+  // Header names are credentials; nearby policy/count fields are not. Match complete
+  // normalized names so authorizationEnabled and authHeaderCount remain readable.
+  return (
+    /^(?:(?:proxy|http)_)?(?:authorization(?:_?headers?)?|auth_?headers?)$/u.test(words) ||
+    [...SECRET_KEY_HINTS, ...JOINED_KEY_HINTS].some(
+      (hint) => lowered.includes(hint) || words.includes(hint),
+    )
+  );
+}
+
+/**
  * The whitespace of `STRIP_CHARS`, as the inside of a character class.
  *
  * NOT JavaScript's `\s`, which the pattern below used to be written with: JavaScript's
@@ -57,6 +88,307 @@ export const URL_USERINFO = new RegExp(
   `([a-zA-Z][a-zA-Z0-9+.-]*://[^/${SPACE_CLASS}:?#]*):([^/${SPACE_CLASS}/?#]+)@`,
   'gu',
 );
+
+/**
+ * The whole user info of a URL authority, user name included: `scheme://<userinfo>@`.
+ * `URL_USERINFO` keeps the user name readable and needs a password, which is what earlier
+ * releases print in logs and argv. An attachable artifact cannot assume the user name is not
+ * itself the credential (`https://TOKEN@host`, `https://TOKEN:x-oauth-basic@host`), so the
+ * evidence bundle masks all of it.
+ *
+ * The user info runs to the last `@` before whitespace or the authority's end, and may hold
+ * any other character. `{`, `|`, `"` and the rest are not valid raw in user info, but a URL
+ * parser accepts them and percent-encodes them, so a working `MONGO_URL` can carry one in its
+ * password. Excluding them left that password in the clear. The cost is that one match can
+ * run across a `"` or `,` into a later `@`; `redactAllUserinfo` keeps that inside one JSON
+ * string.
+ */
+const URL_ANY_USERINFO = new RegExp(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^/${SPACE_CLASS}?#]+@`, 'gu');
+
+/** One JSON string token; the text is already known to be valid JSON. */
+const JSON_STRING = /"(?:[^"\\]|\\.)*"/y;
+const JSON_SPACE = /[ \t\n\r]*/y;
+/** A number, `true`, `false` or `null`: everything else a JSON value can start with. */
+const JSON_LITERAL = /[^,\]}\s]+/y;
+
+function jsonToken(pattern: RegExp, text: string, at: number): string {
+  pattern.lastIndex = at;
+  return pattern.exec(text)?.[0] ?? '';
+}
+
+/** Where each object and array of a valid JSON text ends, by where it opens; one pass. */
+function jsonEnds(text: string): Map<number, number> {
+  const ends = new Map<number, number>();
+  const open: number[] = [];
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    if (char === '"') i += jsonToken(JSON_STRING, text, i).length - 1;
+    else if (char === '{' || char === '[') open.push(i);
+    else if (char === '}' || char === ']') ends.set(open.pop() ?? 0, i + 1);
+  }
+  return ends;
+}
+
+/** The index after the JSON value at `at`. */
+function jsonValueEnd(text: string, at: number, ends: ReadonlyMap<number, number>): number {
+  const open = text[at];
+  if (open === '{' || open === '[') return ends.get(at) ?? text.length;
+  return at + jsonToken(open === '"' ? JSON_STRING : JSON_LITERAL, text, at).length;
+}
+
+/**
+ * Whether the object at `at` has a `name` member naming a credential, in any member position;
+ * the last one counts, as for `JSON.parse`. Its `value` member is then the credential, as the
+ * same object in YAML is (`{name: DB_PASSWORD, value: ...}`).
+ */
+function namesCredential(text: string, at: number, ends: ReadonlyMap<number, number>): boolean {
+  let name = '';
+  let i = at + 1;
+  for (;;) {
+    i += jsonToken(JSON_SPACE, text, i).length;
+    if (text[i] === '}' || i >= text.length) return credentialKey(name);
+    if (text[i] === ',') {
+      i += 1;
+      continue;
+    }
+    const key = jsonToken(JSON_STRING, text, i);
+    i += key.length;
+    i += jsonToken(JSON_SPACE, text, i).length + 1;
+    i += jsonToken(JSON_SPACE, text, i).length;
+    const end = jsonValueEnd(text, i, ends);
+    if ((JSON.parse(key) as string) === 'name') {
+      const value = text.slice(i, end);
+      name = value.startsWith('"') ? (JSON.parse(value) as string) : value;
+    }
+    i = end;
+  }
+}
+
+/** Numeric credentials and URL login names match whole scalars; `7` must not erase `27017`. */
+export type KnownSecret = string | { readonly value: string; readonly whole: true };
+
+/** Replace known values after decoding a scalar, never across JSON syntax. */
+export function redactKnownValues(value: string, secrets: readonly KnownSecret[]): string {
+  if (secrets.some((item) => typeof item !== 'string' && item.value === value)) return REDACTED;
+  return [
+    ...new Set(secrets.filter((item): item is string => typeof item === 'string' && item !== '')),
+  ]
+    .sort((left, right) => right.length - left.length)
+    .reduce((masked, item) => masked.replaceAll(item, REDACTED), value);
+}
+
+/**
+ * Discover credentials before rendering so aliases and earlier copies cannot escape. JSON
+ * tokens are walked in source order, including duplicate members and original scalar spellings.
+ * The caller bounds object traversal; the depth limit also bounds nested JSON strings.
+ */
+export function discoverTextSecrets(
+  text: string,
+  add: (value: string, whole?: boolean) => void,
+  depth = 0,
+): void {
+  if (depth > 100) throw new RangeError('artifact credential nesting exceeds limit');
+  let valid = false;
+  try {
+    JSON.parse(text);
+    valid = true;
+  } catch {
+    // Ordinary text, a URL or an assignment.
+  }
+  if (valid) {
+    const ends = jsonEnds(text);
+    const walk = (at: number, secret: boolean, level: number): number => {
+      if (level > 100) throw new RangeError('artifact credential nesting exceeds limit');
+      const open = text[at];
+      if (open === '"') {
+        const token = jsonToken(JSON_STRING, text, at);
+        const decoded = JSON.parse(token) as string;
+        if (secret) add(decoded);
+        discoverTextSecrets(decoded, add, level + 1);
+        return at + token.length;
+      }
+      if (open !== '{' && open !== '[') {
+        const token = jsonToken(JSON_LITERAL, text, at);
+        if (secret) {
+          add(token, true);
+          add(String(JSON.parse(token)), true);
+        }
+        return at + token.length;
+      }
+      const named = open === '{' && namesCredential(text, at, ends);
+      let i = at + 1;
+      for (;;) {
+        i += jsonToken(JSON_SPACE, text, i).length;
+        if (text[i] === '}' || text[i] === ']') return i + 1;
+        if (text[i] === ',') {
+          i += 1;
+          continue;
+        }
+        let member = secret;
+        if (open === '{') {
+          const token = jsonToken(JSON_STRING, text, i);
+          const key = JSON.parse(token) as string;
+          discoverTextSecrets(key, add, level + 1);
+          member ||= credentialKey(key) || (key === 'value' && named);
+          i += token.length;
+          i += jsonToken(JSON_SPACE, text, i).length + 1;
+          i += jsonToken(JSON_SPACE, text, i).length;
+        }
+        i = walk(i, member, level + 1);
+      }
+    };
+    walk(jsonToken(JSON_SPACE, text, 0).length, false, depth);
+    return;
+  }
+  // Inspect a complete assignment's RHS before URL matching, so a JSON string ends its URL.
+  const equals = text.indexOf('=');
+  if (equals > 0 && !text.slice(0, equals).includes('://')) {
+    const value = text.slice(equals + 1);
+    if (credentialKey(text.slice(0, equals))) add(value);
+    discoverTextSecrets(value, add, depth + 1);
+    return;
+  }
+  const urls = new RegExp(URL_ANY_USERINFO.source, 'gu');
+  for (const match of text.matchAll(urls)) {
+    const info = match[0].slice((match[1] ?? '').length, -1);
+    add(info);
+    const colon = info.indexOf(':');
+    if (colon >= 0) {
+      add(info.slice(0, colon), true);
+      add(info.slice(colon + 1));
+    }
+  }
+}
+
+/**
+ * A string an artifact holds, with every URL's user info masked and, in `KEY=VALUE`, the
+ * value of a credential key: the list-form environment entry `DB_PASSWORD=...`, a JSON string
+ * included.
+ */
+export function redactAssignedText(
+  value: string,
+  knownSecrets: readonly KnownSecret[] = [],
+): string {
+  if (knownSecrets.some((item) => (typeof item === 'string' ? item : item.value) === value))
+    return REDACTED;
+  // A complete JSON value is masked member by member; its first `=` is inside a string.
+  const json = redactJson(value, knownSecrets);
+  if (json !== null) return json;
+  const urlRedacted = redactAllUserinfo(value, knownSecrets);
+  // A URL password or query can contain `=`, so the user info goes first.
+  const equals = urlRedacted.indexOf('=');
+  if (equals > 0 && credentialKey(urlRedacted.slice(0, equals))) {
+    return `${urlRedacted.slice(0, equals + 1)}${REDACTED}`;
+  }
+  return redactKnownValues(urlRedacted, knownSecrets);
+}
+
+/**
+ * The JSON value at `at`, masked, and the index after it. A string is masked on its own, so a
+ * URL ends with its string and a match cannot run on into the next string's `@`, and a
+ * `KEY=VALUE` string is masked as the same list entry in YAML is. A member a credential key
+ * names is masked whole, each scalar below it included, and so is the `value` beside a `name`
+ * that names a credential, as in YAML. Everything else keeps its bytes, number spellings and
+ * member order included.
+ */
+function maskJsonValue(
+  text: string,
+  at: number,
+  secret: boolean,
+  ends: ReadonlyMap<number, number>,
+  knownSecrets: readonly KnownSecret[],
+): [string, number] {
+  const open = text[at];
+  if (open === '"') {
+    const token = jsonToken(JSON_STRING, text, at);
+    if (secret) return [JSON.stringify(REDACTED), at + token.length];
+    const decoded = JSON.parse(token) as string;
+    const masked = redactAssignedText(decoded, knownSecrets);
+    return [masked === decoded ? token : JSON.stringify(masked), at + token.length];
+  }
+  if (open !== '{' && open !== '[') {
+    const token = jsonToken(JSON_LITERAL, text, at);
+    return [
+      secret ||
+      redactKnownValues(token, knownSecrets) !== token ||
+      redactKnownValues(String(JSON.parse(token)), knownSecrets) !== String(JSON.parse(token))
+        ? JSON.stringify(REDACTED)
+        : token,
+      at + token.length,
+    ];
+  }
+  const close = open === '{' ? '}' : ']';
+  const namedSecret = open === '{' && !secret && namesCredential(text, at, ends);
+  let out = open;
+  let i = at + 1;
+  for (;;) {
+    const space = jsonToken(JSON_SPACE, text, i);
+    out += space;
+    i += space.length;
+    if (text[i] === close) return [out + close, i + 1];
+    if (text[i] === ',') {
+      out += ',';
+      i += 1;
+      continue;
+    }
+    let member = secret;
+    if (open === '{') {
+      const [key, afterKey] = maskJsonValue(text, i, false, ends, knownSecrets);
+      const name = JSON.parse(text.slice(i, afterKey)) as string;
+      member ||=
+        key !== text.slice(i, afterKey) || credentialKey(name) || (name === 'value' && namedSecret);
+      const colon = jsonToken(JSON_SPACE, text, afterKey);
+      const valueAt = afterKey + colon.length + 1;
+      const beforeValue = jsonToken(JSON_SPACE, text, valueAt);
+      out += `${key}${colon}:${beforeValue}`;
+      i = valueAt + beforeValue.length;
+    }
+    const [value, after] = maskJsonValue(text, i, member, ends, knownSecrets);
+    out += value;
+    i = after;
+  }
+}
+
+/** `text` masked by `maskJsonValue` when it is one complete JSON value; null when it is not. */
+function redactJson(text: string, knownSecrets: readonly KnownSecret[]): string | null {
+  try {
+    JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const leading = jsonToken(JSON_SPACE, text, 0);
+  try {
+    const [value, after] = maskJsonValue(text, leading.length, false, jsonEnds(text), knownSecrets);
+    return `${leading}${value}${text.slice(after)}`;
+  } catch (error) {
+    // Nesting deeper than the stack: JSON.parse reads it, and walking it cannot. Withhold it.
+    if (error instanceof RangeError) return REDACTED;
+    throw error;
+  }
+}
+
+/**
+ * Mask every URL's user info, user name included, for an artifact a person attaches.
+ *
+ * A JSON value, or `KEY=` followed by one, is masked string by string, a string holding JSON
+ * included, and its credentials are masked too: credential members, the `value` beside a
+ * credential `name`, and credential `KEY=VALUE` strings. Anything else is masked whole, which
+ * can mask more than the user info, never less.
+ */
+export function redactAllUserinfo(
+  value: string,
+  knownSecrets: readonly KnownSecret[] = [],
+): string {
+  const json = redactJson(value, knownSecrets);
+  if (json !== null) return json;
+  const equals = value.indexOf('=');
+  // Not when the key holds a URL: `https://u:p=["x"]@h` is one URL whose password has a `=`.
+  if (equals > 0 && !value.slice(0, equals).includes('://')) {
+    const assigned = redactJson(value.slice(equals + 1), knownSecrets);
+    if (assigned !== null) return `${value.slice(0, equals + 1)}${assigned}`;
+  }
+  return redactKnownValues(value.replace(URL_ANY_USERINFO, `$1${REDACTED}@`), knownSecrets);
+}
 
 /** Mask credentials named by their key or embedded in URL userinfo. */
 export function redactEnv(key: string, value: string): string {

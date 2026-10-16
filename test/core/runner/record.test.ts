@@ -406,45 +406,114 @@ describe('the write-ahead ordering', () => {
     expect((await readMeta('blocked')).name).toBe('blocked');
   });
 
+  it('keeps a loaded record as it was spelled while a write is interrupted, and finishes it on retry', async () => {
+    // `env`, `monitor` and `upgrade` pass back the record they loaded. The interrupted record is
+    // the one earlier releases read next, so it keeps the loaded spellings; the retry loads that
+    // record and must not leave it marked unfinished.
+    const name = 'interrupted';
+    const ws = paths.workspace(name);
+    const recordFile = path.join(ws, 'repro.json');
+    fs.mkdirSync(ws, { recursive: true });
+    fs.writeFileSync(
+      recordFile,
+      '{"name": "interrupted", "project": "houston-interrupted", "rc_version": "8.5.1", ' +
+        '"rc_image": "rocketchat/rocket.chat:8.5.1", "mongo_tag": "8.0", ' +
+        '"mongo_flavor": "official", "preset": "default", "root_url": "http://localhost:3100", ' +
+        '"host_port": 3100.0, "version_source": "live", "pinned": 1.0, "extra": ' +
+        '{"runtime": "docker", "big": 123456789012345678901234567890, "10": "numeric-key", ' +
+        '"f": 3.0}}',
+    );
+    fs.mkdirSync(path.join(ws, 'docker-compose.yml'));
+    const loaded = await readMeta(name);
+
+    await expect(write(name, 'services: {}\n', loaded)).rejects.toThrow();
+
+    expect(loaded.extra.incomplete).toBeUndefined();
+    const interrupted = fs.readFileSync(recordFile, 'utf8');
+    expect(interrupted).toContain('"host_port": 3100.0,');
+    expect(interrupted).toContain('"pinned": 1.0,');
+    expect(interrupted).toContain('"big": 123456789012345678901234567890,');
+    expect(interrupted).toContain('"f": 3.0,');
+    expect(interrupted.indexOf('"big"')).toBeLessThan(interrupted.indexOf('"10"'));
+    expect(interrupted).toContain('"incomplete": true');
+
+    fs.rmdirSync(path.join(ws, 'docker-compose.yml'));
+    // A loaded write of any other document edits whatever file survived, so it is not the
+    // replacement and leaves the record exactly as unfinished as it was.
+    await write(name, 'services: {other: {}}\n', await readMeta(name));
+    expect(fs.readFileSync(recordFile, 'utf8')).toBe(interrupted);
+
+    await write(name, 'services: {}\n', await readMeta(name));
+
+    expect(fs.readFileSync(recordFile, 'utf8')).toBe(
+      interrupted.replace(
+        /,\n {4}"incomplete": true,\n {4}"incomplete_sha256": "[0-9a-f]{64}"/u,
+        '',
+      ),
+    );
+    // Not left for the tests below, which list every workspace.
+    fs.rmSync(ws, { recursive: true, force: true });
+  });
+
   it('leaves the readable half when the writer is killed between the two writes', async () => {
-    // The plan asks for this one to be tested by KILLING between the writes, because
-    // the ordering is only observable from outside the process that does them. The
-    // compose payload is sized so the second write is wide enough to be killed inside.
+    // Observe the real child creating its Compose temporary, then kill it. SIGKILL cannot
+    // run finally cleanup; only the published record and target atomicity are guaranteed.
     const child = path.join(ROOT, 'tools', 'writeahead-child.js');
-    let caught = false;
-
-    for (let attempt = 0; attempt < 8 && !caught; attempt += 1) {
-      const name = `killed-${String(attempt)}`;
-      const ws = paths.workspace(name);
-      const proc = spawn(process.execPath, [child, name, String(24 * 1024 * 1024)], {
-        env: { ...process.env, HOUSTON_HOME: config.home() },
-        stdio: 'pipe',
-      });
-      const exited = new Promise<void>((resolve) => {
-        proc.once('close', () => resolve());
-      });
-      const deadline = Date.now() + 20_000;
-      while (Date.now() < deadline) {
-        if (fs.existsSync(path.join(ws, 'repro.json'))) {
-          proc.kill('SIGKILL');
-          break;
-        }
-        if (proc.exitCode !== null) break;
-        await new Promise((resolve) => setTimeout(resolve, 1));
-      }
-      await exited;
-
-      if (fs.existsSync(path.join(ws, 'docker-compose.yml'))) continue; // too late; retry
-      caught = true;
-      // The half that survived is the one `readMeta` can read and `up` regenerates.
+    const name = 'killed-write';
+    const ws = paths.workspace(name);
+    fs.mkdirSync(ws, { recursive: true });
+    const proc = spawn(process.execPath, [child, name, String(24 * 1024 * 1024)], {
+      env: { ...process.env, HOUSTON_HOME: config.home() },
+      stdio: 'pipe',
+    });
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+      (resolve, reject) => {
+        proc.once('error', reject);
+        proc.once('close', (code, signal) => resolve({ code, signal }));
+      },
+    );
+    const temporary = new RegExp(
+      `^docker-compose\\.yml\\.${String(proc.pid)}\\.[0-9a-f]{8}\\.tmp$`,
+      'u',
+    );
+    let observedTemporary = false;
+    const observe = (): void => {
+      if (observedTemporary || !fs.readdirSync(ws).some((entry) => temporary.test(entry))) return;
+      observedTemporary = true;
+      proc.kill('SIGKILL');
+    };
+    const watcher = fs.watch(ws, observe);
+    // The interval also covers coalesced filesystem events. This is an observation loop,
+    // not a required write duration or a retry of the crash assertion.
+    const poll = setInterval(observe, 1);
+    const deadline = setTimeout(() => proc.kill('SIGKILL'), 20_000);
+    try {
+      const result = await exited;
+      expect(observedTemporary).toBe(true);
+      expect(result).toEqual({ code: null, signal: 'SIGKILL' });
+      expect(fs.existsSync(path.join(ws, 'docker-compose.yml'))).toBe(false);
       expect(await paths.exists(name)).toBe(true);
       expect((await readMeta(name)).name).toBe(name);
-      // And no temp file was left looking like a workspace file.
-      expect(fs.readdirSync(ws).filter((entry) => entry.endsWith('.tmp'))).toEqual([]);
+      expect(fs.statSync(ws).mode & 0o777).toBe(0o700);
+      expect(fs.statSync(path.join(ws, 'repro.json')).mode & 0o777).toBe(0o644);
+      // A leftover must be this child's unique ordinary temporary, never a published
+      // Compose target, symlink, directory or unrelated file.
+      for (const entry of fs.readdirSync(ws)) {
+        if (entry === 'repro.json') continue;
+        expect(entry).toMatch(temporary);
+        expect(fs.lstatSync(path.join(ws, entry)).isFile()).toBe(true);
+      }
+    } finally {
+      clearTimeout(deadline);
+      clearInterval(poll);
+      watcher.close();
+      if (proc.exitCode === null && proc.signalCode === null) {
+        proc.kill('SIGKILL');
+        await exited;
+      }
+      fs.rmSync(ws, { recursive: true, force: true });
     }
-
-    expect(caught).toBe(true);
-  }, 120_000);
+  });
 });
 
 describe('a Kubernetes workspace', () => {
@@ -494,6 +563,26 @@ describe('a workspace the record does not fully describe', () => {
     await writeRecord('kube', sample({ name: 'kube', project: 'p' }));
     expect(fs.statSync(paths.workspace('kube')).mode & 0o777).toBe(0o700);
     expect((await readMeta('kube')).name).toBe('kube');
+  });
+
+  it('leaves every file a Compose write makes at 0644, the record written last included', async () => {
+    // Written at the process umask, then restricted: under 002 a file the restriction missed
+    // stays group-writable, and a backup records that mode.
+    const saved = process.umask(0o002);
+    try {
+      await write('modes', 'services: {}\n', sample({ name: 'modes', project: 'p' }), [
+        ['files/seed.ldif', 'dn: x\n'],
+      ]);
+    } finally {
+      process.umask(saved);
+    }
+    const ws = paths.workspace('modes');
+    expect(
+      ['repro.json', 'docker-compose.yml', 'files/seed.ldif'].map((file) =>
+        (fs.statSync(path.join(ws, file)).mode & 0o777).toString(8),
+      ),
+    ).toEqual(['644', '644', '644']);
+    fs.rmSync(ws, { recursive: true, force: true });
   });
 
   it('mints the project name for a workspace that has no record yet', async () => {

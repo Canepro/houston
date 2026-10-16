@@ -212,7 +212,9 @@ and a create that cannot finish leaves a half-made workspace behind.
 
 **Everything binds loopback unless told otherwise.** Reproductions ship weak fixed credentials
 (`admin` / `admin123`), so everything binds `DEFAULT_BIND_HOST` (`127.0.0.1`) unless opted out
-with `--bind`, `HOUSTON_BIND_HOST` or `config set bind_host`. A workspace reachable beyond
+with `--bind`, `HOUSTON_BIND_HOST` or `config set bind_host`. The bind host is applied to
+every published port after presets merge, replacing any address a preset wrote, so one
+custom preset cannot leave a sidecar on every interface. A workspace reachable beyond
 loopback gets a generated admin password instead, when it is made: a rebuild keeps the one
 its database holds (`keptAdminPassword`), since Rocket.Chat sets it only on an empty
 database. `PRESET_PORTS` in `lib/config.ts` is the one port registry, and
@@ -255,15 +257,15 @@ One line per directory. Where a line uses `·`, it separates ranks, bottom first
 `git ls-files src` is the authority on what exists (tests live in `test/`), and each module's
 header comment says what it is for.
 
-- **`lib/`**, below every service: `errors` `events` `jsonout` `config` `lock` `context`, the registries `audit` `journal` `teammode`, then `compose` `versions` `monitoring` `mongo-kernel` `redact` `seed-profiles` `seed-options` `targz`, and the exact-format modules `format` `float-text` `json-text` `yaml-dump` `close-matches` `mkdir-parents` `tempdir` `login-name` `platform-name` `home` `version-spec` `unicode-tables`, and `map-limit` (a bounded concurrent map the cluster ledger and the region sweep share), and `capture-render` (the pure evidence README renderer)
+- **`lib/`**, below every service: `errors` `events` `jsonout` `config` `onboarding` `lock` `context`, the registries `audit` `journal` `teammode`, then `compose` `versions` `monitoring` `mongo-kernel` `redact` `seed-profiles` `seed-options` `targz`, and the exact-format modules `format` `float-text` `json-text` `yaml-dump` `close-matches` `mkdir-parents` `tempdir` `login-name` `platform-name` `home` `version-spec` `unicode-tables`, and `map-limit` (a bounded concurrent map the cluster ledger and the region sweep share), and `capture-render` (the pure evidence README renderer)
 - **`lib/presets/`**, the dynamic scenarios (static presets are YAML in `data/presets/`): `types` · `registry` · `common` `scenario` `composite` (several presets as one) · `keycloak` `public` (a preset's UIs at paths of the HTTPS name) · `e2ee` `email` `ldap` `livechat` `multi-instance` `oidc` `s3-minio` `saml` · `index`
 - **`seams/`**, the only doors out: `exec` `docker-cli` `kubectl` `aws-cli` `rc-http`
 - **`seams/fs/`**: `lock`
 - **`core/`**, the shared brain. REST and cloud: `rcapi` `eks` `eks-docs` `cluster` `topology`. HTTPS: `tls` `tls-local`. Data: `backup` `backup-compat` `database-of` `seed-db` `upgrade` `envvars` `monitor` `data` `configimport` `scaleseed` `loadtest` `postready`. Diagnosis: `diagnose` `doctor`. Records: `journal` `recovery` `eventlog` `audit`, and `evidence`, the secret-safe record of a workspace a person attaches to a case, plus `capture`, which drives a scripted browser capture into that record. People: `users` `sessions` `firstrun`, and Okta sign-in, `sso` with its links `sso-identities`. The home: `skill` `migrate` `promote`
-- **`core/runner/`**, Docker per workspace: `paths` `locks` · `engine` `record` · `host` `ports` `queries`
+- **`core/runner/`**, Docker per workspace: `paths` `locks` · `engine` `record` · `host` `inventory` `ports` `queries`
 - **`core/edge/`**, the shared Traefik edge: `paths` `types` · `engine` · `acme` `networks` · `routeyml` · `spec` · `routes` · `runtime`
-- **`core/kube/`**, the Kubernetes domain half, which selects by label and never by name prefix: `names` · `exec` · `ask` `tools` · `capabilities` `reachability` `replicaset` · `context` · `cluster` `endpoints` `namespace` · `manifests` `probe` `scale` `status` `transfer` · `release` · `operator` · `chart` `monitoring` · `certmanager` `forward` · `ingress` `grafana-ingress` · `workspace`
-- **`core/lifecycle/`**, create, inspect, change and destroy, with no façade (import the module that defines a name): `types` `notes` `admin` · `naming` `request` `ports` `tlsplan` · `sizing` `seeding` `ownership` `inspect` · `preconditions` `payload` `ready` · `state` · `destroy` `pruning` · `create-k8s` · `create-docker`
+- **`core/kube/`**, the Kubernetes domain half, which selects by label and never by name prefix: `names` · `exec` · `ask` `tools` · `capabilities` `reachability` `replicaset` · `context` · `cluster` `endpoints` `namespace` · `manifests` `probe` `scale` `status` `transfer` · `inventory` · `release` · `operator` · `chart` `monitoring` · `certmanager` `forward` · `ingress` `grafana-ingress` · `workspace`
+- **`core/lifecycle/`**, create, inspect, change and destroy, with no façade (import the module that defines a name): `access` `types` `notes` `admin` · `naming` `request` `ports` `tlsplan` · `sizing` `seeding` `ownership` `inspect` · `preconditions` `payload` `ready` · `state` · `destroy` `pruning` · `create-k8s` · `create-docker`
 - **`perf/`**, what `loadtest` and `capacity` measure: `timings` `slo` `baseline` · `rcmetrics` `resources` `mongoprof` `constrain` `k6` `verdict` `timeline` · `report`
 - **`seed/`**, sample data planned before anything is created and read back after: `kinds` · `wording` `assets` · `plan` `client` · `receipt` · `executor` `history` `verification` · `apply` `repairs` · `check`
 - **`cli/`**, the terminal front door: `spec-types` `wire` `cell-widths` · `spec-data` `error-panel` · `help` `capabilities` `perf` `serve` · `usage-error` · `app` · `render` · `handlers` · `index` `entry`

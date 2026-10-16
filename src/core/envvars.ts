@@ -12,7 +12,7 @@
  *
  * Same shape as `core/monitor.ts`, which mutates a running repro the same way.
  */
-import { toYaml } from '../lib/compose';
+import { CREDENTIALS_PENDING, suppliedCredentials, toYaml } from '../lib/compose';
 import type { ComposeDoc } from '../lib/compose';
 import * as config from '../lib/config';
 import { DockerError, ValidationError } from '../lib/errors';
@@ -34,10 +34,10 @@ import { redactEnv } from '../lib/redact';
 import { login } from './lifecycle/admin';
 import { resolveName } from './lifecycle/naming';
 import { requireDocker } from './lifecycle/preconditions';
-import { waitServing } from './lifecycle/ready';
+import { recreateRocketChat, waitServing } from './lifecycle/ready';
 import { settingIds } from './rcapi';
-import { up } from './runner/engine';
 import { reproLock } from './runner/locks';
+import { workspace } from './runner/paths';
 import { rcContainerEnv } from './runner/queries';
 import { type Metadata, adminPass, readCompose, readMeta, write } from './runner/record';
 import * as topology from './topology';
@@ -494,6 +494,51 @@ export async function mergedOverrides(
   return { meta, overrides };
 }
 
+/**
+ * Create records whether Compose hands Rocket.Chat a licence (`licensed`) and a registration
+ * token (`reg_token_supplied`), and evidence and `inspect` read those before the Compose file.
+ * A change here can add, blank or remove either, so the recorded markers follow the document
+ * being written, env files included. A record without them is left as earlier releases write
+ * it back, and evidence asks its Compose file instead.
+ *
+ * Either way the document describes the configuration. A change to what it hands Rocket.Chat
+ * also records `CREDENTIALS_PENDING` until every Rocket.Chat service is recreated with it
+ * (`recreateRocketChat`), so evidence does not report a credential a running container may not
+ * have.
+ */
+async function refreshCredentialMarkers(
+  extra: Bag,
+  before: Awaited<ReturnType<typeof suppliedCredentials>>,
+  doc: ComposeDoc,
+  target: string,
+): Promise<void> {
+  const supplied = await suppliedCredentials(doc, workspace(target));
+  if (supplied.license !== before.license || supplied.token !== before.token) {
+    extra[CREDENTIALS_PENDING] = true;
+  }
+  const tokenMarker =
+    typeof extra.reg_token_supplied === 'boolean' || extra.reg_token_supplied === null;
+  if (
+    !tokenMarker &&
+    extra.licensed !== true &&
+    typeof extra.effective_license !== 'boolean' &&
+    extra.effective_license !== null
+  ) {
+    return;
+  }
+  if (tokenMarker) extra.reg_token_supplied = supplied.token === 'unknown' ? null : supplied.token;
+  // Absent means unlicensed once the token marker exists; before it, absent sends evidence to
+  // the Compose file, which finds a licence added here.
+  if (supplied.license !== true) delete extra.licensed;
+  else if (tokenMarker) extra.licensed = true;
+  if (
+    tokenMarker ||
+    typeof extra.effective_license === 'boolean' ||
+    extra.effective_license === null
+  )
+    extra.effective_license = supplied.license === 'unknown' ? null : supplied.license;
+}
+
 export async function setEnvLocked(
   target: string,
   setsValue: Record<string, string> | null,
@@ -509,46 +554,62 @@ export async function setEnvLocked(
 
   const { meta, overrides } = await mergedOverrides(emit, sets, target, unset);
 
-  const { doc, rcServices } = await applyToCompose(overrides, target);
+  const before = await suppliedCredentials(
+    (await readCompose(target)) as unknown as ComposeDoc,
+    workspace(target),
+  );
+  const { doc } = await applyToCompose(overrides, target);
 
   // `meta.extra["env"] = overrides`, which is a TypeError when `extra` is not a mapping --
   // raised before anything is written. Assigned into `bagOf`'s throwaway `{}`, the override
   // reached docker-compose.yml and not repro.json, so the next `up --force` rebuilt it away.
   setItemChecked(meta.extra, 'env', overrides);
+  await refreshCredentialMarkers(meta.extra, before, doc as unknown as ComposeDoc, target);
   await write(target, toYaml(doc as unknown as ComposeDoc), meta);
   const changed = [...Object.keys(sets), ...unset].sort().join(', ');
   info(emit, `env updated on ${quotedText(target)}: ${changed}`, { phase: 'config' });
 
   if (!restart) {
+    // A running workspace keeps its environment through a plain `up`, so the way to apply
+    // this is the same change without the flag. Keys only: a value can be a credential.
+    const again = [
+      ...Object.keys(sets)
+        .sort()
+        .map((key) => `--set ${key}=<value>`),
+      ...[...unset].sort().map((key) => `--unset ${key}`),
+    ].join(' ');
     info(
       emit,
-      'not restarting; the change applies next time the container is ' +
-        `recreated (\`houston up --name ${target}\`)`,
+      'not restarting; Rocket.Chat keeps its current environment until the change is ' +
+        `applied: if the workspace is stopped, run \`houston up --name ${target}\`; ` +
+        `if it is running, repeat \`houston env --name ${target} ${again}\` without --no-restart`,
       { phase: 'done' },
     );
     return { name: target, restarted: false, overrides: shown(overrides) };
   }
 
-  // An env change only reaches Rocket.Chat by recreating the container. compose recreates
-  // just the services whose config changed, so Mongo keeps running and its volume is
-  // untouched — no data loss, and no image pull.
+  // An env change only reaches Rocket.Chat by recreating the container. Mongo keeps
+  // running and its volume is untouched — no data loss, and no image pull.
   info(emit, 'recreating the Rocket.Chat container (data is kept)...', { phase: 'boot' });
   // FORCED, so an interrupted apply is healed by the next one. Compose decides what to
   // recreate from a config hash on the container, and that was measured not to fire: an
   // apply interrupted mid-recreate left the compose file carrying a variable the
   // container did not have, and re-running `env`, `restart` and `up` all reported success
-  // without changing anything. Scoped to the one service, so Mongo and its volume are
-  // untouched — which is the reason recreating here is safe at all.
-  if ((await up(target, { pull: false, forceRecreate: rcServices[0] })) !== 0) {
+  // without changing anything. EVERY Rocket.Chat service, since the change is written to
+  // all of them; recreating only the first left `rocketchat-2..N` on the old environment.
+  // Once that succeeds Rocket.Chat runs what the Compose file says, a change an earlier
+  // `env` deferred or failed to apply included.
+  if ((await recreateRocketChat(target)) !== 0) {
     throw new DockerError('`docker compose up` failed applying the env change');
   }
+  const deployed = await readMeta(target);
   // WAITED FOR, so the command returns when Rocket.Chat answers again. It returned as soon
   // as compose had recreated the container, and a `seed` typed straight after refused
   // "repro not ready" while the new container booted. No line of its own: the wait sits
   // under the "recreating" line, and "restarted" is said once it is true. A container the
   // new environment stops from serving is a NotReadyError (exit 5) naming why, not a
   // success; the change is written either way, so `env --unset` is the way back.
-  await waitServing(await readMeta(target), emit, 300.0);
+  await waitServing(deployed, emit, 300.0);
   info(emit, `${quotedText(target)} restarted with the new environment`, { phase: 'done' });
   return { name: target, restarted: true, overrides: shown(overrides) };
 }

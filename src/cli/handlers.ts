@@ -21,6 +21,7 @@ import type * as KubeClusterNS from '../core/kube/cluster';
 import type * as KubeReachabilityNS from '../core/kube/reachability';
 import type * as KubeStatusNS from '../core/kube/status';
 import type * as KubeNamesNS from '../core/kube/names';
+import type * as AccessNS from '../core/lifecycle/access';
 import type * as AdminNS from '../core/lifecycle/admin';
 import type * as CreateDockerNS from '../core/lifecycle/create-docker';
 import type * as DestroyNS from '../core/lifecycle/destroy';
@@ -41,7 +42,9 @@ import type * as NotesNS from '../core/lifecycle/notes';
 import type * as RcapiNS from '../core/rcapi';
 import type * as RunnerEngineNS from '../core/runner/engine';
 import type * as RunnerQueriesNS from '../core/runner/queries';
+import type * as RunnerPathsNS from '../core/runner/paths';
 import type * as LocksNS from '../core/runner/locks';
+import type * as OnboardingNS from '../lib/onboarding';
 import type * as RecordNS from '../core/runner/record';
 import type * as ScaleseedNS from '../core/scaleseed';
 import type * as SsoNS from '../core/sso';
@@ -789,6 +792,126 @@ async function confirmDestruction(
   }
 }
 
+/**
+ * Docker reuse keeps the recorded bind, including legacy Compose recovery. Kubernetes
+ * resolves its bind afresh on every up. Unknown reused binds cannot produce a handoff.
+ * Resolve typed-name ownership just as create does before reading the existing record.
+ */
+/**
+ * The side ports an `up` is known to publish before it runs: its presets' services,
+ * monitoring when asked for, and an explicit `--port`'s replica ports. A port allocated
+ * during the create is checked by the handoff afterwards.
+ */
+async function portsKnownBeforeUp(o: Values): Promise<number[]> {
+  const presets = require('../lib/presets') as typeof PresetsNS;
+  const config = require('../lib/config') as typeof ConfigNS;
+  const topology = require('../core/topology') as typeof TopologyNS;
+  const normalized = (value: string): string => {
+    try {
+      return topology.normalize(value);
+    } catch {
+      return value; // An invalid name is the create's refusal to make.
+    }
+  };
+  // Only a NEW workspace whose request is plainly Docker is checked here. A Kubernetes
+  // request, a microservices deployment, a context, or a re-up (whose recorded runtime,
+  // ports and settings win) is checked by the handoff after create instead.
+  // The deployment as Docker would read it; any spelling Docker cannot host (`micro`,
+  // `Microservices`) or does not know leaves the decision to create.
+  let deployment: string;
+  try {
+    deployment = topology.normalizeDeployment(text(o.deployment), topology.DOCKER);
+  } catch {
+    return [];
+  }
+  if (
+    normalized(text(o.runtime)) === topology.KUBERNETES ||
+    text(o.context).trim() !== '' ||
+    (await upTargetsExistingWorkspace(o))
+  ) {
+    return [];
+  }
+  const names = strings(o.preset);
+  const ports: number[] = [];
+  for (const name of names) {
+    try {
+      ports.push(...presets.load(name).ports);
+    } catch {
+      // An unknown preset is the create's refusal to make, with its own message.
+    }
+  }
+  if (bool(o.monitor)) ports.push(...config.MONITOR_PORTS);
+  const port = number(o.port);
+  const multi = deployment === topology.MULTI_INSTANCE || names.includes('multi-instance');
+  // A multi-instance deployment without --replicas runs its default of two.
+  const replicas = number(o.replicas) || (multi ? 2 : 0);
+  if (port > 0 && replicas > 1) {
+    for (let at = 1; at <= replicas; at += 1) ports.push(port + at);
+  }
+  return ports.filter((value) => Number.isSafeInteger(value) && value > 0);
+}
+
+/** Whether `up` names a workspace that already has a record, as create resolves the name. */
+async function upTargetsExistingWorkspace(o: Values): Promise<boolean> {
+  const types = require('../core/lifecycle/types') as typeof LifecycleTypesNS;
+  const audit = require('../core/audit') as typeof AuditNS;
+  const naming = require('../core/lifecycle/naming') as typeof NamingNS;
+  const ownership = require('../core/lifecycle/ownership') as typeof OwnershipNS;
+  const paths = require('../core/runner/paths') as typeof RunnerPathsNS;
+  const req = types.createReq({
+    version: text(o.version),
+    preset: strings(o.preset).length > 0 ? compositeName(strings(o.preset)) : '',
+    runtime: text(o.runtime),
+    context: text(o.context),
+    name: text(o.name),
+    actor: audit.actor(),
+    bind: text(o.bind),
+  });
+  await ownership.claimTypedName(req);
+  const name = naming.deriveFor(req);
+  return name !== '' && (await paths.exists(name));
+}
+
+async function handoffBindForUp(o: Values): Promise<string | null> {
+  const types = require('../core/lifecycle/types') as typeof LifecycleTypesNS;
+  const request = require('../core/lifecycle/request') as typeof RequestNS;
+  const audit = require('../core/audit') as typeof AuditNS;
+  const req = types.createReq({
+    version: text(o.version),
+    preset: strings(o.preset).length > 0 ? compositeName(strings(o.preset)) : '',
+    runtime: text(o.runtime),
+    context: text(o.context),
+    name: text(o.name),
+    actor: audit.actor(),
+    bind: text(o.bind),
+  });
+  const requested = request.requestedBindHost(req);
+  if (bool(o.force) || bool(o.fresh)) return requested;
+
+  const naming = require('../core/lifecycle/naming') as typeof NamingNS;
+  const ownership = require('../core/lifecycle/ownership') as typeof OwnershipNS;
+  const paths = require('../core/runner/paths') as typeof RunnerPathsNS;
+  const record = require('../core/runner/record') as typeof RecordNS;
+  const topology = require('../core/topology') as typeof TopologyNS;
+  const payload = require('../core/lifecycle/payload') as typeof PayloadNS;
+  await ownership.claimTypedName(req);
+  const name = naming.deriveFor(req);
+  if (!name || !(await paths.exists(name))) return requested;
+  let meta: RecordNS.Metadata;
+  try {
+    meta = await record.readMeta(name);
+  } catch {
+    return null;
+  }
+  // The create front door carries context before inferring runtime. An explicit runtime
+  // wins; otherwise an explicit or carried context selects Kubernetes before the locked
+  // axes step can fall back to the recorded runtime.
+  req.context ||= text(topology.axesOfMeta(meta).context);
+  const runtime = topology.normalize(request.inferRuntime(req) || topology.ofMeta(meta));
+  if (runtime === topology.KUBERNETES) return requested;
+  return (await payload.bindHostOf(meta)) || null;
+}
+
 /** Name every destructive target before asking once. */
 async function confirmPrune(
   io: CliIo,
@@ -846,8 +969,21 @@ async function dispatch(
   switch (invocation.spec.path) {
     case 'capabilities':
       return capabilities();
-    case 'up':
+    case 'up': {
+      // Only human output consumes a handoff. Refuse invalid overrides before creating
+      // its loopback workspace, but leave JSON automation independent of tunnel advice.
+      if (!active()) {
+        const bind = await handoffBindForUp(o);
+        if (bind !== null) {
+          (require('../core/lifecycle/access') as typeof AccessNS).validateEnvironment(
+            process.env,
+            bind,
+            await portsKnownBeforeUp(o),
+          );
+        }
+      }
       return await runUp(invocation, io);
+    }
     case 'ready': {
       const ready = require('../core/lifecycle/ready') as typeof ReadyNS;
       // `requireEngine` BEFORE the first poll. Without it a stopped daemon went straight
@@ -989,7 +1125,16 @@ async function dispatch(
         return withMeta({}, await record.readMeta(name));
       }
       const payload = require('../core/lifecycle/payload') as typeof PayloadNS;
-      return await payload.detail(name);
+      const record = require('../core/runner/record') as typeof RecordNS;
+      const access = require('../core/lifecycle/access') as typeof AccessNS;
+      // One snapshot for both: a second read of the record during a rebuild could
+      // advertise one port and forward another.
+      const meta = await record.readMeta(name);
+      const d = await payload.detailOf(name, meta);
+      // Advice for THIS session: `detail()` also serves the GUI, where the server's own
+      // environment says nothing about the browser's, so the handoff is computed here.
+      d.access = access.handoff(meta, process.env, String(d.bind_host));
+      return d;
     }
     case 'evidence': {
       const evidence = require('../core/evidence') as typeof EvidenceNS;
@@ -1013,6 +1158,13 @@ async function dispatch(
       return await capture.captureBundle(name, text(o.workload), text(o.bundle), {
         force: bool(o.force),
       });
+    }
+    case 'inspect': {
+      // The record, the engine and the cluster, with no login in it: what `info` is for a
+      // person at the keyboard, this is for someone deciding how to reach the workspace
+      // from somewhere else.
+      const payload = require('../core/lifecycle/payload') as typeof PayloadNS;
+      return await payload.inspection(await target(text(o.name)));
     }
     case 'users':
       // Printed as it goes (`handlers/users.ts`): it is `json: none`, so what it prints and
@@ -1094,6 +1246,33 @@ async function dispatch(
         stored[internal] = value;
       });
       return { key, value };
+    }
+    case 'onboard': {
+      const onboarding = require('../lib/onboarding') as typeof OnboardingNS;
+      const action = text(a.action) || 'status';
+      const id = text(a.id);
+      if (['status', 'complete', 'setup'].includes(action) && id !== '')
+        throw new ValidationError(`\`onboard ${action}\` does not take a grant ID`);
+      if (action === 'status') return { ...onboarding.state(), action };
+      if (!['grant', 'revoke', 'complete'].includes(action))
+        throw new ValidationError(
+          `unknown action ${quotedText(action)} (want: status | grant | revoke | complete)`,
+        );
+      // The id is checked BEFORE the lock is taken and the file rewritten, so an unknown
+      // grant is a usage error (exit 2) with nothing written, not a stamped onboarding.
+      if (action !== 'complete') {
+        if (id === '')
+          throw new ValidationError(
+            `\`onboard ${action}\` needs a grant (want: ${onboarding.grantIds().join(' | ')})`,
+          );
+        onboarding.checkGrantId(id);
+      }
+      await (require('../core/runner/locks') as typeof LocksNS).updateConfig((stored) => {
+        if (action === 'grant') onboarding.grant(stored, id);
+        else if (action === 'revoke') onboarding.revoke(stored, id);
+        else onboarding.complete(stored);
+      });
+      return { ...onboarding.state(), action, id };
     }
     case 'env': {
       const envvars = require('../core/envvars') as typeof EnvvarsNS;
@@ -2321,7 +2500,9 @@ function tlsLabel(meta: RecordNS.Metadata): string {
     acme: "Let's Encrypt",
     own: 'supplied certificate',
   };
-  const kind = isTruthy(meta.extra.tls) ? toTextAny(meta.extra.tls) : '';
+  const record = require('../core/runner/record') as typeof RecordNS;
+  const extra = record.extraBag(meta);
+  const kind = isTruthy(extra.tls) ? toTextAny(extra.tls) : '';
   return Object.hasOwn(labels, kind) ? (labels[kind] as string) : 'enabled';
 }
 
@@ -2344,7 +2525,8 @@ function summaryPanel(
 ): void {
   const record = require('../core/runner/record') as typeof RecordNS;
   const topology = require('../core/topology') as typeof TopologyNS;
-  const managedBy = meta.extra.mongo_managed_by ?? '';
+  const extra = record.extraBag(meta);
+  const managedBy = extra.mongo_managed_by ?? '';
   const mongo = isTruthy(managedBy)
     ? `${meta.mongoTag} (via the ${toTextAny(managedBy)})`
     : `${meta.mongoTag} (${meta.mongoFlavor})`;
@@ -2357,7 +2539,7 @@ function summaryPanel(
     ['URL', record.externalUrl(meta)],
     ['Login', `admin / ${record.adminPass(meta)}`],
   ];
-  const owner = meta.extra.created_by ?? '';
+  const owner = extra.created_by ?? '';
   if (isTruthy(owner)) rows.push(['Owner', toTextAny(owner)]);
   if (isTruthy(meta.publicUrl)) {
     rows.push(['TLS', tlsLabel(meta)]);
@@ -2365,14 +2547,35 @@ function summaryPanel(
   }
   rows.push(...extraRows);
   writePanel(io, meta.name, rows);
-  const instances = meta.extra.instances;
-  if (isTruthy(instances)) {
+  const instances = extra.instances;
+  if (record.hasComposeInstancePorts(meta) && isTruthy(instances)) {
     io.writeOut(`  instances (${toTextAny(instances)}, load-balanced by Traefik):\n`);
     const count = toInt(instances);
     for (let at = 1; at <= count; at += 1) {
       io.writeOut(`    rocketchat-${String(at)}: http://localhost:${String(meta.hostPort + at)}\n`);
     }
   }
+}
+
+/** Print a tunnel only when the current SSH session cannot open the server's loopback URL. */
+async function printAccessHandoff(meta: RecordNS.Metadata, io: CliIo): Promise<void> {
+  const access = require('../core/lifecycle/access') as typeof AccessNS;
+  const payload = require('../core/lifecycle/payload') as typeof PayloadNS;
+  let handoff: AccessNS.AccessHandoff | null;
+  try {
+    handoff = access.handoff(meta, process.env, await payload.bindHostOf(meta));
+  } catch (error) {
+    // Advice only: a session override that cannot make a command must not turn a create
+    // that completed into a failure. `up` refuses the override before creating anything.
+    if (!(error instanceof ValidationError)) throw error;
+    io.writeErr(`  remote access: ${error.message}\n`);
+    return;
+  }
+  if (handoff === null || handoff.tunnel_command === null) return;
+  io.writeOut('  remote access (workspace is loopback-only on the server):\n');
+  io.writeOut(`    tunnel : ${handoff.tunnel_command}\n`);
+  io.writeOut(`    browser: ${handoff.browser_url}\n`);
+  if (handoff.note !== null) io.writeOut(`    note   : ${handoff.note}\n`);
 }
 
 /**
@@ -2401,7 +2604,9 @@ export async function printNotes(meta: RecordNS.Metadata, io: CliIo): Promise<vo
   let groups: { title: unknown; rows: unknown; body: unknown; commands: unknown }[] =
     await notes.noteGroupsOf(meta);
   if (groups.length === 0) {
-    const flat = Array.isArray(meta.extra.notes) ? meta.extra.notes : [];
+    const record = require('../core/runner/record') as typeof RecordNS;
+    const extra = record.extraBag(meta);
+    const flat = Array.isArray(extra.notes) ? extra.notes : [];
     if (flat.length === 0) return;
     groups = [{ title: '', rows: [], body: flat, commands: [] }];
   }
@@ -2886,6 +3091,142 @@ function renderImportPlan(io: CliIo, plan: Bag, dryRun: boolean): void {
   }
 }
 
+/**
+ * The inspection as short panels, one per section, each saying `none` rather than
+ * vanishing: a reader comparing two workspaces should find the same sections on both.
+ * Only the sections of the workspace's own runtime are drawn; the payload carries both.
+ */
+function renderInspection(io: CliIo, result: Bag): void {
+  const runtime = display(result.runtime, 'docker');
+  writePanel(io, display(result.name, 'repro'), [
+    ['Rocket.Chat', display(result.rc_version)],
+    ['MongoDB', display(result.mongo_tag)],
+    ['Preset', display(result.preset)],
+    ['Runtime', runtime],
+    ['URL', display(result.url)],
+    ['Bind', display(result.bind_host, 'unknown')],
+  ]);
+  const section = (title: string, rows: (readonly [string, string])[], unknown = false): void => {
+    writePanel(io, title, rows.length > 0 ? rows : [['', unknown ? 'unknown' : 'none']]);
+  };
+  const mentions = (warnings: string[], terms: string[]): boolean =>
+    warnings.some((warning) => {
+      const lower = warning.toLowerCase();
+      return terms.some((term) => lower.includes(term));
+    });
+  if (runtime === 'kubernetes') {
+    const kube = bag(result.kubernetes);
+    const warnings = strings(kube.warnings);
+    // No recorded context or namespace means none of the three resource reads ran. Keep
+    // that distinct from a cluster that answered each read with an empty collection.
+    const locationUnknown = warnings.includes(
+      'the repro has no recorded Kubernetes context or namespace',
+    );
+    writePanel(io, 'cluster', [
+      ['context', display(kube.context)],
+      ['cluster', display(kube.cluster)],
+      [
+        'exists',
+        kube.cluster_exists === null || kube.cluster_exists === undefined
+          ? 'unknown'
+          : display(kube.cluster_exists),
+      ],
+      ['namespace', display(kube.namespace)],
+      ['ingress', display(kube.ingress_endpoint, 'none')],
+    ]);
+    section(
+      'nodes',
+      bags(kube.nodes).map((node) => {
+        const roles = Array.isArray(node.roles) ? node.roles.map(toTextAny).join(',') : '';
+        const internalIp = display(node.internal_ip, 'unknown');
+        const externalIp = display(node.external_ip);
+        return [
+          display(node.name),
+          `${display(node.version)}  ${isTruthy(node.ready) ? 'Ready' : 'NotReady'}` +
+            `${roles === '' ? '' : `  ${roles}`}` +
+            `  INTERNAL-IP=${internalIp}` +
+            `${externalIp === '' ? '' : `  EXTERNAL-IP=${externalIp}`}` +
+            `  cpu=${display(node.allocatable_cpu, '?')} memory=${display(node.allocatable_memory, '?')}`,
+        ];
+      }),
+      locationUnknown || mentions(warnings, ['node']),
+    );
+    section(
+      'services',
+      bags(kube.services).map((service) => {
+        const ports = bags(service.ports)
+          .map(
+            (port) =>
+              `${display(port.port)}->${display(port.target_port)}/${display(port.protocol, 'TCP')}` +
+              `${isTruthy(port.node_port) ? ` nodePort=${display(port.node_port)}` : ''}`,
+          )
+          .join(', ');
+        const external = Array.isArray(service.external_ips)
+          ? service.external_ips.map(toTextAny).join(',')
+          : '';
+        return [
+          display(service.name),
+          `${display(service.type, 'ClusterIP')}  ${display(service.cluster_ip, '-')}` +
+            `${external === '' ? '' : `  external=${external}`}  ${ports === '' ? 'no ports' : ports}`,
+        ];
+      }),
+      locationUnknown || mentions(warnings, ['service']),
+    );
+    section(
+      'pods',
+      bags(kube.pods).map((pod) => [
+        display(pod.service),
+        `${display(pod.state, '?')}  ${display(pod.status)}`,
+      ]),
+      locationUnknown || mentions(warnings, ['pod']),
+    );
+    if (warnings.length > 0)
+      writePanel(
+        io,
+        'warnings',
+        warnings.map((warning) => ['', warning]),
+      );
+    return;
+  }
+  const docker = bag(result.docker);
+  const warnings = strings(docker.warnings);
+  const engineUnknown = mentions(warnings, ['docker engine']);
+  section(
+    'containers',
+    bags(docker.containers).map((container) => {
+      const ports = bags(container.ports)
+        .map(
+          (port) =>
+            `${display(port.host_ip).includes(':') ? `[${display(port.host_ip)}]` : display(port.host_ip)}:` +
+            `${display(port.host_port)}->${display(port.container_port)}/${display(port.protocol, 'tcp')}`,
+        )
+        .join(', ');
+      return [
+        display(container.service, display(container.name)),
+        `${display(container.state, '?')}  ${display(container.status)}` +
+          `${ports === '' ? '' : `  ${ports}`}`,
+      ];
+    }),
+    engineUnknown || mentions(warnings, ['container']),
+  );
+  section(
+    'networks',
+    strings(docker.networks).map((network) => ['', network]),
+    engineUnknown || mentions(warnings, ['network']),
+  );
+  section(
+    'volumes',
+    strings(docker.volumes).map((volume) => ['', volume]),
+    engineUnknown || mentions(warnings, ['volume']),
+  );
+  if (warnings.length > 0)
+    writePanel(
+      io,
+      'warnings',
+      warnings.map((warning) => ['', warning]),
+    );
+}
+
 /** Human output is an explicit part of every command, never a generic object dump. */
 export async function renderHuman(
   invocation: Invocation,
@@ -2910,10 +3251,12 @@ export async function renderHuman(
             ? []
             : [['Booted in', fmtDuration(Number(booted))]],
         );
+        await printAccessHandoff(meta, io);
         io.writeOut(`  next: houston logs --name ${meta.name} -f\n`);
       } else {
         io.writeOut('✓ starting\n');
         summaryPanel(meta, io);
+        await printAccessHandoff(meta, io);
         io.writeOut(`  ready when serving : houston ready --name ${meta.name}\n`);
         io.writeOut(`  follow logs        : houston logs --name ${meta.name} -f\n`);
       }
@@ -2924,6 +3267,7 @@ export async function renderHuman(
       const meta = metaOf(value);
       io.writeOut('✓ ready\n');
       summaryPanel(meta, io, [['Booted in', fmtDuration(Number(result.booted_s))]]);
+      await printAccessHandoff(meta, io);
       io.writeOut(`  next: houston logs --name ${meta.name} -f\n`);
       await printNotes(meta, io);
       return;
@@ -3058,6 +3402,7 @@ export async function renderHuman(
     case 'info': {
       const meta = metaOf(value);
       summaryPanel(meta, io);
+      await printAccessHandoff(meta, io);
       io.writeOut(`  api  : houston api --name ${meta.name} GET /api/v1/me\n`);
       io.writeOut(`  curl : ${meta.rootUrl}/api/info\n`);
       await printNotes(meta, io);
@@ -3106,12 +3451,42 @@ export async function renderHuman(
       io.writeOut(`  open  ${location}/README.md\n`);
       return;
     }
+    case 'inspect':
+      renderInspection(io, result);
+      return;
     case 'users':
       // Printed by the handler as it went (`handlers/users.ts`): nothing is left to render.
       return;
     case 'edge':
       // Printed by the handler as it went (`handlers/https.ts`): nothing is left to render.
       return;
+    case 'onboard': {
+      const available = bags(result.grants_available);
+      const held = available.filter((spec) => isTruthy(spec.held)).map((spec) => display(spec.id));
+      if (result.action === 'grant') say(io, `✓ granted ${display(result.id)}`);
+      else if (result.action === 'revoke') say(io, `✓ denied ${display(result.id)}`);
+      else if (result.action === 'complete') say(io, '✓ onboarding recorded');
+      say(
+        io,
+        isTruthy(result.completed)
+          ? `onboarded  yes, ${display(result.completed_at)}`
+          : 'onboarded  no — a person has not answered any of these yet',
+      );
+      say(io, `grants     ${held.length > 0 ? held.join(', ') : '(none held)'}`);
+      for (const spec of available) {
+        const answer = isTruthy(spec.held)
+          ? 'granted '
+          : isTruthy(spec.answered)
+            ? 'denied  '
+            : 'unanswered';
+        say(io, `  ${display(spec.id).padEnd(20)} ${answer} ` + `${display(spec.unlocks)}`);
+      }
+      say(
+        io,
+        '  grant one with `houston onboard grant <id>`; record a denial with `houston onboard revoke <id>`',
+      );
+      return;
+    }
     case 'config':
       // `toTextAny(value)`: a stored boolean reads `False`, not `false`, which is the whole
       // difference between "set to false" and "unset" on this screen.

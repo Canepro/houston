@@ -7,9 +7,6 @@
  * reach outside, and the orchestration between them is the real one. Nothing reaches a cluster,
  * the network or Docker.
  */
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-
 import type * as ClusterNS from '../../../src/core/kube/cluster';
 import type * as ContextNS from '../../../src/core/kube/context';
 import type * as NamespaceNS from '../../../src/core/kube/namespace';
@@ -25,16 +22,21 @@ import type * as SizingNS from '../../../src/core/lifecycle/sizing';
 import type * as TlsplanNS from '../../../src/core/lifecycle/tlsplan';
 import type * as RoutesNS from '../../../src/core/edge/routes';
 
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+
 import * as config from '../../../src/lib/config';
+import { grant, revoke } from '../../../src/lib/onboarding';
 import { ConflictError, PreflightError, ValidationError } from '../../../src/lib/errors';
-import { NOTHING_LEFT, nullEmit } from '../../../src/lib/events';
+import { NOTHING_LEFT, nullEmit, type Event } from '../../../src/lib/events';
 import type { KubectlResult } from '../../../src/seams/kubectl';
 import { createRepro } from '../../../src/core/lifecycle/create-docker';
 import { createKubernetes } from '../../../src/core/lifecycle/create-k8s';
+import { describe as describeWorkspace } from '../../../src/core/lifecycle/inspect';
 import { createReq } from '../../../src/core/lifecycle/types';
-import { exists } from '../../../src/core/runner/paths';
+import { exists, remove } from '../../../src/core/runner/paths';
 import { usedPorts } from '../../../src/core/runner/ports';
-import { readMeta } from '../../../src/core/runner/record';
+import { readMeta, updateMeta } from '../../../src/core/runner/record';
 import * as topology from '../../../src/core/topology';
 
 import { register, routeHost } from '../../../src/core/edge/routes';
@@ -176,6 +178,11 @@ beforeEach(() => {
   mockRoute = null;
   mockCalls.length = 0;
   mockCreated.length = 0;
+  // Most cases exercise the local Kind path's Kubernetes behavior. Give it the standing
+  // decision deliberately; the gate regression below clears it and proves the refusal.
+  config.updateConfig((stored) => {
+    grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+  });
 });
 
 afterEach(() => {
@@ -183,6 +190,30 @@ afterEach(() => {
 });
 
 describe('a Kubernetes create', () => {
+  it('gates local Kind setup before it exports a kubeconfig or writes a provisional record', async () => {
+    // `ensureKubeconfig` writes Houston's owned kubeconfig for an existing Kind cluster, and
+    // the record reserves the workspace name. Both must remain untouched until onboarding
+    // and the scoped grant are present.
+    config.saveConfig({});
+    const req = (name: string) =>
+      createReq({ version: '8.5.1', name, runtime: 'kubernetes', offline: true });
+
+    await expect(createKubernetes(req('kgated-none'))).rejects.toMatchObject({
+      code: 'GATE_NOT_ONBOARDED',
+    });
+    expect(mockCreated).toEqual([]);
+    expect(await exists('kgated-none')).toBe(false);
+
+    config.updateConfig((stored) => {
+      revoke(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
+    await expect(createKubernetes(req('kgated-denied'))).rejects.toMatchObject({
+      code: 'GATE_OWNED_CLUSTER',
+    });
+    expect(mockCreated).toEqual([]);
+    expect(await exists('kgated-denied')).toBe(false);
+  });
+
   it('waits for the workspace to SERVE before it seeds it', async () => {
     // `up --seed` ran the seeder the instant helm returned -- "can't seed — repro not
     // ready". The CLI forces wait when seeding, and this path never read it. Helm returning
@@ -301,19 +332,23 @@ describe('a Kubernetes create', () => {
     const req = (license: string) =>
       createReq({ version: '8.5.1', name: 'klic', runtime: 'kubernetes', offline: true, license });
     await createKubernetes(req(LICENSE));
-    expect([mockCreated[0]?.license, mockCreated[0]?.licensed]).toEqual([LICENSE, true]);
+    expect([mockCreated[0]?.license, mockCreated[0]?.licensed]).toEqual([LICENSE, false]);
     const meta = await readMeta('klic');
     expect(meta.extra.licensed).toBe(true);
+    expect(meta.extra.effective_license).toBe(true);
     expect(JSON.stringify(meta)).not.toContain(LICENSE);
     await createKubernetes(req(''));
     expect([mockCreated[1]?.license, mockCreated[1]?.licensed]).toEqual(['', true]);
+    expect((await readMeta('klic')).extra.effective_license).toBe(true);
   });
 
-  it('records only effective registration-token presence before and after Kubernetes create', async () => {
+  it('records only deployed registration-token presence before and after Kubernetes create', async () => {
     const token = 'EVIDENCE-REGISTRATION-TOKEN-SENTINEL';
     let provisional: Record<string, unknown> | undefined;
+    let interrupt = false;
     mockCreate = async (options) => {
       provisional = (await readMeta(String(options.name))).extra;
+      if (interrupt) throw new Error('killed before the token Secret and Helm');
       return {
         context: CONTEXT,
         namespace: `houston-${String(options.name)}`,
@@ -324,34 +359,115 @@ describe('a Kubernetes create', () => {
         microservices: false,
       };
     };
+    const up = (regToken: string) =>
+      createKubernetes(
+        createReq({
+          version: '8.5.1',
+          name: 'ktoken-evidence',
+          runtime: 'kubernetes',
+          regToken,
+          offline: true,
+        }),
+      );
+    const observed: unknown[] = [];
+    const step = async (label: string, regToken: string) => {
+      await up(regToken).catch(() => undefined);
+      const record = (await readMeta('ktoken-evidence')).extra;
+      expect(JSON.stringify(provisional)).not.toContain(token);
+      expect(JSON.stringify(record)).not.toContain(token);
+      observed.push([label, provisional?.reg_token_supplied, record.reg_token_supplied]);
+    };
 
-    await createKubernetes(
-      createReq({
-        version: '8.5.1',
-        name: 'ktoken-evidence',
-        runtime: 'kubernetes',
-        regToken: `  ${token}  `,
-        offline: true,
-      }),
-    );
-
+    // A first create has deployed nothing when its write-ahead record is written.
+    await step('first create with a token', `  ${token}  `);
     expect(mockCreated.at(-1)?.regToken).toBe(token);
-    expect(provisional?.reg_token_supplied).toBe(true);
-    expect(JSON.stringify(provisional)).not.toContain(token);
-    const final = await readMeta('ktoken-evidence');
-    expect(final.extra.reg_token_supplied).toBe(true);
-    expect(JSON.stringify(final)).not.toContain(token);
+    // A re-up's write-ahead record carries the release still running until Helm replaces it.
+    await step('re-up without a token', '');
+    // Killed before the Secret and Helm: the old tokenless release is what still runs.
+    interrupt = true;
+    await step('killed re-up with a token', token);
+    // A record from before the marker existed cannot say what runs, so neither can this one.
+    await updateMeta('ktoken-evidence', (meta) => {
+      delete meta.extra.reg_token_supplied;
+    });
+    await step('killed re-up from a record with no marker', token);
+
+    expect(observed).toEqual([
+      ['first create with a token', false, true],
+      ['re-up without a token', true, false],
+      ['killed re-up with a token', false, false],
+      ['killed re-up from a record with no marker', undefined, undefined],
+    ]);
+  });
+
+  it('records a preset-only Kubernetes registration token the chart deploys', async () => {
+    const preset = 'preset-token';
+    const presetFile = path.join(config.presetDir(), `${preset}.yaml`);
+    await fs.mkdir(config.presetDir(), { recursive: true });
+    const provisionals: Record<string, unknown>[] = [];
+    mockCreate = async (options) => {
+      provisionals.push((await readMeta(String(options.name))).extra);
+      return {
+        context: CONTEXT,
+        namespace: `houston-${String(options.name)}`,
+        chart_version: '7.0.0',
+        release: 'rocketchat',
+        port_forward_pid: 0,
+        bind_host: '',
+        microservices: false,
+      };
+    };
+    const observed: unknown[] = [];
+    try {
+      for (const example of [
+        { name: 'kpreset-token', presetToken: '  PRESET-TOKEN-SENTINEL  ', regToken: '' },
+        { name: 'kpreset-blank', presetToken: '  ', regToken: '' },
+        { name: 'kpreset-dedicated', presetToken: 'PRESET-TOKEN-SENTINEL', regToken: 'DEDICATED' },
+      ]) {
+        await fs.writeFile(
+          presetFile,
+          `name: ${preset}\nenv:\n  REG_TOKEN: ${JSON.stringify(example.presetToken)}\n`,
+        );
+        await createKubernetes(
+          createReq({
+            version: '8.5.1',
+            name: example.name,
+            runtime: 'kubernetes',
+            preset,
+            regToken: example.regToken,
+            offline: true,
+          }),
+        );
+        const provisional = provisionals.at(-1);
+        const final = (await readMeta(example.name)).extra;
+        observed.push([
+          example.name,
+          mockCreated.at(-1)?.regToken,
+          provisional?.reg_token_supplied,
+          final.reg_token_supplied,
+        ]);
+        expect(JSON.stringify(provisional)).not.toContain('PRESET-TOKEN-SENTINEL');
+        expect(JSON.stringify(final)).not.toContain('PRESET-TOKEN-SENTINEL');
+      }
+    } finally {
+      await fs.rm(presetFile, { force: true });
+    }
+    expect(observed).toEqual([
+      ['kpreset-token', 'PRESET-TOKEN-SENTINEL', false, true],
+      ['kpreset-blank', '', false, false],
+      ['kpreset-dedicated', 'DEDICATED', false, true],
+    ]);
   });
 
   it('captures a catalog licence requirement before a Kubernetes create can change it', async () => {
     const preset = 'provisional-license';
     const presetFile = path.join(config.presetDir(), `${preset}.yaml`);
-    fs.mkdirSync(config.presetDir(), { recursive: true });
-    fs.writeFileSync(presetFile, `name: ${preset}\nrequires_license: true\n`);
+    await fs.mkdir(config.presetDir(), { recursive: true });
+    await fs.writeFile(presetFile, `name: ${preset}\nrequires_license: true\n`);
     let provisional: Record<string, unknown> | undefined;
     mockCreate = async (options) => {
       provisional = (await readMeta(String(options.name))).extra;
-      fs.rmSync(presetFile);
+      await fs.rm(presetFile);
       return {
         context: CONTEXT,
         namespace: `houston-${String(options.name)}`,
@@ -375,7 +491,7 @@ describe('a Kubernetes create', () => {
         }),
       );
     } finally {
-      fs.rmSync(presetFile, { force: true });
+      await fs.rm(presetFile, { force: true });
     }
 
     expect(provisional?.license_required).toBe(true);
@@ -434,6 +550,197 @@ describe('a Kubernetes create', () => {
       if (!(error instanceof ConflictError)) throw error;
     });
     expect(said.filter((line) => line.includes('Premium plan for LDAP login'))).toHaveLength(1);
+  });
+
+  it.each(['default', 'licensed-user'])(
+    'warns at plan time that unlicensed microservices stop after the first replica with %s',
+    async (preset) => {
+      // An earlier case may leave a box-wide token, which rightly silences the warning.
+      config.updateConfig((cfg) => {
+        delete cfg.reg_token;
+      });
+      await fs.mkdir(config.presetDir(), { recursive: true });
+      const presetPath = path.join(config.presetDir(), 'licensed-user.yaml');
+      await fs.writeFile(presetPath, 'name: licensed-user\nrequires_license: true\n');
+      try {
+        const said: { message: string; code: string; phase: string }[] = [];
+        await createKubernetes(
+          createReq({
+            version: '8.5.1',
+            name: `kmicro-${preset}`,
+            preset,
+            runtime: 'kubernetes',
+            deployment: 'microservices',
+            offline: true,
+          }),
+          (event) => said.push({ message: event.message, code: event.code, phase: event.phase }),
+        ).catch((error: unknown) => {
+          if (!(error instanceof ConflictError)) throw error;
+        });
+        const licence = said.filter((line) => line.code === 'LICENSE_ABSENT_EE_PRESET');
+        expect(licence).toHaveLength(1);
+        expect(licence[0]?.phase).toBe('plan');
+        expect(licence[0]?.message).toContain('replicas after the first stop');
+        expect(licence[0]?.message).toContain('Enterprise license not found');
+        expect(licence[0]?.message).toContain('no effective licence or registration token');
+      } finally {
+        await fs.rm(presetPath, { force: true });
+      }
+    },
+  );
+
+  it('uses Kubernetes final token sources and warns only when they are absent', async () => {
+    await fs.mkdir(config.presetDir(), { recursive: true });
+    const tokenPresetPath = path.join(config.presetDir(), 'token-licensed.yaml');
+    const ldapPresetPath = path.join(config.presetDir(), 'ldap.yaml');
+    await fs.writeFile(
+      tokenPresetPath,
+      'name: token-licensed\nrequires_license: true\nenv:\n  REG_TOKEN: preset-token\n',
+    );
+    // A user preset can override a dynamic one, so this also proves the login warning sees
+    // the same final chart environment as the Enterprise warning.
+    await fs.writeFile(ldapPresetPath, 'name: ldap\nenv:\n  REG_TOKEN: premium-token\n');
+    try {
+      for (const [index, source, raw, secret, licenceWarning, premiumWarning] of [
+        [0, 'config', '   ', '', true, false],
+        [1, 'flag', '   ', '', true, false],
+        [2, 'flag', '  registration-fixture  ', 'registration-fixture', false, false],
+        [3, 'preset', 'preset-token', 'preset-token', false, false],
+        [4, 'premium preset', 'premium-token', 'premium-token', false, false],
+        [5, 'config', '  config-wins  ', 'config-wins', false, false],
+        [6, 'flag', '  flag-wins  ', 'flag-wins', false, false],
+      ] as const) {
+        config.updateConfig((cfg) => {
+          cfg.reg_token = source === 'config' ? raw : '';
+        });
+        const events: Event[] = [];
+        const preset =
+          source === 'preset' || index >= 5
+            ? 'token-licensed'
+            : source === 'premium preset'
+              ? 'ldap'
+              : '';
+        await createKubernetes(
+          createReq({
+            version: source === 'premium preset' ? '9.0.0' : '8.5.1',
+            name: `token-${String(index)}`,
+            preset,
+            runtime: 'kubernetes',
+            deployment: preset === '' ? 'microservices' : 'monolith',
+            regToken: source === 'flag' ? raw : '',
+            offline: true,
+          }),
+          (event) => events.push(event),
+        );
+        expect(mockCreated.at(-1)?.regToken).toBe(secret);
+        expect(events.some((event) => event.code === 'LICENSE_ABSENT_EE_PRESET')).toBe(
+          licenceWarning,
+        );
+        expect(events.some((event) => event.message.includes('Premium plan for LDAP login'))).toBe(
+          premiumWarning,
+        );
+        if (preset !== '') {
+          expect(
+            (mockCreated.at(-1)?.preset as { env: Record<string, string> }).env.REG_TOKEN,
+          ).toBe(preset === 'ldap' ? 'premium-token' : 'preset-token');
+        }
+      }
+    } finally {
+      await Promise.all([
+        fs.rm(tokenPresetPath, { force: true }),
+        fs.rm(ldapPresetPath, { force: true }),
+      ]);
+    }
+  });
+
+  it('uses Kubernetes final licence sources for both create-time warnings', async () => {
+    config.updateConfig((cfg) => {
+      delete cfg.reg_token;
+    });
+    await fs.mkdir(config.presetDir(), { recursive: true });
+    const presetPath = path.join(config.presetDir(), 'ldap.yaml');
+    try {
+      for (const [index, literal, license, warned] of [
+        [0, '  synthetic-preset-license  ', '', false],
+        [1, ' \t ', '', true],
+        [2, '', '  synthetic-file-license  ', false],
+        [3, 'synthetic-preset-license', 'synthetic-file-license', false],
+      ] as const) {
+        await fs.writeFile(
+          presetPath,
+          [
+            'name: ldap',
+            'requires_license: true',
+            'env:',
+            `  ROCKETCHAT_LICENSE: ${JSON.stringify(literal)}`,
+            '',
+          ].join('\n'),
+        );
+        const events: Event[] = [];
+        await createKubernetes(
+          createReq({
+            version: '9.0.0',
+            name: `licence-source-${String(index)}`,
+            preset: 'ldap',
+            runtime: 'kubernetes',
+            deployment: 'microservices',
+            offline: true,
+            license,
+          }),
+          (event) => events.push(event),
+        );
+        expect(events.some((event) => event.code === 'LICENSE_ABSENT_EE_PRESET')).toBe(warned);
+        expect(events.some((event) => event.message.includes('Premium plan for LDAP login'))).toBe(
+          warned,
+        );
+        const meta = await readMeta(`licence-source-${String(index)}`);
+        expect(meta.extra.effective_license).toBe(!warned);
+        expect(meta.extra.licensed === true).toBe(!warned);
+        expect(JSON.stringify(meta)).not.toContain('synthetic-preset-license');
+        expect(JSON.stringify(meta)).not.toContain('synthetic-file-license');
+        expect(mockCreated.at(-1)?.license).toBe(license.trim() || literal.trim());
+        if (index === 0) {
+          await createKubernetes(
+            createReq({
+              version: '9.0.0',
+              name: 'licence-source-0',
+              preset: 'ldap',
+              runtime: 'kubernetes',
+              deployment: 'microservices',
+              offline: true,
+            }),
+          );
+          // A preset-only licence now has an installed Secret; re-up retains it.
+          expect([mockCreated.at(-1)?.license, mockCreated.at(-1)?.licensed]).toEqual(['', true]);
+          expect((await readMeta('licence-source-0')).extra.effective_license).toBe(true);
+        }
+      }
+    } finally {
+      await fs.rm(presetPath, { force: true });
+    }
+  });
+
+  it('does not call LDAP an Enterprise feature on a monolith', async () => {
+    // The Kubernetes LDAP adapter's `requiresLicense` is a marker of the microservices
+    // topology, not of LDAP; a monolith with LDAP and no licence gets no licence warning.
+    config.updateConfig((cfg) => {
+      delete cfg.reg_token;
+    });
+    const codes: string[] = [];
+    await createKubernetes(
+      createReq({
+        version: '8.5.1',
+        name: 'kmono',
+        preset: 'ldap',
+        runtime: 'kubernetes',
+        deployment: 'monolith',
+        offline: true,
+      }),
+      (event) => codes.push(event.code),
+    ).catch((error: unknown) => {
+      if (!(error instanceof ConflictError)) throw error;
+    });
+    expect(codes).not.toContain('LICENSE_ABSENT_EE_PRESET');
   });
 
   it('composes several presets as one, and records the set as Compose does', async () => {
@@ -567,10 +874,89 @@ describe('a Kubernetes create', () => {
     expect(await exists('interrupted')).toBe(true);
     const meta = await readMeta('interrupted');
     expect(topology.ofMeta(meta)).toBe(topology.KUBERNETES);
+    expect(meta.extra.effective_license).toBe(false);
     // Teardown selects on the namespace, so it has to be recorded...
     expect(meta.extra.namespace).toBe(await namespaceFor('interrupted'));
     // ...and it must be distinguishable from a create that finished.
     expect(meta.extra.incomplete).toBe(true);
+  });
+
+  it('does not report an interrupted re-up as licensed before its Secret exists', async () => {
+    // The write-ahead record stored effective_license from the planned payload, and inspect
+    // trusts that boolean without reading incomplete. A re-up killed before createWorkspace
+    // installs the Secret was described as licensed, and the microservices warning was gone.
+    const LICENSE = 'synthetic-provisional-license';
+    const req = (license = '') =>
+      createReq({
+        version: '8.5.1',
+        name: 'kprov',
+        runtime: 'kubernetes',
+        deployment: 'microservices',
+        offline: true,
+        license,
+      });
+    const licenseNote = (groups: unknown): string => {
+      const rows = (groups as { rows?: [string, string][] }[]).flatMap((group) => group.rows ?? []);
+      return rows.find((row) => row[0] === 'License')?.[1] ?? '';
+    };
+    try {
+      await createKubernetes(req());
+      mockCreate = () => Promise.reject(new Error('stopped before the licence Secret'));
+      await expect(createKubernetes(req(LICENSE))).rejects.toThrow(
+        'stopped before the licence Secret',
+      );
+      const meta = await readMeta('kprov');
+      expect(meta.extra.incomplete).toBe(true);
+      expect(meta.extra.licensed).toBe(true);
+      expect(meta.extra.effective_license).toBe(false);
+      expect(JSON.stringify(meta)).not.toContain(LICENSE);
+      const interrupted = await describeWorkspace('kprov');
+      expect(interrupted.licensed).toBe(false);
+      expect(licenseNote(interrupted.note_groups)).toContain('Enterprise license not found');
+
+      mockCreate = null;
+      await createKubernetes(req(LICENSE));
+      const done = await readMeta('kprov');
+      expect(done.extra.incomplete).toBeUndefined();
+      expect(done.extra.effective_license).toBe(true);
+      expect(JSON.stringify(done)).not.toContain(LICENSE);
+      const completed = await describeWorkspace('kprov');
+      expect(completed.licensed).toBe(true);
+      expect(licenseNote(completed.note_groups)).toBe('');
+    } finally {
+      await remove('kprov');
+    }
+  });
+
+  it('keeps a completed licence effective when a later re-up is interrupted', async () => {
+    // A re-up of a finished licensed workspace stored effective_license false before the
+    // new create reached the cluster. Inspect trusts that boolean, so the still-licensed
+    // workspace was reported as unlicensed. A licence that is only planned stays false.
+    const LICENSE = 'synthetic-retained-license';
+    const req = (license = '') =>
+      createReq({
+        version: '8.5.1',
+        name: 'kkeep',
+        runtime: 'kubernetes',
+        deployment: 'microservices',
+        offline: true,
+        license,
+      });
+    try {
+      await createKubernetes(req(LICENSE));
+      expect((await readMeta('kkeep')).extra.effective_license).toBe(true);
+      mockCreate = () => Promise.reject(new Error('stopped during the retained re-up'));
+      await expect(createKubernetes(req())).rejects.toThrow('stopped during the retained re-up');
+      const meta = await readMeta('kkeep');
+      expect(meta.extra.incomplete).toBe(true);
+      expect(meta.extra.retained_license).toBe(true);
+      expect(meta.extra.effective_license).toBe(true);
+      expect(JSON.stringify(meta)).not.toContain(LICENSE);
+      expect((await describeWorkspace('kkeep')).licensed).toBe(true);
+    } finally {
+      mockCreate = null;
+      await remove('kkeep');
+    }
   });
 
   it('takes back the edge route it registered when the create fails', async () => {
