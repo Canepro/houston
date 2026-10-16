@@ -316,6 +316,26 @@ describe('binding', () => {
     ]);
   });
 
+  it('keeps an IPv6 bind separate from interpolated port fields', () => {
+    expect(
+      bound(
+        [
+          '${HOST_PORT:-2:8080}:80',
+          '8080:${CONTAINER_PORT:-2:80}',
+          '${HOST_PORT:-8080}:${CONTAINER_PORT:-80}/UDP',
+        ],
+        '::1',
+      ),
+    ).toEqual([
+      '[::1]:${HOST_PORT:-2:8080}:80',
+      '[::1]:8080:${CONTAINER_PORT:-2:80}',
+      '[::1]:${HOST_PORT:-8080}:${CONTAINER_PORT:-80}/udp',
+    ]);
+    expect(bound(['${HOST_PORT:-8080}:${CONTAINER_PORT:-80}'], '2001:db8::1')).toEqual([
+      '[2001:db8::1]:${HOST_PORT:-8080}:${CONTAINER_PORT:-80}',
+    ]);
+  });
+
   it.each([
     '${PORT_MAPPING:-8080:80}',
     '${PORT_MAPPING-8080:80}',

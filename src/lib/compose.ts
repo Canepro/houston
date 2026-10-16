@@ -665,6 +665,7 @@ function addressField(value: string): boolean {
  */
 export function bindPorts(doc: ComposeDoc, bind: string): void {
   if (!bind) return;
+  const shortBind = isIP(bind) === 6 ? `[${bind}]` : bind;
   for (const [name, svc] of Object.entries(doc.services)) {
     const ports = svc.ports;
     if (!Array.isArray(ports) || ports.length === 0) continue;
@@ -705,7 +706,7 @@ export function bindPorts(doc: ComposeDoc, bind: string): void {
             'it on every interface.',
         );
       }
-      out.push(`${bind}:${parsed.host}:${parsed.container}${parsed.protocol}`);
+      out.push(`${shortBind}:${parsed.host}:${parsed.container}${parsed.protocol}`);
     }
     svc.ports = out;
   }

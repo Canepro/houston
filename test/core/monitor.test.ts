@@ -70,7 +70,16 @@ describe('reading the host bind out of an existing workspace', () => {
     expect(detectBind(doc(['127.0.0.1:${HOST_PORT:-8080}:${CONTAINER_PORT:-80}']))).toBe(
       '127.0.0.1',
     );
-    expect(detectBind(doc(['::1:${HOST_PORT:+8080}:${CONTAINER_PORT+80}/tcp']))).toBe('::1');
+    expect(detectBind(doc(['[::1]:${HOST_PORT:+8080}:${CONTAINER_PORT+80}/tcp']))).toBe('::1');
+  });
+
+  it('reads host_ip from a long-syntax port before falling back to the default bind', () => {
+    const { detectBind } = require('../../src/core/monitor') as typeof MonitorNS;
+    expect(
+      detectBind({
+        services: { rocketchat: { ports: [{ target: 80, published: 8080, host_ip: '::1' }] } },
+      }),
+    ).toBe('::1');
   });
 });
 
