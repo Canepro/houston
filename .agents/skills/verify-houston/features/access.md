@@ -54,6 +54,11 @@ one forward for each recorded sidecar and monitoring port. A primary local port
 that collides with either sidecar forward or the monitoring forward must refuse
 with exit 2 and VALIDATION_FAILED. Drive 4312, 4313, and 4314 independently,
 keeping the non-colliding IPv6 forward receipt as the nearby success control.
+Also require successful SSH JSON and human guidance for each of those same local
+ports on `verify-access-fixture`, which has no recorded side ports. A global ban
+on these numbers must fail verification. These successes use the same workspace
+identity, loopback bind, complete tunnel and browser URL checks as other SSH
+responses.
 The `--` delimiter must precede a single
 destination argument, including spaces, quotes, shell punctuation, or an
 option-shaped user override. These explicit bind and option protections are

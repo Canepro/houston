@@ -23,6 +23,21 @@ import time
 import uuid
 
 
+SYNTHETIC_SECRET = 'VERIFY_SYNTHETIC_SECRET_59c8'
+
+
+def secret_safe_text(value):
+    return str(value).replace(SYNTHETIC_SECRET, '[REDACTED_SYNTHETIC_SECRET]')
+
+
+def secret_safe_document(value):
+    if isinstance(value, dict):
+        return {secret_safe_text(key): secret_safe_document(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [secret_safe_document(item) for item in value]
+    return secret_safe_text(value) if isinstance(value, str) else value
+
+
 SCAN_CHUNK_BYTES = 1024 * 1024
 PARSE_LIMIT_BYTES = 1024 * 1024
 FILE_WORK_LIMIT_BYTES = 64 * 1024 * 1024
@@ -88,7 +103,7 @@ def bounded_file_work(function):
     return bounded
 
 
-def walk_entries(root, skipped=()):
+def walk_entries(root, skipped=(), secret=SYNTHETIC_SECRET, unreadable=()):
     """Walk lazily so directory enumeration cannot outrun the shared budget."""
     budget = CURRENT_FILE_WORK.get()
     skipped = set(skipped)
@@ -96,7 +111,15 @@ def walk_entries(root, skipped=()):
     while stack:
         current = stack.pop()
         budget.check(current)
-        with os.scandir(current) as entries:
+        try:
+            entries = os.scandir(current)
+        except PermissionError:
+            # Only already-refused receipt directories may be omitted from a
+            # failure inventory. Their root names were checked by the parent.
+            if current in unreadable:
+                continue
+            raise
+        with entries:
             while True:
                 budget.check(current)
                 try:
@@ -104,6 +127,8 @@ def walk_entries(root, skipped=()):
                 except StopIteration:
                     break
                 path = current / entry.name
+                require(secret not in str(path.relative_to(root)),
+                        'Synthetic secret leaked in retained path')
                 budget.check(path, entries=1)
                 if path in skipped:
                     continue
@@ -301,20 +326,21 @@ def no_special_entries(root):
 @bounded_file_work
 def no_synthetic_secret(secret, paths):
     for path in paths:
+        require(secret not in str(path), 'Synthetic secret leaked in retained path')
         CURRENT_FILE_WORK.get().check(path, entries=1)
         require_regular_file(path, f'Expected retained regular file: {path}')
         require(not file_contains_secret(path, secret), f'Synthetic secret leaked: {path.name}')
 
 
 @bounded_file_work
-def retained_regular_files(root):
-    return sorted((path for path, mode in walk_entries(root) if stat.S_ISREG(mode)),
+def retained_regular_files(root, secret=SYNTHETIC_SECRET):
+    return sorted((path for path, mode in walk_entries(root, secret=secret) if stat.S_ISREG(mode)),
                   key=lambda item: str(item.relative_to(root)))
 
 
 @bounded_file_work
 def scan_retained_regular_files(secret, root):
-    no_synthetic_secret(secret, retained_regular_files(root))
+    no_synthetic_secret(secret, retained_regular_files(root, secret))
 
 
 @bounded_file_work
@@ -339,7 +365,7 @@ def bind_candidate_temp(env, scratch):
 def scan_candidate_temp(secret, temp):
     require(stat.S_ISDIR(temp.lstat().st_mode),
             f'Candidate temp directory is missing: {temp}')
-    no_synthetic_secret(secret, retained_regular_files(temp))
+    no_synthetic_secret(secret, retained_regular_files(temp, secret))
 
 
 def require_real_evidence_directory(path):
@@ -456,7 +482,7 @@ def atomic_receipt_bytes(path, payload):
 
 
 def write_summary_file(path, summary):
-    atomic_receipt_bytes(path, (json.dumps(summary, indent=2) + '\n').encode())
+    atomic_receipt_bytes(path, (json.dumps(secret_safe_document(summary), indent=2) + '\n').encode())
 
 
 def write_failure_summary(out, summary):
@@ -500,13 +526,18 @@ def write_verification_receipts(out, summary):
     manifest_path, manifest_refusal = claim_regular_receipt(manifest_target)
     refusals = [item for item in (summary_refusal, manifest_refusal) if item]
     record_receipt_refusal(summary, refusals)
-    summary['inventory'] = manifest_path.name
-    write_summary_file(summary_path, summary)
     skipped = [path for path, kind in (
         (summary_target, summary_kind),
         (manifest_target, manifest_kind),
     ) if kind == 'directory']
+    # Preserve refusal diagnostics before checking names. Unreadable refused
+    # receipt directories already force FAIL and remain outside the inventory.
+    # Still inspect their children when readable, and every other retained name.
+    for _path, _mode in walk_entries(out, unreadable=skipped):
+        pass
     skipped.extend([manifest_target, manifest_path])
+    summary['inventory'] = manifest_path.name
+    write_summary_file(summary_path, summary)
     files = {
         str(path.relative_to(out)): hash_file(path)
         for path in inventory_regular_files(out, skipped)
@@ -697,8 +728,31 @@ def reject_json_constant(token):
     raise ValueError(f'Invalid JSON numeric constant: {token}')
 
 
+@bounded_file_work
+def require_no_decoded_secret(value):
+    # Iterators keep traversal memory proportional to depth. The existing file
+    # budget also bounds decoded structures with many tiny keys or sequences.
+    stack = [iter((value,))]
+    while stack:
+        CURRENT_FILE_WORK.get().check('decoded document')
+        try:
+            item = next(stack[-1])
+        except StopIteration:
+            stack.pop()
+            continue
+        CURRENT_FILE_WORK.get().check('decoded document', entries=1)
+        if isinstance(item, str):
+            require(SYNTHETIC_SECRET not in item, 'Synthetic secret leaked in decoded document')
+        elif isinstance(item, dict):
+            stack.extend((iter(item.values()), iter(item.keys())))
+        elif isinstance(item, list):
+            stack.append(iter(item))
+
+
 def strict_json_loads(payload):
-    return json.loads(payload, parse_constant=reject_json_constant)
+    value = json.loads(payload, parse_constant=reject_json_constant)
+    require_no_decoded_secret(value)
+    return value
 
 
 def yaml_document(node_exec, root, env, path):
@@ -1427,9 +1481,13 @@ def main():
     parser.add_argument('--checkout', type=Path, help='Candidate checkout; defaults to this skill checkout')
     args = parser.parse_args()
     verifier_root = Path(__file__).resolve().parents[4]
+    require(SYNTHETIC_SECRET not in str(args.checkout) + str(args.evidence_dir) + str(verifier_root),
+            'Synthetic secret leaked in verifier path')
     root = args.checkout.expanduser().resolve() if args.checkout else verifier_root
-    require((root / 'bin' / 'houston').is_file(), 'Candidate checkout has no bin/houston')
     out = args.evidence_dir.expanduser().resolve()
+    require(SYNTHETIC_SECRET not in str(root) + str(out),
+            'Synthetic secret leaked in resolved verifier path')
+    require((root / 'bin' / 'houston').is_file(), 'Candidate checkout has no bin/houston')
     require(not out.is_relative_to(root) and not out.is_relative_to(verifier_root),
             'Evidence must be outside candidate and verifier checkouts')
     out.mkdir(parents=True, exist_ok=False)
@@ -1458,7 +1516,7 @@ def main():
     completed = False
     cleanup_errors = []
     candidate_temp = None
-    sentinel = 'VERIFY_SYNTHETIC_SECRET_59c8'
+    sentinel = SYNTHETIC_SECRET
     try:
         candidate_before = candidate_fingerprint(root)
         source_before = candidate_before['source']
@@ -1534,7 +1592,8 @@ def main():
                              project='houston-verify-access-fixture',
                              root_url='http://127.0.0.1:39999', admin_password='synthetic-access',
                              extra={'runtime': 'kubernetes', 'context': 'verify-offline',
-                                    'namespace': access_workspace.name, 'bind_host': '127.0.0.1'})
+                                    'namespace': access_workspace.name, 'bind_host': '127.0.0.1',
+                                    'sidecar_ports': [], 'monitoring_ports': []})
         (access_workspace / 'repro.json').write_text(json.dumps(access_record))
         docker_access = workspace.parent / 'verify-docker-access-fixture'
         docker_access.mkdir()
@@ -1866,6 +1925,9 @@ def main():
                                   overrides=dict(remote, HOUSTON_SSH_LOCAL_PORT=value))
                     require(invalid['error']['code'] == 'VALIDATION_FAILED',
                             f'Invalid local port {value} must be refused')
+            for port in (4312, 4313, 4314):
+                remote_access(f'no-sideports-{port}', 'SSH_CONNECTION', port=port,
+                              changes={'HOUSTON_SSH_LOCAL_PORT': str(port)})
             ipv6_remote = {'SSH_CONNECTION': ssh_values['SSH_CONNECTION'],
                            'HOUSTON_SSH_LOCAL_PORT': '4311',
                            'HOUSTON_SSH_USER': "operator's team",
@@ -2192,10 +2254,10 @@ def main():
             print(summary_path)
         else:
             # No stdout locator exists unless a verifier summary was written.
-            print('No verification summary could be retained: ' + json.dumps(summary),
+            print('No verification summary could be retained: ' + json.dumps(secret_safe_document(summary)),
                   file=sys.stderr)
     if failure is not None:
-        raise failure
+        raise RuntimeError(secret_safe_text(failure)) from None
 
 
 if __name__ == '__main__':

@@ -19,6 +19,13 @@ import tempfile
 from unittest.mock import patch
 
 
+SECRET = 'VERIFY_SYNTHETIC_SECRET_59c8'
+
+
+def safe_text(value):
+    return str(value).replace(SECRET, '[REDACTED_SYNTHETIC_SECRET]')
+
+
 SCRIPT = Path(__file__).with_name('verify.py')
 # Exact 79b4d74 bin/houston, SHA-256 dcef1aa364320990f2e5ed0d468e24f5b4cfb04fc322e40f9c8640af273ee115.
 # The Node adapter models dispatch, not the real TypeScript application.
@@ -35,6 +42,7 @@ import hashlib, json, os, sys
 from pathlib import Path
 out = Path(OUT)
 attack = ATTACK
+SECRET = 'VERIFY_SYNTHETIC_SECRET_59c8'
 args = sys.argv[1:]
 home = Path(os.environ['HOUSTON_HOME'])
 
@@ -51,6 +59,13 @@ def emit(schema, data=None, error=None, code=0):
             else:
                 data['schema'] = 'houston.setup.wrong'
     value['error' if error else 'data'] = error if error else data
+    if attack.startswith('decoded-json:'):
+        field = attack.split(':')[1]
+        value['extra'] = ({SECRET: 'masked'} if field == 'key' else
+                          {'nested': [['prefix-' + SECRET + '-suffix']]} if field == 'nested' else
+                          {'note': SECRET} if field == 'value' else {'note': 'safe café'})
+        print(json.dumps(value).replace(SECRET, ''.join('\\u%04x' % ord(c) for c in SECRET)))
+        sys.exit(code)
     if attack.startswith('json-constant:'):
         value['extra_numeric'] = float(attack.split(':')[1])
     elif attack == 'json-number-clean':
@@ -67,7 +82,7 @@ if args == ['capabilities']:
     commands = [descriptor('info', ['--name'], 'houston.info.v1'), descriptor('capabilities', [], 'houston.capabilities.v1')]
     if attack.startswith('inspect-'):
         commands.append(descriptor('inspect', ['--name'], 'houston.inspect.v1'))
-    if attack.startswith(('bundle-', 'admin-')) or attack == 'json-bundle-constant':
+    if attack.startswith(('bundle-', 'admin-')) or attack == 'json-bundle-constant' or attack.startswith('decoded-attachment:'):
         commands.append(descriptor('evidence', ['--name', '--bundle'], 'houston.evidence.v1'))
     if attack == 'config-large' or attack.startswith('feature-'):
         commands.append(descriptor('onboard', ['--json'] + (['--show', '--deployment', '--scenario', '--seed-profile', '--retain-runs/--no-retain-runs', '--accept-defaults', '--reconfigure', '--section'] if attack.startswith('feature-') else []), 'houston.onboard.v1'))
@@ -81,6 +96,14 @@ if args[0] == 'evidence':
     repro.update(runtime='docker', deployment='monolith', rc_image='rocketchat/rocket.chat:8.5.1', root_url='http://127.0.0.1:39999', bind_host='127.0.0.1')
     admin = {'admin-null': None, 'admin-map': {}, 'admin-list': [], 'admin-int': 0}.get(attack, 'masked')
     compose = json.dumps(dict(services=dict(rocketchat=dict(image='rocketchat/rocket.chat:8.5.1', environment=dict(ADMIN_PASS=admin), labels={'support-note': 'masked'}, command='clean'))))
+    if attack.startswith('decoded-attachment:compose-'):
+        field = attack.split('compose-')[1]
+        document = json.loads(compose)
+        document['services']['rocketchat']['labels']['extra'] = (
+            {SECRET: 'masked'} if field == 'key' else
+            {'nested': [['prefix-' + SECRET + '-suffix']]} if field == 'nested' else
+            {'note': SECRET} if field == 'value' else {'note': 'safe café'})
+        compose = json.dumps(document).replace(SECRET, ''.join('\\u%04x' % ord(c) for c in SECRET))
     if attack == 'bundle-compose':
         compose += ' ' * (2 * 1024 * 1024)
     raw = (home / 'repros/verify-fixture/docker-compose.yml').read_bytes()
@@ -88,7 +111,11 @@ if args[0] == 'evidence':
     if '--bundle' in args:
         bundle = Path(args[args.index('--bundle') + 1])
         bundle.mkdir()
-        (bundle / 'manifest.json').write_text(json.dumps(dict(data, generated_at=float('inf')) if attack == 'json-bundle-constant' else data))
+        manifest = dict(data, generated_at=float('inf')) if attack == 'json-bundle-constant' else dict(data)
+        if attack.startswith('decoded-attachment:manifest-'):
+            field = attack.split('manifest-')[1]
+            manifest['generated_at'] = {SECRET: 'masked'} if field == 'key' else {'nested': [[SECRET]]}
+        (bundle / 'manifest.json').write_text(json.dumps(manifest).replace(SECRET, ''.join('\\u%04x' % ord(c) for c in SECRET)))
         (bundle / 'README.md').write_text('Workspace `verify-fixture` Rocket.Chat 8.5.1 http://127.0.0.1:39999')
         (bundle / 'docker-compose.yml').write_text(compose)
         if attack in ('bundle-manifest', 'bundle-readme'):
@@ -184,7 +211,7 @@ if attack.startswith('access-'):
         emit('houston.error.v1', error=dict(code='VALIDATION_FAILED', message='Invalid local port'), code=2)
     if remote and not (os.environ.get('HOUSTON_SSH_USER') and os.environ.get('HOUSTON_SSH_HOST')):
         emit('houston.error.v1', error=dict(code='VALIDATION_FAILED', message='Invalid SSH settings'), code=2)
-    if port in sides and attack != 'access-no-collision':
+    if (port in sides or attack == 'access-global-ban' and port in (4312, 4313, 4314)) and attack != 'access-no-collision':
         message = ('Invalid SSH settings' if attack == 'access-collision-reason' else
                    f'HOUSTON_SSH_LOCAL_PORT {port_text} is one of this workspace\'s side ports')
         emit('houston.error.v1', error=dict(code='VALIDATION_FAILED', message=message), code=2)
@@ -231,6 +258,22 @@ if attack.startswith('access-'):
     emit('houston.info.v1', data)
 if 'verify-kube-fixture' not in args and 'verify-fixture' not in args:
     if 'verify-access-fixture' in args:
+        if attack.startswith('retained-name:') and ':final-' not in attack:
+            kind = attack.split(':')[1]
+            target = out / (SECRET if kind != 'safe' else 'safe café [notes]')
+            if kind == 'refused-directory':
+                target = out / 'summary.json'
+                target.mkdir()
+                target = target / SECRET
+            if kind == 'file' or kind == 'safe':
+                target.write_text('clean content')
+            elif kind == 'directory':
+                target.mkdir()
+                (target / 'clean.txt').write_text('clean content')
+            else:
+                target.mkdir()
+            if kind == 'primary-error':
+                raise RuntimeError('candidate failed at ' + str(target))
         if attack.startswith('cleanup-'):
             target = Path(os.environ['TMPDIR']) / 'cleanup-tree'
             target.mkdir(exist_ok=True)
@@ -373,6 +416,22 @@ def worker(path, checkout, out, attack):
         module.os.unlink = observe_unlink
         if attack == 'cleanup-time':
             module.time.monotonic = lambda: real_clock() + cleanup_offset
+    if attack.startswith('retained-name:final-'):
+        original_receipts = module.write_verification_receipts
+        def late_name(out, summary):
+            target = out / SECRET
+            if attack.endswith('directory'):
+                target.mkdir()
+            else:
+                target.write_text('clean content')
+            return original_receipts(out, summary)
+        module.write_verification_receipts = late_name
+    if attack == 'retained-name:cleanup-error':
+        original_remove = module.remove_scratch
+        def cleanup_error(root):
+            original_remove(root)
+            raise OSError('synthetic cleanup error at ' + SECRET)
+        module.remove_scratch = cleanup_error
     if attack.startswith('work-'):
         # Small limits exercise the production budget against real files and reads.
         module.FILE_WORK_LIMIT_BYTES = 128 * 1024
@@ -703,8 +762,12 @@ def run_main_case(path, attack, proof_dir=None):
         if proof_dir is not None:
             retained = proof_dir / attack.replace(':', '_')
             retained.mkdir(parents=True, exist_ok=False)
-            (retained / 'worker.stdout').write_text(result.stdout)
-            (retained / 'worker.stderr').write_text(result.stderr)
+            raw_hashes = {}
+            def retain_bytes(name, payload):
+                raw_hashes[name] = hashlib.sha256(payload).hexdigest()
+                (retained / name).write_bytes(payload.replace(SECRET.encode(), b'[REDACTED_SYNTHETIC_SECRET]'))
+            retain_bytes('worker.stdout', result.stdout.encode())
+            retain_bytes('worker.stderr', result.stderr.encode())
             (retained / 'invocation.json').write_text(json.dumps(dict(
                 command=command, exit=result.returncode, attack=attack,
                 verifier_sha256=hashlib.sha256(path.read_bytes()).hexdigest()), indent=2) + '\n')
@@ -714,8 +777,13 @@ def run_main_case(path, attack, proof_dir=None):
             for label in ('access-public-local', 'access-public', 'inspect-docker',
                           'inspect-kubernetes', 'inspect-docker-human', 'inspect-kubernetes-human'):
                 names.extend((label + '.stdout', label + '.stderr'))
-            if attack.startswith('json-'):
+            if attack.startswith(('json-', 'decoded-json:')):
                 names.extend(p.name for p in out.glob('*.stdout'))
+            if attack.startswith('decoded-attachment:'):
+                for name in ('manifest.json', 'docker-compose.yml'):
+                    target = out / 'bundle' / name
+                    if target.is_file():
+                        retain_bytes('bundle-' + name, target.read_bytes())
             if attack.startswith('feature-'):
                 names.extend(p.name for p in out.glob('setup-*.stdout'))
             if attack.startswith('dispatch-'):
@@ -747,7 +815,7 @@ def run_main_case(path, attack, proof_dir=None):
             for name in names:
                 target = out / name
                 if target.is_file() and not target.is_symlink() and target.stat().st_size <= 1024 * 1024:
-                    (retained / name).write_bytes(target.read_bytes())
+                    retain_bytes(name, target.read_bytes())
             if attack.startswith('untracked-colon'):
                 (retained / 'candidate-git-status.txt').write_bytes(subprocess.check_output(
                     ['git', '-C', str(candidate), 'status', '--porcelain'], env=environment))
@@ -758,7 +826,8 @@ def run_main_case(path, attack, proof_dir=None):
             if printed:
                 target = Path(printed[-1])
                 if target.is_file() and not target.is_symlink() and target.stat().st_size <= 1024 * 1024:
-                    (retained / 'printed-summary.json').write_bytes(target.read_bytes())
+                    retain_bytes('printed-summary.json', target.read_bytes())
+            (retained / 'raw-receipt-hashes.json').write_text(json.dumps(raw_hashes, indent=2) + '\n')
         assert (candidate / 'notes.tmp').read_bytes() == b'unrelated dirty file\n', 'unrelated dirty file changed'
         assert outside.read_bytes() == b'outside source unchanged\n', 'outside source bytes overwritten'
         if attack == 'no-summary':
@@ -786,7 +855,7 @@ def run_main_case(path, attack, proof_dir=None):
         summary_path = Path(lines[-1])
         summary = json.loads(summary_path.read_text())
         should_pass = (attack in ('clean', 'feature-clean', 'stdout-hardlink', 'access-clean', 'inspect-clean', 'untracked-clean', 'untracked-ignored', 'untracked-colon-clean', 'entrypoint-bin-clean', 'dispatch-clean', 'dispatch-bin-clean', 'dispatch-source-clean',
-                                  'git-helper-initial', 'git-helper-during', 'git-clean', 'cleanup-clean', 'dispatch-legacy-clean', 'json-number-clean')
+                                  'git-helper-initial', 'git-helper-during', 'git-clean', 'cleanup-clean', 'dispatch-legacy-clean', 'json-number-clean', 'retained-name:safe', 'decoded-json:clean', 'decoded-attachment:compose-clean')
                        or attack.endswith(':hardlink'))
         assert (result.returncode == 0) == should_pass, f'exit={result.returncode}: {summary}'
         assert summary['result'] == ('PASS_SCOPED' if should_pass else 'FAIL'), summary
@@ -833,6 +902,29 @@ def run_main_case(path, attack, proof_dir=None):
             assert 'Unsupported candidate Git submodule (tracked gitlink)' in error, error
             if 'during' not in attack:
                 assert not (out / 'commands.json').exists(), 'gitlink refused after CLI launch'
+        elif attack == 'access-global-ban':
+            assert 'access-no-sideports-4312: expected exit 0, got 2' in error, error
+        elif attack.startswith(('decoded-json:', 'decoded-attachment:')):
+            if attack.startswith('decoded-json:'):
+                target = out / 'capabilities.stdout'
+            else:
+                target = out / 'bundle' / ('docker-compose.yml' if ':compose-' in attack else 'manifest.json')
+            raw = target.read_text()
+            assert SECRET not in raw, 'attack was not encoded'
+            projected = json.dumps(json.loads(raw), ensure_ascii=False)
+            assert (SECRET in projected) == (not attack.endswith('clean')), 'decoded fixture missed intended content'
+            if not attack.endswith('clean'):
+                assert 'Synthetic secret leaked in decoded document' in error, error
+            assert SECRET not in result.stdout + result.stderr, 'sentinel in process diagnostics'
+        elif attack.startswith('retained-name:'):
+            assert SECRET not in result.stdout + result.stderr, 'sentinel in process diagnostics'
+            assert SECRET not in summary_path.read_text(), 'sentinel in summary'
+            if attack != 'retained-name:safe':
+                assert ('Synthetic secret leaked in retained path' in error or
+                        attack.endswith(('cleanup-error', 'primary-error'))), 'wrong name refusal'
+                assert 'inventory' not in summary, 'unsafe names received an inventory'
+                assert not list(out.glob('sha256.json*')), 'unsafe inventory retained'
+                return dict(observed, unsafe_names_refused=True, diagnostics_secret_safe=True, inventory=None)
         elif attack == 'access-no-collision':
             assert 'access-sidecar-port-collision: expected exit 2, got 0' in error, error
         elif attack in ('json-package-constant', 'json-bundle-constant'):
@@ -1106,6 +1198,11 @@ def main():
     args = parser.parse_args()
     path = args.verify_source
     attacks = (
+        'access-global-ban',
+        *('decoded-json:' + field for field in ('value', 'key', 'nested', 'clean')),
+        *('decoded-attachment:compose-' + field for field in ('value', 'key', 'nested', 'clean')),
+        *('decoded-attachment:manifest-' + field for field in ('key', 'nested')),
+        *('retained-name:' + kind for kind in ('file', 'directory', 'empty', 'primary-error', 'safe', 'final-file', 'final-directory', 'cleanup-error', 'refused-directory')),
         'submodule-clean-initial', 'submodule-clean-include', 'submodule-clean-worktree',
         'submodule-process-initial', 'submodule-clean-during', 'submodule-process-during',
         'dispatch-lib-external-mutate', 'dispatch-lib-ignored-mutate',
@@ -1172,7 +1269,7 @@ def main():
         try:
             observed = case()
         except Exception as error:
-            print(f'FAIL {name}: {type(error).__name__}: {error}', flush=True)
+            print(f'FAIL {name}: {type(error).__name__}: {safe_text(error)}', flush=True)
             failed += 1
         else:
             print(f'PASS {name}: {json.dumps(observed, sort_keys=True)}', flush=True)

@@ -50,3 +50,17 @@ and attachable artifact handling only. The restricted PATH makes engine tools
 unavailable, so real service state, engine versions, container/pod log redaction,
 Kubernetes bundles, and teardown receipts remain pending live-runtime
 prerequisites. Never substitute invented engine output.
+
+Decoded JSON envelopes, bundle manifests and YAML projections must reject the
+synthetic sentinel in every string key and value, including nested sequences.
+Keep the raw byte scan too. The offline regression uses escaped Unicode in the
+JSON subset of YAML and a synthetic `JSON.parse` YAML adapter. It exercises the
+verifier's decoded-document acceptance, not the dependency-backed YAML parser.
+
+Check every retained relative path before writing the verdict and final hash
+inventory, including empty directories. Inspect readable refused receipt
+directories too. Unreadable receipt directories already force failure and remain
+excluded from the inventory under the existing refusal contract. A sentinel-bearing
+name must fail without an inventory. Diagnostics and failure summaries must redact
+the sentinel, including errors from cleanup.
+Safe Unicode and punctuation in ordinary names remain supported.
