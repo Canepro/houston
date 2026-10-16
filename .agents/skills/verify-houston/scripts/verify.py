@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -80,6 +81,93 @@ def require_unknown_panels(human, panels):
         require(match is not None, f'Human inspection omitted the {panel} panel')
         require(re.search(r'\bunknown\b', match.group(0), flags=re.IGNORECASE) is not None,
                 f'Human inspection did not mark the {panel} panel unknown')
+
+
+def require_command_contract(command, name, flags, schema):
+    require(isinstance(command, dict) and command.get('json') is True
+            and isinstance(command.get('flags'), list)
+            and all(isinstance(flag, str) for flag in command['flags'])
+            and set(flags).issubset(command['flags'])
+            and command.get('schema') == schema,
+            f'Advertised {name} lacks the required JSON/schema/string-array flags contract')
+
+
+def require_saved_topology_command(command):
+    message = 'Setup first-run command must use saved topology with valued --version/--name and --wait only'
+    require(isinstance(command, str) and '\n' not in command and '\r' not in command, message)
+    tokens = shlex.split(command)
+    require(tokens[:2] == ['houston', 'up'], message)
+    values = {}
+    index = 2
+    while index < len(tokens):
+        option, attached, value = tokens[index].partition('=')
+        require(option in ('--version', '--name', '--wait') and option not in values, message)
+        if option == '--wait':
+            require(not attached, message)
+            values[option] = True
+        else:
+            if not attached:
+                index += 1
+                require(index < len(tokens), message)
+                value = tokens[index]
+            pattern = (r'[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?'
+                       if option == '--version' else r'[A-Za-z0-9][A-Za-z0-9_.-]*')
+            require(re.fullmatch(pattern, value) is not None, message)
+            values[option] = value
+        index += 1
+    require(set(values) == {'--version', '--name', '--wait'}, message)
+
+
+def require_setup_first_run(saved):
+    command = saved.get('first_run_command')
+    if command != '':
+        require_saved_topology_command(command)
+        return {'result': 'PASS', 'coverage': 'present command grammar'}
+    message = 'Blank setup first-run command lacks matching runtime/tool/capacity blocker and readiness facts'
+    environment = saved.get('environment', {})
+    require(saved['selection']['deployment'] == 'microservices'
+            and environment.get('microservices_ready') is False
+            and environment.get('kubernetes_provisioning_available') is False, message)
+    missing = environment.get('missing_kubernetes_tools')
+    tools = environment.get('tools', {})
+    require(isinstance(missing, list)
+            and all(isinstance(tool, str) and tool in ('kubectl', 'helm') for tool in missing)
+            and len(missing) == len(set(missing))
+            and all(isinstance(tools.get(tool), bool) for tool in ('kubectl', 'helm', 'kind'))
+            and set(missing) == {tool for tool in ('kubectl', 'helm') if tools[tool] is False}, message)
+    state = environment.get('owned_kubernetes_runtime')
+    require(state in ('ready', 'unavailable', 'unknown'), message)
+    capacity = saved.get('capacity', {})
+    values = [environment.get('engine_cpus'), environment.get('engine_memory_gib'),
+              capacity.get('observed_cpu'), capacity.get('observed_memory_gib'),
+              capacity.get('required_cpu'), capacity.get('required_memory_gib')]
+    require(all(type(value) in (int, float) and math.isfinite(value) and value >= 0
+                for value in values), message)
+    cpu, memory, observed_cpu, observed_memory, required_cpu, required_memory = values
+    # These are the committed setup consumer's engine floors, not host capacity.
+    require(required_cpu == 4 and required_memory == 6
+            and observed_cpu == cpu and observed_memory == memory
+            and capacity.get('applicable') is True, message)
+    known = cpu > 0 and memory > 0
+    enough = known and cpu >= required_cpu and memory >= required_memory
+    capacity_code = '' if enough else 'CAPACITY_BELOW_FLOOR' if known else 'CAPACITY_UNKNOWN'
+    require(capacity.get('ready') is enough
+            and capacity.get('status') == ('ready' if enough else 'below_floor' if known else 'unknown')
+            and capacity.get('code') == capacity_code
+            and not (state == 'ready' and not missing and enough)
+            and not (tools['kind'] and not missing and enough), message)
+    if missing:
+        code, kind = 'KUBERNETES_TOOLS_MISSING', 'tools'
+    elif state == 'ready':
+        require(not enough, message)
+        code, kind = capacity_code, 'capacity'
+    else:
+        code = 'OWNED_KUBERNETES_UNAVAILABLE' if state == 'unavailable' else 'OWNED_KUBERNETES_UNKNOWN'
+        kind = 'runtime'
+    require(any(gate.get('code') == code and gate.get('kind') == kind
+                and isinstance(gate.get('message'), str) and gate['message'].strip()
+                and gate.get('approve_with') == '' for gate in saved['gates']), message)
+    return {'result': 'PASS', 'coverage': 'blocked command with matching facts', 'blocker': code}
 
 
 def yaml_document(node_exec, root, env, path):
@@ -678,10 +766,15 @@ def main():
         toolbin.mkdir()
         node_shim = shutil.which('node')
         require(node_shim is not None, 'Missing prerequisite: node')
+        discovery_home = scratch / 'node-discovery-home'
+        discovery_home.mkdir()
+        discovery_env = {'PATH': os.environ.get('PATH', os.defpath),
+                         'HOME': str(discovery_home), 'LANG': 'C.UTF-8', 'NO_COLOR': '1'}
         node_exec = Path(bounded_output(
             'Node executable discovery',
             [node_shim, '-p', 'process.execPath'],
             cwd=root,
+            env=discovery_env,
             text=True,
         ).strip())
         require(node_exec.is_file(), 'Node did not expose its executable path')
@@ -799,9 +892,8 @@ def main():
         caps = run('capabilities', ['capabilities'], schema='houston.capabilities.v1')['data']
         require(caps['houston_version'] == version and 2 in caps['contract_versions'], 'Capability version differs')
         commands = {c['name']: c for c in caps['commands']}
-        require(commands['info']['json'] and '--name' in commands['info']['flags']
-                and commands['info'].get('schema') == 'houston.info.v1',
-                'Missing or incompatible info contract')
+        require_command_contract(commands.get('info'), 'info', ['--name'], 'houston.info.v1')
+        require_command_contract(commands.get('capabilities'), 'capabilities', [], 'houston.capabilities.v1')
         require(caps['default_bind_host'] == '127.0.0.1', 'Unexpected default bind host')
         summary['features']['capabilities'] = 'PASS'
         missing = run('missing-workspace', ['info', '--name', 'verify-missing', '--json'],
@@ -812,9 +904,7 @@ def main():
         if inspection is None:
             summary['features']['inspect'] = 'PENDING: command absent from capabilities'
         else:
-            require(inspection['json'] and '--name' in inspection['flags']
-                    and inspection.get('schema') == 'houston.inspect.v1',
-                    'Advertised inspect differs from owner draft; reconcile contract before driving')
+            require_command_contract(inspection, 'inspect', ['--name'], 'houston.inspect.v1')
             missing_inspect = run('inspect-missing', ['inspect', '--name', 'verify-missing', '--json'],
                                   expected=4, schema='houston.error.v1', ok=False)
             require(missing_inspect['error']['code'] == 'NOT_FOUND', 'Inspect missing name must be NOT_FOUND')
@@ -858,9 +948,7 @@ def main():
         if evidence is None:
             summary['features']['evidence'] = 'PENDING: command absent from capabilities'
         else:
-            require(evidence['json'] and {'--name', '--bundle'}.issubset(evidence['flags'])
-                    and evidence.get('schema') == 'houston.evidence.v1',
-                    'Advertised evidence lacks required JSON/bundle contract; repair verifier against source')
+            require_command_contract(evidence, 'evidence', ['--name', '--bundle'], 'houston.evidence.v1')
             missing_evidence = run('evidence-missing', ['evidence', '--name', 'verify-missing', '--json'],
                                    expected=4, schema='houston.error.v1', ok=False)
             require(missing_evidence['error']['code'] == 'NOT_FOUND',
@@ -947,9 +1035,7 @@ def main():
         if capture is None:
             summary['features']['capture'] = 'PENDING: command absent from capabilities'
         else:
-            require(capture['json'] and {'--name', '--workload', '--bundle'}.issubset(capture['flags'])
-                    and capture.get('schema') == 'houston.capture.v1',
-                    'Advertised capture differs from owner draft; reconcile contract before driving')
+            require_command_contract(capture, 'capture', ['--name', '--workload', '--bundle'], 'houston.capture.v1')
             absent_bundle = out / 'capture-missing-bundle'
             capture_marker = scratch / 'capture-browser-started'
             fake_playwright = scratch / 'fake-playwright.cjs'
@@ -1029,13 +1115,14 @@ def main():
                           changes={'HOUSTON_SSH_LOCAL_PORT': '4311',
                                    'HOUSTON_SSH_USER': "operator's team",
                                    'HOUSTON_SSH_HOST': 'ssh-proof.invalid; echo unsafe'})
-            collision = run('access-side-port-collision',
-                            ['info', '--name', 'verify-ipv6-fixture', '--json'],
-                            expected=2, schema='houston.error.v1', ok=False,
-                            overrides={'SSH_TTY': ssh_values['SSH_TTY'],
-                                       'HOUSTON_SSH_LOCAL_PORT': '4314'})
-            require(collision['error']['code'] == 'VALIDATION_FAILED',
-                    'A primary forward colliding with a monitoring port must refuse')
+            for label, port in [('sidecar', 4312), ('sidecar-second', 4313), ('monitoring', 4314)]:
+                collision = run('access-' + label + '-port-collision',
+                                ['info', '--name', 'verify-ipv6-fixture', '--json'],
+                                expected=2, schema='houston.error.v1', ok=False,
+                                overrides={'SSH_TTY': ssh_values['SSH_TTY'],
+                                           'HOUSTON_SSH_LOCAL_PORT': str(port)})
+                require(collision['error']['code'] == 'VALIDATION_FAILED',
+                        f'A primary forward colliding with a {label} port must refuse')
             remote_access('option', 'SSH_CONNECTION',
                           changes={'HOUSTON_SSH_USER': '-oProxyCommand=unsafe'})
             remote_access('minimum-port', 'SSH_CONNECTION', port=1024,
@@ -1057,9 +1144,8 @@ def main():
         if 'onboard' not in commands:
             summary['features']['onboarding'] = 'PENDING: onboard command absent'
         else:
-            require(commands['onboard']['json'] is True
-                    and commands['onboard'].get('schema') == 'houston.onboard.v1',
-                    'Advertised onboard lacks the required JSON/schema contract')
+            require_command_contract(commands['onboard'], 'onboard', ['--json'], 'houston.onboard.v1')
+            require_command_contract(commands.get('down'), 'down', ['--name', '--yes'], 'houston.down.v1')
             # These answers belong only to this run's disposable home. Nothing here
             # grants authority in the operator's home or invokes an engine action.
             config_file = Path(env['HOUSTON_HOME']) / 'config.yaml'
@@ -1139,10 +1225,14 @@ def main():
                     and persisted['onboarding']['rc_repro_version'] == version,
                     'Onboarding failed to persist the revoked grant state or legacy fields')
             (out / 'onboarding-persisted.json').write_text(json.dumps(persisted, indent=2) + '\n')
+            kubectl_trap.unlink()
             summary['features']['onboarding'] = (
                 'PASS: synthetic-home status, invalid grant, grant/revoke persistence and '
                 'legacy preservation and local teardown authority refusals; live engine pending')
         if 'onboard' in commands and '--show' in commands['onboard']['flags']:
+            require_command_contract(commands['onboard'], 'setup',
+                ['--show', '--deployment', '--scenario', '--seed-profile', '--retain-runs/--no-retain-runs',
+                 '--accept-defaults', '--reconfigure', '--section'], 'houston.onboard.v1')
             config_file = Path(env['HOUSTON_HOME']) / 'config.yaml'
             setup_before = config_file.read_bytes()
             shown = run('setup-show', ['onboard', 'setup', '--show', '--json'],
@@ -1171,13 +1261,7 @@ def main():
                     and saved['actions'] == []
                     and any(gate['code'] == 'GATE_OWNED_CLUSTER' for gate in saved['gates']),
                     'Setup failed to persist explicit choices or changed authority')
-            first_run_tokens = shlex.split(saved['first_run_command'])
-            require(first_run_tokens[:2] == ['houston', 'up']
-                    and '--version' in first_run_tokens and '--name' in first_run_tokens
-                    and '--wait' in first_run_tokens
-                    and not any(flag in first_run_tokens for flag in
-                                ('--runtime', '--context', '--deployment', '--preset', '--seed', '--seed-profile')),
-                    'Setup first-run command must use saved topology without explicit axes or seed flags')
+            summary['setup_first_run'] = require_setup_first_run(saved)
             after = config_file.read_bytes()
             repeated = run('setup-readback', ['onboard', '--show', '--json'],
                            schema='houston.onboard.v1')['data']
@@ -1196,8 +1280,8 @@ def main():
             persisted_setup = yaml_document(node_exec, root, env, config_file)
             require(persisted_setup['future_config'] == legacy['future_config']
                     and persisted_setup['grants']['future_grant'] == legacy['grants']['future_grant']
-                    and persisted_setup['grants']['engine_resize'] is False
-                    and persisted_setup['onboarding']['future_field'] == 'preserve',
+                    and persisted_setup['grants'] == persisted['grants']
+                    and persisted_setup['onboarding'] == persisted['onboarding'],
                     'Setup discarded unrelated legacy fields')
             (out / 'setup-persisted.json').write_text(json.dumps(persisted_setup, indent=2) + '\n')
             before_prompt = config_file.read_bytes()
@@ -1214,6 +1298,13 @@ def main():
                     and prompt_saved['selection']['retain_runs'] is True
                     and prompt_saved['persisted']['grants']['owned_cluster'] is False,
                     'Interactive section setup lost the accepted answer or unrelated state')
+            interactive_setup = yaml_document(node_exec, root, env, config_file)
+            expected_interactive = json.loads(json.dumps(persisted_setup))
+            expected_interactive['preferences']['seed_profile'] = 'small'
+            require(interactive_setup == expected_interactive,
+                    'Interactive setup discarded legacy fields, scope, denials or unrelated state')
+            (out / 'setup-interactive-persisted.json').write_text(
+                json.dumps(interactive_setup, indent=2) + '\n')
             summary['features']['setup'] = ('PASS: real CLI preview, explicit choices, readback, '
                 'safe defaults, no-write refusals, prompts and legacy preservation; API and live engine pending')
         else:

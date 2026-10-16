@@ -39,7 +39,9 @@ must carry matching ports and browser URL, an alternate local port, accepted por
 rules. It must include `-o ExitOnForwardFailure=yes`; its forwarding argument
 must explicitly bind the client to 127.0.0.1. The IPv6 fixture also requires
 one forward for each recorded sidecar and monitoring port. A primary local port
-that collides with a monitoring forward must refuse with VALIDATION_FAILED.
+that collides with either sidecar forward or the monitoring forward must refuse
+with exit 2 and VALIDATION_FAILED. Drive 4312, 4313, and 4314 independently,
+keeping the non-colliding IPv6 forward receipt as the nearby success control.
 The `--` delimiter must precede a single
 destination argument, including spaces, quotes, shell punctuation, or an
 option-shaped user override. These explicit bind and option protections are

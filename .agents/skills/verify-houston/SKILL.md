@@ -33,14 +33,18 @@ lookups use a resolved Git executable with a scrubbed Git environment, an explic
 candidate checkout, and a verified Git top level. Store evidence outside both
 checkouts.
 
-The helper requires Python 3.9+, Node, `dirname`, and `readlink`. On POSIX it also
-requires `waitid` with `WNOWAIT`, and refuses before launching a command if that
-cleanup primitive is unavailable. On Linux, readable `/proc` process-status files
+The helper requires Python 3.9+, Node, `dirname`, and `readlink`. Process-group
+cleanup supports Darwin and Linux only and requires `waitid` with `WNOWAIT`.
+Other POSIX platforms, or a missing cleanup primitive, refuse before command launch.
+The non-POSIX fallback cleans up only the direct child and has no platform acceptance
+proof; Windows and other platforms remain pending. On Linux, readable `/proc` process-status files
 are also required to distinguish the reserved zombie leader from live group members.
 It creates a unique
 temporary directory containing `HOUSTON_HOME`, `HOUSTON_SKILL_HOME`, a synthetic
-user home, and synthetic Docker, Kubernetes, IPv6 and wildcard-bind workspaces. Only
-entry-point utilities are initially on the child's PATH. The onboarding refusal
+user home, and synthetic Docker, Kubernetes, IPv6 and wildcard-bind workspaces. Node executable discovery uses an isolated temporary home and a minimal environment,
+retaining caller PATH only to resolve the installed Node shim. It excludes caller
+Node options, module paths, credentials, and other overrides. Only
+entry-point utilities are initially on the CLI child's PATH. The onboarding refusal
 drive adds a disposable kubectl trap and requires it never to be invoked. It passes no inherited credentials, engine sockets, kubeconfig,
 proxy variables, or Houston overrides. Do not broaden that environment to make a
 check pass.
@@ -81,8 +85,9 @@ The helper drives `--version`, `capabilities`, and an unknown workspace through
 `info --json`. If capabilities advertise `inspect`, it drives both offline
 runtime fixtures and the missing-workspace failure. If `capabilities.data.commands` advertises
 `evidence`, it also drives
-JSON and bundle output against the synthetic record. It fails if the advertised
-flags or known contract differ. Missing mandatory baseline commands are failures.
+JSON and bundle output against the synthetic record. Every driven command descriptor must advertise literal `json: true`, a string
+array of flags, the required flags, and the known schema. Incompatible discovery
+fails before driving that feature. Missing mandatory baseline commands are failures.
 An advertised `capture` command also gets an explicit missing-workspace drive,
 which must refuse without creating a bundle or starting a browser.
 
@@ -107,7 +112,10 @@ strings or branch names, when choosing applicability.
 `commands.json` records actual argv and exit codes. Each command has separate
 stdout and stderr files. The helper scans each pair at the command-output boundary,
 including refusals and timeouts, then requires both regular files for every expected command label and repeats
-the scan over every retained command receipt before it can report `PASS_SCOPED` or write `sha256.json`. `summary.json`
+the scan over every retained command receipt before it can report `PASS_SCOPED`.
+Failure receipts and `sha256.json` may still be written when that scan fails.
+Require `summary.result: PASS_SCOPED` and a successful `summary.receipt_scan`;
+the existence of a hash manifest does not establish acceptance. `summary.json`
 binds results to the revision, records the fixture immutability check, and names
 pending coverage. The helper reads retained files back after cleanup. Evidence bundles,
 when applicable, also survive under the evidence directory.
@@ -121,7 +129,7 @@ plants a synthetic secret to detect leaks.
 ## Cleanup
 
 The helper removes only the scratch directory it created, including the fixture,
-in a `finally` block on success or ordinary failure. On POSIX, it keeps the CLI
+in a `finally` block on success or ordinary failure. On Darwin and Linux, it keeps the CLI
 leader unreaped while it force-kills the command group and confirms it has no live
 member before reaping the leader. Linux checks the cleanup deadline before and
 after each `/proc` entry iteration and status read; an OS call already in progress

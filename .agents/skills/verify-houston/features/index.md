@@ -17,4 +17,6 @@ migration ports are integrated. `PASS_SCOPED` never means the full migration pas
 Every command receipt is a shared safety check: the helper scans its stdout and
 stderr at capture time, then requires both regular files for every expected
 command label and scans every retained command receipt again before
-`PASS_SCOPED` and `sha256.json`. Bundle attachments retain their recipe-specific scan.
+`PASS_SCOPED`. Failure receipts and a hash manifest may remain after a failed
+scan. Require `summary.result: PASS_SCOPED` and successful `summary.receipt_scan`;
+file existence alone proves no verdict. Bundle attachments retain their recipe-specific scan.
