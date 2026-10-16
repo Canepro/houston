@@ -233,7 +233,7 @@ describe('redactAllUserinfo', () => {
 
 describe('credentialFlag', () => {
   it('names credential option words and leaves lookalikes readable', () => {
-    const flags = [
+    const credentials = [
       '--requirepass',
       '-storepass',
       '-keypass',
@@ -246,14 +246,28 @@ describe('credentialFlag', () => {
       '--dbpass',
       '--passcode',
       '--password',
+      '--db2pass',
+      '--mysql8pass',
+      '--s3pass',
+      '--db2password',
+      '--apikeyvalue',
+      '--sshkeydata',
+    ];
+    const readable = [
       '--bypass',
       '--compass',
       '--proxy-bypass-list',
       '--port',
       '--passive',
       '--passthrough',
+      '--proxybypass',
+      '--sslbypass',
+      '--nopass',
+      '--skippass',
+      '--lowpass',
+      '--bypassfile',
     ];
-    expect(flags.filter(credentialFlag)).toEqual(flags.slice(0, 12));
+    expect([...credentials, ...readable].filter(credentialFlag)).toEqual(credentials);
   });
 });
 
