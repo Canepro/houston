@@ -570,6 +570,16 @@ it('serves the shared secret-free setup snapshot to readonly users without persi
     schema: 'houston.setup.v1',
     selection: { deployment: 'microservices' },
     license: { required: true, supplied: true },
+    environment: {
+      owned_kubernetes_runtime: 'unknown',
+      microservices_ready: false,
+      kubernetes_provisioning_available: false,
+      missing_kubernetes_tools: ['kubectl', 'helm'],
+    },
+    first_run_command: '',
+    gates: expect.arrayContaining([
+      expect.objectContaining({ kind: 'tools', code: 'KUBERNETES_TOOLS_MISSING' }),
+    ]),
   });
   expect(result.body).not.toContain('private-setup-token');
   expect(fs.readFileSync(path.join(home, 'config.yaml'))).toEqual(before);

@@ -94,8 +94,8 @@ const ROOT = path.resolve(__dirname, '..');
 // reclamation, the reachability message, and collision-winner startup, rollback and deadline.
 // R4 covers publication uncertainty, durable-marker teardown, and pre-dispatch IDs.
 // R5 adds complete TLS creation-receipt rollback/reuse and full lock-waiter cases.
-// Goal-first setup also adds owner-boundary regressions. Remeasure the combined floor.
-const FLOOR = 4584;
+// Goal-first setup adds 26 owner-boundary cases. Combined collection measured 4610 tests.
+const FLOOR = 4610;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

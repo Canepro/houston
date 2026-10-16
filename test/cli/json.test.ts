@@ -10,6 +10,7 @@ import * as path from 'node:path';
 
 import type * as DoctorNS from '../../src/core/doctor';
 import type * as ContextNS from '../../src/core/kube/context';
+import type * as KubeToolsNS from '../../src/core/kube/tools';
 import type * as CreateDockerNS from '../../src/core/lifecycle/create-docker';
 import type * as RequestNS from '../../src/core/lifecycle/request';
 import type * as LifecycleTypesNS from '../../src/core/lifecycle/types';
@@ -804,14 +805,28 @@ describe('goal-first setup CLI', () => {
   it('parses the setup-generated command into an owned local plan and keeps explicit remote use', async () => {
     const cfg = require('../../src/lib/config') as typeof ConfigNS;
     cfg.saveConfig({ [cfg.KUBE_CONTEXT_KEY]: 'shared-k3s' });
-    const setupResult = await run([
-      'onboard',
-      '--deployment',
-      'microservices',
-      '--seed-profile',
-      'none',
-      '--json',
-    ]);
+    const tools = require('../../src/core/kube/tools') as typeof KubeToolsNS;
+    const presence = jest
+      .spyOn(tools, 'which')
+      .mockImplementation((name) =>
+        ['kubectl', 'helm', 'kind'].includes(name) ? `/test/${name}` : '',
+      );
+    let setupResult: Ran;
+    try {
+      setupResult = await run([
+        'onboard',
+        '--deployment',
+        'microservices',
+        '--seed-profile',
+        'none',
+        '--json',
+      ]);
+    } finally {
+      presence.mockRestore();
+    }
+    expect(setupResult.envelope.data).toMatchObject({
+      environment: { microservices_ready: false, kubernetes_provisioning_available: true },
+    });
     const command = String(
       (setupResult.envelope.data as Record<string, unknown>).first_run_command,
     );
