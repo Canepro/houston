@@ -312,11 +312,13 @@ describe('a Kubernetes create', () => {
     expect((await readMeta('klic')).extra.effective_license).toBe(true);
   });
 
-  it('records only effective registration-token presence before and after Kubernetes create', async () => {
+  it('records only deployed registration-token presence before and after Kubernetes create', async () => {
     const token = 'EVIDENCE-REGISTRATION-TOKEN-SENTINEL';
     let provisional: Record<string, unknown> | undefined;
+    let interrupt = false;
     mockCreate = async (options) => {
       provisional = (await readMeta(String(options.name))).extra;
+      if (interrupt) throw new Error('killed before the token Secret and Helm');
       return {
         context: CONTEXT,
         namespace: `houston-${String(options.name)}`,
@@ -327,23 +329,39 @@ describe('a Kubernetes create', () => {
         microservices: false,
       };
     };
+    const up = (regToken: string) =>
+      createKubernetes(
+        createReq({
+          version: '8.5.1',
+          name: 'ktoken-evidence',
+          runtime: 'kubernetes',
+          regToken,
+          offline: true,
+        }),
+      );
+    const observed: unknown[] = [];
+    const step = async (label: string, regToken: string) => {
+      await up(regToken).catch(() => undefined);
+      const record = (await readMeta('ktoken-evidence')).extra;
+      expect(JSON.stringify(provisional)).not.toContain(token);
+      expect(JSON.stringify(record)).not.toContain(token);
+      observed.push([label, provisional?.reg_token_supplied, record.reg_token_supplied]);
+    };
 
-    await createKubernetes(
-      createReq({
-        version: '8.5.1',
-        name: 'ktoken-evidence',
-        runtime: 'kubernetes',
-        regToken: `  ${token}  `,
-        offline: true,
-      }),
-    );
-
+    // A first create has deployed nothing when its write-ahead record is written.
+    await step('first create with a token', `  ${token}  `);
     expect(mockCreated.at(-1)?.regToken).toBe(token);
-    expect(provisional?.reg_token_supplied).toBe(true);
-    expect(JSON.stringify(provisional)).not.toContain(token);
-    const final = await readMeta('ktoken-evidence');
-    expect(final.extra.reg_token_supplied).toBe(true);
-    expect(JSON.stringify(final)).not.toContain(token);
+    // A re-up's write-ahead record carries the release still running until Helm replaces it.
+    await step('re-up without a token', '');
+    // Killed before the Secret and Helm: the old tokenless release is what still runs.
+    interrupt = true;
+    await step('killed re-up with a token', token);
+
+    expect(observed).toEqual([
+      ['first create with a token', false, true],
+      ['re-up without a token', true, false],
+      ['killed re-up with a token', false, false],
+    ]);
   });
 
   it('records a preset-only Kubernetes registration token the chart deploys', async () => {
@@ -399,9 +417,9 @@ describe('a Kubernetes create', () => {
       await fs.rm(presetFile, { force: true });
     }
     expect(observed).toEqual([
-      ['kpreset-token', 'PRESET-TOKEN-SENTINEL', true, true],
+      ['kpreset-token', 'PRESET-TOKEN-SENTINEL', false, true],
       ['kpreset-blank', '', false, false],
-      ['kpreset-dedicated', 'DEDICATED', true, true],
+      ['kpreset-dedicated', 'DEDICATED', false, true],
     ]);
   });
 

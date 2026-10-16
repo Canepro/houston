@@ -348,6 +348,7 @@ describe('the create path end to end, stopped at the write seam', () => {
       presetEnv = {},
       rocketchat = {},
       files = {},
+      presetFiles = [],
       instances = 1,
     }: {
       name: string;
@@ -356,6 +357,7 @@ describe('the create path end to end, stopped at the write seam', () => {
       presetEnv?: Record<string, string>;
       rocketchat?: Record<string, unknown>;
       files?: Record<string, string>;
+      presetFiles?: [string, string][];
       instances?: number;
     }) => {
       const runnerPaths = require('../../../src/core/runner/paths') as typeof PathsNS;
@@ -376,6 +378,7 @@ describe('the create path end to end, stopped at the write seam', () => {
           ...preset,
           env: { ...preset.env, ...presetEnv },
           rocketchat: { ...preset.rocketchat, ...rocketchat },
+          files: [...preset.files, ...presetFiles],
         },
         hostPort: 3000,
         root: 'http://localhost:3000',
@@ -404,6 +407,7 @@ describe('the create path end to end, stopped at the write seam', () => {
       presetEnv?: Record<string, string>;
       rocketchat?: Record<string, unknown>;
       files?: Record<string, string>;
+      presetFiles?: [string, string][];
       supplied: boolean;
       instances: number;
     }> = [
@@ -460,6 +464,14 @@ describe('the create path end to end, stopped at the write seam', () => {
         instances: 2,
       },
       {
+        // A first create: the preset generates the file, and nothing is on disk yet.
+        name: 'token-preset-env-file',
+        rocketchat: { env_file: ['token.env'] },
+        presetFiles: [['token.env', 'REG_TOKEN=generated-token\n']],
+        supplied: true,
+        instances: 2,
+      },
+      {
         name: 'token-env-file-blank',
         rocketchat: { env_file: ['token.env'] },
         files: { 'token.env': 'REG_TOKEN=\n' },
@@ -477,7 +489,7 @@ describe('the create path end to end, stopped at the write seam', () => {
           entry.startsWith('REG_TOKEN=') ? `REG_TOKEN=${entry.slice(10).trim()}` : entry,
         );
         expect(environments).toEqual(Array(example.instances).fill(normalized));
-      } else if (example.files !== undefined) {
+      } else if (example.files !== undefined || example.presetFiles !== undefined) {
         expect(envFiles).toEqual(Array(example.instances).fill(example.rocketchat?.env_file));
       } else {
         expect(

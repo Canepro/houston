@@ -952,10 +952,13 @@ export async function buildDocument(plan: CreatePlan): Promise<void> {
   // patches apply after the base environment, so an earlier token or licence is not enough.
   const projectDirectory = paths.workspace(plan.reproName);
   const rcNames = compose.rcServiceNames((plan.pre as Preset).instances);
+  // The preset's own files are written with the workspace, after this; an env file it
+  // generates is read from the preset, not from a disk that does not have it yet.
   const { fileLicenses, fileTokens } = await compose.readEnvFileStates(
     plan.doc,
     rcNames,
     projectDirectory,
+    (plan.pre as Preset).files,
   );
   // Presence only, by the rule the warnings below use, so the record and the warnings agree.
   plan.regTokenSupplied = compose.suppliesRegToken(plan.doc, rcNames, projectDirectory, fileTokens);

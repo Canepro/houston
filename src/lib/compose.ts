@@ -321,12 +321,18 @@ export interface EnvFileStates {
 /**
  * Read every env_file the named services reference, presence only. An unreadable or
  * unresolvable file supplies nothing; a missing optional file leaves earlier state unchanged.
+ * `pending` holds files a create is about to write, as [relative path, content]; they replace
+ * whatever is on disk, so they are read instead of it.
  */
 export async function readEnvFileStates(
   doc: ComposeDoc,
   names: readonly string[],
   projectDirectory: string,
+  pending: readonly (readonly [string, string])[] = [],
 ): Promise<EnvFileStates> {
+  const generated = new Map(
+    pending.map(([relative, content]) => [path.resolve(projectDirectory, relative), content]),
+  );
   const fileLicenses = new Map<string, boolean | null>();
   const fileTokens = new Map<string, boolean | null>();
   for (const name of names) {
@@ -339,7 +345,8 @@ export async function readEnvFileStates(
         continue;
       }
       try {
-        const found = credentialsInEnvFile(await fs.readFile(file.path, 'utf8'), file.raw);
+        const text = generated.get(file.path) ?? (await fs.readFile(file.path, 'utf8'));
+        const found = credentialsInEnvFile(text, file.raw);
         fileLicenses.set(key, found.license);
         fileTokens.set(key, found.token);
       } catch (error) {
