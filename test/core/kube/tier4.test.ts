@@ -65,6 +65,8 @@ import {
 } from '../../../src/core/kube/monitoring';
 import { CONTEXT, OWNER_LABEL_KEY, OWNER_OF_LABEL, tuning } from '../../../src/core/kube/names';
 import {
+  LICENSE_KEY,
+  LICENSE_SECRET,
   MONGO_APP_DB,
   MONGO_APP_USER,
   MONGO_DB_SERVICE_ACCOUNT,
@@ -826,15 +828,56 @@ describe('the chart', () => {
     expect('ADMIN_EMAIL' in got).toBe(false);
   });
 
-  it('references the licence Secret, never the licence', () => {
-    const env = chartEnv('pw', '', {}, '', '', {}, true);
-    expect(env.find((entry) => entry.name === 'ROCKETCHAT_LICENSE')).toEqual({
-      name: 'ROCKETCHAT_LICENSE',
-      valueFrom: { secretKeyRef: { name: 'houston-license', key: 'license' } },
-    });
-    expect(
-      chartEnv('pw', '', {}, '', '').some((entry) => entry.name === 'ROCKETCHAT_LICENSE'),
-    ).toBe(false);
+  it('keeps one final licence entry, with the dedicated Secret winning', () => {
+    const cases: { literal: string; licensed: boolean; expected: ChartEnvEntry[] }[] = [
+      {
+        literal: 'synthetic-preset-license',
+        licensed: false,
+        expected: [{ name: 'ROCKETCHAT_LICENSE', value: 'synthetic-preset-license' }],
+      },
+      {
+        literal: ' \t ',
+        licensed: false,
+        expected: [{ name: 'ROCKETCHAT_LICENSE', value: ' \t ' }],
+      },
+      {
+        literal: '',
+        licensed: true,
+        expected: [
+          {
+            name: 'ROCKETCHAT_LICENSE',
+            valueFrom: { secretKeyRef: { name: LICENSE_SECRET, key: LICENSE_KEY } },
+          },
+        ],
+      },
+      {
+        literal: 'synthetic-preset-license',
+        licensed: true,
+        expected: [
+          {
+            name: 'ROCKETCHAT_LICENSE',
+            valueFrom: { secretKeyRef: { name: LICENSE_SECRET, key: LICENSE_KEY } },
+          },
+        ],
+      },
+    ];
+    for (const { literal, licensed, expected } of cases) {
+      const presetEnv = {
+        ROCKETCHAT_LICENSE: literal,
+        UNRELATED: '  retain padding  ',
+      };
+      const env = valuesFor({
+        rcVersion: '8.5.1',
+        rcImage: 'rc',
+        microservices: false,
+        presetEnv,
+        licensed,
+      }).extraEnv as ChartEnvEntry[];
+      expect(env.filter((entry) => entry.name === 'ROCKETCHAT_LICENSE')).toEqual(expected);
+      expect(env.map(names).length).toBe(new Set(env.map(names)).size);
+      expect(env.find((entry) => entry.name === 'UNRELATED')?.value).toBe('  retain padding  ');
+      expect(presetEnv.ROCKETCHAT_LICENSE).toBe(literal);
+    }
   });
 
   it('pulls a CI build every time, with its microservices from ghcr', () => {
@@ -867,11 +910,14 @@ describe('the chart', () => {
     expect((release.image as { pullPolicy: string }).pullPolicy).toBe('IfNotPresent');
   });
 
-  it('refuses an override of a variable the chart writes itself, naming what to use', () => {
+  it('refuses chart-owned and dedicated-contract overrides, naming what to use', () => {
     expect(() => refuseChartOwnedEnv({ ROOT_URL: 'http://x' })).toThrow(/use --root-url/u);
     expect(() => refuseChartOwnedEnv({ DEPLOY_METHOD: 'x' })).toThrow(ValidationError);
     expect(() => refuseChartOwnedEnv({ OVERWRITE_SETTING_Prometheus_Enabled: 'false' })).toThrow(
       /server-side-apply conflict/u,
+    );
+    expect(() => refuseChartOwnedEnv({ ROCKETCHAT_LICENSE: 'synthetic-license' })).toThrow(
+      /use --license/u,
     );
     expect(() =>
       refuseChartOwnedEnv({ ADMIN_PASS: 'x', OVERWRITE_SETTING_Site_Name: 'y' }),

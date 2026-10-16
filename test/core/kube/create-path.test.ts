@@ -450,6 +450,52 @@ describe('a Kubernetes create', () => {
     }
   });
 
+  it('uses Kubernetes final licence sources for both create-time warnings', async () => {
+    config.updateConfig((cfg) => {
+      delete cfg.reg_token;
+    });
+    await fs.mkdir(config.presetDir(), { recursive: true });
+    const presetPath = path.join(config.presetDir(), 'ldap.yaml');
+    try {
+      for (const [index, literal, license, warned] of [
+        [0, 'synthetic-preset-license', '', false],
+        [1, ' \t ', '', true],
+        [2, '', 'synthetic-file-license', false],
+        [3, 'synthetic-preset-license', 'synthetic-file-license', false],
+      ] as const) {
+        await fs.writeFile(
+          presetPath,
+          [
+            'name: ldap',
+            'requires_license: true',
+            'env:',
+            `  ROCKETCHAT_LICENSE: ${JSON.stringify(literal)}`,
+            '',
+          ].join('\n'),
+        );
+        const events: Event[] = [];
+        await createKubernetes(
+          createReq({
+            version: '9.0.0',
+            name: `licence-source-${String(index)}`,
+            preset: 'ldap',
+            runtime: 'kubernetes',
+            deployment: 'microservices',
+            offline: true,
+            license,
+          }),
+          (event) => events.push(event),
+        );
+        expect(events.some((event) => event.code === 'LICENSE_ABSENT_EE_PRESET')).toBe(warned);
+        expect(events.some((event) => event.message.includes('Premium plan for LDAP login'))).toBe(
+          warned,
+        );
+      }
+    } finally {
+      await fs.rm(presetPath, { force: true });
+    }
+  });
+
   it('does not call LDAP an Enterprise feature on a monolith', async () => {
     // The Kubernetes LDAP adapter's `requiresLicense` is a marker of the microservices
     // topology, not of LDAP; a monolith with LDAP and no licence gets no licence warning.

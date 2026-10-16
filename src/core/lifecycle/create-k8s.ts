@@ -36,7 +36,7 @@ import {
   applyMongoOverride,
   resolve,
 } from '../../lib/versions';
-import { hasEffectiveRegToken, refuseChartOwnedEnv } from '../kube/chart';
+import { hasEffectiveLicense, hasEffectiveRegToken, refuseChartOwnedEnv } from '../kube/chart';
 import * as ownership from './ownership';
 import { refuseEnforcedBefore880 } from '../../lib/presets/e2ee';
 import { endpointString } from '../kube/endpoints';
@@ -466,17 +466,24 @@ export function settleAddressing(job: KubeCreate): void {
   )
     ? 'present'
     : '';
+  // `job.licensed` remains the dedicated request/record and Secret-lifecycle state. Warning
+  // presence follows the final chart environment, where a user preset can also supply a licence.
+  const effectiveLicense = hasEffectiveLicense(
+    (job.presetForNotes as Preset).env,
+    job.licensed,
+    job.envOverrides,
+  );
   const premium = request.premiumAuthWarning(
     names,
     job.resolved?.rcVersion ?? '',
-    job.licensed,
+    effectiveLicense,
     effectiveToken,
   );
   if (premium !== '') warn(job.emit, premium, { phase: 'plan' });
   const unlicensed = request.licenceAbsentWarning(
     request.presetLicensing(names),
     job.microservices,
-    job.licensed,
+    effectiveLicense,
     effectiveToken,
   );
   if (unlicensed !== '') {
