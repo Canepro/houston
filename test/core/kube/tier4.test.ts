@@ -64,6 +64,8 @@ import {
 } from '../../../src/core/kube/monitoring';
 import { CONTEXT, OWNER_LABEL_KEY, OWNER_OF_LABEL, tuning } from '../../../src/core/kube/names';
 import {
+  LICENSE_KEY,
+  LICENSE_SECRET,
   MONGO_APP_DB,
   MONGO_APP_USER,
   MONGO_DB_SERVICE_ACCOUNT,
@@ -722,6 +724,53 @@ describe('the chart', () => {
     expect(entry?.value).toBeUndefined();
   });
 
+  it('omits unbacked registration literals and preserves prepared Secret references', () => {
+    const cases: {
+      preset: string;
+      overrides?: Record<string, string | null>;
+      secret?: string;
+      expected: ChartEnvEntry[];
+    }[] = [
+      { preset: '  preset-fixture  ', expected: [] },
+      { preset: ' \t\n ', expected: [] },
+      { preset: '', expected: [] },
+      {
+        preset: '  preset-fixture  ',
+        overrides: { REG_TOKEN: '  override-fixture  ' },
+        expected: [],
+      },
+      { preset: 'preset-fixture', overrides: { REG_TOKEN: ' \t ' }, expected: [] },
+      { preset: 'preset-fixture', overrides: { REG_TOKEN: null }, expected: [] },
+      {
+        preset: '  preset-fixture  ',
+        secret: REG_TOKEN_SECRET,
+        expected: [
+          {
+            name: 'REG_TOKEN',
+            valueFrom: {
+              secretKeyRef: { name: REG_TOKEN_SECRET, key: REG_TOKEN_KEY },
+            },
+          },
+        ],
+      },
+    ];
+    for (const { preset, overrides = {}, secret = '', expected } of cases) {
+      const presetEnv = { REG_TOKEN: preset, UNRELATED: '  retain padding  ' };
+      const values = valuesFor({
+        rcVersion: '8.5.1',
+        rcImage: 'rc',
+        microservices: false,
+        presetEnv,
+        envOverrides: overrides,
+        regTokenSecret: secret,
+      });
+      const env = values.extraEnv as ChartEnvEntry[];
+      expect(env.filter((entry) => entry.name === 'REG_TOKEN')).toEqual(expected);
+      expect(env.find((entry) => entry.name === 'UNRELATED')?.value).toBe('  retain padding  ');
+      expect(presetEnv.REG_TOKEN).toBe(preset);
+    }
+  });
+
   it('turns NATS off for a monolith, because nothing would talk to it', () => {
     // The chart defaults it on independently of microservices, so `--deployment monolith` ran
     // a 3-pod NATS cluster that nothing used.
@@ -775,15 +824,56 @@ describe('the chart', () => {
     expect('ADMIN_EMAIL' in got).toBe(false);
   });
 
-  it('references the licence Secret, never the licence', () => {
-    const env = chartEnv('pw', '', {}, '', '', {}, true);
-    expect(env.find((entry) => entry.name === 'ROCKETCHAT_LICENSE')).toEqual({
-      name: 'ROCKETCHAT_LICENSE',
-      valueFrom: { secretKeyRef: { name: 'houston-license', key: 'license' } },
-    });
-    expect(
-      chartEnv('pw', '', {}, '', '').some((entry) => entry.name === 'ROCKETCHAT_LICENSE'),
-    ).toBe(false);
+  it('keeps one final licence entry, with the dedicated Secret winning', () => {
+    const cases: { literal: string; licensed: boolean; expected: ChartEnvEntry[] }[] = [
+      {
+        literal: 'synthetic-preset-license',
+        licensed: false,
+        expected: [],
+      },
+      {
+        literal: ' \t ',
+        licensed: false,
+        expected: [],
+      },
+      {
+        literal: '',
+        licensed: true,
+        expected: [
+          {
+            name: 'ROCKETCHAT_LICENSE',
+            valueFrom: { secretKeyRef: { name: LICENSE_SECRET, key: LICENSE_KEY } },
+          },
+        ],
+      },
+      {
+        literal: 'synthetic-preset-license',
+        licensed: true,
+        expected: [
+          {
+            name: 'ROCKETCHAT_LICENSE',
+            valueFrom: { secretKeyRef: { name: LICENSE_SECRET, key: LICENSE_KEY } },
+          },
+        ],
+      },
+    ];
+    for (const { literal, licensed, expected } of cases) {
+      const presetEnv = {
+        ROCKETCHAT_LICENSE: literal,
+        UNRELATED: '  retain padding  ',
+      };
+      const env = valuesFor({
+        rcVersion: '8.5.1',
+        rcImage: 'rc',
+        microservices: false,
+        presetEnv,
+        licensed,
+      }).extraEnv as ChartEnvEntry[];
+      expect(env.filter((entry) => entry.name === 'ROCKETCHAT_LICENSE')).toEqual(expected);
+      expect(env.map(names).length).toBe(new Set(env.map(names)).size);
+      expect(env.find((entry) => entry.name === 'UNRELATED')?.value).toBe('  retain padding  ');
+      expect(presetEnv.ROCKETCHAT_LICENSE).toBe(literal);
+    }
   });
 
   it('pulls a CI build every time, with its microservices from ghcr', () => {
@@ -816,11 +906,14 @@ describe('the chart', () => {
     expect((release.image as { pullPolicy: string }).pullPolicy).toBe('IfNotPresent');
   });
 
-  it('refuses an override of a variable the chart writes itself, naming what to use', () => {
+  it('refuses chart-owned and dedicated-contract overrides, naming what to use', () => {
     expect(() => refuseChartOwnedEnv({ ROOT_URL: 'http://x' })).toThrow(/use --root-url/u);
     expect(() => refuseChartOwnedEnv({ DEPLOY_METHOD: 'x' })).toThrow(ValidationError);
     expect(() => refuseChartOwnedEnv({ OVERWRITE_SETTING_Prometheus_Enabled: 'false' })).toThrow(
       /server-side-apply conflict/u,
+    );
+    expect(() => refuseChartOwnedEnv({ ROCKETCHAT_LICENSE: 'synthetic-license' })).toThrow(
+      /use --license/u,
     );
     expect(() =>
       refuseChartOwnedEnv({ ADMIN_PASS: 'x', OVERWRITE_SETTING_Site_Name: 'y' }),

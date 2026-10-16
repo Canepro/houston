@@ -5,6 +5,8 @@ import * as path from 'node:path';
 import type * as ErrorsNS from '../../src/lib/errors';
 import type * as PolicyNS from '../testsetup-policy';
 import type * as KubeOperatorNS from '../../src/core/kube/operator';
+import type * as EnvvarsNS from '../../src/core/envvars';
+import type * as PathsNS from '../../src/core/runner/paths';
 import type * as RecordNS from '../../src/core/runner/record';
 import type * as UpgradeNS from '../../src/core/upgrade';
 
@@ -634,7 +636,16 @@ describe('running an upgrade', () => {
   it('rolls back the compose document and the record when `up` fails', async () => {
     prepareWorkspace();
     const mine = await runTypescript(true);
-    expect(mine.order).toEqual(['backup', 'stopServices', 'write', 'up', 'write', 'up', 'restore']);
+    expect(mine.order).toEqual([
+      'backup',
+      'stopServices',
+      'write',
+      'up',
+      'write',
+      'up',
+      'up',
+      'restore',
+    ]);
     expect(mine.meta).toEqual({
       rc_version: '8.5.1',
       rc_image: 'registry.rocket.chat/rocketchat/rocket.chat',
@@ -658,7 +669,16 @@ describe('running an upgrade', () => {
     expect(mine.result).toBeNull();
     expect(String(mine.error)).toContain('restore broke');
     expect(String(mine.error)).toContain('indeterminate state');
-    expect(mine.order).toEqual(['backup', 'stopServices', 'write', 'up', 'write', 'up', 'restore']);
+    expect(mine.order).toEqual([
+      'backup',
+      'stopServices',
+      'write',
+      'up',
+      'write',
+      'up',
+      'up',
+      'restore',
+    ]);
     expect(mine.error).toBe(
       'DockerError: upgrade to 8.6.1 failed (`docker compose up` failed applying the new ' +
         "image) AND the rollback failed (restore broke). 'w' is now in an indeterminate " +
@@ -699,6 +719,368 @@ describe('running an upgrade', () => {
       extra: { upgraded_from: '8.5.1' },
     });
     expect(mine.recordedExtra).toEqual({ upgraded_from: '8.5.1' });
+  });
+});
+
+describe('what an upgrade or a rollback leaves the record saying', () => {
+  // A `doMock` outlives `resetModules`. These are the real modules here, whatever an earlier
+  // case stubbed, and the stubs below are this block's alone.
+  const REAL = [
+    'runner/record',
+    'kube/chart',
+    'kube/exec',
+    'kube/manifests',
+    'kube/names',
+    'kube/namespace',
+    'kube/release',
+    'kube/status',
+    'kube/tools',
+  ].map((module) => `../../src/core/${module}`);
+  const STUBBED = [
+    'runner/paths',
+    'lifecycle/naming',
+    'lifecycle/preconditions',
+    'lifecycle/ownership',
+    'lifecycle/admin',
+    'runner/queries',
+    'topology',
+    'backup',
+    'runner/engine',
+    'lifecycle/ready',
+    'rcapi',
+  ].map((module) => `../../src/core/${module}`);
+  afterEach(() => {
+    for (const module of STUBBED) jest.dontMock(module);
+    jest.dontMock('../../src/seams/docker-cli');
+    jest.resetModules();
+  });
+
+  const IMAGE = 'registry.rocket.chat/rocketchat/rocket.chat';
+  const composeAt = (tag: string, services = ['rocketchat-1', 'rocketchat-2']) =>
+    [
+      'services:',
+      ...services.flatMap((service) => [
+        `  ${service}:`,
+        `    image: ${IMAGE}:${tag}`,
+        '    environment:',
+        "      PORT: '3000'",
+      ]),
+      '  mongodb:',
+      '    image: mongo:8.0',
+      '',
+    ].join('\n');
+
+  /**
+   * Real records and Compose files on disk, the real `env`, `upgrade`, `rollback` and
+   * `recreateRocketChat`. Only what reaches an engine, a backup or Rocket.Chat is stubbed.
+   * `ups` answers each `engine.up` in turn; `failCompose` makes the next Compose write fail.
+   */
+  function lifecycle(ups: number[] = [], projectUps: number[] = [], stopped = false) {
+    jest.resetModules();
+    for (const module of REAL) jest.dontMock(module);
+    jest.dontMock('../../src/lib/versions');
+    const state = {
+      failCompose: false,
+      recreated: [] as unknown[],
+      warnings: [] as string[],
+      argv: [] as string[][],
+      manifests: 0,
+      restores: 0,
+      restoreArgv: [] as string[][],
+    };
+    const bundle = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'houston-pre-')), 'pre.rcbak');
+    fs.writeFileSync(bundle, '');
+    jest.doMock('../../src/core/runner/paths', () => {
+      const actual = jest.requireActual<typeof PathsNS>('../../src/core/runner/paths');
+      return {
+        ...actual,
+        atomicWrite: async (...args: Parameters<typeof actual.atomicWrite>) => {
+          if (state.failCompose && path.basename(args[0]) === 'docker-compose.yml') {
+            state.failCompose = false;
+            throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+          }
+          return await actual.atomicWrite(...args);
+        },
+      };
+    });
+    jest.doMock('../../src/core/lifecycle/naming', () => ({ resolveName: async (n: string) => n }));
+    jest.doMock('../../src/core/lifecycle/preconditions', () => ({
+      ...jest.requireActual('../../src/core/lifecycle/preconditions'),
+      requireEngine: async () => undefined,
+    }));
+    jest.doMock('../../src/core/lifecycle/ownership', () => ({
+      ...jest.requireActual('../../src/core/lifecycle/ownership'),
+      mayDestroy: async () => [true, ''],
+    }));
+    jest.doMock('../../src/core/lifecycle/admin', () => ({
+      ...jest.requireActual('../../src/core/lifecycle/admin'),
+      login: async () => {
+        throw new Error('not serving');
+      },
+    }));
+    jest.doMock('../../src/core/runner/queries', () => ({
+      ...jest.requireActual('../../src/core/runner/queries'),
+      rcState: async () => (stopped ? 'stopped' : 'running'),
+      containerDetails: async () => [],
+      runningWriterServices: async () => [],
+    }));
+    jest.doMock('../../src/core/topology', () => ({
+      ...jest.requireActual('../../src/core/topology'),
+      ofRepro: async () => 'docker',
+    }));
+    jest.doMock('../../src/core/backup', () => ({
+      ...jest.requireActual('../../src/core/backup'),
+      createLocked: async () => ({ path: bundle }),
+      restoreLocked: async () => {
+        state.restores++;
+        state.restoreArgv = state.argv.map((args) => [...args]);
+        return { restored: true };
+      },
+      readManifest: async () => {
+        state.manifests++;
+        return { rc_version: '8.5.1', rc_image: IMAGE };
+      },
+    }));
+    jest.doMock('../../src/core/runner/engine', () => ({
+      ...jest.requireActual('../../src/core/runner/engine'),
+      stopServices: async () => 0,
+      startServices: async () => 0,
+      composeLogsCapture: async () => '',
+    }));
+    // Keep engine.up real: these are the actual Compose argv, not a parallel model of it.
+    jest.doMock('../../src/seams/docker-cli', () => ({
+      ...jest.requireActual('../../src/seams/docker-cli'),
+      compose: async (args: readonly string[]) => {
+        state.argv.push([...args]);
+        let exitCode = 0;
+        if (args[0] === 'up') {
+          if (args.includes('--force-recreate')) {
+            state.recreated.push(args.slice(args.indexOf('--no-deps') + 1));
+            exitCode = ups.shift() ?? 0;
+          } else {
+            exitCode = projectUps.shift() ?? 0;
+          }
+        }
+        return { argv: [...args], exitCode, signal: null, stdout: '', stderr: '' };
+      },
+      invalidateQueries: () => undefined,
+    }));
+    jest.doMock('../../src/core/lifecycle/ready', () => ({
+      ...jest.requireActual('../../src/core/lifecycle/ready'),
+      waitAndFinalize: async () => ({}),
+      waitServing: async () => ({}),
+    }));
+    jest.doMock('../../src/core/rcapi', () => ({
+      ...jest.requireActual('../../src/core/rcapi'),
+      apiInfo: async () => ({ version: '8.6.1' }),
+    }));
+    const record = require('../../src/core/runner/record') as typeof RecordNS;
+    const upgrade = require('../../src/core/upgrade') as typeof UpgradeNS;
+    const envvars = require('../../src/core/envvars') as typeof EnvvarsNS;
+    const paths = require('../../src/core/runner/paths') as typeof PathsNS;
+    const emit = ((event: { level: string; message: string }) => {
+      if (event.level === 'warn') state.warnings.push(event.message);
+    }) as never;
+    const create = async (
+      name: string,
+      extra: Record<string, unknown> = {},
+      services = ['rocketchat-1', 'rocketchat-2'],
+    ) =>
+      await record.write(
+        name,
+        composeAt('8.5.1', services),
+        record.metadata({
+          name,
+          project: `houston-${name}`,
+          rcVersion: '8.5.1',
+          rcImage: IMAGE,
+          mongoTag: '8.0',
+          mongoFlavor: 'official',
+          preset: 'default',
+          rootUrl: 'http://localhost:3000',
+          hostPort: 3000,
+          versionSource: 'map',
+          extra: { reg_token_supplied: false, instances: 2, ...extra },
+        }),
+      );
+    const upgradeTo = async (name: string, force = false) =>
+      await upgrade.runLocked(name, '8.6.1', {
+        offline: true,
+        force,
+        noBackup: false,
+        rollbackOnFailure: true,
+        emit,
+      });
+    const facts = async (name: string) => {
+      const meta = await record.readMeta(name);
+      const file = fs.readFileSync(path.join(paths.workspace(name), 'docker-compose.yml'), 'utf8');
+      return {
+        version: meta.rcVersion,
+        file: [...new Set(file.match(/rocket\.chat:[0-9.]+/gu))],
+        unfinished: meta.extra.incomplete === true,
+        pending: meta.extra.credentials_pending === true,
+      };
+    };
+    return { state, record, upgrade, envvars, create, upgradeTo, facts, emit, bundle };
+  }
+
+  it.each(['automatic', 'explicit'] as const)(
+    '%s rollback starts the project and recreates all replicas before entering restore',
+    async (kind) => {
+      for (const scenario of ['recreate-fails', 'project-fails', 'single', 'multi'] as const) {
+        const services = scenario === 'single' ? ['rocketchat'] : ['rocketchat-1', 'rocketchat-2'];
+        const projectFails = scenario === 'project-fails';
+        const recreateFails = scenario === 'recreate-fails';
+        const run = lifecycle([recreateFails ? 37 : 0], [projectFails ? 38 : 0], true);
+        await run.create('rollback-stopped', { credentials_pending: true }, services);
+        const previousCompose = composeAt('8.5.1', services);
+        const action =
+          kind === 'automatic'
+            ? run.upgrade.rollbackCompose(
+                'rollback-stopped',
+                previousCompose,
+                { rcVersion: '8.5.1', rcImage: IMAGE },
+                '/unused.rcbak',
+                run.emit,
+              )
+            : run.upgrade.rollback('rollback-stopped', { bundle: run.bundle, emit: run.emit });
+        if (projectFails || recreateFails) {
+          const error: unknown = await action.catch((failure: unknown) => failure);
+          expect(run.state.restores).toBe(0);
+          // Explicit rollback reads the supplied bundle to select its previous version first.
+          expect(run.state.manifests).toBe(kind === 'explicit' ? 1 : 0);
+          expect(error).toEqual(
+            expect.objectContaining({
+              message: expect.stringContaining(
+                projectFails
+                  ? 'failed starting the project for rollback'
+                  : 'failed rolling back the image',
+              ),
+            }),
+          );
+          expect((await run.facts('rollback-stopped')).pending).toBe(true);
+        } else {
+          await action;
+          expect(run.state.restores).toBe(1);
+          expect(run.state.restoreArgv).toEqual([
+            ['pull'],
+            ['up', '-d', '--remove-orphans'],
+            ['up', '-d', '--remove-orphans', '--force-recreate', '--no-deps', ...services],
+          ]);
+          expect(run.state.manifests).toBe(1);
+          expect((await run.facts('rollback-stopped')).pending).toBe(false);
+        }
+        expect(run.state.argv).toEqual([
+          ['pull'],
+          ['up', '-d', '--remove-orphans'],
+          ...(projectFails
+            ? []
+            : [['up', '-d', '--remove-orphans', '--force-recreate', '--no-deps', ...services]]),
+        ]);
+      }
+    },
+  );
+
+  it('deploys a deferred credential change only when every replica is recreated', async () => {
+    const both = ['rocketchat-1', 'rocketchat-2'];
+    const cases: Array<[string, number[]]> = [
+      ['the upgrade recreates every replica', [0]],
+      ['its rollback recreates them after the upgrade fails', [1, 0]],
+      ['neither recreate succeeds', [1, 1]],
+    ];
+    const observed: unknown[] = [];
+    for (const [label, ups] of cases) {
+      const run = lifecycle(ups);
+      await run.create('c');
+      await run.envvars.setEnvLocked('c', { REG_TOKEN: 'token' }, [], { restart: false });
+      expect((await run.facts('c')).pending).toBe(true);
+      const result = run.upgradeTo('c');
+      if (label === 'neither recreate succeeds') {
+        await expect(result).rejects.toThrow('AND the rollback failed');
+        expect(run.state.restores).toBe(0);
+        expect(run.state.manifests).toBe(0);
+      } else {
+        await result.catch(() => undefined);
+      }
+      observed.push([label, run.state.recreated, (await run.facts('c')).pending]);
+    }
+    expect(observed).toEqual([
+      [cases[0]?.[0], [both], false],
+      [cases[1]?.[0], [both, both], false],
+      [cases[2]?.[0], [both, both], true],
+    ]);
+  });
+
+  it('finishes an interrupted upgrade on the rollback that undoes it, and nothing else', async () => {
+    const unfinishedWarning = (name: string) =>
+      expect.stringContaining(`\`houston up --name ${name} --version 8.5.1 --force\``);
+
+    // The upgrade's record lands and its Compose file does not; `rollback` puts the image back
+    // in both, so the record describes the file again.
+    let run = lifecycle();
+    await run.create('d');
+    run.state.failCompose = true;
+    await expect(run.upgradeTo('d')).rejects.toMatchObject({ code: 'ENOSPC' });
+    expect(await run.facts('d')).toEqual({
+      version: '8.6.1',
+      file: ['rocket.chat:8.5.1'],
+      unfinished: true,
+      pending: false,
+    });
+    await run.upgrade.rollback('d', { emit: run.emit });
+    expect(await run.facts('d')).toEqual({
+      version: '8.5.1',
+      file: ['rocket.chat:8.5.1'],
+      unfinished: false,
+      pending: false,
+    });
+    expect(run.state.warnings).toEqual([]);
+
+    // An edit of the surviving file between the two is not the upgrade the record names, so
+    // the rollback cannot show the record matches it. It stays unfinished, and says how out.
+    run = lifecycle();
+    await run.create('d-edited');
+    run.state.failCompose = true;
+    await expect(run.upgradeTo('d-edited')).rejects.toMatchObject({ code: 'ENOSPC' });
+    await run.envvars.setEnvLocked('d-edited', { SOME_FLAG: '1' }, [], { restart: false });
+    await run.upgrade.rollback('d-edited', { emit: run.emit });
+    expect(await run.facts('d-edited')).toMatchObject({ version: '8.5.1', unfinished: true });
+    expect(run.state.warnings).toEqual([unfinishedWarning('d-edited')]);
+
+    // A rollback whose recreate fails still put the record and file back together, and does
+    // not call a deferred credential deployed.
+    run = lifecycle([1]);
+    await run.create('d-failed');
+    await run.envvars.setEnvLocked('d-failed', { REG_TOKEN: 'token' }, [], { restart: false });
+    run.state.failCompose = true;
+    await expect(run.upgradeTo('d-failed')).rejects.toMatchObject({ code: 'ENOSPC' });
+    await expect(run.upgrade.rollback('d-failed', { emit: run.emit })).rejects.toThrow(
+      'failed rolling back the image',
+    );
+    expect(await run.facts('d-failed')).toEqual({
+      version: '8.5.1',
+      file: ['rocket.chat:8.5.1'],
+      unfinished: false,
+      pending: true,
+    });
+
+    // `upgrade --force` to the recorded release writes the interrupted replacement and
+    // finishes the record. When it fails to boot, its rollback puts the old file back, and
+    // the record it restores is unfinished again rather than claiming that file.
+    run = lifecycle([1, 0]);
+    await run.create('d-forced');
+    run.state.failCompose = true;
+    await expect(run.upgradeTo('d-forced')).rejects.toMatchObject({ code: 'ENOSPC' });
+    await expect(run.upgradeTo('d-forced', true)).rejects.toThrow('was rolled back');
+    expect(await run.facts('d-forced')).toEqual({
+      version: '8.6.1',
+      file: ['rocket.chat:8.5.1'],
+      unfinished: true,
+      pending: false,
+    });
+    expect(run.state.warnings).toContainEqual(
+      expect.stringContaining('`houston up --name d-forced --version 8.6.1 --force`'),
+    );
   });
 });
 

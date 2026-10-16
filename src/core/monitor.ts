@@ -10,7 +10,7 @@
  * in `core/kube/monitoring.ts` and this module is the caller that supplies the workspace's
  * namespace.
  */
-import { forEngine, toYaml, type ComposeDoc } from '../lib/compose';
+import { forEngine, toYaml, topLevelPositions, type ComposeDoc } from '../lib/compose';
 import * as config from '../lib/config';
 import { DockerError, NotReadyError, ValidationError, errorText } from '../lib/errors';
 import { type Emit, info, nullEmit, warn } from '../lib/events';
@@ -125,7 +125,8 @@ async function updateDockerRoute(m: Metadata, grafana: boolean): Promise<void> {
 }
 
 /**
- * Host bind interface from an existing published port (ip:host:container).
+ * Host bind interface from an existing published port: long-syntax `host_ip` or
+ * short-syntax `ip:host:container`.
  *
  * A service that is not a mapping is refused where the loop reaches it: one after a
  * three-part port is never read, as it never has been.
@@ -136,8 +137,17 @@ export function detectBind(doc: Bag, name = ''): string {
   )) {
     const ports = mapping(svc, `service ${quotedText(service)}`, name).ports;
     for (const p of Array.isArray(ports) ? ports : []) {
-      const parts = String(p).split(':');
-      if (parts.length === 3) return parts[0] as string;
+      if (isMapping(p) && typeof p.host_ip === 'string' && p.host_ip !== '') {
+        return p.host_ip;
+      }
+      // The two rightmost fields are the ports; the address is whatever stands before
+      // them, bracketed or not. `bindPorts` brackets IPv6, so an interpolated port field
+      // cannot become part of the selected address before Compose expands it.
+      const text = String(p);
+      const colons = topLevelPositions(text, ':');
+      if (colons.length < 2) continue;
+      const address = text.slice(0, colons[colons.length - 2] ?? 0).replace(/^\[|\]$/gu, '');
+      if (address !== '') return address;
     }
   }
   return config.DEFAULT_BIND_HOST;

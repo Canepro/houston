@@ -1,6 +1,6 @@
 import { defineCommand } from './spec-types';
 
-/** The frozen command surface; root invocation is separate. */
+/** The frozen command surface; its invariant counts routable paths, and root invocation is separate. */
 export const COMMAND_SPECS = [
   defineCommand({
     id: 'up',
@@ -729,6 +729,59 @@ export const COMMAND_SPECS = [
       option: {
         index: 1,
         description: 'print the result as one JSON envelope on stdout; prose moves to stderr',
+      },
+    },
+  }),
+  defineCommand({
+    id: 'evidence',
+    path: 'evidence',
+    description:
+      'Emit a record of what was deployed and how it is behaving.\n\nThe record reduces the root URL to its origin and omits the stored login and environment\nvalues. `info --json` is not that: it carries the admin login.\n\n\b\n    houston evidence --name TICKET-1234 --json\n    houston evidence --name TICKET-1234 --bundle ./TICKET-1234-evidence\n\b\nA bundle writes a manifest, README, and, when available, a redacted deployment file. It masks\nthe workspace admin password, credential-named fields, and URL userinfo. Houston cannot infer\nunknown credentials in arbitrary custom YAML values. Raw logs stay in the workspace because\nthey can contain credentials.',
+    arguments: [],
+    options: [
+      {
+        key: 'name',
+        long: '--name',
+        short: '-n',
+        value: 'string',
+        required: false,
+        repeatable: false,
+        defaultValue: '',
+        description: '',
+        hidden: false,
+        negatablePair: false,
+      },
+      {
+        key: 'bundle',
+        long: '--bundle',
+        value: 'string',
+        required: false,
+        repeatable: false,
+        defaultValue: '',
+        description:
+          'also write a manifest, README, and any available redacted deployment artifact to this directory',
+        hidden: false,
+        negatablePair: false,
+      },
+      {
+        key: 'retain_for_task',
+        long: '--retain-for-task',
+        value: 'boolean',
+        required: false,
+        repeatable: false,
+        defaultValue: false,
+        description: 'record that the current task explicitly requires keeping this workspace',
+        hidden: false,
+        negatablePair: false,
+      },
+    ],
+    json: {
+      mode: 'flag',
+      schema: 'houston.evidence.v1',
+      streams: false,
+      option: {
+        index: 3,
+        description: 'print the record as one JSON envelope on stdout; prose moves to stderr',
       },
     },
   }),

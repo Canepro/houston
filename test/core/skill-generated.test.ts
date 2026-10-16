@@ -37,7 +37,7 @@ describe('the shipped skill file', () => {
     // `keep` (it moves a cluster's deletion date) or `share` (it grants AWS access), and
     // was never told which cluster command only reads.
     const shipped = fs.readFileSync(generator.TARGET, 'utf8');
-    expect(shipped).toContain('`houston cluster overview --json` | the safe read');
+    expect(shipped).toMatch(/`houston cluster overview --json`[ \t]+\|[ \t]+the safe read/u);
     const ask = shipped.slice(
       shipped.indexOf('### Ask a person first'),
       shipped.indexOf('## Three standing rules'),
