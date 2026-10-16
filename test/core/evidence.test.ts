@@ -1460,7 +1460,7 @@ describe('the bundle', () => {
       const rocketchat = pick(parsed, 'services', 'rocketchat');
       expect(
         field === 'test' ? pick(rocketchat, 'healthcheck', 'test') : pick(rocketchat, field),
-      ).toEqual(['client', flag, '********', '--port', '27017']);
+      ).toBe('********');
       expect(parsed['x-before']).toBe('********');
       expect(parsed['x-after']).toBe('********');
       expect(parsed['x-port']).toBe(27017);
@@ -1491,23 +1491,9 @@ describe('the bundle', () => {
     expect(compose).not.toContain('EqualsArgumentSentinel');
     expect(compose).not.toContain('ArgsSentinelOne');
     const parsed = YAML.parse(compose) as Record<string, unknown>;
-    expect(pick(parsed, 'services', 'rocketchat', 'command')).toEqual([
-      'client',
-      '--password=********',
-      'EqualsNeighborSentinel',
-      '--port',
-      '27017',
-      '--name',
-      'rocketchat-1',
-      '--verbose',
-      '--password',
-    ]);
-    expect(pick(parsed, 'services', 'rocketchat', 'args')).toEqual([
-      '--password',
-      '********',
-      '--port',
-      '27017',
-    ]);
+    // A command naming a credential flag is withheld whole.
+    expect(pick(parsed, 'services', 'rocketchat', 'command')).toBe('********');
+    expect(pick(parsed, 'services', 'rocketchat', 'args')).toBe('********');
     // A list under any other key is data, not an argument sequence.
     expect(parsed['x-notes']).toEqual(['--password', 'NotListSentinel']);
     expect(parsed['x-before']).toBe('********');
@@ -1550,6 +1536,21 @@ describe('the bundle', () => {
         '  escaped:',
         '    image: example',
         String.raw`    command: sh -c "client --password Esc\\\"apedSentinel"`,
+        '  numeric:',
+        '    image: example',
+        '    command: mongosh -u root -p 12345 --eval ping',
+        '  equals:',
+        '    image: example',
+        '    command: curl https://host --password=TopEqualsSentinel',
+        '  backtick:',
+        '    image: example',
+        '    command: echo `client --password BacktickSentinel`',
+        '  embedded:',
+        '    image: example',
+        `    environment: { SPEC: '{"command":"client --password EmbeddedSentinel"}' }`,
+        '  login:',
+        '    image: example',
+        '    command: docker login --password-stdin registry.example.test',
         '  docker:',
         '    image: example',
         '    command: docker run -u 1000 -p 8080:80 -p --eval image',
@@ -1557,6 +1558,8 @@ describe('the bundle', () => {
         '    image: example',
         `    command: sh -c "useradd -u 1000 app; mkdir -p /data/db && proxy -p 8080:80 --password;"`,
         'x-copy: QuotedSentinel',
+        'x-backtick-copy: BacktickSentinel',
+        'x-registry: registry.example.test',
         'x-port: 8080:80',
         'x-control: readable',
         '',
@@ -1572,26 +1575,25 @@ describe('the bundle', () => {
       'ListShortSentinel',
       'ContinuedSentinel',
       'apedSentinel',
+      'TopEqualsSentinel',
+      'BacktickSentinel',
+      'EmbeddedSentinel',
     ]) {
       expect(compose).not.toContain(sentinel);
     }
     const parsed = YAML.parse(compose) as Record<string, unknown>;
-    expect(pick(parsed, 'services', 'rocketchat', 'command')).toBe(
-      'client --reg-token "********" --port 27017',
-    );
+    expect(pick(parsed, 'services', 'rocketchat', 'command')).toBe('********');
     expect(parsed['x-copy']).toBe('********');
+    expect(pick(parsed, 'services', 'numeric', 'command')).toBe('********');
+    // A mode switch takes no value: the registry stays readable outside the withheld command.
+    expect(pick(parsed, 'services', 'login', 'command')).toBe('********');
+    expect(parsed['x-registry']).toBe('registry.example.test');
     // A port or an option after -p is the next argument; newlines are never masked.
-    expect(pick(parsed, 'services', 'docker', 'command')).toBe(
-      'docker run -u 1000 -p 8080:80 -p --eval image',
-    );
+    // A user flag beside -p withholds the command line, since a short -p value can be either a
+    // port or a password; the port spelling elsewhere stays readable.
+    expect(pick(parsed, 'services', 'docker', 'command')).toBe('********');
     expect(compose).toContain('\n');
-    expect(pick(parsed, 'services', 'digits', 'command')).toEqual([
-      'mongosh',
-      '-u',
-      'root',
-      '-p',
-      '********',
-    ]);
+    expect(pick(parsed, 'services', 'digits', 'command')).toBe('********');
     // Short flag clusters and `user:group` are not credentials.
     expect(pick(parsed, 'services', 'cluster', 'command')).toEqual([
       'python',
@@ -1602,9 +1604,9 @@ describe('the bundle', () => {
     expect(pick(parsed, 'services', 'exec', 'command')).toBe('docker exec -u root:root app');
     // `;` ends a command: the user flag before it does not make the later -p a password, and a
     // flag with nothing after it masks nothing.
-    expect(pick(parsed, 'services', 'proxy', 'command')).toBe(
-      'sh -c "useradd -u 1000 app; mkdir -p /data/db && proxy -p 8080:80 --password;"',
-    );
+    // It names --password, so the line is withheld; the values around it are not secrets and
+    // stay readable everywhere else.
+    expect(pick(parsed, 'services', 'proxy', 'command')).toBe('********');
     expect(parsed['x-port']).toBe('8080:80');
     expect(parsed['x-control']).toBe('readable');
   });
@@ -1692,20 +1694,8 @@ describe('the bundle', () => {
       ].join('\n'),
     );
     const parsed = YAML.parse(compose) as Record<string, unknown>;
-    expect(pick(parsed, 'services', 'rocketchat', 'command')).toEqual([
-      'client',
-      '--password',
-      '********',
-      '--port',
-      27017,
-    ]);
-    expect(pick(parsed, 'services', 'rocketchat', 'entrypoint')).toEqual([
-      'client',
-      '--reg-token',
-      '********',
-      '--port',
-      '27017',
-    ]);
+    expect(pick(parsed, 'services', 'rocketchat', 'command')).toBe('********');
+    expect(pick(parsed, 'services', 'rocketchat', 'entrypoint')).toBe('********');
     expect(parsed['x-before']).toBe('********');
     expect(parsed['x-lexical-before']).toBe('********');
     expect(parsed['x-lexical-canonical']).toBe('********');

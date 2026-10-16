@@ -39,7 +39,10 @@ import { isTruthy, quotedText, toText } from '../lib/format';
 import { pathExpandUser } from '../lib/home';
 import {
   ARGUMENT_LIST_KEYS,
+  commandCarriesCredential,
   credentialFlag,
+  credentialFlagWord,
+  valueTakingCredentialFlag,
   credentialKey,
   discoverTextSecrets,
   type KnownSecret,
@@ -687,6 +690,12 @@ function redactArtifactValue(
   const out: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(fields)) {
     const safeKey = redactArtifactText(key, false, knownSecrets);
+    // A command that names a credential flag is withheld whole: the flag's value can be
+    // spelled in more ways than this reader can follow, and a partial mask would show it.
+    if (ARGUMENT_LIST_KEYS.includes(key) && argumentsCarryCredential(item)) {
+      out[safeKey] = REDACTED;
+      continue;
+    }
     out[safeKey] = redactArtifactValue(
       item,
       knownSecrets,
@@ -695,6 +704,17 @@ function redactArtifactValue(
     );
   }
   return out;
+}
+
+/** Whether a command, entrypoint, args or healthcheck value names a credential flag. */
+function argumentsCarryCredential(value: unknown): boolean {
+  if (typeof value === 'string') return commandCarriesCredential(value);
+  if (!Array.isArray(value)) return false;
+  const words = value.filter((item): item is string => typeof item === 'string');
+  return (
+    words.some((word) => credentialFlagWord(word) || commandCarriesCredential(word)) ||
+    (words.includes('-p') && words.some(userArgument))
+  );
 }
 
 /** Whether one argument names a user: `-u x`, `-ux`, `--user[=x]`, `--username[=x]`. */
@@ -708,7 +728,7 @@ function userArgument(word: string): boolean {
  * Elsewhere `-p` is a port or `mkdir -p`, and masking those would erase evidence.
  */
 function credentialArgument(flag: string, value: string, userGiven: boolean): boolean {
-  if (credentialFlag(flag)) return true;
+  if (valueTakingCredentialFlag(flag)) return value !== '' && !value.startsWith('-');
   // A following option or a port is the next argument, not a password `-p` was asked for.
   return (
     flag === '-p' && userGiven && value !== '' && !value.startsWith('-') && !portSpelling(value)
@@ -786,7 +806,7 @@ function shellCommands(text: string): ShellWord[][] {
       begin(index);
       word += text[index + 1] ?? '';
       index += 1;
-    } else if (/[;&|()\n]/u.test(char)) {
+    } else if (/[;&|()`\n]/u.test(char)) {
       endCommand(index);
     } else if (/[\s<>]/u.test(char)) {
       endWord(index);
@@ -806,6 +826,11 @@ function discoverCommandText(text: string, add: (value: string) => void, depth =
     const userGiven = command.some((word) => userArgument(word.text));
     for (let index = 0; index < command.length; index += 1) {
       const word = command[index] as ShellWord;
+      // `--password=value` carries its own value.
+      const equals = word.text.indexOf('=');
+      if (equals > 0 && credentialFlag(word.text.slice(0, equals))) {
+        add(word.text.slice(equals + 1));
+      }
       const next = command[index + 1];
       const spellings = (value: string, raw: string): void => {
         add(value);

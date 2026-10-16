@@ -83,6 +83,30 @@ export function credentialFlag(item: string): boolean {
   return flag !== undefined && credentialKey(flag);
 }
 
+/** Whether a flag hands its credential to the NEXT argument, rather than switching a mode. */
+export function valueTakingCredentialFlag(flag: string): boolean {
+  return credentialFlag(flag) && !/-(?:stdin|file|fd|env|prompt|cmd|command)$/u.test(flag);
+}
+
+/** Whether one argument word is, or assigns, a credential flag: `--password`, `--password=x`. */
+export function credentialFlagWord(word: string): boolean {
+  const equals = word.indexOf('=');
+  return credentialFlag(equals > 0 ? word.slice(0, equals) : word);
+}
+
+/**
+ * Whether a command string names a credential flag anywhere: in any quoted, nested, or
+ * backtick-substituted part, in `--flag=value` form, or as `-p` beside a user flag. Splitting at
+ * every quote and shell operator only finds flags; it is not how the command parses.
+ */
+export function commandCarriesCredential(text: string): boolean {
+  const words = text.split(/[\s'"`;&|()<>\\]+/u).filter((word) => word !== '');
+  if (words.some(credentialFlagWord)) return true;
+  return (
+    words.includes('-p') && words.some((word) => /^(?:-u.*|--user(?:name)?(?:=.*)?)$/u.test(word))
+  );
+}
+
 /**
  * The whitespace of `STRIP_CHARS`, as the inside of a character class.
  *
@@ -229,6 +253,12 @@ export function discoverTextSecrets(
         const token = jsonToken(JSON_STRING, text, at);
         const decoded = JSON.parse(token) as string;
         if (secret) add(decoded);
+        // A command string with a credential flag is attached whole: its spelling as decoded
+        // text and as the JSON-escaped text the artifact holds.
+        if (argv && commandCarriesCredential(decoded)) {
+          add(decoded);
+          add(token.slice(1, -1));
+        }
         discoverTextSecrets(decoded, add, level + 1);
         return at + token.length;
       }
