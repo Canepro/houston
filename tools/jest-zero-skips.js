@@ -110,7 +110,7 @@ const ROOT = path.resolve(__dirname, '..');
 // the Secret lifecycle flag: 47 cases over 4551, total 4598. One more records the token
 // Helm accepted when a re-up stops after Helm: total 4599. One more masks user-only URL
 // credentials in the evidence bundle: CI on fe95a08 measured 4600.
-const FLOOR = 4600;
+const FLOOR = 4601;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

@@ -4,8 +4,14 @@ import * as path from 'node:path';
 
 import * as YAML from 'yaml';
 
+import type * as PathsNS from '../../src/core/runner/paths';
 import type * as PayloadNS from '../../src/core/lifecycle/payload';
 import type * as KubeNamespaceNS from '../../src/core/kube/namespace';
+
+jest.mock('../../src/core/runner/paths', () => {
+  const actual = jest.requireActual<typeof PathsNS>('../../src/core/runner/paths');
+  return { ...actual, atomicWrite: jest.fn(actual.atomicWrite) };
+});
 
 jest.mock('../../src/core/lifecycle/payload', () => {
   const actual = jest.requireActual<typeof PayloadNS>('../../src/core/lifecycle/payload');
@@ -31,7 +37,7 @@ import {
   safeOrigin,
   writeBundle,
 } from '../../src/core/evidence';
-import { workspace } from '../../src/core/runner/paths';
+import { atomicWrite, workspace } from '../../src/core/runner/paths';
 import { metadata, write } from '../../src/core/runner/record';
 
 const namespaceLabels = kubeNamespace.namespaceLabels as jest.MockedFunction<
@@ -212,6 +218,38 @@ describe('the record', () => {
     });
     expect(rec.artifact).toEqual({ name: '', sha256: '' });
     expect(detail).not.toHaveBeenCalled();
+  });
+
+  it('withholds the old Docker artifact after a failed replacement and restores it after retry', async () => {
+    const name = 'e1-interrupted-replacement';
+    await workspaceNamed(name);
+    const original = jest.requireActual<typeof PathsNS>('../../src/core/runner/paths').atomicWrite;
+    const writer = jest.mocked(atomicWrite);
+    writer.mockImplementation(async (target, content, options) => {
+      if (path.basename(target) === 'docker-compose.yml')
+        throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+      return await original(target, content, options);
+    });
+    try {
+      await expect(workspaceNamed(name, {}, { rcVersion: '8.6.0' })).rejects.toMatchObject({
+        code: 'ENOSPC',
+      });
+    } finally {
+      writer.mockImplementation(original);
+    }
+    expect(fs.readFileSync(path.join(workspace(name), 'docker-compose.yml'), 'utf8')).toBe(COMPOSE);
+    const rec = await record(name);
+    expect(rec.artifact).toEqual({ name: '', sha256: '' });
+    const dest = path.join(workspace(name), 'out', 'interrupted');
+    await writeBundle(name, dest, rec);
+    expect(fs.readdirSync(dest).sort()).toEqual(['README.md', 'manifest.json']);
+
+    await workspaceNamed(name, {}, { rcVersion: '8.6.0' }, COMPOSE.replaceAll('8.5.1', '8.6.0'));
+    const complete = await record(name);
+    expect(complete.artifact).toEqual({
+      name: 'docker-compose.yml',
+      sha256: createHash('sha256').update(COMPOSE.replaceAll('8.5.1', '8.6.0')).digest('hex'),
+    });
   });
 
   it('does not relabel an invalid Docker artifact as absent metadata', async () => {
@@ -821,6 +859,8 @@ describe('the bundle', () => {
             '      RAW_AT_URL: https://reader:Raw@AtValueSentinel@example.test/?q=a=b',
             '      BEARER_URL: https://BearerOnlySentinel@example.test/x',
             '      GIT_URL: https://GitTokenSentinel:x-oauth-basic@github.com/org/repo.git',
+            `      OIDC_CONFIG: '{"url":"https://idp.example","admin":"ops@example.com"}'`,
+            `      OIDC_LIST: '["https://a.example","ops@example.com"]'`,
             '      BLANK_SECOND_URL: https://EmptyPasswordSentinel:@example.test',
           ].join('\n'),
         ),
@@ -851,6 +891,12 @@ describe('the bundle', () => {
       'x-reference': Record<string, string>;
       'list-environment': string[];
     };
+    expect(rendered.services.rocketchat.environment.OIDC_CONFIG).toBe(
+      '{"url":"https://idp.example","admin":"ops@example.com"}',
+    );
+    expect(rendered.services.rocketchat.environment.OIDC_LIST).toBe(
+      '["https://a.example","ops@example.com"]',
+    );
     expect(rendered.services.rocketchat.environment.MONGO_URL).toBe(
       'mongodb://********@mongodb:27017/rocketchat?replicaSet=rs0',
     );

@@ -39,7 +39,7 @@ import * as config from '../lib/config';
 import { ValidationError } from '../lib/errors';
 import { isTruthy, quotedText, toText } from '../lib/format';
 import { pathExpandUser } from '../lib/home';
-import { REDACTED, redactAllUserinfo, redactEnv, SECRET_KEY_HINTS } from '../lib/redact';
+import { REDACTED, redactAllUserinfo, SECRET_KEY_HINTS } from '../lib/redact';
 import { namesOf } from '../lib/presets/composite';
 import * as presets from '../lib/presets/index';
 import { PROFILES } from '../lib/seed-profiles';
@@ -188,8 +188,8 @@ async function artifactOf(meta: Metadata): Promise<CapturedArtifact> {
   // by filesystem order and attach the stale one.
   const candidate =
     topology.ofMeta(meta) === topology.KUBERNETES ? KUBERNETES_ARTIFACT : DOCKER_ARTIFACT;
-  // A Kubernetes re-up writes its incomplete record before Helm and its values only after.
-  // Until the create finishes, the file on disk is the previous release's, and attaching it
+  // Both runtimes mark the record incomplete before replacing deployment files.
+  // Until the write finishes, the file on disk can be the previous release's, and attaching it
   // beside the new request would describe a deployment that may not exist. Unavailable is
   // what evidence can truthfully say.
   if (bag(meta.extra).incomplete === true) return { name: '', sha256: '', bytes: null };
@@ -645,12 +645,12 @@ function redactArtifactText(
   // A URL password or query can contain `=`. Mask userinfo in the complete string before
   // treating an equals sign as a list-form environment assignment. A bundle also masks the
   // user name, which log redaction leaves readable and which can be the credential itself.
-  const urlRedacted = redactAllUserinfo(redactEnv('', value));
+  const urlRedacted = redactAllUserinfo(value);
   const equals = urlRedacted.indexOf('=');
   if (equals > 0) {
     const key = urlRedacted.slice(0, equals);
     return redactKnownSecrets(
-      `${key}=${redactEnv(key, urlRedacted.slice(equals + 1))}`,
+      `${key}=${secretKey(key) ? REDACTED : urlRedacted.slice(equals + 1)}`,
       knownSecrets,
     );
   }

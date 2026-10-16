@@ -355,7 +355,10 @@ export async function write(
   // which on a normal box leaves them readable by every local user. Applied on every
   // write, so workspaces created before this are tightened when next touched.
   await paths.restrict(ws);
-  await paths.atomicWrite(joinPath(ws, 'repro.json'), serialise(meta));
+  // A failed replacement can leave the previous Compose file beside the new request.
+  // Keep the request discoverable, but withhold its artifact until all writes finish.
+  const provisional = { ...meta, extra: { ...meta.extra, incomplete: true } };
+  await paths.atomicWrite(joinPath(ws, 'repro.json'), serialise(provisional));
   await paths.atomicWrite(joinPath(ws, 'docker-compose.yml'), composeYaml);
 
   for (const [relative, content] of files) {
@@ -369,6 +372,7 @@ export async function write(
     await fs.writeFile(target, content.split('{{ROOT_URL}}').join(advertised), 'utf8');
   }
   await paths.restrict(ws); // again: covers the files just written, and their dirs
+  await paths.atomicWrite(joinPath(ws, 'repro.json'), serialise(meta));
 }
 
 /**

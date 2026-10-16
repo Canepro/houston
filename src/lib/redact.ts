@@ -66,7 +66,10 @@ export const URL_USERINFO = new RegExp(
  * evidence bundle masks all of it. The user info runs to the last `@` before the authority
  * ends, as in `URL_USERINFO`.
  */
-const URL_ANY_USERINFO = new RegExp(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^/${SPACE_CLASS}?#]+@`, 'gu');
+const URL_ANY_USERINFO = new RegExp(
+  `([a-zA-Z][a-zA-Z0-9+.-]*://)[^/${SPACE_CLASS}?#"<>\\[\\]{}|\\\\^\x60]+@`,
+  'gu',
+);
 
 /** Mask every URL's user info, user name included, for an artifact a person attaches. */
 export function redactAllUserinfo(value: string): string {

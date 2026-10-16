@@ -163,9 +163,11 @@ describe('redactEnv', () => {
 
 describe('redactAllUserinfo', () => {
   it('masks the whole URL user info an attachable bundle cannot assume is public', () => {
-    const masked = (value: string) => redactAllUserinfo(redactEnv('', value));
+    const masked = (value: string) => redactAllUserinfo(value);
     expect(
       [
+        '{"url":"https://idp.example","admin":"ops@example.com"}',
+        '["https://a.example","ops@example.com"]',
         'https://BEARER_TOKEN@example.test/x',
         'https://TOKEN:@h',
         'https://ghp_SECRETTOKEN:x-oauth-basic@github.com/org/repo.git',
@@ -179,6 +181,8 @@ describe('redactAllUserinfo', () => {
         'x https://t@h y https://u:p@h2',
       ].map(masked),
     ).toEqual([
+      '{"url":"https://idp.example","admin":"ops@example.com"}',
+      '["https://a.example","ops@example.com"]',
       `https://${REDACTED}@example.test/x`,
       `https://${REDACTED}@h`,
       `https://${REDACTED}@github.com/org/repo.git`,
