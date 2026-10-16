@@ -98,7 +98,8 @@ const ROOT = path.resolve(__dirname, '..');
 // and one covers final Kubernetes licence precedence and warning presence.
 // R5 adds one workspace-owner credential promotion regression; collection measures 4538.
 // R6 adds one mixed-replica credential lifecycle regression; collection measures 4539.
-const FLOOR = 4539;
+// R7 adds one equivalent-file regression and two interrupted-create cleanup cases; total 4542.
+const FLOOR = 4542;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

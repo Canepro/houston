@@ -511,7 +511,7 @@ export interface CreateWorkspaceOptions {
   readonly envOverrides?: Record<string, string | null>;
   /** This run's licence text, installed as a Secret; '' installs none. */
   readonly license?: string;
-  /** Whether the release references the licence Secret: this run's, or one already there. */
+  /** An existing licence Secret established by a completed create, not provisional intent. */
   readonly licensed?: boolean;
   readonly plan?: ClusterPlan | null;
   readonly tlsHost?: string;
@@ -550,7 +550,7 @@ export async function createWorkspace({
   preset = null,
   envOverrides = {},
   license = '',
-  licensed = false,
+  licensed: retainedLicense = false,
   plan = null,
   tlsHost = '',
   ingressClass = '',
@@ -563,10 +563,16 @@ export async function createWorkspace({
 }: CreateWorkspaceOptions): Promise<Record<string, unknown>> {
   // Resolve at this API boundary too so callers cannot bypass the Secret path.
   // Preset credentials must be settled before either manifests or chart values are built.
-  const credentials = credentialInputs(preset?.env, regToken, license, licensed, envOverrides);
+  const credentials = credentialInputs(
+    preset?.env,
+    regToken,
+    license,
+    retainedLicense,
+    envOverrides,
+  );
   regToken = credentials.regToken;
   license = credentials.license;
-  licensed = credentials.licensed;
+  const licensed = credentials.licensed;
   const prepared = await prepareCluster(plan, resolved, emit);
   const { context, hadCluster, chartVersion } = prepared;
 

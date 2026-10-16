@@ -18,6 +18,7 @@
  */
 
 import { isIP } from 'node:net';
+import * as path from 'node:path';
 
 import {
   ADMIN_EMAIL,
@@ -216,21 +217,32 @@ function normalizeRegToken(environment: unknown): void {
 }
 
 /** Whether the supplied private licence file remains attached to this service. */
-function hasLicenseFile(service: Service | undefined, licensed: boolean): boolean {
+function hasLicenseFile(
+  service: Service | undefined,
+  licensed: boolean,
+  projectDirectory: string,
+): boolean {
   if (!licensed) return false;
+  const licenseFile = path.resolve(projectDirectory, LICENSE_ENV_FILE);
+  const referencesLicenseFile = (file: unknown): boolean =>
+    typeof file === 'string' &&
+    isKnownNonBlankComposeValue(file) &&
+    path.resolve(projectDirectory, file) === licenseFile;
   const files = service?.env_file;
-  if (typeof files === 'string') return files === LICENSE_ENV_FILE;
+  if (typeof files === 'string') return referencesLicenseFile(files);
   if (!Array.isArray(files)) return false;
-  return files.some(
-    (file) => file === LICENSE_ENV_FILE || (isPlainObject(file) && file.path === LICENSE_ENV_FILE),
-  );
+  return files.some((file) => referencesLicenseFile(isPlainObject(file) ? file.path : file));
 }
 
-function serviceHasLicense(service: Service | undefined, licensed: boolean): boolean {
+function serviceHasLicense(
+  service: Service | undefined,
+  licensed: boolean,
+  projectDirectory: string,
+): boolean {
   const entry = environmentEntry(service?.environment, 'ROCKETCHAT_LICENSE');
   return entry.present
     ? isKnownNonBlankComposeValue(entry.value)
-    : hasLicenseFile(service, licensed);
+    : hasLicenseFile(service, licensed, projectDirectory);
 }
 
 /** Whether every final Rocket.Chat service gets a known licence from its environment or file. */
@@ -238,8 +250,11 @@ export function hasEffectiveLicense(
   doc: ComposeDoc,
   instances: number,
   licensed: boolean,
+  projectDirectory: string,
 ): boolean {
-  return rcServiceNames(instances).every((name) => serviceHasLicense(doc.services[name], licensed));
+  return rcServiceNames(instances).every((name) =>
+    serviceHasLicense(doc.services[name], licensed, projectDirectory),
+  );
 }
 
 /** Every replica needs a credential, but replicas may use different credential types. */
@@ -247,12 +262,13 @@ export function hasEffectiveCredential(
   doc: ComposeDoc,
   instances: number,
   licensed: boolean,
+  projectDirectory: string,
 ): boolean {
   return rcServiceNames(instances).every((name) => {
     const service = doc.services[name];
     return (
       environmentHasKnownValue(service?.environment, 'REG_TOKEN') ||
-      serviceHasLicense(service, licensed)
+      serviceHasLicense(service, licensed, projectDirectory)
     );
   });
 }

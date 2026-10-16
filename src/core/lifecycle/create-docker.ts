@@ -951,6 +951,7 @@ export async function buildDocument(plan: CreatePlan): Promise<void> {
     plan.doc,
     (plan.pre as Preset).instances,
     plan.spec.licensed,
+    paths.workspace(plan.reproName),
   )
     ? 'present'
     : '';
@@ -958,6 +959,7 @@ export async function buildDocument(plan: CreatePlan): Promise<void> {
     plan.doc,
     (plan.pre as Preset).instances,
     plan.spec.licensed,
+    paths.workspace(plan.reproName),
   );
   const premium = request.premiumAuthWarning(
     [(plan.pre as Preset).name],

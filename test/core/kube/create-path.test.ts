@@ -301,7 +301,7 @@ describe('a Kubernetes create', () => {
     const req = (license: string) =>
       createReq({ version: '8.5.1', name: 'klic', runtime: 'kubernetes', offline: true, license });
     await createKubernetes(req(LICENSE));
-    expect([mockCreated[0]?.license, mockCreated[0]?.licensed]).toEqual([LICENSE, true]);
+    expect([mockCreated[0]?.license, mockCreated[0]?.licensed]).toEqual([LICENSE, false]);
     const meta = await readMeta('klic');
     expect(meta.extra.licensed).toBe(true);
     expect(meta.extra.effective_license).toBe(true);

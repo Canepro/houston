@@ -20,6 +20,8 @@ import { createPlan } from '../../../src/core/lifecycle/create-docker';
 
 import type * as CreateDockerNS from '../../../src/core/lifecycle/create-docker';
 import type * as CreateK8sNS from '../../../src/core/lifecycle/create-k8s';
+import type * as InspectNS from '../../../src/core/lifecycle/inspect';
+import type * as RecordNS from '../../../src/core/runner/record';
 import { MODE_ACME, tlsSpec } from '../../../src/core/tls';
 import { createReq } from '../../../src/core/lifecycle/types';
 import * as users from '../../../src/core/users';
@@ -576,6 +578,93 @@ describe('the create path end to end, stopped at the write seam', () => {
       config.updateConfig((cfg) => {
         delete cfg.reg_token;
       });
+    }
+  });
+
+  it('recognizes equivalent project licence files without trusting other files or masked entries', async () => {
+    const file = path.join(config.presetDir(), 'ldap.yaml');
+    const cases = [
+      { label: 'short string', envFile: './.license.env', licensed: true },
+      { label: 'short list', envFile: ['./.license.env'], licensed: true },
+      {
+        label: 'long path',
+        envFile: [{ path: './.license.env', required: false }],
+        licensed: true,
+      },
+      { label: 'normalized relative', envFile: ['sub/../.license.env'], licensed: true },
+      { label: 'absolute project file', envFile: [], absolute: true, licensed: true },
+      { label: 'different file', envFile: ['other.env'], licensed: false },
+      { label: 'parent file', envFile: ['../.license.env'], licensed: false },
+      {
+        label: 'unresolved path',
+        envFile: ['${UNSET_LICENSE_DIR}/../.license.env'],
+        licensed: false,
+      },
+      {
+        label: 'blank env masks file',
+        envFile: ['./.license.env'],
+        env: { ROCKETCHAT_LICENSE: '' },
+        licensed: false,
+      },
+      {
+        label: 'unresolved env masks file',
+        envFile: [{ path: './.license.env' }],
+        env: { ROCKETCHAT_LICENSE: '${UNSET_LICENSE}' },
+        licensed: false,
+      },
+    ] as const;
+    config.updateConfig((cfg) => {
+      delete cfg.reg_token;
+    });
+    fs.mkdirSync(config.presetDir(), { recursive: true });
+    const observed: unknown[] = [];
+    try {
+      for (const [index, one] of cases.entries()) {
+        const name = `file-licence-${String(index)}`;
+        const envFile =
+          'absolute' in one ? path.join(config.reprosDir(), name, '.license.env') : one.envFile;
+        fs.writeFileSync(
+          file,
+          YAML.stringify({
+            name: 'ldap',
+            requires_license: true,
+            rocketchat: { env_file: envFile, environment: 'env' in one ? one.env : {} },
+          }),
+        );
+        const { seen, createDocker } = capture();
+        const events: { code: string; message: string }[] = [];
+        await expect(
+          createDocker.createRepro(
+            createReq({
+              version: '9.0.0',
+              name,
+              preset: 'ldap',
+              license: 'synthetic-file-licence',
+              wait: false,
+              offline: true,
+            }),
+            (event) => events.push(event),
+          ),
+        ).rejects.toThrow('stopped at the write seam');
+        // Persist the actual lifecycle record, then use the same summary as info/GUI.
+        await writeRecord(name, seen.meta as Metadata);
+        const record = require('../../../src/core/runner/record') as typeof RecordNS;
+        const inspect = require('../../../src/core/lifecycle/inspect') as typeof InspectNS;
+        const meta = await record.readMeta(name);
+        observed.push([
+          one.label,
+          events.some((event) => event.code === 'LICENSE_ABSENT_EE_PRESET'),
+          events.some((event) => event.message.includes('Premium plan for LDAP login')),
+          meta.extra.licensed === true,
+          (await inspect.summary(meta)).licensed,
+        ]);
+        expect(JSON.stringify(meta)).not.toContain('synthetic-file-licence');
+      }
+      expect(observed).toEqual(
+        cases.map((one) => [one.label, !one.licensed, !one.licensed, one.licensed, one.licensed]),
+      );
+    } finally {
+      fs.rmSync(file, { force: true });
     }
   });
 

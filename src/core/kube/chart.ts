@@ -254,7 +254,7 @@ export function credentialInputs(
   presetEnv: Record<string, unknown> | undefined,
   regToken = '',
   license = '',
-  licensed = false,
+  retainedLicense = false,
   overrides: Record<string, string | null> = {},
 ): { regToken: string; license: string; licensed: boolean } {
   const effective = (key: string): string => {
@@ -265,8 +265,9 @@ export function credentialInputs(
   const token = regToken.trim() || effective('REG_TOKEN').trim();
   const suppliedLicense = license.trim() === '' ? '' : license;
   const presetLicense = effective('ROCKETCHAT_LICENSE');
-  const payload = suppliedLicense || (licensed || presetLicense.trim() === '' ? '' : presetLicense);
-  return { regToken: token, license: payload, licensed: licensed || payload !== '' };
+  const payload =
+    suppliedLicense || (retainedLicense || presetLicense.trim() === '' ? '' : presetLicense);
+  return { regToken: token, license: payload, licensed: retainedLicense || payload !== '' };
 }
 
 /**

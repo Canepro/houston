@@ -38,6 +38,30 @@ import type * as presetTypes from '../../../src/lib/presets/types';
 import { createWorkspace, type CreateWorkspaceOptions } from '../../../src/core/kube/workspace';
 import { metadata, readMeta, writeRecord } from '../../../src/core/runner/record';
 import * as paths from '../../../src/core/runner/paths';
+import { createKubernetes } from '../../../src/core/lifecycle/create-k8s';
+import { createReq } from '../../../src/core/lifecycle/types';
+import * as lifecyclePorts from '../../../src/core/lifecycle/ports';
+import * as sizing from '../../../src/core/lifecycle/sizing';
+import * as tlsplan from '../../../src/core/lifecycle/tlsplan';
+import * as reachability from '../../../src/core/kube/reachability';
+
+jest.mock('../../../src/core/lifecycle/sizing', () => ({
+  ...jest.requireActual('../../../src/core/lifecycle/sizing'),
+  checkCapacity: jest.fn(),
+}));
+jest.mock('../../../src/core/lifecycle/ports', () => ({
+  ...jest.requireActual('../../../src/core/lifecycle/ports'),
+  pickHostPort: jest.fn(),
+  checkSidecarPorts: jest.fn(),
+}));
+jest.mock('../../../src/core/lifecycle/tlsplan', () => ({
+  ...jest.requireActual('../../../src/core/lifecycle/tlsplan'),
+  resolveTls: jest.fn(),
+}));
+jest.mock('../../../src/core/kube/reachability', () => ({
+  ...jest.requireActual('../../../src/core/kube/reachability'),
+  helmReachable: jest.fn(),
+}));
 
 // Only the calls that reach a cluster are replaced. `mongoRbacManifest`, `mongoManifest`,
 // `operatorMongoUrl`, `valuesFor` and `mongoImage` all stay real.
@@ -62,6 +86,7 @@ jest.mock('../../../src/core/kube/capabilities', () => ({
 jest.mock('../../../src/core/kube/namespace', () => ({
   ...jest.requireActual('../../../src/core/kube/namespace'),
   namespaceFor: jest.fn(),
+  assertNamespaceAvailable: jest.fn(),
   ensureNamespace: jest.fn(),
 }));
 jest.mock('../../../src/core/kube/probe', () => ({
@@ -607,6 +632,205 @@ describe('the values the release is installed with', () => {
       }
     }
   });
+
+  it.each(['unknown namespace', 'failed namespace cleanup'])(
+    'retries real provisional preset credentials after %s and retains only completed Secrets',
+    async (failure) => {
+      const presetPath = path.join(config.presetDir(), 'retry-credentials.yaml');
+      const license = 'synthetic-retry-preset-license';
+      const token = 'synthetic-retry-preset-token';
+      const changedLicense = 'synthetic-new-preset-license';
+      const events: Event[] = [];
+      const inputs: { argv: string[]; input: string }[] = [];
+      const req = () =>
+        createReq({
+          version: '8.5.1',
+          name: 'tk',
+          preset: 'retry-credentials',
+          runtime: 'kubernetes',
+          offline: true,
+          wait: false,
+        });
+      const prepare = (held: string[]) => {
+        harness({ held });
+        mocked(sizing.checkCapacity).mockResolvedValue(undefined);
+        mocked(lifecyclePorts.pickHostPort).mockResolvedValue(3000);
+        mocked(lifecyclePorts.checkSidecarPorts).mockResolvedValue(undefined);
+        mocked(tlsplan.resolveTls).mockResolvedValue(null);
+        mocked(reachability.helmReachable).mockResolvedValue('');
+        mocked(namespace.assertNamespaceAvailable).mockResolvedValue(undefined);
+        const actualTools = jest.requireActual<typeof tools>('../../../src/core/kube/tools');
+        mocked(probe.preflight).mockResolvedValue({
+          ...actualTools.preflight({
+            tools: {
+              kubectl: actualTools.makeTool({
+                name: 'kubectl',
+                path: '/stated/kubectl',
+                version: [1, 36],
+              }),
+              helm: actualTools.makeTool({ name: 'helm', path: '/stated/helm', version: [3, 15] }),
+            },
+          }),
+          context: 'prod',
+          clusterReachable: true,
+          defaultStorageClass: 'local-path',
+          architectures: ['amd64'],
+          unreadable: [],
+        });
+        mocked(manifests.recordRendered).mockImplementation(
+          (jest.requireActual('../../../src/core/kube/manifests') as typeof manifests)
+            .recordRendered,
+        );
+        // Keep Secret application real through its stdin boundary; only transport is stated.
+        mocked(release.apply).mockImplementation(
+          (jest.requireActual('../../../src/core/kube/release') as typeof release).apply,
+        );
+        const run = kube.run;
+        kube.run = (argv, options) => {
+          if (options?.input !== undefined) inputs.push({ argv: [...argv], input: options.input });
+          return run(argv, options);
+        };
+      };
+      const writePreset = async (value: string) => {
+        await fs.writeFile(
+          presetPath,
+          YAML.stringify({
+            name: 'retry-credentials',
+            requires_license: true,
+            env: { ROCKETCHAT_LICENSE: value, REG_TOKEN: `  ${token}  ` },
+          }),
+        );
+      };
+      const appliedLicense = () =>
+        inputs.filter((call) => {
+          return YAML.parseAllDocuments(call.input).some((document) => {
+            const doc = document.toJSON() as { kind?: string; metadata?: { name?: string } };
+            return doc.kind === 'Secret' && doc.metadata?.name === 'houston-license';
+          });
+        });
+      const assertPrivate = async (result: unknown) => {
+        const written = await fs.readFile(path.join(paths.workspace('tk'), 'repro.json'), 'utf8');
+        const values = await fs
+          .readFile(path.join(paths.workspace('tk'), 'kubernetes', 'values.yaml'), 'utf8')
+          .catch(() => '');
+        const visible = JSON.stringify([
+          written,
+          values,
+          result,
+          events,
+          ran,
+          mocked(manifests.recordRendered).mock.calls,
+        ]);
+        for (const raw of [license, token, changedLicense]) expect(visible).not.toContain(raw);
+        for (const call of inputs) {
+          expect(call.argv).not.toEqual(expect.arrayContaining([expect.stringContaining(license)]));
+          expect(call.argv).not.toEqual(expect.arrayContaining([expect.stringContaining(token)]));
+        }
+      };
+      config.updateConfig((cfg) => {
+        delete cfg.reg_token;
+      });
+      await paths.remove('tk');
+      await fs.mkdir(config.presetDir(), { recursive: true });
+      try {
+        await writePreset(license);
+        prepare(failure === 'unknown namespace' ? ['houston-tk'] : []);
+        const run = kube.run;
+        kube.run = (argv, options) => {
+          if (
+            (failure === 'unknown namespace' &&
+              argv.includes('get') &&
+              argv.includes('namespace')) ||
+            (failure === 'failed namespace cleanup' && argv.includes('delete'))
+          ) {
+            ran.push([...argv]);
+            return Promise.resolve({
+              argv,
+              returncode: 1,
+              stdout: '',
+              stderr: 'stated transport failure',
+            });
+          }
+          return run(argv, options);
+        };
+        mocked(replicaset.initReplicaSet).mockRejectedValueOnce(new Interrupted());
+        await expect(createKubernetes(req(), (event) => events.push(event))).rejects.toBeInstanceOf(
+          Interrupted,
+        );
+        const provisional = await readMeta('tk');
+        expect(provisional.extra.incomplete).toBe(true);
+        expect(provisional.extra.licensed).toBe(true);
+        expect(appliedLicense()).toHaveLength(0);
+        if (failure === 'failed namespace cleanup')
+          expect(ran.some((argv) => argv.includes('delete'))).toBe(true);
+        await assertPrivate(null);
+
+        inputs.length = 0;
+        prepare(['houston-tk']);
+        const result = await createKubernetes(req(), (event) => events.push(event));
+        expect(
+          appliedLicense().map(
+            (call) =>
+              (YAML.parse(call.input) as { stringData: { license: string } }).stringData.license,
+          ),
+        ).toEqual([license]);
+        const tokenDoc = inputs
+          .flatMap((call) =>
+            YAML.parseAllDocuments(call.input).map(
+              (document) =>
+                document.toJSON() as {
+                  metadata?: { name?: string };
+                  stringData?: { token?: string };
+                },
+            ),
+          )
+          .find((doc) => doc.metadata?.name === 'houston-reg-token');
+        expect(tokenDoc?.stringData?.token).toBe(token);
+        const values = mocked(release.install).mock.calls[0]?.[0].values as Record<string, unknown>;
+        expect(values.license).toBeUndefined();
+        expect(values.extraEnv).toEqual(
+          expect.arrayContaining([
+            {
+              name: 'ROCKETCHAT_LICENSE',
+              valueFrom: { secretKeyRef: { name: 'houston-license', key: 'license' } },
+            },
+            {
+              name: 'REG_TOKEN',
+              valueFrom: { secretKeyRef: { name: 'houston-reg-token', key: 'token' } },
+            },
+          ]),
+        );
+        for (const call of appliedLicense())
+          expect(call.argv.slice(-3)).toEqual(['apply', '-f', '-']);
+        expect((await readMeta('tk')).extra.incomplete).toBeUndefined();
+        expect((await readMeta('tk')).extra.effective_license).toBe(true);
+        await assertPrivate(result);
+
+        // A completed Secret wins over a changed preset, including a later interrupted re-up.
+        await writePreset(changedLicense);
+        inputs.length = 0;
+        prepare(['houston-tk']);
+        await createKubernetes(req(), (event) => events.push(event));
+        expect(appliedLicense()).toHaveLength(0);
+        expect((await readMeta('tk')).extra.licensed).toBe(true);
+        await assertPrivate(null);
+        mocked(replicaset.initReplicaSet).mockRejectedValueOnce(new Interrupted());
+        await expect(createKubernetes(req(), (event) => events.push(event))).rejects.toBeInstanceOf(
+          Interrupted,
+        );
+        expect((await readMeta('tk')).extra.incomplete).toBe(true);
+        inputs.length = 0;
+        prepare(['houston-tk']);
+        await createKubernetes(req(), (event) => events.push(event));
+        expect(appliedLicense()).toHaveLength(0);
+        expect((await readMeta('tk')).extra.effective_license).toBe(true);
+        await assertPrivate(null);
+      } finally {
+        await fs.rm(presetPath, { force: true });
+        await paths.remove('tk');
+      }
+    },
+  );
 
   it('gives the chart a host OR a root_url, never both', async () => {
     // Two entries for ROOT_URL is a server-side-apply conflict, not an override -- so a

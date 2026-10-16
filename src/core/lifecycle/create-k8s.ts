@@ -116,6 +116,8 @@ export interface KubeCreate {
   envOverrides: Record<string, string | null>;
   /** Whether the release references the licence Secret: this run's, or a re-up's earlier one. */
   licensed: boolean;
+  /** A completed earlier create established the licence Secret, independent of this run's intent. */
+  retainedLicense: boolean;
   /** Whether the final chart environment carries a nonblank licence, including a promoted preset input. */
   effectiveLicense: boolean;
   /** A re-up's forwards, read BEFORE the write-ahead record replaces the record holding them. */
@@ -163,6 +165,7 @@ export function kubeCreate(
     reused: false,
     envOverrides: {},
     licensed: false,
+    retainedLicense: false,
     effectiveLicense: false,
     previous: { pid: 0, port: null, scenarioForwards: {} },
     previousMeta: null,
@@ -238,6 +241,7 @@ export async function settleName(job: KubeCreate): Promise<void> {
 export async function settleEnv(job: KubeCreate): Promise<void> {
   job.envOverrides = {};
   job.licensed = job.req.license.trim() !== '';
+  job.retainedLicense = false;
   if (job.reused) {
     let old: Metadata | null = null;
     try {
@@ -277,8 +281,12 @@ export async function settleEnv(job: KubeCreate): Promise<void> {
       }
       job.namespaceIdentity = { uid, owner };
       job.envOverrides = { ...(bag(previous.env) as Record<string, string | null>) };
-      // The Secret stays in the namespace across a `down`, so a re-up keeps referencing it.
-      job.licensed ||= previous.licensed === true;
+      // A provisional marker records intent before any Secret exists. Only a completed
+      // create, or its explicitly retained provenance, can suppress a new preset payload.
+      job.retainedLicense =
+        previous.licensed === true &&
+        (previous.incomplete !== true || previous.retained_license === true);
+      job.licensed ||= job.retainedLicense;
       // HERE, not after the write-ahead record: that record replaces this one, and reading
       // the forwards back from it found none -- so a re-up never retired its own forward,
       // which kept the port and failed the readiness wait, and `down` lost track of both
@@ -467,7 +475,7 @@ export function settleAddressing(job: KubeCreate): void {
     (job.presetForNotes as Preset).env,
     job.regToken,
     job.req.license,
-    job.licensed,
+    job.retainedLicense,
     job.envOverrides,
   );
   job.regToken = credentials.regToken;
@@ -683,6 +691,8 @@ export async function writeProvisionalRecord(job: KubeCreate): Promise<void> {
   // Explicit false supersedes an earlier marker if this create no longer has an effective licence.
   job.provisional.extra.effective_license = job.effectiveLicense;
   if (job.licensed) job.provisional.extra.licensed = true;
+  // Preserve a completed Secret across repeated interrupted re-ups without promoting new intent.
+  job.provisional.extra.retained_license = job.retainedLicense;
   // Still recorded while the create runs, so a create killed part-way leaves `down` able to
   // stop them.
   if (job.previous.pid !== 0) job.provisional.extra.port_forward_pid = job.previous.pid;
@@ -796,7 +806,7 @@ export async function createTheWorkspace(job: KubeCreate): Promise<void> {
     preset: job.presetForNotes,
     envOverrides: job.envOverrides,
     license: job.license,
-    licensed: job.licensed,
+    licensed: job.retainedLicense,
     plan: job.plan,
     emit: job.emit,
   });
