@@ -711,21 +711,16 @@ function credentialArgument(flag: string, value: string, userGiven: boolean): bo
   if (credentialFlag(flag)) return true;
   // A following option or a port is the next argument, not a password `-p` was asked for.
   return (
-    flag === '-p' &&
-    userGiven &&
-    value !== '' &&
-    !value.startsWith('-') &&
-    !/^[0-9]+(?::[0-9]+)*$/u.test(value)
+    flag === '-p' && userGiven && value !== '' && !value.startsWith('-') && !portSpelling(value)
   );
 }
 
-/** A credential carried inside one word: `-pSECRET` after a user flag, `-u user:SECRET`. */
-function attachedCredential(word: string, next: string, userGiven: boolean): string {
-  if (userGiven && /^-p[^-]/u.test(word)) return word.slice(2);
-  if ((word === '-u' || word === '--user') && next.includes(':')) {
-    return next.slice(next.indexOf(':') + 1);
-  }
-  return '';
+/** `8080` or `8080:80`: every part a port number, which `-p` publishes rather than hides. */
+function portSpelling(value: string): boolean {
+  return (
+    /^[0-9]{1,5}(?::[0-9]{1,5})*$/u.test(value) &&
+    value.split(':').every((part) => Number(part) <= 65535)
+  );
 }
 
 /** One shell word and whether any part of it was quoted, so it may hold a nested command. */
@@ -826,8 +821,6 @@ function discoverCommandText(text: string, add: (value: string) => void, depth =
       if (next !== undefined && credentialArgument(word.text, next.text, userGiven)) {
         spellings(next.text, next.raw);
       }
-      const attached = attachedCredential(word.text, next?.text ?? '', userGiven);
-      if (attached !== '') spellings(attached, attached);
       if (word.quoted) discoverCommandText(word.text, add, depth + 1);
     }
   }
@@ -888,8 +881,6 @@ function discoverArtifactSecrets(
       const next = items[index + 1];
       const value = YAML.isScalar(next) ? String(next.value) : '';
       if (credentialArgument(flag.value, value, userGiven)) visit(list.items[index + 1], true);
-      const attached = attachedCredential(flag.value, value, userGiven);
-      if (attached !== '') add(attached);
     }
   };
   if (YAML.isAlias(node)) {

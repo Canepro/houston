@@ -1535,12 +1535,15 @@ describe('the bundle', () => {
         '  mysql:',
         '    image: example',
         '    command: [mysql, -p, ListShortSentinel, -uroot]',
-        '  attached:',
+        '  digits:',
         '    image: example',
-        '    command: [mysql, -uroot, -pAttachedSentinel, appdb]',
-        '  curl:',
+        '    command: [mongosh, -u, root, -p, "12345678"]',
+        '  cluster:',
         '    image: example',
-        '    command: curl -u admin:CurlSentinel http://x',
+        '    command: [python, -u, app.py, -pv]',
+        '  exec:',
+        '    image: example',
+        '    command: docker exec -u root:root app',
         '  continued:',
         '    image: example',
         '    command: "client --password \\\\\\nContinuedSentinel --verbose"',
@@ -1567,8 +1570,6 @@ describe('the bundle', () => {
       'JoinedSentinel',
       'EscapedSentinel',
       'ListShortSentinel',
-      'AttachedSentinel',
-      'CurlSentinel',
       'ContinuedSentinel',
       'apedSentinel',
     ]) {
@@ -1584,12 +1585,21 @@ describe('the bundle', () => {
       'docker run -u 1000 -p 8080:80 -p --eval image',
     );
     expect(compose).toContain('\n');
-    expect(pick(parsed, 'services', 'attached', 'command')).toEqual([
-      'mysql',
-      '-uroot',
-      '-p********',
-      'appdb',
+    expect(pick(parsed, 'services', 'digits', 'command')).toEqual([
+      'mongosh',
+      '-u',
+      'root',
+      '-p',
+      '********',
     ]);
+    // Short flag clusters and `user:group` are not credentials.
+    expect(pick(parsed, 'services', 'cluster', 'command')).toEqual([
+      'python',
+      '-u',
+      'app.py',
+      '-pv',
+    ]);
+    expect(pick(parsed, 'services', 'exec', 'command')).toBe('docker exec -u root:root app');
     // `;` ends a command: the user flag before it does not make the later -p a password, and a
     // flag with nothing after it masks nothing.
     expect(pick(parsed, 'services', 'proxy', 'command')).toBe(
