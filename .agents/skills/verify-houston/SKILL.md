@@ -29,8 +29,10 @@ To drive another feature checkout without copying this skill into it, add
 `--checkout /absolute/candidate/checkout`. Install dependencies in that candidate
 first and keep its source fixed during the run. The receipt records the candidate
 path, head and tracked diff digest, plus this verifier script's digest. Fingerprint
-lookups use a resolved Git executable with a scrubbed Git environment, an explicit
-candidate checkout, and a verified Git top level. Store evidence outside both
+lookups use a resolved Git executable with an allowlisted environment, an explicit
+candidate checkout, and a verified Git top level. Every evidence Git command disables
+fsmonitor and hooks. Global/system config, caller Git overrides, prompts and optional
+locks are disabled; diff also disables external diff and textconv helpers. Store evidence outside both
 checkouts.
 
 The helper requires Python 3.9+, Node, `dirname`, and `readlink`. Process-group
@@ -84,6 +86,9 @@ the addition or removal of a nonignored file fail the run. A bounded filesystem
 walk applies Git's ignore rules and refuses untracked symlinks, FIFOs, sockets,
 and other special files. Git's untracked listing alone omits some special files.
 Root Git metadata and ignored dependency or build paths stay outside this manifest.
+The candidate fingerprints additionally record the resolved `bin/houston` path and
+its actual executable digest, including an ignored or untracked in-tree target.
+An entrypoint or parent symlink escaping the checkout fails before CLI execution.
 Nonignored nested repository metadata is included by the same walk.
 Root filenames beginning with a colon are treated as literal paths.
 The helper refuses a run if that manifest changes during verification. Commit
@@ -149,8 +154,13 @@ plants a synthetic secret to detect leaks.
 
 ## Cleanup
 
-The helper removes only the scratch directory it created, including the fixture,
-in a `finally` block on success or ordinary failure. On Darwin and Linux, it keeps the CLI
+The helper attempts to remove only the scratch directory it created, including the
+fixture, in a `finally` block on success or ordinary failure. Removal has a fresh
+30-second, 50,000-entry cooperative budget, independent of prior scans. It walks
+lazily through pinned directory descriptors and never follows symlinks. On exhaustion
+or an I/O failure the run fails, `scratch_removed` is false, and `retained_scratch`
+names the remaining directory. The failure summary preserves the primary error and
+reports independent receipt checks, including incomplete scans. On Darwin and Linux, it keeps the CLI
 leader unreaped while it force-kills the command group and confirms it has no live
 member before reaping the leader. Linux checks the cleanup deadline before and
 after each `/proc` entry iteration and status read; an OS call already in progress
@@ -200,7 +210,7 @@ cap and 60-second subprocess timeout remain separate.
 Checks run before and after each bounded read and during lazy directory walks.
 An OS call already in progress cannot be preempted. Expiry fails the run with
 `File work budget exceeded`, its reason and path; excess bytes are never skipped
-to produce a pass. Scratch removal still runs after a scan failure. An incomplete
+to produce a pass. Bounded scratch removal is still attempted after a scan failure. An incomplete
 fingerprint leaves its unchanged facts null, rather than claiming stability.
 If inventory work fails, the failure path attempts bounded inventory invalidation
 and writes a FAIL summary without an inventory locator. Any invalidation failure

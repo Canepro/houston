@@ -153,7 +153,8 @@ if attack.startswith('access-'):
     runtime = record['extra']['runtime']
     remote = any(os.environ.get(key) for key in ('SSH_CONNECTION', 'SSH_CLIENT', 'SSH_TTY'))
     sides = sorted(record['extra'].get('sidecar_ports', []) + record['extra'].get('monitoring_ports', []))
-    port_text = os.environ.get('HOUSTON_SSH_LOCAL_PORT', '39999')
+    host_port = record['host_port']
+    port_text = os.environ.get('HOUSTON_SSH_LOCAL_PORT', str(host_port))
     try:
         port = int(port_text)
         assert 1024 <= port <= 65535 and port not in sides
@@ -164,16 +165,33 @@ if attack.startswith('access-'):
         command = None
         if remote:
             target = '[::1]' if record['extra']['bind_host'] == '::1' else '127.0.0.1'
-            forwards = ['-L', f'127.0.0.1:{port}:{target}:39999']
+            forwards = ['-L', f'127.0.0.1:{port}:{target}:{host_port}']
             for side in sides:
                 forwards += ['-L', f'127.0.0.1:{side}:{target}:{side}']
             command = shlex.join(['ssh', '-N', '-o', 'ExitOnForwardFailure=yes', *forwards, '--', os.environ['HOUSTON_SSH_USER'] + '@' + os.environ['HOUSTON_SSH_HOST']])
-        access = dict(mode='remote_ssh' if remote else 'local', bind='loopback', host_port=39999,
-                      local_port=port if remote else 39999, browser_url=f'http://127.0.0.1:{port}' if remote else record['root_url'],
+        access = dict(mode='remote_ssh' if remote else 'local', bind='loopback', host_port=host_port,
+                      local_port=port if remote else host_port, browser_url=f'http://127.0.0.1:{port}' if remote else record['root_url'],
                       tunnel_command=command, side_ports=sides, note='synthetic remote guidance' if remote else None)
     if attack == 'access-public-local' and name == 'verify-public-fixture' and not remote:
         access = dict(mode='local', browser_url=record['root_url'], tunnel_command=None)
     if '--json' not in args:
+        human_name = name
+        if attack.startswith('access-human:'):
+            _, stage, selected_runtime, field = attack.split(':')
+            if (stage == ('remote' if remote else 'local') and selected_runtime == runtime
+                    and (field == 'name' or not os.environ.get('HOUSTON_SSH_LOCAL_PORT'))):
+                if field == 'name':
+                    human_name = 'another-' + name + '-copy'
+                else:
+                    # Wrong runtime metadata with the requested title preserved.
+                    # Historical fixtures shared this port, so old main falsely passes.
+                    other = 'verify-access-fixture' if runtime == 'docker' else 'verify-docker-access-fixture'
+                    other_record = json.loads((home / 'repros' / other / 'repro.json').read_text())
+                    other_port = other_record['host_port']
+                    access['browser_url'] = f'http://127.0.0.1:{other_port}'
+                    if remote:
+                        access['tunnel_command'] = access['tunnel_command'].replace(f':{host_port}', f':{other_port}')
+        print(f'+- {human_name} ----+\n|  URL  {access["browser_url"] if access else "public"}  |\n+----------------+')
         print(' '.join(str(access[key] or '') for key in ('browser_url', 'tunnel_command')) if access else 'public')
         sys.exit(0)
     data = dict(name=name, runtime=runtime, access=access)
@@ -185,7 +203,26 @@ if attack.startswith('access-'):
     emit('houston.info.v1', data)
 if 'verify-kube-fixture' not in args and 'verify-fixture' not in args:
     if 'verify-access-fixture' in args:
-        if attack.startswith('work-'):
+        if attack.startswith('cleanup-'):
+            target = Path(os.environ['TMPDIR']) / 'cleanup-tree'
+            target.mkdir(exist_ok=True)
+            current = target
+            for depth in range(0 if attack == 'cleanup-clean' else 40):
+                current = current / 'deep'
+                current.mkdir(exist_ok=True)
+                for index in range(12):
+                    (current / f'cleanup-leaf-{index}').write_text('synthetic cleanup input')
+            (target / 'outside-link').symlink_to(OUTSIDE)
+            if attack == 'cleanup-primary':
+                print('candidate command failed', file=sys.stderr)
+                sys.exit(3)
+        elif attack.startswith('entrypoint-') and attack.endswith('mutate'):
+            with Path(__file__).open('a') as stream:
+                stream.write('\n# candidate changed executable bytes\n')
+        elif attack == 'git-helper-during':
+            with (Path.cwd() / '.git/config').open('a') as stream:
+                stream.write('\n[core]\n\tfsmonitor = ' + HELPER + '\n')
+        elif attack.startswith('work-'):
             where = attack.split(':')[1]
             target = {'temp': Path(os.environ['TMPDIR']), 'fixture': home / 'repros/verify-fixture',
                       'retained': out, 'time': out, 'growing': out, 'inventory': out,
@@ -272,6 +309,31 @@ def load(path):
 
 def worker(path, checkout, out, attack):
     module = load(path)
+    git_environments = []
+    cleanup_unlinks = []
+    if attack.startswith('git-'):
+        run_command = module.run_command
+        def observe_git(command, cwd, env, *args, **kwargs):
+            if Path(command[0]).name == 'git':
+                git_environments.append(dict(command=command, keys=sorted(env),
+                                             sentinel=env.get('VERIFIER_CALLER_SENTINEL')))
+            return run_command(command, cwd, env, *args, **kwargs)
+        module.run_command = observe_git
+    if attack.startswith('cleanup-'):
+        module.FILE_WORK_ENTRIES = 256
+        unlink = module.os.unlink
+        real_clock = module.time.monotonic
+        cleanup_offset = 0
+        def observe_unlink(name, *args, **kwargs):
+            nonlocal cleanup_offset
+            if str(name).split('/')[-1].startswith('cleanup-leaf-'):
+                cleanup_unlinks.append(str(name))
+                if attack == 'cleanup-time':
+                    cleanup_offset += 31
+            return unlink(name, *args, **kwargs)
+        module.os.unlink = observe_unlink
+        if attack == 'cleanup-time':
+            module.time.monotonic = lambda: real_clock() + cleanup_offset
     if attack.startswith('work-'):
         # Small limits exercise the production budget against real files and reads.
         module.FILE_WORK_LIMIT_BYTES = 128 * 1024
@@ -383,7 +445,12 @@ def worker(path, checkout, out, attack):
         # the interactive snapshot which has no subsequent candidate command.
         module.candidate_fingerprint = tamper_before_final_fingerprint
     sys.argv = [str(path), '--checkout', str(checkout), '--evidence-dir', str(out)]
-    module.main()
+    try:
+        module.main()
+    finally:
+        if attack.startswith(('git-', 'cleanup-')):
+            (out / 'boundary-observations.json').write_text(json.dumps(dict(
+                git_environments=git_environments, cleanup_unlinks=cleanup_unlinks)))
 
 
 def run_main_case(path, attack, proof_dir=None):
@@ -401,8 +468,25 @@ def run_main_case(path, attack, proof_dir=None):
         stub = candidate / 'bin/houston'
         stub.write_text(
             f'#!{sys.executable}\nOUT={str(out)!r}\nATTACK={attack!r}\n'
-            f'OUTSIDE={str(outside)!r}\nOTHER={str(other)!r}\n' + STUB)
+            f'OUTSIDE={str(outside)!r}\nOTHER={str(other)!r}\nHELPER={str(base / "git-helper")!r}\n' + STUB)
         stub.chmod(0o700)
+        executable_before = stub.read_bytes()
+        executable_target = stub
+        if attack.startswith('entrypoint-'):
+            # Track the link, but leave the real bytes ignored or outside.
+            executable_target = (base / 'external-cli' if 'external' in attack else
+                                 candidate / 'ignored-build/real-cli')
+            executable_target.parent.mkdir(exist_ok=True)
+            stub.rename(executable_target)
+            stub.symlink_to(executable_target)
+            if 'parent' in attack:
+                stub.unlink()
+                (candidate / 'bin').rmdir()
+                directory_target = executable_target.parent / 'entry-bin'
+                directory_target.mkdir()
+                executable_target.rename(directory_target / 'houston')
+                executable_target = directory_target / 'houston'
+                (candidate / 'bin').symlink_to(directory_target, target_is_directory=True)
         (candidate / 'package.json').write_text(
             '{"version":"9.9.9"}' + (' ' * (2 * 1024 * 1024) if attack == 'package-large' else ''))
         # The synthetic CLI writes JSON, a YAML subset. This parser dependency
@@ -443,6 +527,16 @@ def run_main_case(path, attack, proof_dir=None):
             (candidate / 'src').mkdir()
             for item in candidate.glob('budget-*.bin'):
                 item.rename(candidate / 'src' / item.name)
+        if attack.startswith('git-'):
+            helper = base / 'git-helper'
+            helper.write_text(f'#!{sys.executable}\nimport os,json,sys\nfrom pathlib import Path\n'
+                              f'Path({str(base / "helper-marker")!r}).write_text(json.dumps(dict(sentinel=os.environ.get("VERIFIER_CALLER_SENTINEL"))))\n'
+                              'sys.stdout.buffer.write(b"token\\0")\n')
+            helper.chmod(0o700)
+            environment['VERIFIER_CALLER_SENTINEL'] = 'SYNTHETIC_NONSECRET_R13'
+            if attack == 'git-helper-initial':
+                with (candidate / '.git/config').open('a') as stream:
+                    stream.write('\n[core]\n\tfsmonitor = ' + str(helper) + '\n')
         command = [sys.executable, '-I', '-B', str(Path(__file__).resolve()),
                    '--worker', str(path.resolve()), str(candidate), str(out), attack]
         try:
@@ -458,12 +552,19 @@ def run_main_case(path, attack, proof_dir=None):
             (retained / 'invocation.json').write_text(json.dumps(dict(
                 command=command, exit=result.returncode, attack=attack,
                 verifier_sha256=hashlib.sha256(path.read_bytes()).hexdigest()), indent=2) + '\n')
-            names = [*PROVENANCE, 'candidate-fingerprint-after.json', 'fixture-manifest-after.json', 'commands.json']
+            names = ['boundary-observations.json', *PROVENANCE, 'candidate-fingerprint-after.json', 'fixture-manifest-after.json', 'commands.json']
             # Retain actual synthetic outputs at the new CLI boundaries, including
             # baseline false passes. These files contain no real workspace data.
             for label in ('access-public-local', 'access-public', 'inspect-docker',
                           'inspect-kubernetes', 'inspect-docker-human', 'inspect-kubernetes-human'):
                 names.extend((label + '.stdout', label + '.stderr'))
+            if attack.startswith('access-human:') or attack == 'access-clean':
+                names.extend(p.name for p in out.glob('access-*.stdout'))
+            if (base / 'helper-marker').exists():
+                (retained / 'helper-marker.json').write_bytes((base / 'helper-marker').read_bytes())
+            if attack.startswith('entrypoint-'):
+                (retained / 'executable-before.bin').write_bytes(executable_before)
+                (retained / 'executable-after.bin').write_bytes(executable_target.read_bytes())
             for name in names:
                 target = out / name
                 if target.is_file() and not target.is_symlink() and target.stat().st_size <= 1024 * 1024:
@@ -505,11 +606,28 @@ def run_main_case(path, attack, proof_dir=None):
         assert lines, f'main did not print summary: {result.stderr[-1200:]}'
         summary_path = Path(lines[-1])
         summary = json.loads(summary_path.read_text())
-        should_pass = (attack in ('clean', 'feature-clean', 'stdout-hardlink', 'access-clean', 'inspect-clean', 'untracked-clean', 'untracked-ignored', 'untracked-colon-clean')
+        should_pass = (attack in ('clean', 'feature-clean', 'stdout-hardlink', 'access-clean', 'inspect-clean', 'untracked-clean', 'untracked-ignored', 'untracked-colon-clean', 'entrypoint-internal-clean', 'entrypoint-parent-clean',
+                                  'git-helper-initial', 'git-helper-during', 'git-clean', 'cleanup-clean')
                        or attack.endswith(':hardlink'))
         assert (result.returncode == 0) == should_pass, f'exit={result.returncode}: {summary}'
         assert summary['result'] == ('PASS_SCOPED' if should_pass else 'FAIL'), summary
-        assert summary['scratch_removed'] is True, summary
+        if attack.startswith('cleanup-') and attack != 'cleanup-clean':
+            observations = json.loads((out / 'boundary-observations.json').read_text())
+            retained_scratch = Path(summary['retained_scratch']) if 'retained_scratch' in summary else None
+            remains = retained_scratch is not None and retained_scratch.is_dir()
+            # Remove only this case's retained scratch after recording its real state.
+            import shutil
+            if remains:
+                shutil.rmtree(retained_scratch)
+            assert 0 < len(observations['cleanup_unlinks']) <= 256, observations
+            assert summary['scratch_removed'] is False and remains, summary
+            assert 'scratch removal' in str(summary.get('cleanup_errors')), summary
+            if attack == 'cleanup-time':
+                assert len(observations['cleanup_unlinks']) == 1, observations
+                assert '(time, scratch removal)' in str(summary['cleanup_errors']), summary
+            assert outside.read_bytes() == b'outside source unchanged\n'
+        else:
+            assert summary['scratch_removed'] is True, summary
         observed = {
             'exit': result.returncode, 'printed_summary': str(summary_path),
             'result': summary['result'], 'scratch_removed': summary['scratch_removed'],
@@ -517,7 +635,42 @@ def run_main_case(path, attack, proof_dir=None):
             'fixture_unchanged': summary['fixture_unchanged'], 'outside_source_unchanged': True,
         }
         error = str(summary.get('cleanup_errors', '')) + str(summary.get('error', ''))
-        if attack.startswith('work-'):
+        if attack.startswith('cleanup-'):
+            assert attack == 'cleanup-clean' or 'File work budget exceeded' in error, error
+            if attack == 'cleanup-primary':
+                assert 'expected exit 0, got 3' in summary['error'], summary
+            assert summary.get('receipt_scan', {}).get('result') == 'PASS' or 'Final command receipt scan failed' in error
+            if 'inventory' not in summary:
+                assert not [p for p in out.glob('sha256.json*') if p.is_file()], 'obsolete inventory retained'
+                return dict(observed, budget_refused=True, removed_leaves=len(observations['cleanup_unlinks']),
+                            retained_scratch_reported=True, inventory=None)
+        elif attack.startswith('git-'):
+            observations = json.loads((out / 'boundary-observations.json').read_text())
+            assert observations['git_environments'], observations
+            assert not (base / 'helper-marker').exists(), 'candidate Git helper executed with synthetic caller environment'
+            assert all(item['sentinel'] is None for item in observations['git_environments']), 'caller-only sentinel reached Git environment'
+            assert summary['candidate_unchanged'] is True, summary
+        elif attack.startswith('entrypoint-'):
+            if 'external' in attack:
+                assert 'Candidate entrypoint escapes checkout' in error, error
+                assert executable_target.read_bytes() == executable_before, 'external CLI executed or changed'
+                assert not (out / 'commands.json').exists(), 'escaped entrypoint was launched'
+            else:
+                before = json.loads((out / 'candidate-fingerprint-before.json').read_text())
+                after = json.loads((out / 'candidate-fingerprint-after.json').read_text())
+                assert before['entrypoint']['sha256'] == hashlib.sha256(executable_before).hexdigest()
+                if attack.endswith('mutate'):
+                    assert summary['candidate_unchanged'] is False and summary['source_unchanged'] is False, summary
+                    assert before['entrypoint'] != after['entrypoint'], (before, after)
+                    assert executable_target.read_bytes() == executable_before + b'\n# candidate changed executable bytes\n'
+                else:
+                    assert before['entrypoint'] == after['entrypoint'], (before, after)
+                    assert executable_target.read_bytes() == executable_before
+        elif attack.startswith('access-human:'):
+            assert ('Human access chose another workspace' if attack.endswith(':name') else
+                    'Human access guidance differs from JSON' if ':remote:' in attack else
+                    'Human local access guidance omitted the browser URL') in error, error
+        elif attack.startswith('work-'):
             assert 'File work budget exceeded' in error, error
             reason = ('total byte' if attack.endswith((':aggregate', ':final-total')) else
                       'entry' if attack.endswith(':entries') else
@@ -744,6 +897,13 @@ def main():
     args = parser.parse_args()
     path = args.verify_source
     attacks = (
+        'cleanup-budget', 'cleanup-primary', 'cleanup-time', 'cleanup-clean',
+        'entrypoint-external-mutate', 'entrypoint-internal-mutate', 'entrypoint-internal-clean',
+        'entrypoint-parent-mutate', 'entrypoint-parent-clean',
+        'git-clean', 'git-helper-initial', 'git-helper-during',
+        *('access-human:' + stage + ':' + runtime + ':' + field
+          for stage in ('local', 'remote') for runtime in ('docker', 'kubernetes')
+          for field in ('name', 'runtime')),
         'clean', 'access-clean', 'access-public-local', 'inspect-clean',
         *('inspect-identity:' + runtime + ':' + field
           for runtime in ('docker', 'kubernetes') for field in ('name', 'runtime')),

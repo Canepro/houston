@@ -25,7 +25,7 @@ URL selects IPv4 or IPv6 loopback as the forward target. A remote process cannot
 measure a port conflict on the operator's laptop.
 
 The v2 consumer is `info --json`, schema `houston.info.v1`, at `data.access`.
-Human `info` prints the same tunnel and browser URL. The helper probes the clean
+Human `info` prints a workspace panel title and the same tunnel and browser URL. The helper probes the clean
 Docker fixture `verify-docker-access-fixture` and the Kubernetes fixture
 `verify-access-fixture`. Each payload `data` value must be an object, or the run fails. When both objects omit `data.access`, this port stays
 pending. When either object has `data.access`, require the local, human, and
@@ -40,7 +40,11 @@ SSH_CLIENT, SSH_TTY, HOUSTON_SSH_HOST, HOUSTON_SSH_USER, and
 HOUSTON_SSH_LOCAL_PORT values.
 
 Require local mode with no tunnel and human output containing the local browser
-URL. Exercise SSH_CONNECTION, SSH_CLIENT, and SSH_TTY separately. Remote mode
+URL. On every local and remote human process require the exact first panel title
+to match the requested fixture. The real `summaryPanel` renderer has no Runtime
+row. Docker uses port 39998 and Kubernetes uses 39999, so the actual human URL and
+tunnel guidance also distinguish the runtime. Keep JSON identity and guidance
+checks independent of the human process. Exercise SSH_CONNECTION, SSH_CLIENT, and SSH_TTY separately. Remote mode
 must carry matching ports and browser URL, an alternate local port, accepted port
 1024, IPv6 remote loopback, and exit 2 with VALIDATION_FAILED for nonnumeric,
 -1, 1023, and 65536 local ports. Parse the generated command with shell word

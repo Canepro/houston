@@ -114,6 +114,55 @@ def walk_entries(root, skipped=()):
                     stack.append(path)
 
 
+def remove_scratch(root):
+    """Remove lazily through pinned directories, without following symlinks.
+
+    Cleanup owns a fresh budget even when preceding scans exhausted theirs.
+    A stopped traversal retains the rest for the summary to report.
+    """
+    with file_work_scope('scratch removal', fresh=True) as budget:
+        descriptors = []
+        iterators = []
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        parent = os.open(root.parent, flags)
+        descriptors.append(parent)
+        try:
+            descriptor = os.open(root.name, flags, dir_fd=parent)
+            descriptors.append(descriptor)
+            iterator = os.scandir(descriptor)
+            iterators.append(iterator)
+            stack = [(parent, root.name, descriptor, iterator)]
+            while stack:
+                budget.check(root)
+                parent_fd, name, directory_fd, entries = stack[-1]
+                try:
+                    entry = next(entries)
+                except StopIteration:
+                    budget.check(root, entries=1)
+                    os.rmdir(name, dir_fd=parent_fd)
+                    entries.close()
+                    iterators.pop()
+                    os.close(directory_fd)
+                    descriptors.pop()
+                    stack.pop()
+                    continue
+                budget.check(root / entry.name, entries=1)
+                mode = os.stat(entry.name, dir_fd=directory_fd, follow_symlinks=False).st_mode
+                if stat.S_ISDIR(mode):
+                    child = os.open(entry.name, flags, dir_fd=directory_fd)
+                    descriptors.append(child)
+                    children = os.scandir(child)
+                    iterators.append(children)
+                    stack.append((directory_fd, entry.name, child, children))
+                else:
+                    os.unlink(entry.name, dir_fd=directory_fd)
+        finally:
+            for iterator in reversed(iterators):
+                iterator.close()
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
+
+
 def file_blocks(handle, path, chunk_size):
     budget = CURRENT_FILE_WORK.get()
     budget.check(path)
@@ -528,6 +577,12 @@ def require_access_identity(data, name, runtime):
             f'Access response chose another workspace/runtime: expected {name}/{runtime}')
 
 
+def require_human_access_identity(human, name):
+    panel = re.match(r'\A\+- ([^\r\n]*?) -+\+\r?\n', human)
+    require(panel is not None and panel[1] == name,
+            f'Human access chose another workspace: expected {name}')
+
+
 def require_human_inspection_identity(human, name, runtime):
     # renderInspection puts identity in its first writePanel: an exact title
     # and a Runtime label/value row. Other panels cannot supply that identity.
@@ -697,7 +752,7 @@ def git_evidence_context(root):
     require(executable is not None, 'Missing prerequisite: git')
     git = Path(executable).resolve()
     require(git.is_file(), 'Git executable could not be resolved')
-    environment = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+    environment = {'PATH': os.defpath, 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8'}
     environment.update({
         # Do not let a caller pick another repository, config or diff driver.
         'GIT_CONFIG_GLOBAL': os.devnull,
@@ -723,7 +778,8 @@ def git_evidence_context(root):
 def git_evidence_output(context, label, arguments, text=False, stdin=None, accepted_exits=(0,)):
     result = bounded_output(
         label,
-        [context['git'], '--no-pager', '-C', str(context['root']), *arguments],
+        [context['git'], '--no-pager', '-c', 'core.fsmonitor=false',
+         '-c', f'core.hooksPath={os.devnull}', '-C', str(context['root']), *arguments],
         cwd=context['root'],
         env=context['env'],
         text=text,
@@ -804,6 +860,14 @@ def source_manifest(context):
 
 
 @bounded_file_work
+def entrypoint_fingerprint(root):
+    entrypoint = (root / 'bin' / 'houston').resolve(strict=True)
+    require(entrypoint.is_relative_to(root), 'Candidate entrypoint escapes checkout')
+    # Include actual bytes even if Git ignores the target or a parent is a link.
+    return {'path': str(entrypoint.relative_to(root)), 'sha256': hash_file(entrypoint)}
+
+
+@bounded_file_work
 def candidate_fingerprint(root):
     context = git_evidence_context(root)
     return {
@@ -820,6 +884,7 @@ def candidate_fingerprint(root):
                 ['diff', '--no-ext-diff', '--no-textconv', '--no-color', 'HEAD'],
             ),
         ).hexdigest(),
+        'entrypoint': entrypoint_fingerprint(root),
         'source': source_manifest(context),
     }
 
@@ -1317,7 +1382,7 @@ def main():
         retain_provenance('candidate-source.json', json.dumps(source_before, indent=2) + '\n')
         retain_provenance('candidate-fingerprint-before.json',
                           json.dumps(candidate_before, indent=2) + '\n')
-        scratch = Path(tempfile.mkdtemp(prefix='verify-houston-'))
+        scratch = Path(tempfile.mkdtemp(prefix='verify-houston-')).resolve()
         # Only entry-point utilities can execute. No inherited credentials, engine socket,
         # kubeconfig, user home, proxy or ambient HOUSTON_* overrides reach the CLI.
         toolbin = scratch / 'bin'
@@ -1389,8 +1454,8 @@ def main():
         docker_access = workspace.parent / 'verify-docker-access-fixture'
         docker_access.mkdir()
         docker_access_record = dict(record, name=docker_access.name,
-                                     project='houston-verify-docker-access-fixture',
-                                     root_url='http://127.0.0.1:39999',
+                                     project='houston-verify-docker-access-fixture', host_port=39998,
+                                     root_url='http://127.0.0.1:39998',
                                      admin_password='synthetic-access',
                                      extra={'runtime': 'docker', 'bind_host': '127.0.0.1'})
         (docker_access / 'repro.json').write_text(json.dumps(docker_access_record))
@@ -1657,7 +1722,9 @@ def main():
             }
 
             def remote_access(label, marker, name=access_workspace.name, target='127.0.0.1',
-                              port=39999, changes=None, sides=()):
+                              port=None, changes=None, sides=()):
+                host_port = 39998 if name == docker_access.name else 39999
+                port = host_port if port is None else port
                 overrides = {
                     marker: ssh_values[marker],
                     'HOUSTON_SSH_USER': 'operator',
@@ -1670,11 +1737,11 @@ def main():
                 require_access_identity(detail, name, runtime)
                 data = detail['access']
                 require(data['mode'] == 'remote_ssh' and data['bind'] == 'loopback'
-                        and data['host_port'] == 39999 and data['local_port'] == port
+                        and data['host_port'] == host_port and data['local_port'] == port
                         and data['browser_url'] == f'http://127.0.0.1:{port}'
                         and data['side_ports'] == list(sides) and bool(data['note']),
                         'Remote access mode, ports or browser URL differ')
-                expected_forwards = ['-L', f'127.0.0.1:{port}:{target}:39999']
+                expected_forwards = ['-L', f'127.0.0.1:{port}:{target}:{host_port}']
                 for side in sides:
                     expected_forwards.extend(['-L', f'127.0.0.1:{side}:{target}:{side}'])
                 require(shlex.split(data['tunnel_command']) ==
@@ -1682,18 +1749,21 @@ def main():
                          overrides['HOUSTON_SSH_USER'] + '@' + overrides['HOUSTON_SSH_HOST']],
                         'Tunnel must bind client loopback and preserve one option-safe destination')
                 human = run('access-' + label + '-human', ['info', '--name', name], overrides=overrides)
+                require_human_access_identity(human, name)
                 require(data['tunnel_command'] in human and data['browser_url'] in human,
                         'Human access guidance differs from JSON')
             remote = {'SSH_CONNECTION': ssh_values['SSH_CONNECTION'],
                       'HOUSTON_SSH_USER': 'operator', 'HOUSTON_SSH_HOST': 'ssh-proof.invalid'}
             for runtime, name, target, root_url in loopback_access:
                 local = discovered[runtime]['access']
+                host_port = 39998 if runtime == 'docker' else 39999
                 require(local['mode'] == 'local' and local['bind'] == 'loopback'
-                        and local['host_port'] == 39999 and local['local_port'] == 39999
+                        and local['host_port'] == host_port and local['local_port'] == host_port
                         and local['browser_url'] == root_url
                         and local['tunnel_command'] is None and local['note'] is None,
                         'Local access handoff differs from recorded workspace')
                 local_human = run(f'access-local-human-{runtime}', ['info', '--name', name])
+                require_human_access_identity(local_human, name)
                 require(local['browser_url'] in local_human,
                         'Human local access guidance omitted the browser URL')
                 for marker in ssh_values:
@@ -1909,7 +1979,8 @@ def main():
                 candidate_after = candidate_fingerprint(root)
                 if candidate_before is not None:
                     summary['candidate_unchanged'] = candidate_after == candidate_before
-                    summary['source_unchanged'] = candidate_after['source'] == source_before
+                    summary['source_unchanged'] = (candidate_after['source'] == source_before
+                                                  and candidate_after['entrypoint'] == candidate_before['entrypoint'])
                 if candidate_before is not None and candidate_after != candidate_before:
                     cleanup_errors.append('Candidate fingerprint changed during verification')
                 if evidence_directory_ok:
@@ -1938,11 +2009,12 @@ def main():
                     cleanup_errors.append(f'Candidate temp scan failed: {error}')
             try:
                 if scratch is not None:
-                    shutil.rmtree(scratch)
+                    remove_scratch(scratch)
             except Exception as error:
                 cleanup_errors.append(f'Could not remove verifier scratch: {error}')
-            summary['scratch_removed'] = scratch is None or not scratch.exists()
+            summary['scratch_removed'] = scratch is None or path_absent(scratch)
             if not summary['scratch_removed']:
+                summary['retained_scratch'] = str(scratch)
                 cleanup_errors.append('Verifier scratch remains after cleanup')
             if evidence_directory_ok and retained_bundle_files:
                 try:

@@ -42,3 +42,9 @@ and finalizer time. Exhaustion fails with cleanup facts and an incomplete
 inventory when necessary; it cannot certify a partial scan.
 The Python safety regression drives actual verifier `main` with a synthetic
 candidate CLI; it does not replace the real Houston CLI integration sweep.
+
+Human access probes check their own exact workspace title and distinct Docker/Kubernetes
+ports. Candidate fingerprints bind resolved in-tree entrypoint bytes and refuse escaping
+links. Evidence Git commands use an allowlisted environment with fsmonitor and hooks
+disabled. Scratch removal has a fresh bounded traversal; a retained scratch locator
+and FAIL summary report exhaustion without claiming complete cleanup.
