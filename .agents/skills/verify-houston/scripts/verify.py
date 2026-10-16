@@ -625,16 +625,54 @@ def require_human_inspection_identity(human, name, runtime):
             f'Human inspection chose another workspace/runtime: expected {name}/{runtime}')
 
 
+def human_panel_rows(human, title):
+    """Row cells of every panel titled `title`, as writePanel draws it.
+
+    A panel is a "+- title ---+" border, one "|  cell  |" line per cell with
+    the cell padded on the right, and a closing "+----+" border.
+    """
+    pattern = rf'^\+- {re.escape(title)} -+\+\r?\n((?:\|  .*  \|\r?\n)*)\+-+\+\r?$'
+    return [[re.fullmatch(r'\|  (.*)  \|', line)[1].rstrip(' ') for line in match[1].splitlines()]
+            for match in re.finditer(pattern, human, flags=re.MULTILINE)]
+
+
 def require_unknown_panels(human, panels):
+    # renderInspection draws an unreadable empty collection as a single row that
+    # holds exactly "unknown". A resource row or a column that merely contains the
+    # word is not that placeholder.
     for panel in panels:
-        match = re.search(
-            rf'^\+-\s*{re.escape(panel)}\b.*?(?=^\+-|\Z)',
-            human,
-            flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
-        )
-        require(match is not None, f'Human inspection omitted the {panel} panel')
-        require(re.search(r'\bunknown\b', match.group(0), flags=re.IGNORECASE) is not None,
-                f'Human inspection did not mark the {panel} panel unknown')
+        found = human_panel_rows(human, panel)
+        require(found, f'Human inspection omitted the {panel} panel')
+        require(found == [['unknown']],
+                f'Human inspection did not render the {panel} unknown placeholder')
+
+
+def human_setup_gate_rows(human):
+    """(code, message) of each row in the gate section of `onboard --show`.
+
+    humanLines in src/cli/handlers/setup.ts prints one "  CODE: message" row per
+    gate between the "seed deferred" line and the "first run" line.
+    """
+    lines = human.splitlines()
+    starts = [index for index, line in enumerate(lines) if line.startswith('seed deferred ')]
+    ends = [index for index, line in enumerate(lines) if line.startswith('first run ')]
+    require(len(starts) == 1 and len(ends) == 1 and starts[0] < ends[0],
+            'Human setup omitted its gate section')
+    rows = []
+    for line in lines[starts[0] + 1:ends[0]]:
+        row = re.fullmatch(r'  ([A-Z][A-Z0-9_]*): (\S.*)', line)
+        require(row is not None, 'Human setup gate section holds a line that is not a gate row')
+        rows.append((row[1], row[2]))
+    return rows
+
+
+def node_require_option(path):
+    """NODE_OPTIONS value that preloads `path`.
+
+    Node splits NODE_OPTIONS on spaces. Inside double quotes it keeps spaces and
+    reads a backslash as an escape, and it does not decode JSON \\u escapes.
+    """
+    return '--require="' + str(path).replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
 def require_command_contract(command, name, flags, schema):
@@ -919,19 +957,54 @@ def untracked_candidate_files(context):
     return found
 
 
+def git_metadata_roots(context):
+    """Root Git metadata, which no fingerprint covers, as resolved directories."""
+    root = context['root']
+    output = git_evidence_output(
+        context, 'candidate Git directories',
+        ['rev-parse', '--absolute-git-dir', '--git-common-dir'], text=True,
+    )
+    lines = output.splitlines()
+    require(len(lines) == 2, 'Git did not report the candidate Git directories')
+    return {root / '.git', (root / '.git').resolve(), Path(lines[0]).resolve(),
+            (root / lines[1]).resolve()}
+
+
 @bounded_file_work
 def require_safe_tracked_links(context):
-    """Check tracked link structure across the checkout, not arbitrary imports."""
+    """Check tracked link structure across the checkout, not arbitrary imports.
+
+    The worktree decides what a tracked path is. A regular file in the index can
+    be a link on disk, and a link in a parent directory redirects every path below.
+    """
     root = context['root']
+    metadata = git_metadata_roots(context)
     entries = git_evidence_output(
         context, 'candidate tracked link modes', ['ls-files', '--stage', '-z'],
     )
+    plain_parents = set()
     for entry in entries.split(b'\0'):
         CURRENT_FILE_WORK.get().check('candidate tracked links', entries=1)
-        if not entry.startswith(b'120000 '):
+        if not entry or entry.startswith(b'160000 '):
             continue
         name = entry.split(b'\t', 1)[1].decode()
         path = root / name
+        try:
+            linked = stat.S_ISLNK(path.lstat().st_mode)
+        except (FileNotFoundError, NotADirectoryError):
+            # A deleted tracked path or one under a replaced parent; git diff records it.
+            continue
+        except OSError as error:
+            raise RuntimeError(f'Unsafe candidate tracked link: {name} (unreadable)') from error
+        chain = []
+        for parent in path.parents:
+            if linked or parent == root or parent in plain_parents:
+                break
+            chain.append(parent)
+            linked = parent.is_symlink()
+        if not linked:
+            plain_parents.update(chain)
+            continue
         try:
             target = path.resolve(strict=True)
         except (OSError, RuntimeError) as error:
@@ -939,6 +1012,8 @@ def require_safe_tracked_links(context):
         require(target.is_relative_to(root) and
                 (regular_file(target) or stat.S_ISDIR(target.lstat().st_mode)),
                 f'Unsafe candidate tracked link: {name}')
+        require(not any(target == item or target.is_relative_to(item) for item in metadata),
+                f'Unsafe candidate tracked link: {name} (Git metadata target)')
         ignored = git_evidence_output(
             context, 'candidate tracked link ignore rule',
             ['check-ignore', '--no-index', '--stdin', '-z'],
@@ -1845,7 +1920,7 @@ def main():
             absent = run('capture-missing', ['capture', '--name', 'verify-missing', '--workload', 'smoke',
                                           '--bundle', str(absent_bundle), '--json'],
                          expected=4, schema='houston.error.v1', ok=False,
-                         overrides={'NODE_OPTIONS': f'--require={capture_preload}',
+                         overrides={'NODE_OPTIONS': node_require_option(capture_preload),
                                     'VERIFY_CAPTURE_MARKER': str(capture_marker),
                                     'VERIFY_CAPTURE_FAKE': str(fake_playwright)})
             require(absent['error']['code'] == 'NOT_FOUND', 'Capture missing name must be NOT_FOUND')
@@ -1890,8 +1965,11 @@ def main():
                 require(data['mode'] == 'remote_ssh' and data['bind'] == 'loopback'
                         and data['host_port'] == host_port and data['local_port'] == port
                         and data['browser_url'] == f'http://127.0.0.1:{port}'
-                        and data['side_ports'] == list(sides) and bool(data['note']),
+                        and data['side_ports'] == list(sides),
                         'Remote access mode, ports or browser URL differ')
+                # access.ts exposes the remote note as user-facing text.
+                require(isinstance(data['note'], str) and data['note'].strip() != '',
+                        'Remote access note must be nonempty text')
                 expected_forwards = ['-L', f'127.0.0.1:{port}:{target}:{host_port}']
                 for side in sides:
                     expected_forwards.extend(['-L', f'127.0.0.1:{side}:{target}:{side}'])
@@ -2051,8 +2129,18 @@ def main():
                         schema='houston.onboard.v1')['data']
             require(isinstance(shown, dict) and shown.get('schema') == 'houston.setup.v1',
                     'Invalid setup inner schema: setup-show')
-            require(shown['selection']['deployment'] == 'monolith'
-                    and shown['persisted']['grants']['owned_cluster'] is False
+            # The legacy fixture above saves default_deployment "default", which setup
+            # shows as monolith. Its other answers are read from the fixture itself,
+            # not from the candidate payload or a setup helper. selection also carries
+            # topology and kubernetes_target, so compare the saved answers one by one.
+            selection = shown['selection']
+            require(isinstance(selection, dict)
+                    and selection.get('deployment') == 'monolith'
+                    and selection.get('scenarios') == legacy['default_scenarios']
+                    and selection.get('seed_profile') == legacy['preferences']['seed_profile']
+                    and selection.get('retain_runs') is legacy['preferences']['retain_runs'],
+                    'Setup preview selection differs from the legacy fixture answers')
+            require(shown['persisted']['grants']['owned_cluster'] is False
                     and shown['actions'] == [], 'Setup preview lost saved answers or offers actions')
             require(read_bounded_file(config_file) == setup_before, 'Setup preview wrote answers')
             for label, args in [('empty', []), ('invalid', ['--deployment', 'not-a-deployment']),
@@ -2101,7 +2189,7 @@ def main():
             )
             retain_provenance('setup-ready-preload.cjs', ready_preload.read_text())
             ready = run('setup-ready', ['onboard', '--show', '--json'], schema='houston.onboard.v1',
-                        overrides={'NODE_OPTIONS': '--require=' + json.dumps(str(ready_preload))})['data']
+                        overrides={'NODE_OPTIONS': node_require_option(ready_preload)})['data']
             ready_after = read_bounded_file(config_file)
             require(ready_after == after, 'Ready setup preview wrote answers')
             calls = [strict_json_loads(line) for line in read_bounded_file(ready_calls).decode().splitlines()]
@@ -2134,6 +2222,22 @@ def main():
             require(ready.get('selection') == saved['selection'] and ready.get('actions') == []
                     and ready.get('persisted', {}).get('grants', {}).get('owned_cluster') is False,
                     'Ready setup changed saved choices or authority')
+            # Present tools, sufficient capacity and a ready owned runtime contradict a
+            # retained tools, capacity, runtime or onboarding blocker. The denied
+            # owned-cluster grant is the one gate that still applies.
+            ready_gates = ready.get('gates')
+            require(isinstance(ready_gates, list)
+                    and all(isinstance(gate, dict) and isinstance(gate.get('code'), str)
+                            for gate in ready_gates), 'Ready setup gates are malformed')
+            authority = [gate for gate in ready_gates if gate['code'] == 'GATE_OWNED_CLUSTER']
+            require(len(authority) == 1 and authority[0].get('kind') == 'grant'
+                    and isinstance(authority[0].get('message'), str) and authority[0]['message'].strip()
+                    and authority[0].get('approve_with') == 'houston onboard grant owned-cluster',
+                    'Ready setup omitted the denied owned-cluster authority gate')
+            stale = sorted({gate['code'] for gate in ready_gates}.intersection({
+                'KUBERNETES_TOOLS_MISSING', 'CAPACITY_BELOW_FLOOR', 'CAPACITY_UNKNOWN',
+                'OWNED_KUBERNETES_UNAVAILABLE', 'OWNED_KUBERNETES_UNKNOWN', 'GATE_NOT_ONBOARDED'}))
+            require(not stale, 'Ready setup retained contradictory readiness gates: ' + ', '.join(stale))
             require(isinstance(ready.get('first_run_command'), str) and ready['first_run_command'].strip(),
                     'Ready setup must generate a first-run command')
             require_saved_topology_command(ready['first_run_command'])
@@ -2163,7 +2267,12 @@ def main():
             deployments = re.findall(r'^deployment[ \t]+([^\r\n]+)', human, re.MULTILINE)
             require(deployments == [saved['selection']['deployment']],
                     'Human setup selected deployment differs')
-            require('GATE_OWNED_CLUSTER' in human, 'Human setup omitted authority gate')
+            # The separate human process must draw the same gates as the JSON preview
+            # that ran just before it, including the denied owned-cluster row.
+            expected_gate_rows = [(gate.get('code'), gate.get('message')) for gate in repeated['gates']]
+            require(sum(code == 'GATE_OWNED_CLUSTER' for code, _message in expected_gate_rows) == 1
+                    and human_setup_gate_rows(human) == expected_gate_rows,
+                    'Human setup gate rows differ from the JSON setup gates')
             persisted_setup = yaml_document(node_exec, root, env, config_file)
             require(persisted_setup['future_config'] == legacy['future_config']
                     and persisted_setup['grants']['future_grant'] == legacy['grants']['future_grant']

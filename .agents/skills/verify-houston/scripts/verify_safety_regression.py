@@ -11,6 +11,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 import subprocess
@@ -30,6 +31,31 @@ SCRIPT = Path(__file__).with_name('verify.py')
 # Exact 79b4d74 bin/houston, SHA-256 dcef1aa364320990f2e5ed0d468e24f5b4cfb04fc322e40f9c8640af273ee115.
 # The Node adapter models dispatch, not the real TypeScript application.
 DISPATCHER = b'#!/bin/sh\n# houston: the TypeScript build\'s entry.\n#\n# One implementation, so this file only finds the build and EXECS it. Never a spawn: the\n# build becomes this process, so its exit code IS the caller\'s, a signal sent to this pid\n# reaches it, and stdin, stdout and stderr (a TTY or not) are the descriptors the caller\n# gave. Node cannot execve; a shell can. The environment below is what the build needs\n# from the process that starts it.\nset -u\n\nself=$0\nwhile [ -h "$self" ]; do\n  link=$(readlink "$self") || break\n  case $link in\n    /*) self=$link ;;\n    *) self=$(dirname -- "$self")/$link ;;\n  esac\ndone\nroot=$(CDPATH=\'\' cd -P -- "$(dirname -- "$self")/.." && pwd -P) || {\n  printf \'houston: cannot find the directory %s is in. Nothing was run.\\n\' "$0" >&2\n  exit 252\n}\n\n# This file\'s own path, absolute and with its symlinks resolved as $root\'s are: the command\n# the owner installed, which `serve --print-service` names as its unit\'s ExecStart (systemd\n# refuses a relative one) rather than the build behind it, so the unit keeps working when\n# the build\'s location changes. Set on every run, so an inherited value never stands in.\nif here=$(CDPATH=\'\' cd -P -- "$(dirname -- "$self")" && pwd -P); then\n  HOUSTON_DISPATCHER=$here/${self##*/}\n  export HOUSTON_DISPATCHER\nelse\n  unset HOUSTON_DISPATCHER\nfi\n\n# The network earlier releases reached, by default: they honoured HTTP_PROXY, HTTPS_PROXY\n# and NO_PROXY, and trusted REQUESTS_CA_BUNDLE or CURL_CA_BUNDLE. Node\'s fetch honours the\n# proxy variables only under NODE_USE_ENV_PROXY, which it reads at startup -- so behind a\n# proxy `versions` fell back to the shipped map where it should have answered from\n# releases.rocket.chat, and doctor called the release endpoint unreachable. A bundle\n# those variables name is added to Node\'s as NODE_EXTRA_CA_CERTS, which is how a\n# TLS-inspecting proxy\'s CA reaches both. Either is left as the caller set it.\nNODE_USE_ENV_PROXY=${NODE_USE_ENV_PROXY-1}\nexport NODE_USE_ENV_PROXY\nif [ -z "${NODE_EXTRA_CA_CERTS-}" ]; then\n  ca=${REQUESTS_CA_BUNDLE:-${CURL_CA_BUNDLE:-}}\n  if [ -n "$ca" ]; then NODE_EXTRA_CA_CERTS=$ca; export NODE_EXTRA_CA_CERTS; fi\nfi\n\n# A CHECKOUT RUNS ITS SOURCE; AN INSTALLED PACKAGE RUNS THE EMITTED BUILD. The source is\n# what was edited, so on a tree that has src/ it is run through tools/cli.js (swc, no build\n# step); an installed tarball ships dist/ and no src/, so there the emitted build is the\n# only build. Preferring dist/ wherever it existed ran STALE code on a checkout: `yarn\n# build` from before a change left dist/ behind, and a fresh home was claimed with the old\n# marker while `--version`, read from package.json, said the new number. Both are the same\n# code: `tsc` emits dist/ from src/ with no bundler, and the tarball is what `yarn build`\n# is for.\nif [ -f "$root/src/cli/entry.ts" ] && [ -f "$root/tools/cli.js" ]; then\n  exec node "$root/tools/cli.js" "$@"\nfi\nif [ -f "$root/dist/cli/entry.js" ]; then exec node "$root/dist/cli/entry.js" "$@"; fi\nprintf \'houston: neither src/cli/entry.ts with tools/cli.js nor dist/cli/entry.js is under %s. Nothing was run.\\n\' "$root" >&2\nexit 252\n'
+
+# The exact refusal for each unsafe dispatch layout. The tracked-link structural check owns
+# every link case except the two source-manifest cases at the end, which it accepts: a
+# link into a tracked directory, and a link to a tracked file outside the manifest paths.
+DISPATCH_REFUSALS = {
+    'dispatch-relocated-mutate': 'Candidate dispatcher root differs from checkout',
+    'dispatch-fallback-mutate': 'Candidate checkout source dispatch is not manifested: src/cli/entry.ts',
+    'dispatch-ignored-regular-mutate': 'Candidate checkout source dispatch is not manifested: tools/cli.js',
+    'dispatch-external-mutate': 'Unsafe candidate tracked link: tools/cli.js',
+    'dispatch-ignored-mutate': 'Unsafe candidate tracked link: tools/cli.js (ignored target)',
+    'dispatch-parent-external-mutate': 'Unsafe candidate tracked link: tools',
+    'dispatch-parent-ignored-mutate': 'Unsafe candidate tracked link: tools (ignored target)',
+    'dispatch-lib-external-mutate': 'Unsafe candidate tracked link: lib/adapter.js',
+    'dispatch-lib-external-typechange-mutate': 'Unsafe candidate tracked link: lib/adapter.js',
+    'dispatch-lib-external-dirswap-mutate': 'Unsafe candidate tracked link: lib/adapter.js',
+    'dispatch-lib-ignored-mutate': 'Unsafe candidate tracked link: lib/adapter.js (ignored target)',
+    'dispatch-lib-dangling': 'Unsafe candidate tracked link: lib/adapter.js (unresolved)',
+    'dispatch-lib-cyclic': 'Unsafe candidate tracked link: lib/adapter.js (unresolved)',
+    'dispatch-lib-gitdir-mutate': 'Unsafe candidate tracked link: lib/adapter.js (Git metadata target)',
+    'dispatch-source-external-mutate': 'Unsafe candidate tracked link: src/adapter.js',
+    'dispatch-source-external-typechange-mutate': 'Unsafe candidate tracked link: src/adapter.js',
+    'dispatch-source-ignored-mutate': 'Unsafe candidate tracked link: src/adapter.js (ignored target)',
+    'dispatch-source-dir-link-mutate': 'Unsafe candidate source link: src/pkg',
+    'dispatch-source-unmanifested-mutate': 'Unsafe candidate source link: src/adapter.js (target is not manifested)',
+}
 
 PROVENANCE = ('candidate-source.json', 'candidate-fingerprint-before.json',
               'fixture-manifest-before.json')
@@ -87,7 +113,17 @@ if args == ['capabilities']:
     if attack == 'config-large' or attack.startswith('feature-'):
         commands.append(descriptor('onboard', ['--json'] + (['--show', '--deployment', '--scenario', '--seed-profile', '--retain-runs/--no-retain-runs', '--accept-defaults', '--reconfigure', '--section'] if attack.startswith('feature-') else []), 'houston.onboard.v1'))
         commands.append(descriptor('down', ['--name', '--yes'], 'houston.down.v1'))
+    if attack.startswith('feature-preload-path:'):
+        commands.append(descriptor('capture', ['--name', '--workload', '--bundle'], 'houston.capture.v1'))
     emit('houston.capabilities.v1', dict(houston_version='9.9.9', contract_versions=[2], default_bind_host='127.0.0.1', commands=commands))
+if args[:1] == ['capture'] and attack.startswith('feature-preload-path:'):
+    # The real Node process must parse NODE_OPTIONS and load the verifier's preload.
+    import subprocess
+    resolved = subprocess.check_output(['node', '-p', 'require.resolve("playwright")'],
+                                       env=os.environ, text=True).strip()
+    assert resolved == os.environ['VERIFY_CAPTURE_FAKE'], resolved
+    (out / 'preload-path-observed.json').write_text(json.dumps(
+        dict(node_options=os.environ['NODE_OPTIONS'], resolved=resolved)))
 if '--name' in args and args[args.index('--name') + 1] == 'verify-missing':
     emit('houston.error.v1', error=dict(code='NOT_FOUND'), code=4)
 if args[0] == 'evidence':
@@ -182,12 +218,43 @@ if args[0] == 'onboard':
             config['default_deployment'] = 'microservices'
             config['preferences'].update(seed_profile='none', retain_runs=True)
             config_file.write_text(json.dumps(config))
-        selection = dict(deployment='microservices' if config['default_deployment'] == 'microservices' else 'monolith', scenarios=[], seed_profile=config['preferences']['seed_profile'], retain_runs=config['preferences']['retain_runs'])
+        deployment_name = 'microservices' if config['default_deployment'] == 'microservices' else 'monolith'
+        # The real selection also carries topology and kubernetes_target.
+        selection = dict(deployment=deployment_name, scenarios=[], seed_profile=config['preferences']['seed_profile'], retain_runs=config['preferences']['retain_runs'],
+                         topology='kubernetes' if deployment_name == 'microservices' else 'compose', kubernetes_target='houston-local')
+        if attack.startswith('feature-show-selection:') and '--json' in args and config['default_deployment'] == 'default':
+            # Misreport one saved answer in the initial preview, before any save.
+            field = attack.split(':')[1]
+            selection[field] = {'seed_profile': 'none', 'retain_runs': True, 'scenarios': ['email']}[field]
+        # Gate objects have the producer's kind/code/message/approve_with shape.
+        owned_gate = dict(kind='grant', code='GATE_OWNED_CLUSTER',
+                          message='Local Kind lifecycle requires a person to grant owned-cluster.',
+                          approve_with='houston onboard grant owned-cluster')
+        tools_gate = dict(kind='tools', code='KUBERNETES_TOOLS_MISSING',
+                          message='Missing local cluster tools: kubectl, helm', approve_with='')
+        gates = [owned_gate, tools_gate]
         if '--json' not in args:
-            deployment = 'monolith' if attack == 'feature-human-wrong' else selection['deployment']
-            print('deployment  ' + deployment)
+            # Match humanLines: selection rows, facts, one row per gate, then the first run.
+            shown_deployment = 'monolith' if attack == 'feature-human-wrong' else selection['deployment']
+            print('deployment  ' + shown_deployment)
+            print('scenarios   (none)')
+            print('seed        ' + selection['seed_profile'])
+            print('retain runs ' + str(selection['retain_runs']).lower())
             print('engine      microservices ready no')
-            print('  GATE_OWNED_CLUSTER: permission denied')
+            print('tools       docker no, kubectl no, helm no, kind no')
+            print('seed deferred no')
+            human_gates = gates
+            if attack == 'feature-human-gate:incidental' or attack == 'feature-human-gate:outside':
+                human_gates = [gate for gate in gates if gate['code'] != 'GATE_OWNED_CLUSTER']
+            for gate in human_gates:
+                message = 'permission granted' if (attack == 'feature-human-gate:message'
+                                                   and gate['code'] == 'GATE_OWNED_CLUSTER') else gate['message']
+                print('  ' + gate['code'] + ': ' + message)
+            print('first run   (blocked)')
+            if attack == 'feature-human-gate:incidental':
+                print('hint        GATE_OWNED_CLUSTER is listed by houston onboard --help')
+            if attack == 'feature-human-gate:outside':
+                print('  GATE_OWNED_CLUSTER: ' + owned_gate['message'])
             if attack.startswith('feature-human-mutate:'):
                 field = attack.split(':')[1]
                 if field == 'deployment':
@@ -206,8 +273,6 @@ if args[0] == 'onboard':
         capacity = dict(applicable=True, ready=False, status='unknown', code='CAPACITY_UNKNOWN',
                         required_cpu=4, required_memory_gib=6, observed_cpu=0, observed_memory_gib=0,
                         supported_action=None)
-        gates = [dict(code='GATE_OWNED_CLUSTER'), dict(code='KUBERNETES_TOOLS_MISSING', kind='tools',
-                 message='Missing kubectl, helm', approve_with='')]
         command = '' if attack.startswith('feature-ready:') else 'houston up --version 8.5.1 --name fixture --wait'
         if ready:
             # Invoke the candidate's existing observation modules under the real
@@ -231,7 +296,19 @@ const base = process.cwd();
                 engine_cpus=facts['engine']['cpus'], engine_memory_gib=facts['engine']['memBytes']/1024**3,
                 engine_kernel_version=facts['engine']['kernel'])
             capacity.update(ready=True, status='ready', code='', observed_cpu=8, observed_memory_gib=16)
-            gates = gates[:1]
+            # Only the denied owned-cluster authority gate applies to this ready state.
+            gates = [] if attack == 'feature-ready:no-authority' else [owned_gate]
+            stale = {
+                'stale-tools': tools_gate,
+                'stale-capacity': dict(kind='capacity', code='CAPACITY_BELOW_FLOOR',
+                    message='Configure the engine manually, then run houston doctor --json. Automatic engine resizing is not supported.', approve_with=''),
+                'stale-runtime': dict(kind='runtime', code='OWNED_KUBERNETES_UNAVAILABLE',
+                    message='Owned local runtime is unavailable; Kind provisioning is unavailable.', approve_with=''),
+                'stale-onboarding': dict(kind='onboarding', code='GATE_NOT_ONBOARDED',
+                    message='A person must complete onboarding before local Kind lifecycle operations.', approve_with='houston onboard'),
+            }.get(attack.split(':')[1] if attack.startswith('feature-ready:') else '')
+            if stale is not None:
+                gates.append(stale)
             command = ('houston up --version 8.5.1 --name fixture --wait' if attack != 'feature-ready:blank' else '')
             if attack == 'feature-ready:grammar':
                 command += ' --runtime kubernetes'
@@ -254,7 +331,7 @@ if args[0] == 'inspect':
              kubernetes=dict(nodes=[], services=[], pods=[], warnings=['reads unavailable'],
                              context='verify-offline', namespace='houston-verify-kube-fixture', cluster_exists=None)))
     human_name, human_runtime = name, runtime
-    if attack != 'inspect-clean':
+    if attack.startswith('inspect-identity:'):
         _, selected_runtime, field = attack.split(':')
         if selected_runtime == runtime:
             if field == 'name':
@@ -263,8 +340,17 @@ if args[0] == 'inspect':
                 human_runtime = 'docker' if runtime == 'kubernetes' else 'kubernetes'
     # Match renderInspection/writePanel's title and label/value contract.
     print(f'+- {human_name} ----+\n|  Runtime  {human_runtime}  |\n+----------------+')
-    for panel in ('nodes', 'services', 'pods') if runtime == 'kubernetes' else ('containers', 'networks', 'volumes'):
-        print(f'+- {panel} ----+\n|  unknown  |\n+----------------+')
+    for index, panel in enumerate(('nodes', 'services', 'pods') if runtime == 'kubernetes' else ('containers', 'networks', 'volumes')):
+        cells = ['unknown']
+        if attack.startswith('inspect-panel:') and attack.split(':')[1] == runtime and index == 0:
+            # Real resource rows with an incidental "unknown", or the placeholder beside a row.
+            row = ('kind-control-plane  v1.31.0  Ready  INTERNAL-IP=unknown  cpu=? memory=?'
+                   if runtime == 'kubernetes' else 'rocketchat  ?  Up unknown')
+            cells = [row] if attack.split(':')[2] == 'resource' else [row, 'unknown']
+        body = ''.join(f'|  {cell}  |\n' for cell in cells)
+        print(f'+- {panel} ----+\n{body}+----------------+')
+    # The renderer draws warnings in their own panel after the resource panels.
+    print('+- warnings ----+\n|  unknown state: the runtime could not be read  |\n+----------------+')
     sys.exit(0)
 if args[0] != 'info':
     raise RuntimeError(args)
@@ -299,7 +385,9 @@ if attack.startswith('access-'):
             command = shlex.join(['ssh', '-N', '-o', 'ExitOnForwardFailure=yes', *forwards, '--', os.environ['HOUSTON_SSH_USER'] + '@' + os.environ['HOUSTON_SSH_HOST']])
         access = dict(mode='remote_ssh' if remote else 'local', bind='loopback', host_port=host_port,
                       local_port=port if remote else host_port, browser_url=f'http://127.0.0.1:{port}' if remote else record['root_url'],
-                      tunnel_command=command, side_ports=sides, note='synthetic remote guidance' if remote else None)
+                      tunnel_command=command, side_ports=sides,
+                      note=({'true': True, 'one': 1, 'object': {'text': 'guidance'}, 'blank': '   '}[attack.split(':')[1]]
+                            if attack.startswith('access-note:') else 'synthetic remote guidance') if remote else None)
     if attack == 'access-public-local' and name == 'verify-public-fixture' and not remote:
         access = dict(mode='local', browser_url=record['root_url'], tunnel_command=None)
     if '--json' not in args:
@@ -643,6 +731,7 @@ def run_main_case(path, attack, proof_dir=None):
         stub.chmod(0o700)
         executable_before = stub.read_bytes()
         executable_target = stub
+        after_commit = None
         if attack.startswith('dispatch-'):
             layout = candidate / 'ignored-build/copy' if 'relocated' in attack else candidate
             (layout / 'src/cli').mkdir(parents=True)
@@ -651,6 +740,17 @@ def run_main_case(path, attack, proof_dir=None):
             target_dir = base / 'external-tools' if 'external' in attack else layout / 'tools'
             if 'fallback' in attack:
                 target_dir = candidate / 'dist/cli'
+            if 'unmanifested' in attack:
+                # Tracked and nonignored, but outside every source-manifest pathspec.
+                target_dir = layout / 'lib'
+            if 'dir-link' in attack:
+                target_dir = layout / 'lib/pkg'
+            if 'gitdir' in attack:
+                # Root Git metadata is outside every fingerprint. Create it first.
+                subprocess.run(['git', 'init', '-q', str(candidate)], check=True,
+                               env={'PATH': os.environ.get('PATH', os.defpath), 'HOME': str(base),
+                                    'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull})
+                target_dir = candidate / '.git/hidden'
             if 'ignored' in attack and 'ignored-regular' not in attack:
                 target_dir = candidate / 'ignored-build/source'
             target_dir.mkdir(parents=True, exist_ok=True)
@@ -664,22 +764,39 @@ def run_main_case(path, attack, proof_dir=None):
             elif 'lib' in attack:
                 (layout / 'tools/cli.js').write_text("require('../lib/adapter.js');")
                 (target_dir / 'adapter.js').write_text(adapter)
-                (layout / 'lib').mkdir()
+                (layout / 'lib').mkdir(exist_ok=True)
                 target = (target_dir / 'adapter.js')
                 if 'dangling' in attack:
                     target = layout / 'absent.js'
                 elif 'cyclic' in attack:
                     target = layout / 'lib/adapter.js'
-                (layout / 'lib/adapter.js').symlink_to(target)
+                if 'typechange' in attack or 'dirswap' in attack:
+                    # Committed as a regular file. The worktree changes after the commit.
+                    (layout / 'lib/adapter.js').write_text('process.exit(0);')
+                    after_commit = ('swap-lib-dir', target_dir) if 'dirswap' in attack else (
+                        'link', layout / 'lib/adapter.js', target)
+                else:
+                    (layout / 'lib/adapter.js').symlink_to(target)
+            elif 'dir-link' in attack:
+                (layout / 'tools/cli.js').write_text("require('../src/pkg/adapter.js');")
+                (target_dir / 'adapter.js').write_text(adapter)
+                (layout / 'src/pkg').symlink_to(target_dir, target_is_directory=True)
             elif 'source' in attack:
                 (layout / 'tools/cli.js').write_text("require('../src/adapter.js');")
                 (target_dir / 'adapter.js').write_text(adapter)
-                (layout / 'src/adapter.js').symlink_to(target_dir / 'adapter.js')
+                if 'typechange' in attack:
+                    (layout / 'src/adapter.js').write_text('process.exit(0);')
+                    after_commit = ('link', layout / 'src/adapter.js', target_dir / 'adapter.js')
+                else:
+                    (layout / 'src/adapter.js').symlink_to(target_dir / 'adapter.js')
             elif 'external' in attack or ('ignored' in attack and 'ignored-regular' not in attack):
                 (target_dir / 'cli.js').write_text(adapter)
                 (layout / 'tools/cli.js').symlink_to(target_dir / 'cli.js')
             else:
                 (layout / 'tools/cli.js').write_text(adapter)
+                if 'deleted' in attack:
+                    (layout / 'docs').mkdir()
+                    (layout / 'docs/unused.txt').write_text('tracked file removed before the run\n')
             if attack == 'dispatch-bin-clean':
                 (candidate / 'bin/real-dispatcher').write_bytes(DISPATCHER)
                 (candidate / 'bin/real-dispatcher').chmod(0o700)
@@ -763,15 +880,30 @@ def run_main_case(path, attack, proof_dir=None):
             'LANG': 'C.UTF-8', 'GIT_CONFIG_NOSYSTEM': '1',
             'GIT_CONFIG_GLOBAL': os.devnull,
         }
+        if attack.startswith('feature-preload-path:'):
+            # Node's NODE_OPTIONS parser splits on spaces and reads quotes and backslashes.
+            awkward = base / ('tmp dir' if attack.endswith(':spaces') else 'tmp d\u00eer "q" \\b')
+            awkward.mkdir()
+            environment['TMPDIR'] = str(awkward)
         for command in (
             ['git', 'init', '-q', str(candidate)],
-            ['git', '-C', str(candidate), 'add', 'bin', 'package.json', '.gitignore', *(['src', 'tools'] if 'relocated' not in attack else []), *(['lib'] if 'lib' in attack else []), *(['data', 'legacy'] if attack == 'dispatch-legacy-clean' else [])],
+            ['git', '-C', str(candidate), 'add', 'bin', 'package.json', '.gitignore', *(['src', 'tools'] if 'relocated' not in attack else []), *(['lib'] if ('lib' in attack or 'unmanifested' in attack or 'dir-link' in attack) else []),
+                       *(['docs'] if 'deleted' in attack else []), *(['data', 'legacy'] if attack == 'dispatch-legacy-clean' else [])],
             ['git', '-C', str(candidate), '-c', 'user.name=Verifier test',
              '-c', 'user.email=verifier@invalid', '-c', 'commit.gpgsign=false',
              '-c', f'core.hooksPath={os.devnull}', 'commit', '-qm', 'fixture'],
         ):
             subprocess.run(command, check=True, env=environment,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if after_commit is not None:
+            if after_commit[0] == 'link':
+                after_commit[1].unlink()
+                after_commit[1].symlink_to(after_commit[2])
+            else:
+                shutil.rmtree(candidate / 'lib')
+                (candidate / 'lib').symlink_to(after_commit[1], target_is_directory=True)
+        if 'deleted' in attack:
+            (candidate / 'docs/unused.txt').unlink()
         if attack.startswith('work-before:'):
             (candidate / 'src').mkdir(exist_ok=True)
             for item in candidate.glob('budget-*.bin'):
@@ -871,6 +1003,8 @@ def run_main_case(path, attack, proof_dir=None):
                 names.extend(p.name for p in out.glob('evidence*.stderr'))
             if attack.startswith('feature-'):
                 names.extend(p.name for p in out.glob('setup-*') if p.is_file())
+            if attack.startswith('feature-preload-path:'):
+                names.extend(('capture-missing.stdout', 'capture-missing.stderr', 'preload-path-observed.json'))
             if attack.startswith('dispatch-'):
                 (retained / 'executed-code-before.bin').write_bytes(executable_before)
                 (retained / 'executed-code-after.bin').write_bytes(executable_target.read_bytes())
@@ -940,7 +1074,9 @@ def run_main_case(path, attack, proof_dir=None):
         summary_path = Path(lines[-1])
         summary = json.loads(summary_path.read_text())
         should_pass = (attack in ('clean', 'feature-clean', 'stdout-hardlink', 'access-clean', 'inspect-clean', 'untracked-clean', 'untracked-ignored', 'untracked-colon-clean', 'entrypoint-bin-clean', 'dispatch-clean', 'dispatch-bin-clean', 'dispatch-source-clean',
-                                  'git-helper-initial', 'git-helper-during', 'git-clean', 'cleanup-clean', 'dispatch-legacy-clean', 'json-number-clean', 'retained-name:safe', 'decoded-json:clean', 'decoded-attachment:compose-clean', 'feature-ready:clean', 'bundle-path:absolute', 'bundle-path:symlink-valid')
+                                  'git-helper-initial', 'git-helper-during', 'git-clean', 'cleanup-clean', 'dispatch-legacy-clean', 'json-number-clean', 'retained-name:safe', 'decoded-json:clean', 'decoded-attachment:compose-clean', 'feature-ready:clean', 'bundle-path:absolute', 'bundle-path:symlink-valid',
+                                  'dispatch-lib-internal-clean', 'dispatch-tracked-deleted-clean',
+                                  'feature-preload-path:spaces', 'feature-preload-path:weird')
                        or attack.endswith(':hardlink'))
         assert (result.returncode == 0) == should_pass, f'exit={result.returncode}: {summary}'
         assert summary['result'] == ('PASS_SCOPED' if should_pass else 'FAIL'), summary
@@ -1027,6 +1163,16 @@ def run_main_case(path, attack, proof_dir=None):
                     or (attack.split(':')[1] == 'show' and ('Setup preview lost saved answers' in error or "'schema'" in error))), error
         elif attack.startswith('feature-human-mutate:'):
             assert 'Human setup preview wrote answers' in error, error
+        elif attack.startswith('feature-human-gate:'):
+            assert 'Human setup gate rows differ from the JSON setup gates' in error, error
+        elif attack.startswith('feature-show-selection:'):
+            assert 'Setup preview selection differs from the legacy fixture answers' in error, error
+        elif attack.startswith('feature-preload-path:'):
+            observed_preload = json.loads((out / 'preload-path-observed.json').read_text())
+            option_value = observed_preload['node_options'].split('=', 1)[1]
+            assert ' ' in option_value, observed_preload
+            assert summary['features']['capture'].startswith('PASS'), summary
+            assert summary['setup_ready']['controlled_observations'] is True, summary
         elif attack.startswith('feature-ready:'):
             if attack == 'feature-ready:blank':
                 assert 'Ready setup must generate a first-run command' in error, error
@@ -1038,6 +1184,10 @@ def run_main_case(path, attack, proof_dir=None):
                 assert 'Ready setup preview wrote answers' in error, error
             elif attack == 'feature-ready:blocked-facts':
                 assert 'Blank setup first-run command lacks matching' in error, error
+            elif attack == 'feature-ready:no-authority':
+                assert 'Ready setup omitted the denied owned-cluster authority gate' in error, error
+            elif attack.startswith('feature-ready:stale-'):
+                assert 'Ready setup retained contradictory readiness gates' in error, error
             else:
                 assert summary['setup_ready']['config_unchanged'] is True, summary
                 assert summary['setup_ready']['controlled_observations'] is True, summary
@@ -1049,17 +1199,17 @@ def run_main_case(path, attack, proof_dir=None):
         elif attack == 'feature-human-wrong':
             assert 'Human setup selected deployment differs' in error, error
         elif attack.startswith('dispatch-'):
-            if attack in ('dispatch-clean', 'dispatch-bin-clean', 'dispatch-source-clean', 'dispatch-legacy-clean'):
+            if attack in ('dispatch-clean', 'dispatch-bin-clean', 'dispatch-source-clean', 'dispatch-legacy-clean',
+                          'dispatch-lib-internal-clean', 'dispatch-tracked-deleted-clean'):
                 assert executable_target.read_bytes() == executable_before
             elif attack == 'dispatch-source-mutate':
                 assert summary['candidate_unchanged'] is False and summary['source_unchanged'] is False, summary
                 assert executable_target.read_bytes() != executable_before
                 assert (candidate / 'src/adapter.js').is_symlink()
             else:
-                expected = ('Candidate dispatcher root differs' if 'relocated' in attack else
-                            'Candidate checkout source dispatch is not manifested' if 'fallback' in attack or 'ignored-regular' in attack else
-                            'Unsafe candidate source link')
-                assert expected in error or 'Unsafe candidate tracked link' in error, error
+                expected = DISPATCH_REFUSALS[attack]
+                # A message without a reason suffix must not be a longer one in disguise.
+                assert re.search(re.escape(expected) + ('' if expected.endswith(')') else r"(?! \()"), error), (expected, error)
                 assert executable_target.read_bytes() == executable_before, 'unsafe source executed'
                 assert not (out / 'commands.json').exists(), 'unsafe dispatcher launched'
         elif attack.startswith('entrypoint-'):
@@ -1094,10 +1244,15 @@ def run_main_case(path, attack, proof_dir=None):
             if 'inventory' not in summary:
                 assert not [p for p in out.glob('sha256.json*') if p.is_file()], 'obsolete inventory retained'
                 return dict(observed, error=error, inventory=None, budget_refused=True)
+        elif attack.startswith('inspect-panel:'):
+            panel = 'nodes' if ':kubernetes:' in attack else 'containers'
+            assert f'Human inspection did not render the {panel} unknown placeholder' in error, error
         elif attack.startswith('inspect-') and attack != 'inspect-clean':
             assert 'Human inspection chose another workspace/runtime' in error, error
         elif attack == 'access-public-local':
             assert 'Wildcard workspace must not claim loopback access' in error, error
+        elif attack.startswith('access-note:'):
+            assert 'Remote access note must be nonempty text' in error, error
         elif attack.startswith('access-') and attack != 'access-clean':
             assert 'Access response chose another workspace/runtime' in error, error
         elif attack.startswith('untracked-'):
@@ -1304,7 +1459,18 @@ def main():
     args = parser.parse_args()
     path = args.verify_source
     attacks = (
-        *('feature-ready:' + kind for kind in ('blank', 'grammar', 'facts', 'write', 'blocked-facts', 'clean')),
+        *('feature-ready:' + kind for kind in ('blank', 'grammar', 'facts', 'write', 'blocked-facts', 'clean',
+                                                'no-authority', 'stale-tools', 'stale-capacity',
+                                                'stale-runtime', 'stale-onboarding')),
+        *('feature-human-gate:' + kind for kind in ('incidental', 'outside', 'message')),
+        *('feature-show-selection:' + field for field in ('seed_profile', 'retain_runs', 'scenarios')),
+        *('feature-preload-path:' + kind for kind in ('spaces', 'weird')),
+        *('inspect-panel:' + runtime + ':' + kind for runtime in ('docker', 'kubernetes') for kind in ('resource', 'mixed')),
+        *('access-note:' + kind for kind in ('true', 'one', 'object', 'blank')),
+        'dispatch-lib-external-typechange-mutate', 'dispatch-lib-external-dirswap-mutate',
+        'dispatch-lib-gitdir-mutate', 'dispatch-lib-internal-clean', 'dispatch-tracked-deleted-clean',
+        'dispatch-source-external-typechange-mutate', 'dispatch-source-unmanifested-mutate',
+        'dispatch-source-dir-link-mutate',
         *('feature-human-mutate:' + field for field in ('deployment', 'scenarios', 'legacy')),
         *('bundle-path:' + kind for kind in ('missing', 'file', 'relative', 'wrong', 'symlink-missing', 'symlink-wrong', 'absolute', 'symlink-valid')),
         'access-global-ban',

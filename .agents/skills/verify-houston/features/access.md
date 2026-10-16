@@ -25,7 +25,9 @@ URL selects IPv4 or IPv6 loopback as the forward target. A remote process cannot
 measure a port conflict on the operator's laptop.
 
 The v2 consumer is `info --json`, schema `houston.info.v1`, at `data.access`.
-Human `info` prints a workspace panel title and the same tunnel and browser URL. The helper probes the clean
+Human `info` prints a workspace panel title and the same tunnel and browser URL.
+A remote handoff `note` must be nonempty text; a boolean, number, object or
+whitespace-only string is not guidance. The helper probes the clean
 Docker fixture `verify-docker-access-fixture` and the Kubernetes fixture
 `verify-access-fixture`. Each payload `data` value must be an object, or the run fails. When both objects omit `data.access`, this port stays
 pending. When either object has `data.access`, require the local, human, and

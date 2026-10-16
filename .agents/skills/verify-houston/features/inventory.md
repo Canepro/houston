@@ -36,9 +36,12 @@ only the unavailable-engine projection, never an empty or healthy real cluster.
 The helper also drives both fixtures without `--json`. Each first panel must have
 the exact requested workspace name as its title and the expected `Runtime` row.
 A name that only contains the expected name does not match. Require each Docker
-containers, networks, and volumes panel plus each Kubernetes nodes, Services,
-and pods panel to mark its own unreadable state `unknown`, with the synthetic
-secret absent from both stdout and stderr.
+containers, networks, and volumes panel plus each Kubernetes nodes, services,
+and pods panel to be a single `writePanel` panel with one row whose cell is exactly
+`unknown`, the placeholder `renderInspection` draws for an unreadable collection.
+A resource row that contains the word, such as `INTERNAL-IP=unknown`, a placeholder
+beside a resource row, or a duplicate panel does not match. Warnings are a separate
+`warnings` panel. The synthetic secret must be absent from both stdout and stderr.
 
 Live prerequisites remain an approved existing Kubernetes context/namespace and
 read-only API access to nodes, Services, and pods. Capture actual node readiness,
