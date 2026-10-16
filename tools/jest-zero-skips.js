@@ -95,7 +95,9 @@ const ROOT = path.resolve(__dirname, '..');
 // Capture and its shell-roundtrip contract add twenty-three cases; seven repair regressions
 // bring the total to 4,570. Workload-directory refusal and cleanup-fence regressions bring
 // the collection-only measured total to 4,572 (237 files, no test bodies executed).
-const FLOOR = 4572;
+// One recorded-target matrix covers scheme semantics, nested userinfo and placeholders.
+// Collection now measures 4,573 cases in 237 files, without executing test bodies.
+const FLOOR = 4573;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

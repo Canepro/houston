@@ -212,6 +212,95 @@ describe('scripted browser capture', () => {
     ]);
   });
 
+  test('records authored URL shapes safely without copying context expansion back from navigation', async () => {
+    const contextURL = 'https://context-user:context-value@idp.example.test/landing';
+    const cases = [
+      [
+        'http://workspace.test',
+        'http:user:key@idp.example.test/login',
+        REDACTED,
+        'http://workspace.test/user:key@idp.example.test/login',
+      ],
+      [
+        'https://workspace.test',
+        'http:user:key@idp.example.test/login',
+        'http://idp.example.test/login',
+        'http://user:key@idp.example.test/login',
+      ],
+      [
+        'http://workspace.test',
+        'https:user:key@idp.example.test/login',
+        'https://idp.example.test/login',
+        'https://user:key@idp.example.test/login',
+      ],
+      [
+        'https://workspace.test',
+        'https:user:key@idp.example.test/login',
+        REDACTED,
+        'https://workspace.test/user:key@idp.example.test/login',
+      ],
+      [
+        '',
+        'http:user:key@idp.example.test/login',
+        'http://idp.example.test/login',
+        'http:user:key@idp.example.test/login',
+      ],
+      [
+        'https://workspace.test',
+        'login?prompt=login',
+        'login?prompt=login',
+        'https://workspace.test/login?prompt=login',
+      ],
+      [
+        'http://workspace.test',
+        '/rooms/general',
+        '/rooms/general',
+        'http://workspace.test/rooms/general',
+      ],
+      [
+        'https://workspace.test',
+        '//user:key@idp.example.test/login',
+        'https://idp.example.test/login',
+        'https://user:key@idp.example.test/login',
+      ],
+      ['http://workspace.test', '{{next}}', '{{next}}', contextURL],
+      [
+        'https://workspace.test',
+        'https://user:{{admin_pass}}@idp.example.test/login',
+        'https://idp.example.test/login',
+        'https://user:context-password@idp.example.test/login',
+      ],
+      [
+        'https://workspace.test',
+        '/?next=https%3A%2F%2Fuser%3Akey%40idp.example.test',
+        REDACTED,
+        'https://workspace.test/?next=https%3A%2F%2Fuser%3Akey%40idp.example.test',
+      ],
+      [
+        'https://workspace.test',
+        '/#next=https://user@idp.example.test',
+        REDACTED,
+        'https://workspace.test/#next=https://user@idp.example.test',
+      ],
+    ];
+    for (const [index, row] of cases.entries()) {
+      const [root, target, recorded, navigated] = row as [string, string, string, string];
+      const dest = path.join(config.home(), `recorded-target-${String(index)}`);
+      const driver = new FakeDriver(dest);
+      const goto = jest.spyOn(driver, 'goto');
+      const manifest = await run(
+        parseWorkload(`steps:\n  - goto: ${JSON.stringify(target)}\n`, 'fixture'),
+        driver,
+        dest,
+        { root_url: root, next: contextURL, admin_pass: 'context-password' },
+      );
+      expect(goto.mock.calls).toEqual([[navigated, 15000]]);
+      expect(manifest.steps[0]!.target).toBe(recorded);
+      expect(JSON.stringify(manifest)).not.toContain('context-value');
+      expect(manifest.privacy.visual_review_required).toBe(true);
+    }
+  });
+
   test('renders artifact-only failure with its actual cause and no invented failed step', async () => {
     const dest = path.join(config.home(), 'missing-frame');
     const driver = new FakeDriver(dest);

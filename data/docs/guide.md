@@ -108,7 +108,9 @@ it cannot certify confidentiality of transient sessions, rotated tokens or other
 Houston masks known secret values and any nonempty fill into a credential-shaped field before
 typing it. The control stays hidden if it later enters a modal dialog or the page removes its
 visible cover. Goto targets in the manifest and step banner omit URL userinfo; navigation
-still uses the original authored target. Inspect the visible PNG files and video before you
+still uses the original authored target. Targets containing nested URL credentials are
+redacted as a whole, including encoded nested URLs. Placeholder values are expanded only
+for navigation. Inspect the visible PNG files and video before you
 attach the bundle because a page can echo a value outside the masked input.
 
 Exit 9 means a step failed or an artifact did not hold up. Houston keeps the partial bundle so

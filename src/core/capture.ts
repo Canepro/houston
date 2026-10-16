@@ -439,18 +439,42 @@ function navigationTarget(root: string, target: string, context: Context): strin
   return root === '' ? resolved : new URL(resolved, root).toString();
 }
 
-/** Display the authored target without URL credentials; never rewrite the navigation input. */
-function recordedTarget(step: Step): string {
+/** Display authored navigation only. Context expansion belongs exclusively to the browser. */
+function recordedTarget(step: Step, root: string): string {
   if (step.action !== 'goto') return step.target;
   try {
-    const url = new URL(step.target, 'http://capture.invalid');
-    if (url.username === '' && url.password === '') return step.target;
-    url.username = '';
-    url.password = '';
-    return url.toString();
+    // Use the navigation origin, including its scheme: special URLs without // can be
+    // relative paths under one scheme and credential-bearing authorities under another.
+    // A synthetic base only preserves relative display when the injected driver has no root.
+    const base = root === '' ? undefined : root;
+    const url =
+      root === '' && !/^[a-z][a-z0-9+.-]*:/iu.test(step.target)
+        ? new URL(step.target, 'http://capture.invalid')
+        : new URL(step.target, base);
+    let display = step.target;
+    if (url.username !== '' || url.password !== '') {
+      url.username = '';
+      url.password = '';
+      display = url.toString();
+    }
+    // A nested URL in a query, fragment or path is still authored credential text. Keep
+    // the whole target private when it contains an authority with userinfo, including
+    // percent-encoded nested URLs. This does not inspect selectors or expand placeholders.
+    let decoded = display;
+    for (let depth = 0; depth < 4; depth += 1) {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) {
+        const normalized = decoded.replaceAll('\t', '').replaceAll('\r', '').replaceAll('\n', '');
+        return /(?:[a-z][a-z0-9+.-]*:[/\\]*|[/\\]{2})[^/\\?\s#]*@/iu.test(normalized)
+          ? REDACTED
+          : display;
+      }
+      decoded = next;
+    }
+    return REDACTED;
   } catch {
-    // An invalid URL can still contain userinfo. Its navigation will fail with a generic
-    // error, and neither narration nor the retained partial manifest needs its raw bytes.
+    // Invalid or ambiguously encoded URLs can still contain userinfo. Generic navigation
+    // errors and retained partial records never need their raw authored bytes.
     return REDACTED;
   }
 }
@@ -696,7 +720,7 @@ export async function run(
         const rec: StepRecord = {
           index: i,
           action: step.action,
-          target: recordedTarget(step),
+          target: recordedTarget(step, root),
           outcome: 'ok',
           frame: null,
           ms: 0,

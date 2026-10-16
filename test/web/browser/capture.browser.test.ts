@@ -8,6 +8,7 @@ import * as zlib from 'node:zlib';
 import { chromium } from 'playwright';
 
 import * as config from '../../../src/lib/config';
+import { renderCaptureSection } from '../../../src/lib/capture-render';
 
 import { browserDriver, parseWorkload, run, SECRET_MASK_COLOR } from '../../../src/core/capture';
 
@@ -539,14 +540,25 @@ describe('scripted capture in a real browser', () => {
     },
   );
 
-  test('keeps authored goto userinfo out of real banners and persisted records while navigating the original URL', async () => {
+  test.each([
+    'canonical',
+    'mismatched-base',
+    'mismatched-failed',
+    'nested-query',
+    'reverse-failed',
+  ])('keeps authored URL credentials out of retained outputs for %s navigation', async (mode) => {
     const requests: string[] = [];
+    const fails = mode.endsWith('failed');
     const user = 'authored-user-marker';
     const password = 'authored-password-marker';
     const expectedAuth = `Basic ${Buffer.from(`${user}:${password}`).toString('base64')}`;
     let authorized = false;
     server = createServer((request, response) => {
       requests.push(request.url ?? '');
+      if (request.url === '/unavailable') {
+        response.destroy();
+        return;
+      }
       if (request.url === '/destination') {
         if (request.headers.authorization !== expectedAuth) {
           response.writeHead(401, { 'www-authenticate': 'Basic realm=fixture' });
@@ -562,35 +574,86 @@ describe('scripted capture in a real browser', () => {
     const address = server.address() as AddressInfo;
     expect(address.address).toBe('127.0.0.1');
     const origin = `http://127.0.0.1:${String(address.port)}`;
-    const target = origin.replace('http://', `http://${user}:${password}@`) + '/destination';
-    const source = ['steps:', '  - goto: /', `  - goto: "${target}"`, '  - shot: result'].join(
-      '\n',
-    );
-    dest = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-capture-authored-url-'));
+    // HTTPS here is workspace metadata only. Every successful request goes to the
+    // bound HTTP fixture. The reverse case intentionally sends TLS to that HTTP port.
+    const root = mode.startsWith('mismatched-') ? origin.replace('http:', 'https:') : origin;
+    const credentials = `${user}:${password}@127.0.0.1:${String(address.port)}`;
+    const target = mode.startsWith('mismatched-')
+      ? `http:${credentials}/${fails ? 'unavailable' : 'destination'}`
+      : mode === 'reverse-failed'
+        ? `https:${credentials}/destination`
+        : mode === 'nested-query'
+          ? `${origin}/nested?next=https://${credentials}/callback`
+          : `http://${credentials}/destination`;
+    const targets = [origin, target];
+    if (fails)
+      targets.push(
+        `http:${credentials}/skipped`,
+        `http://${credentials}/skipped-canonical`,
+        `${origin}/?next=https://${credentials}/skip`,
+      );
+    const source = [
+      'steps:',
+      ...targets.map((value) => `  - goto: ${JSON.stringify(value)}\n    timeout_ms: 2000`),
+      '  - shot: result',
+    ].join('\n');
+    dest = fs.mkdtempSync(path.join(os.tmpdir(), `houston-capture-url-${mode}-`));
     const sourceFile = path.join(config.home(), 'synthetic-workload.yaml');
     fs.writeFileSync(sourceFile, source);
     const workload = parseWorkload(fs.readFileSync(sourceFile, 'utf8'), sourceFile);
-    const driver = await browserDriver(origin, dest);
+    const driver = await browserDriver(root, dest);
     const banner = driver.banner!.bind(driver);
     const narrations: string[] = [];
     driver.banner = async (text) => {
       narrations.push(text);
       await banner(text);
       if (text.startsWith('step 1:')) {
-        await driver.settle!(500);
+        await driver.settle!(600);
         await driver.screenshot(path.join(dest, 'authored-url-banner.png'));
       }
     };
-    const manifest = await run(workload, driver, dest, { root_url: origin });
-    expect(manifest.status).toBe('ok');
-    expect(requests).toContain('/destination');
-    expect(authorized).toBe(true);
+    let failure: unknown;
+    try {
+      await run(workload, driver, dest, { root_url: root });
+    } catch (error) {
+      failure = error;
+    }
+    const manifestText = fs.readFileSync(path.join(dest, 'manifest.json'), 'utf8');
+    const manifest = JSON.parse(manifestText) as Awaited<ReturnType<typeof run>>;
+    const readme = renderCaptureSection(manifest).join('\n');
+    fs.writeFileSync(path.join(dest, 'README.md'), readme);
+    fs.writeFileSync(path.join(dest, 'narrations.json'), JSON.stringify(narrations));
+    fs.writeFileSync(
+      path.join(dest, 'navigation-proof.json'),
+      JSON.stringify({ mode, root, requests, authorized, failure: String(failure), address }),
+    );
+    // Decode the retained media before checking text so a RED failure keeps visual proof.
+    const decoded = await inspectVideo(dest);
+    expect(decoded.frames).toBeGreaterThan(20);
+    if (fails) {
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain('navigation failed');
+      expect(manifest.steps.map((step) => step.outcome)).toEqual([
+        'ok',
+        'failed',
+        'skipped',
+        'skipped',
+        'skipped',
+        'skipped',
+      ]);
+    } else {
+      expect(failure).toBeUndefined();
+      expect(manifest.status).toBe('ok');
+      if (mode === 'nested-query')
+        expect(requests).toContain(`/nested?next=https://${credentials}/callback`);
+      else {
+        expect(requests).toContain('/destination');
+        expect(authorized).toBe(true);
+      }
+    }
     expect(workload.steps[1]!.target).toBe(target);
     expect(fs.readFileSync(sourceFile, 'utf8')).toBe(source);
-    for (const text of [
-      JSON.stringify(narrations),
-      fs.readFileSync(path.join(dest, 'manifest.json'), 'utf8'),
-    ]) {
+    for (const text of [JSON.stringify(narrations), manifestText, readme, String(failure)]) {
       expect(text).not.toContain(user);
       expect(text).not.toContain(password);
     }
