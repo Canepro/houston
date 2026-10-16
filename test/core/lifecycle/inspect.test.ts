@@ -794,11 +794,12 @@ describe('what the record alone says', () => {
     ).toEqual([]);
   });
 
-  it('says microservices need a license only while the workspace has none', async () => {
+  it('reports the effective license state in Kubernetes notes and inspect output', async () => {
     // The second Rocket.Chat replica of an unlicensed microservices workspace crash-loops
     // ("Enterprise license not found") and nothing said why. A license can be added once it
-    // is up, so this is said, not refused.
-    const rows = async (extra: Record<string, unknown>) => {
+    // is up, so this is said, not refused. New Kubernetes records distinguish the effective
+    // chart license from a Secret Houston owns; records without the new field keep the old flag.
+    const report = async (extra: Record<string, unknown>) => {
       const meta = metadata({
         name: 'm',
         project: 'houston-m',
@@ -806,18 +807,32 @@ describe('what the record alone says', () => {
         hostPort: 3000,
         extra: { runtime: 'kubernetes', namespace: 'houston-m', ...extra },
       });
-      const groups = (await summary(meta)).note_groups as NoteGroup[];
-      return Object.fromEntries(groups[0]?.rows ?? []) as Record<string, string>;
+      const result = await summary(meta);
+      const groups = result.note_groups as NoteGroup[];
+      return {
+        licensed: result.licensed,
+        rows: Object.fromEntries(groups[0]?.rows ?? []) as Record<string, string>,
+      };
     };
-    expect((await rows({ deployment: 'microservices' })).License).toBe(
+    expect((await report({ deployment: 'microservices' })).rows.License).toBe(
       'microservices are an Enterprise feature: without a license, Rocket.Chat replicas after ' +
         'the first stop ("Enterprise license not found"). Add one with `--license` or in ' +
         'Rocket.Chat under Workspace > Subscription.',
     );
-    expect(await rows({ deployment: 'microservices', licensed: true })).not.toHaveProperty(
-      'License',
-    );
-    expect(await rows({ deployment: 'monolith' })).not.toHaveProperty('License');
+    const legacy = await report({ deployment: 'microservices', licensed: true });
+    expect(legacy.rows).not.toHaveProperty('License');
+    expect(legacy.licensed).toBe(true);
+    const presetLiteral = await report({ deployment: 'microservices', effective_license: true });
+    expect(presetLiteral.rows).not.toHaveProperty('License');
+    expect(presetLiteral.licensed).toBe(true);
+    const staleSecretMarker = await report({
+      deployment: 'microservices',
+      licensed: true,
+      effective_license: false,
+    });
+    expect(staleSecretMarker.rows).toHaveProperty('License');
+    expect(staleSecretMarker.licensed).toBe(false);
+    expect((await report({ deployment: 'monolith' })).rows).not.toHaveProperty('License');
   });
 
   it("carries the workspace's password, and an older record's real one", async () => {

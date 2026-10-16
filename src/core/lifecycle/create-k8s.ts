@@ -116,6 +116,8 @@ export interface KubeCreate {
   envOverrides: Record<string, string | null>;
   /** Whether the release references the licence Secret: this run's, or a re-up's earlier one. */
   licensed: boolean;
+  /** Whether the final chart environment carries a nonblank licence, including a preset literal. */
+  effectiveLicense: boolean;
   /** A re-up's forwards, read BEFORE the write-ahead record replaces the record holding them. */
   previous: { pid: number; port: number | null; scenarioForwards: Record<string, unknown> };
   /** The record a re-up replaces, read before the write-ahead record does. */
@@ -159,6 +161,7 @@ export function kubeCreate(
     reused: false,
     envOverrides: {},
     licensed: false,
+    effectiveLicense: false,
     previous: { pid: 0, port: null, scenarioForwards: {} },
     previousMeta: null,
     namespaceIdentity: null,
@@ -466,9 +469,9 @@ export function settleAddressing(job: KubeCreate): void {
   )
     ? 'present'
     : '';
-  // `job.licensed` remains the dedicated request/record and Secret-lifecycle state. Warning
-  // presence follows the final chart environment, where a user preset can also supply a licence.
-  const effectiveLicense = hasEffectiveLicense(
+  // `job.licensed` remains the dedicated request/record and Secret-lifecycle state. Warnings
+  // and user-facing metadata follow the final chart environment, where a preset can supply one.
+  job.effectiveLicense = hasEffectiveLicense(
     (job.presetForNotes as Preset).env,
     job.licensed,
     job.envOverrides,
@@ -476,14 +479,14 @@ export function settleAddressing(job: KubeCreate): void {
   const premium = request.premiumAuthWarning(
     names,
     job.resolved?.rcVersion ?? '',
-    effectiveLicense,
+    job.effectiveLicense,
     effectiveToken,
   );
   if (premium !== '') warn(job.emit, premium, { phase: 'plan' });
   const unlicensed = request.licenceAbsentWarning(
     request.presetLicensing(names),
     job.microservices,
-    effectiveLicense,
+    job.effectiveLicense,
     effectiveToken,
   );
   if (unlicensed !== '') {
@@ -677,6 +680,8 @@ export async function writeProvisionalRecord(job: KubeCreate): Promise<void> {
   if (job.req.actor) job.provisional.extra.created_by = job.req.actor;
   // In the write-ahead record too: a re-up after a killed create carries forward from it.
   if (Object.keys(job.envOverrides).length > 0) job.provisional.extra.env = job.envOverrides;
+  // Explicit false supersedes an earlier marker if this create no longer has an effective licence.
+  job.provisional.extra.effective_license = job.effectiveLicense;
   if (job.licensed) job.provisional.extra.licensed = true;
   // Still recorded while the create runs, so a create killed part-way leaves `down` able to
   // stop them.
@@ -883,6 +888,8 @@ export function recordTheRequest(job: KubeCreate): void {
   }
   // The same key Compose records them under, so re-up, `backup` and `restore --new` carry them.
   if (Object.keys(job.envOverrides).length > 0) meta.extra.env = job.envOverrides;
+  // This describes the final chart environment; `licensed` below remains the Secret lifecycle flag.
+  meta.extra.effective_license = job.effectiveLicense;
   if (job.licensed) meta.extra.licensed = true;
   // A preset's self-configuration actions, recorded exactly as the Compose path records
   // them. Without this the OIDC preset would create no OAuth provider and the SAML preset
