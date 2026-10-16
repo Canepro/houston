@@ -1535,6 +1535,21 @@ describe('the bundle', () => {
         '  mysql:',
         '    image: example',
         '    command: [mysql, -p, ListShortSentinel, -uroot]',
+        '  attached:',
+        '    image: example',
+        '    command: [mysql, -uroot, -pAttachedSentinel, appdb]',
+        '  curl:',
+        '    image: example',
+        '    command: curl -u admin:CurlSentinel http://x',
+        '  continued:',
+        '    image: example',
+        '    command: "client --password \\\\\\nContinuedSentinel --verbose"',
+        '  escaped:',
+        '    image: example',
+        String.raw`    command: sh -c "client --password Esc\\\"apedSentinel"`,
+        '  docker:',
+        '    image: example',
+        '    command: docker run -u 1000 -p 8080:80 -p --eval image',
         '  proxy:',
         '    image: example',
         `    command: sh -c "useradd -u 1000 app; mkdir -p /data/db && proxy -p 8080:80 --password;"`,
@@ -1552,6 +1567,10 @@ describe('the bundle', () => {
       'JoinedSentinel',
       'EscapedSentinel',
       'ListShortSentinel',
+      'AttachedSentinel',
+      'CurlSentinel',
+      'ContinuedSentinel',
+      'apedSentinel',
     ]) {
       expect(compose).not.toContain(sentinel);
     }
@@ -1560,6 +1579,17 @@ describe('the bundle', () => {
       'client --reg-token "********" --port 27017',
     );
     expect(parsed['x-copy']).toBe('********');
+    // A port or an option after -p is the next argument; newlines are never masked.
+    expect(pick(parsed, 'services', 'docker', 'command')).toBe(
+      'docker run -u 1000 -p 8080:80 -p --eval image',
+    );
+    expect(compose).toContain('\n');
+    expect(pick(parsed, 'services', 'attached', 'command')).toEqual([
+      'mysql',
+      '-uroot',
+      '-p********',
+      'appdb',
+    ]);
     // `;` ends a command: the user flag before it does not make the later -p a password, and a
     // flag with nothing after it masks nothing.
     expect(pick(parsed, 'services', 'proxy', 'command')).toBe(

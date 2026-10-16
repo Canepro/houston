@@ -709,7 +709,23 @@ function userArgument(word: string): boolean {
  */
 function credentialArgument(flag: string, value: string, userGiven: boolean): boolean {
   if (credentialFlag(flag)) return true;
-  return flag === '-p' && userGiven && value !== '';
+  // A following option or a port is the next argument, not a password `-p` was asked for.
+  return (
+    flag === '-p' &&
+    userGiven &&
+    value !== '' &&
+    !value.startsWith('-') &&
+    !/^[0-9]+(?::[0-9]+)*$/u.test(value)
+  );
+}
+
+/** A credential carried inside one word: `-pSECRET` after a user flag, `-u user:SECRET`. */
+function attachedCredential(word: string, next: string, userGiven: boolean): string {
+  if (userGiven && /^-p[^-]/u.test(word)) return word.slice(2);
+  if ((word === '-u' || word === '--user') && next.includes(':')) {
+    return next.slice(next.indexOf(':') + 1);
+  }
+  return '';
 }
 
 /** One shell word and whether any part of it was quoted, so it may hold a nested command. */
@@ -768,6 +784,9 @@ function shellCommands(text: string): ShellWord[][] {
           index += 1;
         } else word += inner;
       }
+    } else if (char === '\\' && text[index + 1] === '\n') {
+      // A line continuation joins lines; it is not part of any word.
+      index += 1;
     } else if (char === '\\') {
       begin(index);
       word += text[index + 1] ?? '';
@@ -793,12 +812,22 @@ function discoverCommandText(text: string, add: (value: string) => void, depth =
     for (let index = 0; index < command.length; index += 1) {
       const word = command[index] as ShellWord;
       const next = command[index + 1];
-      if (next !== undefined && credentialArgument(word.text, next.text, userGiven)) {
-        add(next.text);
+      const spellings = (value: string, raw: string): void => {
+        add(value);
         // The artifact spells a quoted or escaped value as written; mask that spelling too,
-        // without its outer quotes, which stay to show where the value was.
-        add(next.raw.replace(/^(['"])(.*)\1$/su, '$2'));
+        // without its outer quotes, which stay to show where the value was. Inside an outer
+        // double-quoted string the artifact also escapes `"`, `\`, `$` and backticks.
+        add(raw.replace(/^(['"])(.*)\1$/su, '$2'));
+        if (depth > 0) {
+          add(value.replace(/["\\$`]/gu, '\\$&'));
+          add(raw.replace(/["\\$`]/gu, '\\$&'));
+        }
+      };
+      if (next !== undefined && credentialArgument(word.text, next.text, userGiven)) {
+        spellings(next.text, next.raw);
       }
+      const attached = attachedCredential(word.text, next?.text ?? '', userGiven);
+      if (attached !== '') spellings(attached, attached);
       if (word.quoted) discoverCommandText(word.text, add, depth + 1);
     }
   }
@@ -859,6 +888,8 @@ function discoverArtifactSecrets(
       const next = items[index + 1];
       const value = YAML.isScalar(next) ? String(next.value) : '';
       if (credentialArgument(flag.value, value, userGiven)) visit(list.items[index + 1], true);
+      const attached = attachedCredential(flag.value, value, userGiven);
+      if (attached !== '') add(attached);
     }
   };
   if (YAML.isAlias(node)) {
