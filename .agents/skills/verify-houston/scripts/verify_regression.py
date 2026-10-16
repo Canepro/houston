@@ -6,15 +6,20 @@ dangling capture-missing-bundle symlink, a retained secret outside the bundle
 trio and command receipts, a revoked onboarding record with completed false,
 a symlink or special file beside the bundle, a secret left outside the
 retained tree, access shown only on the Docker fixture, and an access
-discovery payload whose data is null or a string. After each repair, the
+discovery payload whose data is null or a string. They also accept a
+non-regular summary or hash manifest, an evidence root replaced by a
+symlink, missing before-state provenance, a non-string ADMIN_PASS, and a
+sentinel scan that has not proved a chunk boundary. After each repair, the
 same cases call the predicates main uses.
 """
+import hashlib
 import importlib.util
 import json
 import os
 import socket
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 
@@ -25,6 +30,16 @@ ONBOARD_MESSAGE = 'Onboarding failed to persist the revoked grant state or legac
 SPECIAL_MESSAGE = 'Retained output contains a symlink or special entry'
 ACCESS_MESSAGE = 'Access payload is omitted'
 ACCESS_OBJECT_MESSAGE = 'Access discovery payload for'
+RECEIPT_MESSAGE = 'Refused pre-existing non-regular receipt path'
+EVIDENCE_DIRECTORY_MESSAGE = 'Evidence directory must be a real directory'
+PROVENANCE_MESSAGE = 'Mandatory provenance artifact is not a regular file'
+COMPOSE_MESSAGE = 'Sanitized Compose attachment is not semantically safe'
+PROVENANCE_NAMES = (
+    'candidate-source.json',
+    'candidate-fingerprint-before.json',
+    'fixture-manifest-before.json',
+)
+RECEIPT_TIMEOUT_SECONDS = 3
 ONBOARD_COMPLETED_AT = '2026-01-02T00:00:00+00:00'
 ONBOARD_VERSION = '9.9.9-test'
 ONBOARD_LEGACY = {
@@ -371,6 +386,256 @@ def access_cases(results):
              'refuse', f'{ACCESS_OBJECT_MESSAGE} docker, kubernetes is not an object')
 
 
+def call_bounded(fn, timeout):
+    outcome = {}
+
+    def invoke():
+        try:
+            fn()
+        except Exception as error:
+            outcome['error'] = error
+        outcome['done'] = True
+
+    worker = threading.Thread(target=invoke, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if not outcome.get('done'):
+        raise RuntimeError('receipt write hung')
+    if 'error' in outcome:
+        raise outcome['error']
+
+
+def receipt_owner():
+    if hasattr(verify, 'write_verification_receipts'):
+        return 'write_verification_receipts'
+    return 'pre-repair summary write_text'
+
+
+def receipt_cases(results):
+    def plant(kind, name):
+        def run():
+            holder = None
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                evidence = root / 'evidence'
+                evidence.mkdir()
+                outside = root / 'outside-target'
+                outside.write_bytes(b'untouched\n')
+                target = evidence / name
+                if kind == 'symlink':
+                    target.symlink_to(outside)
+                elif kind == 'fifo':
+                    os.mkfifo(target)
+                elif kind == 'socket':
+                    holder = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    holder.bind(str(target))
+                elif kind == 'directory':
+                    target.mkdir()
+                    (target / 'marker.txt').write_bytes(b'keep\n')
+                    # A descent would fail. lstat does not need read permission.
+                    if hasattr(verify, 'write_verification_receipts'):
+                        os.chmod(target, 0)
+                else:
+                    raise RuntimeError(f'unknown receipt fixture {kind}')
+                error = None
+                try:
+                    def invoke():
+                        # The pre-repair write_text opens the entry. Do not open it here:
+                        # a FIFO would block and a symlink would write outside the tree.
+                        if not hasattr(verify, 'write_verification_receipts'):
+                            return
+                        verify.write_verification_receipts(evidence, {'result': 'PASS_SCOPED'})
+                    call_bounded(invoke, RECEIPT_TIMEOUT_SECONDS)
+                except Exception as caught:
+                    error = caught
+                finally:
+                    if holder is not None:
+                        holder.close()
+                    if kind == 'directory' and hasattr(verify, 'write_verification_receipts'):
+                        os.chmod(target, 0o755)
+                if kind == 'symlink':
+                    verify.require(outside.read_bytes() == b'untouched\n',
+                                   'symlink receipt wrote outside the evidence tree')
+                if kind == 'directory':
+                    verify.require((target / 'marker.txt').read_bytes() == b'keep\n',
+                                   'directory receipt was opened')
+                    verify.require(target.is_dir() and not target.is_symlink(),
+                                   'directory receipt was replaced')
+                if hasattr(verify, 'write_verification_receipts'):
+                    summary_file = evidence / 'summary.json'
+                    if kind == 'directory' and name == 'summary.json':
+                        summary_file = next(evidence.glob('summary.json.refused.*'), None)
+                    verify.require(summary_file is not None and verify.regular_file(summary_file),
+                                   'failure summary was not a regular file inside the evidence tree')
+                    payload = json.loads(summary_file.read_text())
+                    verify.require(payload.get('result') == 'FAIL',
+                                   'failure summary still reports success')
+                    if kind != 'directory':
+                        verify.require(verify.regular_file(evidence / name),
+                                       'non-regular receipt path was left in place')
+                    else:
+                        manifest = json.loads((evidence / 'sha256.json').read_text())
+                        verify.require('summary.json/marker.txt' not in manifest,
+                                       'directory receipt was opened')
+                if error is not None:
+                    raise error
+        return run
+
+    run_case(results, 'receipt summary symlink', plant('symlink', 'summary.json'),
+             'refuse', RECEIPT_MESSAGE)
+    run_case(results, 'receipt summary fifo', plant('fifo', 'summary.json'),
+             'refuse', RECEIPT_MESSAGE)
+    run_case(results, 'receipt summary socket', plant('socket', 'summary.json'),
+             'refuse', RECEIPT_MESSAGE)
+    run_case(results, 'receipt summary directory', plant('directory', 'summary.json'),
+             'refuse', RECEIPT_MESSAGE)
+    run_case(results, 'receipt manifest symlink', plant('symlink', 'sha256.json'),
+             'refuse', RECEIPT_MESSAGE)
+
+
+def evidence_directory_owner():
+    if hasattr(verify, 'require_real_evidence_directory'):
+        return 'require_real_evidence_directory'
+    return 'pre-repair Path.is_dir'
+
+
+def evidence_directory_cases(results):
+    def replaced():
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence = root / 'evidence'
+            evidence.mkdir()
+            other = root / 'other'
+            other.mkdir()
+            marker = other / 'marker.txt'
+            marker.write_bytes(b'untouched\n')
+            for name in PROVENANCE_NAMES:
+                (other / name).write_text('{}\n')
+            evidence.rename(root / 'evidence-real')
+            link = root / 'evidence'
+            link.symlink_to(other, target_is_directory=True)
+            if hasattr(verify, 'write_verification_receipts'):
+                write_error = None
+                try:
+                    verify.write_verification_receipts(link, {'result': 'PASS_SCOPED'})
+                except Exception as caught:
+                    write_error = caught
+                if hasattr(verify, 'write_evidence_text'):
+                    try:
+                        verify.write_evidence_text(link, 'candidate-fingerprint-after.json', '{}\n')
+                    except Exception as caught:
+                        if write_error is None:
+                            write_error = caught
+                verify.require(marker.read_bytes() == b'untouched\n', EVIDENCE_DIRECTORY_MESSAGE)
+                verify.require(not (other / 'summary.json').exists()
+                               and not (other / 'sha256.json').exists()
+                               and not (other / 'candidate-fingerprint-after.json').exists(),
+                               EVIDENCE_DIRECTORY_MESSAGE)
+                if write_error is not None:
+                    raise write_error
+            if hasattr(verify, 'require_real_evidence_directory'):
+                verify.require_real_evidence_directory(link)
+                return
+            # is_dir follows the symlink and accepts the replacement root.
+            verify.require(link.is_dir(), EVIDENCE_DIRECTORY_MESSAGE)
+
+    run_case(results, 'evidence root symlink', replaced,
+             'refuse', EVIDENCE_DIRECTORY_MESSAGE)
+
+
+def provenance_owner():
+    if hasattr(verify, 'require_provenance_receipts'):
+        return 'require_provenance_receipts'
+    return 'pre-repair command receipts only'
+
+
+def provenance_cases(results):
+    def plant(missing=None, symlink=None):
+        def run():
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                for name in PROVENANCE_NAMES:
+                    if name == missing:
+                        continue
+                    path = root / name
+                    if name == symlink:
+                        path.symlink_to('missing-provenance')
+                    else:
+                        path.write_text('{}\n')
+                if hasattr(verify, 'require_provenance_receipts'):
+                    verify.require_provenance_receipts(root)
+        return run
+
+    for name in PROVENANCE_NAMES:
+        run_case(results, f'provenance missing {name}', plant(missing=name),
+                 'refuse', PROVENANCE_MESSAGE)
+    run_case(results, 'provenance symlink candidate-source.json',
+             plant(symlink='candidate-source.json'), 'refuse', PROVENANCE_MESSAGE)
+
+
+def compose_owner():
+    if hasattr(verify, 'require_masked_admin_pass'):
+        return 'require_masked_admin_pass'
+    return 'pre-repair ADMIN_PASS not empty or sentinel'
+
+
+def compose_cases(results):
+    def check(value):
+        def run():
+            if hasattr(verify, 'require_masked_admin_pass'):
+                verify.require_masked_admin_pass(value, SECRET)
+                return
+            verify.require(value not in ('', SECRET), COMPOSE_MESSAGE)
+        return run
+
+    run_case(results, 'admin pass null', check(None), 'refuse', COMPOSE_MESSAGE)
+    run_case(results, 'admin pass mapping', check({'masked': True}), 'refuse', COMPOSE_MESSAGE)
+    run_case(results, 'admin pass list', check(['masked']), 'refuse', COMPOSE_MESSAGE)
+    run_case(results, 'admin pass integer', check(0), 'refuse', COMPOSE_MESSAGE)
+
+
+def chunk_owner():
+    if hasattr(verify, 'file_contains_secret') and hasattr(verify, 'hash_file'):
+        return 'file_contains_secret and hash_file'
+    return 'pre-repair read_bytes'
+
+
+def chunk_cases(results):
+    def straddle(tree):
+        def run():
+            # Whole-file read_bytes finds this sentinel without proving the overlap.
+            if not hasattr(verify, 'file_contains_secret') or not hasattr(verify, 'hash_file'):
+                return
+            chunk = verify.SCAN_CHUNK_BYTES
+            needle = SECRET.encode()
+            start = chunk - (len(needle) - 1)
+            data = b'A' * start + needle + b'B' * 16
+            verify.require(needle not in data[:chunk] and needle not in data[chunk:],
+                           'sentinel does not straddle the chunk boundary')
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                if tree == 'retained':
+                    evidence = root / 'out'
+                    evidence.mkdir()
+                    leaked = evidence / 'leak.txt'
+                    leaked.write_bytes(data)
+                    verify.require(verify.hash_file(leaked) == hashlib.sha256(data).hexdigest(),
+                                   'Incremental hash diverges')
+                    verify.scan_retained_regular_files(SECRET, evidence)
+                    return
+                temp = root / 'candidate-tmp'
+                temp.mkdir()
+                leaked = temp / 'leak.txt'
+                leaked.write_bytes(data)
+                verify.require(verify.hash_file(leaked) == hashlib.sha256(data).hexdigest(),
+                               'Incremental hash diverges')
+                verify.scan_candidate_temp(SECRET, temp)
+        return run
+
+    run_case(results, 'chunk sentinel retained', straddle('retained'), 'refuse', SECRET_MESSAGE)
+    run_case(results, 'chunk sentinel candidate temp', straddle('temp'), 'refuse', SECRET_MESSAGE)
+
+
 def main():
     results = []
     print(f'capture owner: {capture_owner()}')
@@ -379,12 +644,22 @@ def main():
     print(f'retained tree owner: {retained_tree_owner()}')
     print(f'candidate temp owner: {candidate_temp_owner()}')
     print(f'access owner: {access_owner()}')
+    print(f'receipt owner: {receipt_owner()}')
+    print(f'evidence directory owner: {evidence_directory_owner()}')
+    print(f'provenance owner: {provenance_owner()}')
+    print(f'compose owner: {compose_owner()}')
+    print(f'chunk owner: {chunk_owner()}')
     capture_cases(results)
     secret_cases(results)
     onboarding_cases(results)
     special_cases(results)
     candidate_temp_cases(results)
     access_cases(results)
+    receipt_cases(results)
+    evidence_directory_cases(results)
+    provenance_cases(results)
+    compose_cases(results)
+    chunk_cases(results)
     failed = False
     for name, status, detail in results:
         print(f'{status} {name}: {detail}')

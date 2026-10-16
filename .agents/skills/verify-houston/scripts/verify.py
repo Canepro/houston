@@ -19,6 +19,18 @@ import threading
 import time
 
 
+SCAN_CHUNK_BYTES = 1024 * 1024
+RECEIPT_REFUSAL = 'Refused pre-existing non-regular receipt path'
+EVIDENCE_DIRECTORY_MESSAGE = 'Evidence directory must be a real directory'
+PROVENANCE_MESSAGE = 'Mandatory provenance artifact is not a regular file'
+COMPOSE_ADMIN_MESSAGE = 'Sanitized Compose attachment is not semantically safe'
+PROVENANCE_RECEIPTS = (
+    'candidate-source.json',
+    'candidate-fingerprint-before.json',
+    'fixture-manifest-before.json',
+)
+
+
 def require(condition, message):
     if not condition:
         raise RuntimeError(message)
@@ -30,7 +42,7 @@ def path_fingerprint(path):
     except FileNotFoundError:
         return 'MISSING'
     if stat.S_ISREG(mode):
-        return 'file:' + hashlib.sha256(path.read_bytes()).hexdigest()
+        return 'file:' + hash_file(path)
     if stat.S_ISLNK(mode):
         return 'symlink:' + os.readlink(path)
     if stat.S_ISDIR(mode):
@@ -70,6 +82,51 @@ def require_regular_file(path, message):
     require(regular_file(path), message)
 
 
+def open_regular_file(path):
+    """Open a regular file without following a symlink or blocking on a FIFO."""
+    require(regular_file(path), f'Expected a regular file: {path}')
+    flags = os.O_RDONLY | os.O_NONBLOCK
+    if hasattr(os, 'O_NOFOLLOW'):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise RuntimeError(f'Expected a regular file: {path}')
+        return os.fdopen(descriptor, 'rb')
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def hash_file(path, chunk_size=SCAN_CHUNK_BYTES):
+    digest = hashlib.sha256()
+    with open_regular_file(path) as handle:
+        while True:
+            block = handle.read(chunk_size)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def file_contains_secret(path, secret, chunk_size=SCAN_CHUNK_BYTES):
+    needle = secret.encode()
+    if not needle:
+        return False
+    overlap = len(needle) - 1
+    size = chunk_size if chunk_size > overlap else overlap + 1
+    with open_regular_file(path) as handle:
+        carry = b''
+        while True:
+            block = handle.read(size)
+            if not block:
+                return False
+            window = carry + block
+            if needle in window:
+                return True
+            carry = window[-overlap:] if overlap else b''
+
+
 def no_special_entries(root):
     entries = []
     for path in root.rglob('*'):
@@ -82,7 +139,7 @@ def no_special_entries(root):
 def no_synthetic_secret(secret, paths):
     for path in paths:
         require_regular_file(path, f'Expected retained regular file: {path}')
-        require(secret.encode() not in path.read_bytes(), f'Synthetic secret leaked: {path.name}')
+        require(not file_contains_secret(path, secret), f'Synthetic secret leaked: {path.name}')
 
 
 def retained_regular_files(root):
@@ -115,6 +172,158 @@ def scan_candidate_temp(secret, temp):
     require(stat.S_ISDIR(temp.lstat().st_mode),
             f'Candidate temp directory is missing: {temp}')
     no_synthetic_secret(secret, retained_regular_files(temp))
+
+
+def require_real_evidence_directory(path):
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        require(False, EVIDENCE_DIRECTORY_MESSAGE)
+    require(stat.S_ISDIR(mode), EVIDENCE_DIRECTORY_MESSAGE)
+
+
+def require_provenance_receipts(out, names=PROVENANCE_RECEIPTS):
+    irregular = [name for name in names if not regular_file(out / name)]
+    require(not irregular, PROVENANCE_MESSAGE + ': ' + ', '.join(irregular))
+
+
+def require_masked_admin_pass(value, sentinel):
+    require(isinstance(value, str) and value not in ('', sentinel), COMPOSE_ADMIN_MESSAGE)
+
+
+def receipt_entry_kind(path):
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return 'absent'
+    if stat.S_ISLNK(mode):
+        return 'symlink'
+    if stat.S_ISFIFO(mode):
+        return 'fifo'
+    if stat.S_ISSOCK(mode):
+        return 'socket'
+    if stat.S_ISDIR(mode):
+        return 'directory'
+    if stat.S_ISREG(mode):
+        return 'file'
+    return 'special'
+
+
+def unused_receipt_name(path):
+    for index in range(100):
+        candidate = path.parent / f'{path.name}.refused.{index}'
+        if receipt_entry_kind(candidate) == 'absent':
+            return candidate
+    raise RuntimeError(f'{RECEIPT_REFUSAL}: no safe name beside {path.name}')
+
+
+def claim_regular_receipt(path):
+    """Return a path that can be created as a regular file.
+
+    lstat decides. unlink removes a symlink, FIFO, or socket without opening
+    it, so a FIFO cannot block and a symlink cannot redirect the write. A
+    directory stays in place and the write uses a fresh sibling name.
+    """
+    kind = receipt_entry_kind(path)
+    if kind in ('absent', 'file'):
+        return path, None
+    message = f'{RECEIPT_REFUSAL}: {path.name} was a {kind}'
+    if kind == 'directory':
+        return unused_receipt_name(path), message
+    path.unlink()
+    return path, message
+
+
+def record_receipt_refusal(summary, refusals):
+    if not refusals:
+        return
+    summary['result'] = 'FAIL'
+    previous = summary.get('error')
+    parts = [str(previous), *refusals] if previous else list(refusals)
+    summary['error'] = '; '.join(parts)
+    cleanup = list(summary.get('cleanup_errors') or [])
+    cleanup.extend(refusals)
+    summary['cleanup_errors'] = cleanup
+
+
+def inventory_regular_files(root, skipped):
+    skipped = set(skipped)
+    found = []
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        for child in sorted(current.iterdir(), key=lambda item: item.name):
+            if child in skipped:
+                continue
+            kind = receipt_entry_kind(child)
+            if kind == 'directory':
+                stack.append(child)
+            elif kind == 'file':
+                found.append(child)
+    return found
+
+
+def write_summary_file(path, summary):
+    path.write_text(json.dumps(summary, indent=2) + '\n')
+
+
+def write_failure_summary(out, summary):
+    if receipt_entry_kind(out) == 'directory':
+        destination = out / 'summary.json'
+    else:
+        # Parent is lexical. Do not resolve a symlinked evidence root.
+        destination = out.parent / f'{out.name}.summary.json'
+    path, refusal = claim_regular_receipt(destination)
+    if refusal:
+        record_receipt_refusal(summary, [refusal])
+    write_summary_file(path, summary)
+    return path
+
+
+def write_evidence_bytes(out, name, payload):
+    """Write one evidence receipt without following a symlink or opening a FIFO."""
+    require_real_evidence_directory(out)
+    path, refusal = claim_regular_receipt(out / name)
+    path.write_bytes(payload)
+    if refusal:
+        raise RuntimeError(refusal)
+    return path
+
+
+def write_evidence_text(out, name, text):
+    return write_evidence_bytes(out, name, text.encode())
+
+
+def write_verification_receipts(out, summary):
+    if receipt_entry_kind(out) != 'directory':
+        record_receipt_refusal(summary, [EVIDENCE_DIRECTORY_MESSAGE])
+        write_failure_summary(out, summary)
+        raise RuntimeError(summary['error'])
+    summary_target = out / 'summary.json'
+    manifest_target = out / 'sha256.json'
+    summary_kind = receipt_entry_kind(summary_target)
+    manifest_kind = receipt_entry_kind(manifest_target)
+    summary_path, summary_refusal = claim_regular_receipt(summary_target)
+    manifest_path, manifest_refusal = claim_regular_receipt(manifest_target)
+    refusals = [item for item in (summary_refusal, manifest_refusal) if item]
+    record_receipt_refusal(summary, refusals)
+    write_summary_file(summary_path, summary)
+    skipped = [path for path, kind in (
+        (summary_target, summary_kind),
+        (manifest_target, manifest_kind),
+    ) if kind == 'directory']
+    files = {
+        str(path.relative_to(out)): hash_file(path)
+        for path in inventory_regular_files(out, skipped)
+    }
+    manifest_path.write_text(json.dumps(files, indent=2) + '\n')
+    for name, digest in files.items():
+        target = out / name
+        require_regular_file(target, f'Evidence entry disappeared after cleanup: {name}')
+        require(hash_file(target) == digest, f'Evidence unreadable after cleanup: {name}')
+    if refusals:
+        raise RuntimeError('; '.join(refusals))
+    return summary_path
 
 
 def require_revoked_onboarding_persisted(persisted, completed_at, version, legacy):
@@ -819,9 +1028,9 @@ def main():
     out.mkdir(parents=True, exist_ok=False)
     candidate_before = candidate_fingerprint(root)
     source_before = candidate_before['source']
-    (out / 'candidate-source.json').write_text(json.dumps(source_before, indent=2) + '\n')
-    (out / 'candidate-fingerprint-before.json').write_text(
-        json.dumps(candidate_before, indent=2) + '\n')
+    write_evidence_text(out, 'candidate-source.json', json.dumps(source_before, indent=2) + '\n')
+    write_evidence_text(out, 'candidate-fingerprint-before.json',
+                        json.dumps(candidate_before, indent=2) + '\n')
     summary = {'head': candidate_before['head'],
                'diff_sha256': candidate_before['diff_sha256'],
                'checkout': str(root),
@@ -928,8 +1137,8 @@ def main():
 
         fixture_root = workspace.parent
         fixture_before = tree_manifest(fixture_root)
-        (out / 'fixture-manifest-before.json').write_text(
-            json.dumps(fixture_before, indent=2) + '\n')
+        write_evidence_text(out, 'fixture-manifest-before.json',
+                            json.dumps(fixture_before, indent=2) + '\n')
         receipts = []
 
         def run(label, argv, expected=0, schema=None, ok=True, overrides=None, stdin=None):
@@ -939,8 +1148,8 @@ def main():
             result = run_command(command, root, child_env, stdin=stdin)
             stdout = result['stdout']
             stderr = result['stderr']
-            (out / f'{label}.stdout').write_bytes(stdout)
-            (out / f'{label}.stderr').write_bytes(stderr)
+            write_evidence_bytes(out, f'{label}.stdout', stdout)
+            write_evidence_bytes(out, f'{label}.stderr', stderr)
             receipt = {'label': label, 'argv': ['bin/houston', *argv], 'exit': result['exit']}
             scan_error = None
             try:
@@ -952,7 +1161,7 @@ def main():
             if result['cleanup_errors']:
                 receipt['cleanup_errors'] = result['cleanup_errors']
             receipts.append(receipt)
-            (out / 'commands.json').write_text(json.dumps(receipts, indent=2) + '\n')
+            write_evidence_text(out, 'commands.json', json.dumps(receipts, indent=2) + '\n')
             errors = []
             if scan_error is not None:
                 errors.append(f'{label}: {scan_error}')
@@ -1086,14 +1295,14 @@ def main():
             require(bundle_payload.get('seed') == expected_seed and manifest.get('seed') == expected_seed,
                     'Bundle response or manifest expanded the seed projection')
             artifact = manifest['artifact']
-            raw_hash = hashlib.sha256((workspace / 'docker-compose.yml').read_bytes()).hexdigest()
+            raw_hash = hash_file(workspace / 'docker-compose.yml')
             for candidate in (payload, bundle_payload, manifest):
                 require(candidate['artifact']['name'] == 'docker-compose.yml'
                         and candidate['artifact']['sha256'] == raw_hash,
                         'Evidence artifact identity differs from fixture bytes')
             sanitized = artifact['sanitized']
             require(sanitized['name'] == 'docker-compose.yml', 'Unexpected sanitized attachment name')
-            attached_hash = hashlib.sha256((bundle / sanitized['name']).read_bytes()).hexdigest()
+            attached_hash = hash_file(bundle / sanitized['name'])
             require(sanitized['sha256'] == attached_hash and attached_hash != raw_hash,
                     'Sanitized attachment digest must match its bytes and differ from secret-bearing source')
             readme = (bundle / 'README.md').read_text()
@@ -1109,14 +1318,15 @@ def main():
                     'Sanitized Compose attachment lost the Rocket.Chat service identity')
             environment = rocketchat.get('environment')
             labels = rocketchat.get('labels')
-            require(isinstance(environment, dict) and 'ADMIN_PASS' in environment
-                    and environment['ADMIN_PASS'] not in ('', sentinel)
-                    and isinstance(labels, dict) and 'support-note' in labels
+            require_masked_admin_pass(
+                environment.get('ADMIN_PASS') if isinstance(environment, dict) else None,
+                sentinel)
+            require(isinstance(labels, dict) and 'support-note' in labels
                     and sentinel not in str(rocketchat.get('command', '')),
-                    'Sanitized Compose attachment is not semantically safe')
+                    COMPOSE_ADMIN_MESSAGE)
             no_synthetic_secret(sentinel, bundle_files)
             retained_bundle_files = [
-                (file, hashlib.sha256(file.read_bytes()).hexdigest()) for file in bundle_files
+                (file, hash_file(file)) for file in bundle_files
             ]
             summary['features']['evidence'] = 'PASS: offline JSON, seed allowlist, sanitized bundle digests and sentinel checks; live runtime pending'
         capture = commands.get('capture')
@@ -1315,7 +1525,8 @@ def main():
             persisted = yaml_document(node_exec, root, env, config_file)
             require_revoked_onboarding_persisted(
                 persisted, revoked['completed_at'], version, legacy)
-            (out / 'onboarding-persisted.json').write_text(json.dumps(persisted, indent=2) + '\n')
+            write_evidence_text(out, 'onboarding-persisted.json',
+                                json.dumps(persisted, indent=2) + '\n')
             kubectl_trap.unlink()
             summary['features']['onboarding'] = (
                 'PASS: synthetic-home status, invalid grant, grant/revoke persistence and '
@@ -1374,7 +1585,8 @@ def main():
                     and persisted_setup['grants'] == persisted['grants']
                     and persisted_setup['onboarding'] == persisted['onboarding'],
                     'Setup discarded unrelated legacy fields')
-            (out / 'setup-persisted.json').write_text(json.dumps(persisted_setup, indent=2) + '\n')
+            write_evidence_text(out, 'setup-persisted.json',
+                                json.dumps(persisted_setup, indent=2) + '\n')
             before_prompt = config_file.read_bytes()
             cancelled = run('setup-prompt-cancel', ['onboard', 'setup', '--reconfigure', '--section', 'seed'],
                             stdin=b'large\nno\n')
@@ -1394,8 +1606,8 @@ def main():
             expected_interactive['preferences']['seed_profile'] = 'small'
             require(interactive_setup == expected_interactive,
                     'Interactive setup discarded legacy fields, scope, denials or unrelated state')
-            (out / 'setup-interactive-persisted.json').write_text(
-                json.dumps(interactive_setup, indent=2) + '\n')
+            write_evidence_text(out, 'setup-interactive-persisted.json',
+                                json.dumps(interactive_setup, indent=2) + '\n')
             summary['features']['setup'] = ('PASS: real CLI preview, explicit choices, readback, '
                 'safe defaults, no-write refusals, prompts and legacy preservation; API and live engine pending')
         else:
@@ -1405,24 +1617,32 @@ def main():
         failure = error
         summary['error'] = str(error)
     finally:
+        evidence_directory_ok = False
+        try:
+            require_real_evidence_directory(out)
+            evidence_directory_ok = True
+        except Exception as error:
+            cleanup_errors.append(str(error))
         try:
             candidate_after = candidate_fingerprint(root)
-            (out / 'candidate-fingerprint-after.json').write_text(
-                json.dumps(candidate_after, indent=2) + '\n')
             summary['candidate_unchanged'] = candidate_after == candidate_before
             summary['source_unchanged'] = candidate_after['source'] == source_before
             if candidate_after != candidate_before:
                 cleanup_errors.append('Candidate fingerprint changed during verification')
+            if evidence_directory_ok:
+                write_evidence_text(out, 'candidate-fingerprint-after.json',
+                                    json.dumps(candidate_after, indent=2) + '\n')
         except Exception as error:
             cleanup_errors.append(f'Could not record the final candidate fingerprint: {error}')
         if fixture_root is not None and fixture_before is not None:
             try:
                 fixture_after = tree_manifest(fixture_root)
-                (out / 'fixture-manifest-after.json').write_text(
-                    json.dumps(fixture_after, indent=2) + '\n')
                 summary['fixture_unchanged'] = fixture_after == fixture_before
                 if fixture_after != fixture_before:
                     cleanup_errors.append('Synthetic fixture manifest changed during verification')
+                if evidence_directory_ok:
+                    write_evidence_text(out, 'fixture-manifest-after.json',
+                                        json.dumps(fixture_after, indent=2) + '\n')
             except Exception as error:
                 cleanup_errors.append(f'Could not record the final fixture manifest: {error}')
         else:
@@ -1440,53 +1660,52 @@ def main():
         summary['scratch_removed'] = not scratch.exists()
         if not summary['scratch_removed']:
             cleanup_errors.append('Verifier scratch remains after cleanup')
-        if retained_bundle_files:
+        if evidence_directory_ok and retained_bundle_files:
             try:
                 require(stat.S_ISDIR(bundle.lstat().st_mode),
                         'Retained bundle root must remain a real directory')
             except Exception as error:
                 cleanup_errors.append(str(error))
-        for file, digest in retained_bundle_files:
+        if evidence_directory_ok:
+            for file, digest in retained_bundle_files:
+                try:
+                    require_regular_file(file, f'Retained bundle attachment is not a regular file: {file.name}')
+                    require(hash_file(file) == digest,
+                            f'Retained bundle attachment changed after cleanup: {file.name}')
+                except Exception as error:
+                    cleanup_errors.append(str(error))
             try:
-                require_regular_file(file, f'Retained bundle attachment is not a regular file: {file.name}')
-                require(hashlib.sha256(file.read_bytes()).hexdigest() == digest,
-                        f'Retained bundle attachment changed after cleanup: {file.name}')
+                require_provenance_receipts(out)
             except Exception as error:
                 cleanup_errors.append(str(error))
-        try:
-            require(expected_receipt_labels, 'No command receipts were expected')
-            scan_command_receipts(sentinel, out, *expected_receipt_labels)
-            scanned_receipts = scan_command_receipts(sentinel, out)
-            summary['receipt_scan'] = {
-                'result': 'PASS',
-                'files': len(scanned_receipts),
-                'scope': 'all retained command stdout/stderr receipts',
-            }
-        except Exception as error:
-            cleanup_errors.append(f'Final command receipt scan failed: {error}')
-        try:
-            scan_retained_regular_files(sentinel, out)
-        except Exception as error:
-            cleanup_errors.append(f'Retained evidence scan failed: {error}')
-        try:
-            require_no_special_retained_entries(out)
-        except Exception as error:
-            cleanup_errors.append(f'Retained special-entry scan failed: {error}')
+            try:
+                require(expected_receipt_labels, 'No command receipts were expected')
+                scan_command_receipts(sentinel, out, *expected_receipt_labels)
+                scanned_receipts = scan_command_receipts(sentinel, out)
+                summary['receipt_scan'] = {
+                    'result': 'PASS',
+                    'files': len(scanned_receipts),
+                    'scope': 'all retained command stdout/stderr receipts',
+                }
+            except Exception as error:
+                cleanup_errors.append(f'Final command receipt scan failed: {error}')
+            try:
+                scan_retained_regular_files(sentinel, out)
+            except Exception as error:
+                cleanup_errors.append(f'Retained evidence scan failed: {error}')
+            try:
+                require_no_special_retained_entries(out)
+            except Exception as error:
+                cleanup_errors.append(f'Retained special-entry scan failed: {error}')
         if cleanup_errors:
             summary['cleanup_errors'] = cleanup_errors
             if failure is None:
                 failure = RuntimeError('; '.join(cleanup_errors))
             summary['error'] = str(failure)
         summary['result'] = 'PASS_SCOPED' if failure is None and completed else 'FAIL'
+        summary_path = None
         try:
-            (out / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
-            files = {str(path.relative_to(out)): hashlib.sha256(path.read_bytes()).hexdigest()
-                     for path in out.rglob('*') if regular_file(path)}
-            (out / 'sha256.json').write_text(json.dumps(files, indent=2) + '\n')
-            for name, digest in files.items():
-                require_regular_file(out / name, f'Evidence entry disappeared after cleanup: {name}')
-                require(hashlib.sha256((out / name).read_bytes()).hexdigest() == digest,
-                        f'Evidence unreadable after cleanup: {name}')
+            summary_path = write_verification_receipts(out, summary)
         except Exception as error:
             if failure is None:
                 failure = error
@@ -1494,8 +1713,17 @@ def main():
             summary['result'] = 'FAIL'
             summary['error'] = str(failure)
             summary['cleanup_errors'] = cleanup_errors
-            (out / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
-        print(out / 'summary.json')
+            try:
+                summary_path = write_failure_summary(out, summary)
+            except Exception as second:
+                cleanup_errors.append(f'Could not write a safe failure summary: {second}')
+                summary['cleanup_errors'] = cleanup_errors
+        if summary_path is None:
+            if receipt_entry_kind(out) == 'directory':
+                summary_path = out / 'summary.json'
+            else:
+                summary_path = out.parent / f'{out.name}.summary.json'
+        print(summary_path)
     if failure is not None:
         raise failure
 
