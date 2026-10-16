@@ -781,7 +781,7 @@ describe('goal-first setup CLI', () => {
     expect(result.code).toBe(2);
     expect(fs.readFileSync(path.join(home, 'config.yaml'))).toEqual(before);
   });
-  it('keeps topology selectors out of the generated local-first command', async () => {
+  it('defers licensed seed and blocks an unusable first run without persisting a token', async () => {
     const result = await run([
       'onboard',
       '--deployment',
@@ -794,10 +794,12 @@ describe('goal-first setup CLI', () => {
     expect(result.envelope.data).toMatchObject({
       selection: { deployment: 'microservices' },
       license: { required: true, supplied: false, seed_deferred: true },
+      environment: { microservices_ready: false, kubernetes_provisioning_available: false },
+      first_run_command: '',
+      gates: expect.arrayContaining([
+        expect.objectContaining({ kind: 'tools', code: 'KUBERNETES_TOOLS_MISSING' }),
+      ]),
     });
-    const command = String((result.envelope.data as Record<string, unknown>).first_run_command);
-    expect(command).not.toMatch(/--(?:runtime|deployment|preset)\b/u);
-    expect(command).not.toContain('--seed');
     expect(
       (require('../../src/lib/config') as typeof ConfigNS).loadConfig(false).reg_token,
     ).toBeUndefined();
