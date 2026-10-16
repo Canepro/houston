@@ -107,8 +107,9 @@ const ROOT = path.resolve(__dirname, '..');
 // metadata-only Docker records, legacy catalogue uncertainty in both licence-output paths,
 // provisional licensing, Compose-list and env-file token presence, legacy sidecar
 // attribution, a preset-only Kubernetes token, and evidence reading `effective_license` before
-// the Secret lifecycle flag: 47 cases over 4551, total 4598.
-const FLOOR = 4598;
+// the Secret lifecycle flag: 47 cases over 4551, total 4598. One more records the token
+// Helm accepted when a re-up stops after Helm: total 4599.
+const FLOOR = 4599;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

@@ -933,6 +933,87 @@ describe('the values the release is installed with', () => {
     }
   });
 
+  it('records the token Helm accepted when the tools Ingress fails on a re-up', async () => {
+    // The write-ahead record states the release still running. Once Helm accepts this run's
+    // release, the marker has to follow it even if the create stops before its final record.
+    const TOKEN = 'synthetic-reup-token';
+    let failHelm = false;
+    let failTools = false;
+    let useTls = false;
+    const req = (regToken: string) =>
+      createReq({
+        version: '8.5.1',
+        name: 'tk',
+        preset: 'email',
+        runtime: 'kubernetes',
+        offline: true,
+        wait: false,
+        regToken,
+      });
+    harness({ held: ['houston-tk'] });
+    mocked(sizing.checkCapacity).mockResolvedValue(undefined);
+    mocked(lifecyclePorts.pickHostPort).mockResolvedValue(3000);
+    mocked(lifecyclePorts.checkSidecarPorts).mockResolvedValue(undefined);
+    mocked(tlsplan.resolveTls).mockImplementation(() =>
+      Promise.resolve(useTls ? ({ mode: 'local', host: 'rc.example.test' } as never) : null),
+    );
+    mocked(tlsplan.kubernetesTlsPlan).mockResolvedValue({
+      host: 'rc.example.test',
+      ingressClass: 'traefik',
+      endpoint: { address: '127.0.0.1', port: 443, source: 'stated' },
+      context: 'prod',
+      issuer: { mode: 'local' },
+      clusterOwns443: true,
+    } as never);
+    mocked(tlsplan.routeKubernetesName).mockResolvedValue(undefined);
+    mocked(release.apply).mockImplementation((body: unknown) =>
+      failTools && String(body).includes('houston-tools')
+        ? Promise.reject(new CreateFailedError('kubectl apply failed: tools ingress refused'))
+        : Promise.resolve(),
+    );
+    mocked(release.install).mockImplementation(() =>
+      failHelm
+        ? Promise.reject(new CreateFailedError('helm install failed: refused'))
+        : Promise.resolve(),
+    );
+    const observed: unknown[] = [];
+    const marker = async (label: string) => {
+      const meta = await readMeta('tk');
+      expect(JSON.stringify(meta)).not.toContain(TOKEN);
+      observed.push([label, meta.extra.incomplete === true, meta.extra.reg_token_supplied]);
+    };
+    try {
+      await paths.remove('tk');
+      await createKubernetes(req(''));
+      await marker('tokenless create');
+
+      failHelm = true;
+      await expect(createKubernetes(req(TOKEN))).rejects.toThrow('helm install failed: refused');
+      await marker('Helm refused the token');
+
+      failHelm = false;
+      failTools = true;
+      useTls = true;
+      await expect(createKubernetes(req(TOKEN))).rejects.toThrow(
+        'kubectl apply failed: tools ingress refused',
+      );
+      await marker('Helm accepted the token, tools Ingress failed');
+
+      await expect(createKubernetes(req(''))).rejects.toThrow(
+        'kubectl apply failed: tools ingress refused',
+      );
+      await marker('Helm accepted no token, tools Ingress failed');
+    } finally {
+      await paths.remove('tk');
+    }
+    expect(observed).toEqual([
+      ['tokenless create', false, false],
+      ['Helm refused the token', true, false],
+      ['Helm accepted the token, tools Ingress failed', true, true],
+      ['Helm accepted no token, tools Ingress failed', true, false],
+    ]);
+  });
+
   it('keeps the licence Helm accepted when the tools Ingress fails on a re-up', async () => {
     // Helm had accepted values that reference houston-license, then the tools Ingress apply
     // threw before noteInstalledLicense. Rollback left the adopted namespace and its Secret,

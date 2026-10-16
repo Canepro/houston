@@ -35,7 +35,7 @@ import { describe as describeWorkspace } from '../../../src/core/lifecycle/inspe
 import { createReq } from '../../../src/core/lifecycle/types';
 import { exists, remove } from '../../../src/core/runner/paths';
 import { usedPorts } from '../../../src/core/runner/ports';
-import { readMeta } from '../../../src/core/runner/record';
+import { readMeta, updateMeta } from '../../../src/core/runner/record';
 import * as topology from '../../../src/core/topology';
 
 import { register, routeHost } from '../../../src/core/edge/routes';
@@ -356,11 +356,17 @@ describe('a Kubernetes create', () => {
     // Killed before the Secret and Helm: the old tokenless release is what still runs.
     interrupt = true;
     await step('killed re-up with a token', token);
+    // A record from before the marker existed cannot say what runs, so neither can this one.
+    await updateMeta('ktoken-evidence', (meta) => {
+      delete meta.extra.reg_token_supplied;
+    });
+    await step('killed re-up from a record with no marker', token);
 
     expect(observed).toEqual([
       ['first create with a token', false, true],
       ['re-up without a token', true, false],
       ['killed re-up with a token', false, false],
+      ['killed re-up from a record with no marker', undefined, undefined],
     ]);
   });
 

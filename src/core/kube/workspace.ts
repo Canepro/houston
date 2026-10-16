@@ -347,8 +347,11 @@ async function installChart(options: ChartInstall): Promise<Record<string, unkno
   // accepted has to be recorded before the tools Ingress can throw. A namespace this run
   // created is deleted by that failure, Secret included, so its marker waits until the
   // Ingress has succeeded and is still written before this function returns.
-  if (options.license !== '' && options.receipt.createdUid === '') {
-    await noteInstalledLicense(name, namespace, context, options.receipt);
+  // The token marker follows the same timing: this release now carries exactly this run's
+  // token, or none, so evidence of a create stopped after Helm describes what runs.
+  const installed = { license: options.license !== '', regToken: regToken !== '' };
+  if (options.receipt.createdUid === '') {
+    await noteInstalledCredentials(name, namespace, context, options.receipt, installed);
   }
   // The preset's own UIs at paths of the same name (Mailpit, Keycloak, the demo page).
   const tools = options.preset === null ? [] : publicPathsOf(options.preset.extra);
@@ -366,8 +369,8 @@ async function installChart(options: ChartInstall): Promise<Record<string, unkno
       { namespace, context },
     );
   }
-  if (options.license !== '' && options.receipt.createdUid !== '') {
-    await noteInstalledLicense(name, namespace, context, options.receipt);
+  if (options.receipt.createdUid !== '') {
+    await noteInstalledCredentials(name, namespace, context, options.receipt, installed);
   }
   return values;
 }
@@ -472,23 +475,30 @@ function recordsThisInstall(
 }
 
 /**
- * Helm has accepted a release that references this run's licence Secret.
+ * Helm has accepted a release with this run's credentials.
  * Inspect reads `effective_license` and ignores `incomplete`, so that boolean becomes
  * true here, together with `retained_license`, and not when the Secret alone exists.
+ * `reg_token_supplied` becomes whether this release carries a token, for the same reason.
+ * Only a licence refuses a changed workspace identity: a token marker is presence only, and
+ * a record that is not this install's keeps whatever it said.
  */
-async function noteInstalledLicense(
+async function noteInstalledCredentials(
   name: string,
   namespace: string,
   context: string,
   receipt: NamespaceReceipt,
+  installed: { license: boolean; regToken: boolean },
 ): Promise<void> {
   try {
     await updateMeta(name, (meta) => {
       if (!recordsThisInstall(meta, name, namespace, context, receipt)) {
+        if (!installed.license) return;
         throw new ConflictError(
           'workspace identity changed before licence installation could be recorded',
         );
       }
+      meta.extra.reg_token_supplied = installed.regToken;
+      if (!installed.license) return;
       meta.extra.licensed = true;
       meta.extra.retained_license = true;
       meta.extra.effective_license = true;
