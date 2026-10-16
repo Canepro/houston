@@ -94,6 +94,57 @@ def scan_retained_regular_files(secret, root):
     no_synthetic_secret(secret, retained_regular_files(root))
 
 
+def require_no_special_retained_entries(root):
+    entries = no_special_entries(root)
+    suffix = f': {entries[0].relative_to(root)}' if entries else ''
+    require(not entries, 'Retained output contains a symlink or special entry' + suffix)
+
+
+def bind_candidate_temp(env, scratch):
+    temp = Path(scratch) / 'candidate-tmp'
+    temp.mkdir()
+    location = str(temp)
+    bound = dict(env)
+    bound['TMPDIR'] = location
+    bound['TMP'] = location
+    bound['TEMP'] = location
+    return bound
+
+
+def scan_candidate_temp(secret, temp):
+    require(stat.S_ISDIR(temp.lstat().st_mode),
+            f'Candidate temp directory is missing: {temp}')
+    no_synthetic_secret(secret, retained_regular_files(temp))
+
+
+def require_revoked_onboarding_persisted(persisted, completed_at, version, legacy):
+    require(all(persisted[key] == legacy[key] for key in
+                ('preferences', 'default_deployment', 'default_scenarios', 'future_config'))
+            and persisted['grants']['engine_resize'] is False
+            and persisted['grants']['future_grant'] == legacy['grants']['future_grant']
+            and persisted['onboarding']['future_field'] == 'preserve'
+            and persisted['grants']['owned_cluster'] is False
+            and persisted['grants']['clusters'] == ['preserved-cluster']
+            and persisted['onboarding']['completed_at'] == completed_at
+            and persisted['onboarding']['rc_repro_version'] == version
+            and persisted['onboarding']['completed'] is True,
+            'Onboarding failed to persist the revoked grant state or legacy fields')
+
+
+def access_supported(payloads):
+    require(isinstance(payloads, list)
+            and [runtime for runtime, _data in payloads] == ['docker', 'kubernetes'],
+            'Access discovery must include the docker and kubernetes loopback fixtures')
+    present = [runtime for runtime, data in payloads
+               if isinstance(data, dict) and 'access' in data]
+    missing = [runtime for runtime, data in payloads
+               if not (isinstance(data, dict) and 'access' in data)]
+    if not present:
+        return False
+    require(not missing, 'Access payload is omitted for ' + ', '.join(missing))
+    return True
+
+
 def require_unknown_panels(human, panels):
     for panel in panels:
         match = re.search(
@@ -781,6 +832,7 @@ def main():
     failure = None
     completed = False
     cleanup_errors = []
+    candidate_temp = None
     sentinel = 'VERIFY_SYNTHETIC_SECRET_59c8'
     try:
         # Only entry-point utilities can execute. No inherited credentials, engine socket,
@@ -809,6 +861,8 @@ def main():
         env = {'PATH': str(toolbin), 'HOME': str(scratch / 'user'),
                'HOUSTON_HOME': str(scratch / 'home'),
                'HOUSTON_SKILL_HOME': str(scratch / 'skills'), 'NO_COLOR': '1', 'LANG': 'C.UTF-8'}
+        env = bind_candidate_temp(env, scratch)
+        candidate_temp = Path(env['TMPDIR'])
         Path(env['HOME']).mkdir()
         workspace = scratch / 'home' / 'repros' / 'verify-fixture'
         workspace.mkdir(parents=True)
@@ -849,6 +903,14 @@ def main():
                              extra={'runtime': 'kubernetes', 'context': 'verify-offline',
                                     'namespace': access_workspace.name, 'bind_host': '127.0.0.1'})
         (access_workspace / 'repro.json').write_text(json.dumps(access_record))
+        docker_access = workspace.parent / 'verify-docker-access-fixture'
+        docker_access.mkdir()
+        docker_access_record = dict(record, name=docker_access.name,
+                                     project='houston-verify-docker-access-fixture',
+                                     root_url='http://127.0.0.1:39999',
+                                     admin_password='synthetic-access',
+                                     extra={'runtime': 'docker', 'bind_host': '127.0.0.1'})
+        (docker_access / 'repro.json').write_text(json.dumps(docker_access_record))
         for name, bind, url, public_url, side_ports in [
                 ('verify-ipv6-fixture', '::1', 'http://[::1]:39999',
                  'https://access.example.test', [4312, 4313]),
@@ -1086,20 +1148,19 @@ def main():
             require(absent['error']['code'] == 'NOT_FOUND', 'Capture missing name must be NOT_FOUND')
             require_absent_capture_bundle(absent_bundle, capture_marker)
             summary['features']['capture'] = 'PASS: missing workspace refused before bundle or browser launch; browser capture pending'
-        detail = run('access-discovery', ['info', '--name', access_workspace.name, '--json'],
-                     schema='houston.info.v1')['data']
-        if 'access' not in detail:
+        loopback_access = (
+            ('docker', docker_access.name, '127.0.0.1', docker_access_record['root_url']),
+            ('kubernetes', access_workspace.name, '127.0.0.1', access_record['root_url']),
+        )
+        discovery = []
+        for runtime, name, _target, _url in loopback_access:
+            detail = run(f'access-discovery-{runtime}', ['info', '--name', name, '--json'],
+                         schema='houston.info.v1')['data']
+            discovery.append((runtime, detail))
+        if not access_supported(discovery):
             summary['features']['access'] = 'PENDING: info payload has no access consumer'
         else:
-            local = detail['access']
-            require(local['mode'] == 'local' and local['bind'] == 'loopback'
-                    and local['host_port'] == 39999 and local['local_port'] == 39999
-                    and local['browser_url'] == access_record['root_url']
-                    and local['tunnel_command'] is None and local['note'] is None,
-                    'Local access handoff differs from recorded workspace')
-            local_human = run('access-local-human', ['info', '--name', access_workspace.name])
-            require(local['browser_url'] in local_human,
-                    'Human local access guidance omitted the browser URL')
+            discovered = dict(discovery)
             ssh_values = {
                 'SSH_CONNECTION': '198.51.100.20 55100 203.0.113.8 22',
                 'SSH_CLIENT': '198.51.100.20 55100 22',
@@ -1131,8 +1192,33 @@ def main():
                 human = run('access-' + label + '-human', ['info', '--name', name], overrides=overrides)
                 require(data['tunnel_command'] in human and data['browser_url'] in human,
                         'Human access guidance differs from JSON')
-            for marker in ssh_values:
-                remote_access(marker.lower().replace('_', '-'), marker)
+            remote = {'SSH_CONNECTION': ssh_values['SSH_CONNECTION'],
+                      'HOUSTON_SSH_USER': 'operator', 'HOUSTON_SSH_HOST': 'ssh-proof.invalid'}
+            for runtime, name, target, root_url in loopback_access:
+                local = discovered[runtime]['access']
+                require(local['mode'] == 'local' and local['bind'] == 'loopback'
+                        and local['host_port'] == 39999 and local['local_port'] == 39999
+                        and local['browser_url'] == root_url
+                        and local['tunnel_command'] is None and local['note'] is None,
+                        'Local access handoff differs from recorded workspace')
+                local_human = run(f'access-local-human-{runtime}', ['info', '--name', name])
+                require(local['browser_url'] in local_human,
+                        'Human local access guidance omitted the browser URL')
+                for marker in ssh_values:
+                    remote_access(runtime + '-' + marker.lower().replace('_', '-'), marker,
+                                  name=name, target=target)
+                remote_access(runtime + '-option', 'SSH_CONNECTION', name=name, target=target,
+                              changes={'HOUSTON_SSH_USER': '-oProxyCommand=unsafe'})
+                remote_access(runtime + '-minimum-port', 'SSH_CONNECTION', name=name, target=target,
+                              port=1024, changes={'HOUSTON_SSH_LOCAL_PORT': '1024'})
+                for label, value in [('non-numeric', 'not-a-port'), ('negative', '-1'),
+                                     ('below-minimum', '1023'), ('above-maximum', '65536')]:
+                    invalid = run(f'access-invalid-port-{runtime}-' + label,
+                                  ['info', '--name', name, '--json'],
+                                  expected=2, schema='houston.error.v1', ok=False,
+                                  overrides=dict(remote, HOUSTON_SSH_LOCAL_PORT=value))
+                    require(invalid['error']['code'] == 'VALIDATION_FAILED',
+                            f'Invalid local port {value} must be refused')
             remote_access('ipv6', 'SSH_CONNECTION', name='verify-ipv6-fixture', target='[::1]', port=4311, sides=(4312, 4313, 4314),
                           changes={'HOUSTON_SSH_LOCAL_PORT': '4311',
                                    'HOUSTON_SSH_USER': "operator's team",
@@ -1145,23 +1231,11 @@ def main():
                                            'HOUSTON_SSH_LOCAL_PORT': str(port)})
                 require(collision['error']['code'] == 'VALIDATION_FAILED',
                         f'A primary forward colliding with a {label} port must refuse')
-            remote_access('option', 'SSH_CONNECTION',
-                          changes={'HOUSTON_SSH_USER': '-oProxyCommand=unsafe'})
-            remote_access('minimum-port', 'SSH_CONNECTION', port=1024,
-                          changes={'HOUSTON_SSH_LOCAL_PORT': '1024'})
-            remote = {'SSH_CONNECTION': ssh_values['SSH_CONNECTION'],
-                      'HOUSTON_SSH_USER': 'operator', 'HOUSTON_SSH_HOST': 'ssh-proof.invalid'}
             public = run('access-public', ['info', '--name', 'verify-public-fixture', '--json'],
                          schema='houston.info.v1', overrides=remote)['data']
             require(public['access'] is None, 'Wildcard workspace must not claim loopback access')
-            for label, value in [('non-numeric', 'not-a-port'), ('negative', '-1'),
-                                 ('below-minimum', '1023'), ('above-maximum', '65536')]:
-                invalid = run('access-invalid-port-' + label, ['info', '--name', access_workspace.name, '--json'],
-                              expected=2, schema='houston.error.v1', ok=False,
-                              overrides=dict(remote, HOUSTON_SSH_LOCAL_PORT=value))
-                require(invalid['error']['code'] == 'VALIDATION_FAILED',
-                        f'Invalid local port {value} must be refused')
-            summary['features']['access'] = ('PASS: local and each SSH-marker info JSON/human handoff, '
+            summary['features']['access'] = (
+                'PASS: Docker and Kubernetes loopback local and SSH-marker handoff, '
                 'IPv6, option safety, local-port boundaries; no SSH executed')
         if 'onboard' not in commands:
             summary['features']['onboarding'] = 'PENDING: onboard command absent'
@@ -1236,16 +1310,8 @@ def main():
             # Read the actual YAML written by the CLI using its existing dependency.
             # This does not import application onboarding logic to produce expectations.
             persisted = yaml_document(node_exec, root, env, config_file)
-            require(all(persisted[key] == legacy[key] for key in
-                        ('preferences', 'default_deployment', 'default_scenarios', 'future_config'))
-                    and persisted['grants']['engine_resize'] is False
-                    and persisted['grants']['future_grant'] == legacy['grants']['future_grant']
-                    and persisted['onboarding']['future_field'] == 'preserve'
-                    and persisted['grants']['owned_cluster'] is False
-                    and persisted['grants']['clusters'] == ['preserved-cluster']
-                    and persisted['onboarding']['completed_at'] == revoked['completed_at']
-                    and persisted['onboarding']['rc_repro_version'] == version,
-                    'Onboarding failed to persist the revoked grant state or legacy fields')
+            require_revoked_onboarding_persisted(
+                persisted, revoked['completed_at'], version, legacy)
             (out / 'onboarding-persisted.json').write_text(json.dumps(persisted, indent=2) + '\n')
             kubectl_trap.unlink()
             summary['features']['onboarding'] = (
@@ -1358,6 +1424,12 @@ def main():
                 cleanup_errors.append(f'Could not record the final fixture manifest: {error}')
         else:
             summary['fixture_unchanged'] = None
+        if candidate_temp is not None:
+            try:
+                # Scan before removal. This directory lives under scratch.
+                scan_candidate_temp(sentinel, candidate_temp)
+            except Exception as error:
+                cleanup_errors.append(f'Candidate temp scan failed: {error}')
         try:
             shutil.rmtree(scratch)
         except Exception as error:
@@ -1393,6 +1465,10 @@ def main():
             scan_retained_regular_files(sentinel, out)
         except Exception as error:
             cleanup_errors.append(f'Retained evidence scan failed: {error}')
+        try:
+            require_no_special_retained_entries(out)
+        except Exception as error:
+            cleanup_errors.append(f'Retained special-entry scan failed: {error}')
         if cleanup_errors:
             summary['cleanup_errors'] = cleanup_errors
             if failure is None:

@@ -5,7 +5,7 @@
 | Discovery and missing workspace | [capabilities](capabilities.md) | Mandatory offline path on every v2 candidate. |
 | Attachable evidence | [evidence](evidence.md) | Drive when `evidence` is advertised; otherwise pending. |
 | Resource inspection | [inspect](inventory.md) | Drive offline fixtures when `inspect` is advertised; live resources pending. |
-| SSH access handoff | [access](access.md) | Drive when `info` includes `data.access`; otherwise pending. No SSH execution. |
+| SSH access handoff | [access](access.md) | Probe the clean Docker fixture and the Kubernetes fixture. Drive when either `info` payload includes `data.access`, and then require the contract on both loopback runtimes. Otherwise pending. No SSH execution. |
 | Onboarding and capture | [onboarding and capture](onboarding-capture.md) | Drive synthetic-home onboarding persistence and local teardown authority refusals when `onboard` is advertised. Live engine behavior and successful browser capture remain pending. |
 | Goal-first setup | [setup](setup.md) | Drive when `onboard` advertises `--show`; buffered prompts included; shared API requires its separate check. |
 
@@ -17,6 +17,9 @@ migration ports are integrated. `PASS_SCOPED` never means the full migration pas
 Every command receipt is a shared safety check: the helper scans its stdout and
 stderr at capture time, then requires both regular files for every expected
 command label and scans every retained command receipt again before
-`PASS_SCOPED`. Failure receipts and a hash manifest may remain after a failed
+`PASS_SCOPED`. It also rejects a symlink, FIFO, socket, or other special entry
+anywhere in the retained evidence tree before `PASS_SCOPED`. The candidate
+temp directory under scratch is scanned for the synthetic sentinel before that
+scratch tree is removed. Failure receipts and a hash manifest may remain after a failed
 scan. Require `summary.result: PASS_SCOPED` and successful `summary.receipt_scan`;
 file existence alone proves no verdict. Bundle attachments retain their recipe-specific scan.

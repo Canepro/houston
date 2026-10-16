@@ -41,7 +41,8 @@ proof; Windows and other platforms remain pending. On Linux, readable `/proc` pr
 are also required to distinguish the reserved zombie leader from live group members.
 It creates a unique
 temporary directory containing `HOUSTON_HOME`, `HOUSTON_SKILL_HOME`, a synthetic
-user home, and synthetic Docker, Kubernetes, IPv6 and wildcard-bind workspaces. Node executable discovery uses an isolated temporary home and a minimal environment,
+user home, a candidate temp directory, and synthetic Docker, Kubernetes, IPv6 and wildcard-bind workspaces. Every candidate
+command gets `TMPDIR`, `TMP`, and `TEMP` pointed at that candidate temp directory. Node executable discovery uses an isolated temporary home and a minimal environment,
 retaining caller PATH only to resolve the installed Node shim. It excludes caller
 Node options, module paths, credentials, and other overrides. Only
 entry-point utilities are initially on the CLI child's PATH. The onboarding refusal
@@ -92,9 +93,10 @@ An advertised `capture` command also gets an explicit missing-workspace drive,
 which must refuse without creating a bundle or starting a browser.
 
 An absent optional port is pending. An advertised port with an incompatible
-recipe is a verifier drift failure, not permission to skip it. An `info` payload
-with `data.access` triggers the SSH handoff drive using only synthetic environment
-overrides. An advertised `onboard` command triggers status, unknown-grant refusal,
+recipe is a verifier drift failure, not permission to skip it. The helper probes `info` on the clean Docker fixture and the Kubernetes fixture.
+When either payload has `data.access`, the SSH handoff drive runs for both
+loopback runtimes, using only synthetic environment overrides. When both omit
+the field, the port stays pending. An advertised `onboard` command triggers status, unknown-grant refusal,
 grant and revoke drives in the run's disposable home. The helper checks the
 persisted grant state, cluster scope and preservation of legacy settings.
 The helper also requires local teardown to refuse missing onboarding and a denied
@@ -113,6 +115,8 @@ strings or branch names, when choosing applicability.
 stdout and stderr files. The helper scans each pair at the command-output boundary,
 including refusals and timeouts, then requires both regular files for every expected command label and repeats
 the scan over every retained command receipt before it can report `PASS_SCOPED`.
+A symlink or other special entry anywhere in that retained tree fails the run.
+Before scratch cleanup, a secret-bearing file in the candidate temp directory fails the run.
 Failure receipts and `sha256.json` may still be written when that scan fails.
 Require `summary.result: PASS_SCOPED` and a successful `summary.receipt_scan`;
 the existence of a hash manifest does not establish acceptance. `summary.json`

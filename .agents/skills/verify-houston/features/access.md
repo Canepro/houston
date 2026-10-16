@@ -25,11 +25,13 @@ URL selects IPv4 or IPv6 loopback as the forward target. A remote process cannot
 measure a port conflict on the operator's laptop.
 
 The v2 consumer is `info --json`, schema `houston.info.v1`, at `data.access`.
-Human `info` prints the same tunnel and browser URL. The helper detects this
-payload field and drives local and remote results through the real CLI. It uses
-only synthetic SSH_CONNECTION, SSH_CLIENT, SSH_TTY, HOUSTON_SSH_HOST,
-HOUSTON_SSH_USER, and HOUSTON_SSH_LOCAL_PORT values. An absent access field
-leaves this port pending.
+Human `info` prints the same tunnel and browser URL. The helper probes the clean
+Docker fixture `verify-docker-access-fixture` and the Kubernetes fixture
+`verify-access-fixture`. When neither payload has `data.access`, this port stays
+pending. When either payload has `data.access`, require the local, human, and
+SSH contract on both loopback runtimes. It uses only synthetic SSH_CONNECTION,
+SSH_CLIENT, SSH_TTY, HOUSTON_SSH_HOST, HOUSTON_SSH_USER, and
+HOUSTON_SSH_LOCAL_PORT values.
 
 Require local mode with no tunnel and human output containing the local browser
 URL. Exercise SSH_CONNECTION, SSH_CLIENT, and SSH_TTY separately. Remote mode

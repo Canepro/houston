@@ -7,7 +7,8 @@ without changing that file, then drives `onboard grant owned-cluster --json`
 and `onboard revoke owned-cluster --json`. A separate status process must read
 the grant back. The persisted YAML must retain unrelated preferences, selectors,
 explicit denials and unknown fields. Granting adds only `houston-local` to the
-existing cluster scopes; revoking removes only that entry. The completion stamp
+existing cluster scopes; revoking removes only that entry. Persisted
+`onboarding.completed` stays true after revocation. The completion timestamp
 must survive revocation and the version must match the running package.
 
 These commands answer questions only in the verifier's temporary home. They
