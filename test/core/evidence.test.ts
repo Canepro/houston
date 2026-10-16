@@ -1572,6 +1572,12 @@ describe('the bundle', () => {
         '  login:',
         '    image: example',
         '    command: docker login --password-stdin registry.example.test',
+        '  python:',
+        '    image: example',
+        '    command: python -u app.py -p production',
+        '  escapedword:',
+        '    image: example',
+        String.raw`    command: sh -c client\ --password\ EscapedWordSentinel`,
         '  docker:',
         '    image: example',
         '    command: docker run -u 1000 -p 8080:80 -p --eval image',
@@ -1579,6 +1585,8 @@ describe('the bundle', () => {
         '    image: example',
         `    command: sh -c "useradd -u 1000 app; mkdir -p /data/db && proxy -p 8080:80 --password;"`,
         'x-copy: QuotedSentinel',
+        'x-env: production',
+        'x-escaped-copy: EscapedWordSentinel',
         'x-backtick-copy: BacktickSentinel',
         'x-registry: registry.example.test',
         'x-dash-copy: -DashSentinel',
@@ -1608,6 +1616,7 @@ describe('the bundle', () => {
       'DashSentinel',
       'EmbeddedListSentinel',
       'QuotedPhraseSentinel',
+      'EscapedWordSentinel',
     ]) {
       expect(compose).not.toContain(sentinel);
     }
@@ -1624,9 +1633,13 @@ describe('the bundle', () => {
     expect(parsed['x-dollar']).toBe('cost $5 each');
     expect(parsed['x-open']).toBe('open the door');
     // A port or an option after -p is the next argument; newlines are never masked.
-    // A user flag beside -p withholds the command line, since a short -p value can be either a
-    // port or a password; the port spelling elsewhere stays readable.
-    expect(pick(parsed, 'services', 'docker', 'command')).toBe('********');
+    // `-u` beside `-p` counts only for a MySQL, MariaDB or MongoDB client; Docker's are a user and
+    // a port, and stay readable.
+    expect(pick(parsed, 'services', 'docker', 'command')).toBe(
+      'docker run -u 1000 -p 8080:80 -p --eval image',
+    );
+    expect(pick(parsed, 'services', 'python', 'command')).toBe('python -u app.py -p production');
+    expect(parsed['x-env']).toBe('production');
     expect(compose).toContain('\n');
     expect(pick(parsed, 'services', 'digits', 'command')).toBe('********');
     // Short flag clusters and `user:group` are not credentials.

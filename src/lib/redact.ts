@@ -180,7 +180,7 @@ export function commandCarriesCredential(text: string): boolean {
   const words = text.split(/[\s'"`;&|()<>\\]+/u).filter((word) => word !== '');
   if (words.some(credentialFlagWord)) return true;
   return (
-    (words.includes('-p') && words.some(userArgument)) ||
+    (words.includes('-p') && userPasswordClient(words) && words.some(userArgument)) ||
     httpUserPassword(words) ||
     authorizationHeaders(words).length > 0
   );
@@ -272,6 +272,15 @@ export function httpUsers(words: readonly string[]): HttpUser[] {
     });
   }
   return users;
+}
+
+/**
+ * Whether these words run a client whose `-u` is a user and whose `-p` is a password: the
+ * MySQL, MariaDB and MongoDB tools. Elsewhere `-u` means something else (`python -u` is
+ * unbuffered), and reading the next `-p` value as a password would mask it across the bundle.
+ */
+export function userPasswordClient(words: readonly string[]): boolean {
+  return words.some((word) => /^(?:mysql|mariadb|mongo)[\w-]*$/u.test(word.split('/').pop() ?? ''));
 }
 
 /** Whether one argument names a user: `-u x`, `-ux`, `--user[=x]`, `--username[=x]`. */
@@ -506,7 +515,7 @@ export function discoverTextSecrets(
       const named = open === '{' && namesCredential(text, at, ends);
       // In an argument array, the item after a credential flag is its value.
       const items = argv && open === '[' ? itemsOf(at) : [];
-      const userGiven = items.some(userArgument);
+      const userGiven = userPasswordClient(items) && items.some(userArgument);
       for (const user of httpUsers(items)) {
         add(user.value);
         add(user.password);

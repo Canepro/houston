@@ -49,6 +49,7 @@ import {
   HTTP_USER_PREFIX,
   httpUsers,
   userArgument,
+  userPasswordClient,
   valueTakingCredentialFlag,
   credentialKey,
   discoverTextSecrets,
@@ -722,7 +723,7 @@ function argumentsCarryCredential(value: unknown): boolean {
   const words = value.filter((item): item is string => typeof item === 'string');
   return (
     words.some((word) => credentialFlagWord(word) || commandCarriesCredential(word)) ||
-    (words.includes('-p') && words.some(userArgument)) ||
+    (words.includes('-p') && userPasswordClient(words) && words.some(userArgument)) ||
     httpUserPassword(words) ||
     authorizationHeaders(words).length > 0
   );
@@ -793,6 +794,8 @@ function shellCommands(text: string): ShellWord[][] {
     } else if (char === '\\') {
       begin(index);
       word += text[index + 1] ?? '';
+      // `sh -c client\ --password\ X` passes one escaped word as the program: read it again.
+      quoted = true;
       index += 1;
     } else if (char === '#' && word === '' && !quoted) {
       // A `#` that starts a word begins a comment: the shell never runs the rest of the line.
@@ -815,7 +818,8 @@ function shellCommands(text: string): ShellWord[][] {
 function discoverCommandText(text: string, add: (value: string) => void, depth = 0): void {
   if (depth > 8) return;
   for (const command of shellCommands(text)) {
-    const userGiven = command.some((word) => userArgument(word.text));
+    const texts = command.map((word) => word.text);
+    const userGiven = userPasswordClient(texts) && texts.some(userArgument);
     // The artifact spells a quoted or escaped value as written; mask that spelling too, without
     // its outer quotes, which stay to show where the value was. Inside an outer double-quoted
     // string the artifact also escapes `"`, `\`, `$` and backticks.
@@ -905,9 +909,10 @@ function discoverArtifactSecrets(
   const discoverArguments = (list: YAML.YAMLSeq): void => {
     const items = list.items.map((item) => (YAML.isAlias(item) ? item.resolve(doc) : item));
     const words = items.map((item) => (YAML.isScalar(item) ? String(item.value) : ''));
-    const userGiven = items.some(
-      (item) => YAML.isScalar(item) && typeof item.value === 'string' && userArgument(item.value),
+    const strings = items.flatMap((item) =>
+      YAML.isScalar(item) && typeof item.value === 'string' ? [item.value] : [],
     );
+    const userGiven = userPasswordClient(strings) && strings.some(userArgument);
     for (const user of httpUsers(words)) {
       add(user.value);
       add(user.password);
