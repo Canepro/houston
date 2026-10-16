@@ -32,13 +32,14 @@ import {
   imageRef,
   isRocketChatServiceName,
   readEnvFileStates,
+  suppliesLicense,
   suppliesRegToken,
 } from '../lib/compose';
 import * as config from '../lib/config';
 import { ValidationError } from '../lib/errors';
 import { isTruthy, quotedText, toText } from '../lib/format';
 import { pathExpandUser } from '../lib/home';
-import { REDACTED, redactEnv, SECRET_KEY_HINTS } from '../lib/redact';
+import { REDACTED, redactBareUserinfo, redactEnv, SECRET_KEY_HINTS } from '../lib/redact';
 import { namesOf } from '../lib/presets/composite';
 import * as presets from '../lib/presets/index';
 import { PROFILES } from '../lib/seed-profiles';
@@ -187,6 +188,11 @@ async function artifactOf(meta: Metadata): Promise<CapturedArtifact> {
   // by filesystem order and attach the stale one.
   const candidate =
     topology.ofMeta(meta) === topology.KUBERNETES ? KUBERNETES_ARTIFACT : DOCKER_ARTIFACT;
+  // A Kubernetes re-up writes its incomplete record before Helm and its values only after.
+  // Until the create finishes, the file on disk is the previous release's, and attaching it
+  // beside the new request would describe a deployment that may not exist. Unavailable is
+  // what evidence can truthfully say.
+  if (bag(meta.extra).incomplete === true) return { name: '', sha256: '', bytes: null };
   try {
     const bytes = await fs.readFile(path.join(paths.workspace(meta.name), ...candidate.path));
     return {
@@ -288,13 +294,21 @@ async function licenseOf(meta: Metadata, deployment: string): Promise<Record<str
   if (licensed) return { required, supplied: true, source: 'license' };
   if (extra.reg_token_supplied === true) return { required, supplied: true, source: 'reg_token' };
   if (extra.reg_token_supplied === false) return { required, supplied: false, source: null };
-  const inferred = await tokenInCompose(meta);
+  const inferred = await credentialsInCompose(meta);
   if (inferred === null) return { required, supplied: null, source: 'unknown' };
-  return { required, supplied: inferred, source: inferred ? 'reg_token' : null };
+  // Licence first, as for the markers: a legacy record set `licensed` only for `--license`,
+  // so a preset, `--env` or env-file licence is found here or not at all.
+  if (inferred.license) return { required, supplied: true, source: 'license' };
+  return { required, supplied: inferred.token, source: inferred.token ? 'reg_token' : null };
 }
 
-/** Whether the generated compose file hands Rocket.Chat a REG_TOKEN; `null` when it cannot be read. */
-async function tokenInCompose(meta: Metadata): Promise<boolean | null> {
+/**
+ * What the generated compose file hands Rocket.Chat, for a record from before the markers
+ * existed; `null` when it cannot be read.
+ */
+async function credentialsInCompose(
+  meta: Metadata,
+): Promise<{ license: boolean; token: boolean } | null> {
   if (topology.ofMeta(meta) === topology.KUBERNETES) return null;
   let doc: Record<string, unknown>;
   try {
@@ -306,8 +320,11 @@ async function tokenInCompose(meta: Metadata): Promise<boolean | null> {
   const compose = { ...doc, services: bag(doc.services) } as ComposeDoc;
   const names = Object.keys(compose.services).filter(isRocketChatServiceName);
   const projectDirectory = paths.workspace(meta.name);
-  const { fileTokens } = await readEnvFileStates(compose, names, projectDirectory);
-  return suppliesRegToken(compose, names, projectDirectory, fileTokens);
+  const { fileLicenses, fileTokens } = await readEnvFileStates(compose, names, projectDirectory);
+  return {
+    license: suppliesLicense(compose, names, projectDirectory, fileLicenses),
+    token: suppliesRegToken(compose, names, projectDirectory, fileTokens),
+  };
 }
 
 /**
@@ -626,8 +643,9 @@ function redactArtifactText(
 ): string {
   if (secret) return REDACTED;
   // A URL password or query can contain `=`. Mask userinfo in the complete string before
-  // treating an equals sign as a list-form environment assignment.
-  const urlRedacted = redactEnv('', value);
+  // treating an equals sign as a list-form environment assignment. A bundle also masks a
+  // user-only credential such as `https://TOKEN@host`, which log redaction leaves readable.
+  const urlRedacted = redactBareUserinfo(redactEnv('', value));
   const equals = urlRedacted.indexOf('=');
   if (equals > 0) {
     const key = urlRedacted.slice(0, equals);

@@ -329,6 +329,7 @@ describe('the record', () => {
       >;
       files?: Record<string, string>;
       supplied: boolean;
+      source?: string;
     }> = [
       {
         name: 'e3-legacy-sidecar-only',
@@ -363,6 +364,31 @@ describe('the record', () => {
         files: { 'token.env': 'REG_TOKEN=file-token\n' },
         supplied: true,
       },
+      {
+        // A legacy record set `licensed` only for --license; a preset or --env licence lives
+        // in the compose file alone, and wins over a token as the markers do.
+        name: 'e3-legacy-env-licence',
+        services: {
+          rocketchat: { environment: { ROCKETCHAT_LICENSE: 'licence', REG_TOKEN: 'token' } },
+        },
+        supplied: true,
+        source: 'license',
+      },
+      {
+        name: 'e3-legacy-file-licence',
+        services: { rocketchat: { env_file: ['licence.env'] } },
+        files: { 'licence.env': 'ROCKETCHAT_LICENSE=licence\n' },
+        supplied: true,
+        source: 'license',
+      },
+      {
+        name: 'e3-legacy-sidecar-licence',
+        services: {
+          rocketchat: { environment: { PORT: '3000' } },
+          'licence-helper': { environment: { ROCKETCHAT_LICENSE: 'licence' } },
+        },
+        supplied: false,
+      },
     ];
 
     for (const example of examples) {
@@ -379,7 +405,7 @@ describe('the record', () => {
       expect((await record(example.name)).license).toEqual({
         required: false,
         supplied: example.supplied,
-        source: example.supplied ? 'reg_token' : null,
+        source: example.source ?? (example.supplied ? 'reg_token' : null),
       });
     }
   });
@@ -525,6 +551,10 @@ describe('the record', () => {
       name: 'kubernetes/values.yaml',
       sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
     });
+    // An interrupted re-up leaves the previous release's values beside its new request.
+    await workspaceNamed('e3-kubernetes', { runtime: 'kubernetes', incomplete: true });
+    fs.rmSync(path.join(workspace('e3-kubernetes'), 'docker-compose.yml'), { force: true });
+    expect((await recordKubernetes('e3-kubernetes')).artifact).toEqual({ name: '', sha256: '' });
   });
 
   it('uses a live namespace label read before claiming Kubernetes ownership', async () => {
@@ -781,6 +811,7 @@ describe('the bundle', () => {
         '  - APP_URL=https://reader:ListRaw@AtValueSentinel@example.test/?q=a=b',
         '  - PORT=3000',
         '  - MONGO_URL=https://reader:ListMongoUrlSentinel@example.test/?q=a=b',
+        '  - HOOK_URL=https://ListBearerSentinel@example.test/hook',
         COMPOSE.replace(
           'MONGO_URL: mongodb://rocket:MongoUrlSecret@mongodb:27017/rocketchat',
           [
@@ -788,6 +819,8 @@ describe('the bundle', () => {
             '      SERVICE_URL: postgresql://reader:Compose=PasswordSentinel@db:5432/rocketchat',
             '      EMPTY_USER_URL: https://:EmptyUserValueSentinel@example.test/?q=a=b',
             '      RAW_AT_URL: https://reader:Raw@AtValueSentinel@example.test/?q=a=b',
+            '      BEARER_URL: https://BearerOnlySentinel@example.test/x',
+            '      BLANK_SECOND_URL: https://EmptyPasswordSentinel:@example.test',
           ].join('\n'),
         ),
         '',
@@ -808,6 +841,9 @@ describe('the bundle', () => {
     expect(artifact).not.toContain('Raw@AtValueSentinel');
     expect(artifact).not.toContain('ListRaw@AtValueSentinel');
     expect(artifact).not.toContain('ListMongoUrlSentinel');
+    expect(artifact).not.toContain('BearerOnlySentinel');
+    expect(artifact).not.toContain('EmptyPasswordSentinel');
+    expect(artifact).not.toContain('ListBearerSentinel');
     const rendered = YAML.parse(artifact) as {
       services: { rocketchat: { environment: Record<string, string> } };
       'x-reference': Record<string, string>;
@@ -825,6 +861,12 @@ describe('the bundle', () => {
     expect(rendered.services.rocketchat.environment.RAW_AT_URL).toBe(
       'https://reader:********@example.test/?q=a=b',
     );
+    expect(rendered.services.rocketchat.environment.BEARER_URL).toBe(
+      'https://********@example.test/x',
+    );
+    expect(rendered.services.rocketchat.environment.BLANK_SECOND_URL).toBe(
+      'https://********:@example.test',
+    );
     expect(Object.keys(rendered['x-reference']).sort()).toEqual([
       'https://:********@example.test?mode=read',
       'https://reader:********@example.test?mode=read',
@@ -833,6 +875,7 @@ describe('the bundle', () => {
       'APP_URL=https://reader:********@example.test/?q=a=b',
       'PORT=3000',
       'MONGO_URL=https://reader:********@example.test/?q=a=b',
+      'HOOK_URL=https://********@example.test/hook',
     ]);
   });
 

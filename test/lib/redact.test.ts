@@ -6,6 +6,7 @@ import {
   REDACTED,
   SECRET_KEY_HINTS,
   URL_USERINFO,
+  redactBareUserinfo,
   redactArgv,
   redactEnv,
 } from '../../src/lib/redact';
@@ -157,6 +158,35 @@ describe('redactEnv', () => {
       '',
     ];
     expect(corpus.map((c) => c.replace(URL_USERINFO, '<M>'))).toEqual(recorded);
+  });
+});
+
+describe('redactBareUserinfo', () => {
+  it('masks user-only URL credentials an attachable bundle cannot assume are public', () => {
+    const masked = (value: string) => redactBareUserinfo(redactEnv('', value));
+    expect(
+      [
+        'https://BEARER_TOKEN@example.test/x',
+        'https://TOKEN:@h',
+        'https://user:pw@h',
+        'https://a@b@h/p',
+        'https://example.com/a@b',
+        'mongodb://rc:s3cret@mongo:27017/db',
+        'https://:pw@h',
+        'https://@h',
+        'x https://t@h y https://u:p@h2',
+      ].map(masked),
+    ).toEqual([
+      `https://${REDACTED}@example.test/x`,
+      `https://${REDACTED}:@h`,
+      `https://user:${REDACTED}@h`,
+      `https://${REDACTED}@h/p`,
+      'https://example.com/a@b',
+      `mongodb://rc:${REDACTED}@mongo:27017/db`,
+      `https://:${REDACTED}@h`,
+      'https://@h',
+      `x https://${REDACTED}@h y https://u:${REDACTED}@h2`,
+    ]);
   });
 });
 

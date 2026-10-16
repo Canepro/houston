@@ -444,6 +444,24 @@ export function suppliesRegToken(
   return names.some((name) => serviceHasToken(doc.services[name], projectDirectory, fileTokens));
 }
 
+/**
+ * Whether every named Rocket.Chat service gets a known licence from its environment or an env
+ * file already on disk, by the rule the create warnings use. Presence only.
+ */
+export function suppliesLicense(
+  doc: ComposeDoc,
+  names: readonly string[],
+  projectDirectory: string,
+  fileLicenses: ReadonlyMap<string, boolean | null>,
+): boolean {
+  return (
+    names.length > 0 &&
+    names.every((name) =>
+      serviceHasLicense(doc.services[name], false, projectDirectory, fileLicenses),
+    )
+  );
+}
+
 /** Every replica needs a credential, but replicas may use different credential types. */
 export function hasEffectiveCredential(
   doc: ComposeDoc,
