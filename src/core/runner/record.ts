@@ -21,7 +21,7 @@ import {
   fileErrorOf,
   quotedText,
 } from '../../lib/format';
-import { JsonSyntaxError, dumps, loads, spelled } from '../../lib/json-text';
+import { JsonSyntaxError, dumps, loads, orderedDict, spelled } from '../../lib/json-text';
 
 import { reproLock } from './locks';
 import * as paths from './paths';
@@ -357,8 +357,7 @@ export async function write(
   await paths.restrict(ws);
   // A failed replacement can leave the previous Compose file beside the new request.
   // Keep the request discoverable, but withhold its artifact until all writes finish.
-  const provisional = { ...meta, extra: { ...meta.extra, incomplete: true } };
-  await paths.atomicWrite(joinPath(ws, 'repro.json'), serialise(provisional));
+  await paths.atomicWrite(joinPath(ws, 'repro.json'), serialise(withIncomplete(meta, true)));
   await paths.atomicWrite(joinPath(ws, 'docker-compose.yml'), composeYaml);
 
   for (const [relative, content] of files) {
@@ -371,8 +370,30 @@ export async function write(
     const advertised = String(meta.extra.advertised_url ?? '') || meta.rootUrl;
     await fs.writeFile(target, content.split('{{ROOT_URL}}').join(advertised), 'utf8');
   }
-  await paths.restrict(ws); // again: covers the files just written, and their dirs
-  await paths.atomicWrite(joinPath(ws, 'repro.json'), serialise(meta));
+  // The caller may pass back the provisional record an earlier interrupted write left.
+  const extra: unknown = meta.extra;
+  const finished =
+    typeof extra === 'object' && extra !== null && Object.hasOwn(extra, 'incomplete')
+      ? withIncomplete(meta, false)
+      : meta;
+  await paths.atomicWrite(joinPath(ws, 'repro.json'), serialise(finished));
+  await paths.restrict(ws); // again: covers the files just written, the record included
+}
+
+/**
+ * `meta` with `extra.incomplete` set or removed, for the two records `write` makes. A copy, so
+ * the caller's record is unchanged however the write ends, and one that keeps what was read:
+ * the top-level spellings in `READ_SPELLINGS`, and `extra`'s key order and numbers, which a
+ * spread copy loses. The interrupted record is the one earlier releases read next.
+ */
+function withIncomplete(meta: Metadata, incomplete: boolean): Metadata {
+  const extra = orderedDict(meta.extra);
+  if (incomplete) extra.incomplete = true;
+  else delete extra.incomplete;
+  const copy = { ...meta, extra };
+  const kept = READ_SPELLINGS.get(meta);
+  if (kept !== undefined) READ_SPELLINGS.set(copy, kept);
+  return copy;
 }
 
 /**

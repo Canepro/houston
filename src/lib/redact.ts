@@ -63,16 +63,51 @@ export const URL_USERINFO = new RegExp(
  * `URL_USERINFO` keeps the user name readable and needs a password, which is what earlier
  * releases print in logs and argv. An attachable artifact cannot assume the user name is not
  * itself the credential (`https://TOKEN@host`, `https://TOKEN:x-oauth-basic@host`), so the
- * evidence bundle masks all of it. The user info runs to the last `@` before the authority
- * ends, as in `URL_USERINFO`.
+ * evidence bundle masks all of it.
+ *
+ * The user info runs to the last `@` before whitespace or the authority's end, and may hold
+ * any other character. `{`, `|`, `"` and the rest are not valid raw in user info, but a URL
+ * parser accepts them and percent-encodes them, so a working `MONGO_URL` can carry one in its
+ * password. Excluding them left that password in the clear. The cost is that one match can
+ * run across a `"` or `,` into a later `@`; `redactAllUserinfo` keeps that inside one JSON
+ * string.
  */
-const URL_ANY_USERINFO = new RegExp(
-  `([a-zA-Z][a-zA-Z0-9+.-]*://)[^/${SPACE_CLASS}?#"<>\\[\\]{}|\\\\^\x60]+@`,
-  'gu',
-);
+const URL_ANY_USERINFO = new RegExp(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^/${SPACE_CLASS}?#]+@`, 'gu');
 
-/** Mask every URL's user info, user name included, for an artifact a person attaches. */
+/**
+ * Each string of a complete JSON text masked on its own, the rest kept byte for byte; null when
+ * `text` is not JSON. A URL ends with its string, so a match must not run on into the next
+ * string's `@`, which made `{"url":"https://idp","admin":"ops@example.com"}` lose its email.
+ */
+function redactJsonStrings(text: string): string | null {
+  try {
+    JSON.parse(text);
+  } catch {
+    return null;
+  }
+  // In valid JSON every `"` outside a string opens one, so this finds exactly its strings.
+  return text.replace(/"(?:[^"\\]|\\.)*"/gu, (token) => {
+    const decoded = JSON.parse(token) as string;
+    const masked = redactAllUserinfo(decoded);
+    return masked === decoded ? token : JSON.stringify(masked);
+  });
+}
+
+/**
+ * Mask every URL's user info, user name included, for an artifact a person attaches.
+ *
+ * A JSON value, or `KEY=` followed by one, is masked string by string, a string holding JSON
+ * included. Anything else is masked whole, which can mask more than the user info, never less.
+ */
 export function redactAllUserinfo(value: string): string {
+  const json = redactJsonStrings(value);
+  if (json !== null) return json;
+  const equals = value.indexOf('=');
+  // Not when the key holds a URL: `https://u:p=["x"]@h` is one URL whose password has a `=`.
+  if (equals > 0 && !value.slice(0, equals).includes('://')) {
+    const assigned = redactJsonStrings(value.slice(equals + 1));
+    if (assigned !== null) return `${value.slice(0, equals + 1)}${assigned}`;
+  }
   return value.replace(URL_ANY_USERINFO, `$1${REDACTED}@`);
 }
 

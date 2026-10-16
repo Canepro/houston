@@ -462,6 +462,27 @@ export function suppliesLicense(
   );
 }
 
+/**
+ * What a written document hands Rocket.Chat: whether every Rocket.Chat service gets a known
+ * licence, and whether any gets a known registration token, env files on disk included. A
+ * sidecar's credential was never Rocket.Chat's, so it does not count. Presence only.
+ */
+export async function suppliedCredentials(
+  doc: ComposeDoc,
+  projectDirectory: string,
+): Promise<{ license: boolean; token: boolean }> {
+  const compose = {
+    ...doc,
+    services: isPlainObject(doc.services) ? doc.services : {},
+  } as ComposeDoc;
+  const names = Object.keys(compose.services).filter(isRocketChatServiceName);
+  const { fileLicenses, fileTokens } = await readEnvFileStates(compose, names, projectDirectory);
+  return {
+    license: suppliesLicense(compose, names, projectDirectory, fileLicenses),
+    token: suppliesRegToken(compose, names, projectDirectory, fileTokens),
+  };
+}
+
 /** Every replica needs a credential, but replicas may use different credential types. */
 export function hasEffectiveCredential(
   doc: ComposeDoc,

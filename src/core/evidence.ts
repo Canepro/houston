@@ -27,14 +27,7 @@ import * as path from 'node:path';
 import * as YAML from 'yaml';
 
 import { renderMarkdown as renderBundleMarkdown } from '../lib/capture-render';
-import {
-  type ComposeDoc,
-  imageRef,
-  isRocketChatServiceName,
-  readEnvFileStates,
-  suppliesLicense,
-  suppliesRegToken,
-} from '../lib/compose';
+import { type ComposeDoc, imageRef, suppliedCredentials } from '../lib/compose';
 import * as config from '../lib/config';
 import { ValidationError } from '../lib/errors';
 import { isTruthy, quotedText, toText } from '../lib/format';
@@ -253,7 +246,8 @@ async function ownershipOf(meta: Metadata, runtime: string): Promise<Record<stri
  * microservices deployment remains true; an unavailable preset makes the requirement unknown
  * unless another recorded component establishes that it was required. `supplied` is `null`
  * when the record cannot say: a Kubernetes record from before `reg_token_supplied` existed put
- * the token in a Secret this reader does not open. A Docker record of that age is asked through
+ * the token in a Secret this reader does not open, and a Docker write that did not finish may
+ * have left the previous compose file. A Docker record from before the markers is asked through
  * its compose file, which is where the token went.
  */
 async function licenseOf(meta: Metadata, deployment: string): Promise<Record<string, unknown>> {
@@ -283,6 +277,12 @@ async function licenseOf(meta: Metadata, deployment: string): Promise<Record<str
       }
     }
     if (!required && unavailable) required = null;
+  }
+  // An unfinished Docker write recorded the request, and its Compose file can still be the
+  // previous one, so neither says what Rocket.Chat was handed. A Kubernetes provisional
+  // record states what is deployed, and keeps its markers.
+  if (topology.ofMeta(meta) !== topology.KUBERNETES && extra.incomplete === true) {
+    return { required, supplied: null, source: 'unknown' };
   }
   // Kubernetes `licensed` is the Secret lifecycle flag: a killed create can set it before Helm
   // installs the licence. `effective_license`, when recorded, is what Rocket.Chat ran with,
@@ -316,15 +316,7 @@ async function credentialsInCompose(
   } catch {
     return null;
   }
-  // Only Rocket.Chat's own services count: a sidecar's token was never handed to Rocket.Chat.
-  const compose = { ...doc, services: bag(doc.services) } as ComposeDoc;
-  const names = Object.keys(compose.services).filter(isRocketChatServiceName);
-  const projectDirectory = paths.workspace(meta.name);
-  const { fileLicenses, fileTokens } = await readEnvFileStates(compose, names, projectDirectory);
-  return {
-    license: suppliesLicense(compose, names, projectDirectory, fileLicenses),
-    token: suppliesRegToken(compose, names, projectDirectory, fileTokens),
-  };
+  return await suppliedCredentials(doc as ComposeDoc, paths.workspace(meta.name));
 }
 
 /**
@@ -565,9 +557,19 @@ export async function record(
   return await reproLock(target, async () => (await snapshotOf(target, retention)).payload);
 }
 
+/**
+ * Whether a key names a credential. The hints are written in environment spelling
+ * (`_key`, `rocketchat_license`), and a bundle also holds YAML keys spelled `privateKey` or
+ * `private-key`, so each word boundary also becomes `_` before matching. The key as written
+ * is matched too, so a split cannot hide a hint it already held.
+ */
 function secretKey(key: string): boolean {
+  const words = key
+    .replace(/(\p{Ll}|\p{Nd})(\p{Lu})/gu, '$1_$2')
+    .replace(/[^\p{L}\p{Nd}]/gu, '_')
+    .toLowerCase();
   const lowered = key.toLowerCase();
-  return SECRET_KEY_HINTS.some((hint) => lowered.includes(hint));
+  return SECRET_KEY_HINTS.some((hint) => lowered.includes(hint) || words.includes(hint));
 }
 
 /**

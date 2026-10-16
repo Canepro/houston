@@ -109,8 +109,11 @@ const ROOT = path.resolve(__dirname, '..');
 // attribution, a preset-only Kubernetes token, and evidence reading `effective_license` before
 // the Secret lifecycle flag: 47 cases over 4551, total 4598. One more records the token
 // Helm accepted when a re-up stops after Helm: total 4599. One more masks user-only URL
-// credentials in the evidence bundle: CI on fe95a08 measured 4600.
-const FLOOR = 4601;
+// credentials in the evidence bundle: CI on fe95a08 measured 4600. One more withholds an
+// interrupted Docker replacement: CI on 23f3b8e collected 4601. Three more follow an env change
+// to the recorded credentials, keep a loaded record's spellings through an interrupted write and
+// clear its marker on retry, and restrict the record a Compose write makes last: total 4604.
+const FLOOR = 4604;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

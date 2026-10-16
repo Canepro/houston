@@ -406,6 +406,47 @@ describe('the write-ahead ordering', () => {
     expect((await readMeta('blocked')).name).toBe('blocked');
   });
 
+  it('keeps a loaded record as it was spelled while a write is interrupted, and finishes it on retry', async () => {
+    // `env`, `monitor` and `upgrade` pass back the record they loaded. The interrupted record is
+    // the one earlier releases read next, so it keeps the loaded spellings; the retry loads that
+    // record and must not leave it marked unfinished.
+    const name = 'interrupted';
+    const ws = paths.workspace(name);
+    const recordFile = path.join(ws, 'repro.json');
+    fs.mkdirSync(ws, { recursive: true });
+    fs.writeFileSync(
+      recordFile,
+      '{"name": "interrupted", "project": "houston-interrupted", "rc_version": "8.5.1", ' +
+        '"rc_image": "rocketchat/rocket.chat:8.5.1", "mongo_tag": "8.0", ' +
+        '"mongo_flavor": "official", "preset": "default", "root_url": "http://localhost:3100", ' +
+        '"host_port": 3100.0, "version_source": "live", "pinned": 1.0, "extra": ' +
+        '{"runtime": "docker", "big": 123456789012345678901234567890, "10": "numeric-key", ' +
+        '"f": 3.0}}',
+    );
+    fs.mkdirSync(path.join(ws, 'docker-compose.yml'));
+    const loaded = await readMeta(name);
+
+    await expect(write(name, 'services: {}\n', loaded)).rejects.toThrow();
+
+    expect(loaded.extra.incomplete).toBeUndefined();
+    const interrupted = fs.readFileSync(recordFile, 'utf8');
+    expect(interrupted).toContain('"host_port": 3100.0,');
+    expect(interrupted).toContain('"pinned": 1.0,');
+    expect(interrupted).toContain('"big": 123456789012345678901234567890,');
+    expect(interrupted).toContain('"f": 3.0,');
+    expect(interrupted.indexOf('"big"')).toBeLessThan(interrupted.indexOf('"10"'));
+    expect(interrupted).toContain('"incomplete": true');
+
+    fs.rmdirSync(path.join(ws, 'docker-compose.yml'));
+    await write(name, 'services: {}\n', await readMeta(name));
+
+    expect(fs.readFileSync(recordFile, 'utf8')).toBe(
+      interrupted.replace(',\n    "incomplete": true', ''),
+    );
+    // Not left for the tests below, which list every workspace.
+    fs.rmSync(ws, { recursive: true, force: true });
+  });
+
   it('leaves the readable half when the writer is killed between the two writes', async () => {
     // The plan asks for this one to be tested by KILLING between the writes, because
     // the ordering is only observable from outside the process that does them. The
@@ -494,6 +535,26 @@ describe('a workspace the record does not fully describe', () => {
     await writeRecord('kube', sample({ name: 'kube', project: 'p' }));
     expect(fs.statSync(paths.workspace('kube')).mode & 0o777).toBe(0o700);
     expect((await readMeta('kube')).name).toBe('kube');
+  });
+
+  it('leaves every file a Compose write makes at 0644, the record written last included', async () => {
+    // Written at the process umask, then restricted: under 002 a file the restriction missed
+    // stays group-writable, and a backup records that mode.
+    const saved = process.umask(0o002);
+    try {
+      await write('modes', 'services: {}\n', sample({ name: 'modes', project: 'p' }), [
+        ['files/seed.ldif', 'dn: x\n'],
+      ]);
+    } finally {
+      process.umask(saved);
+    }
+    const ws = paths.workspace('modes');
+    expect(
+      ['repro.json', 'docker-compose.yml', 'files/seed.ldif'].map((file) =>
+        (fs.statSync(path.join(ws, file)).mode & 0o777).toString(8),
+      ),
+    ).toEqual(['644', '644', '644']);
+    fs.rmSync(ws, { recursive: true, force: true });
   });
 
   it('mints the project name for a workspace that has no record yet', async () => {

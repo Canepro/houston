@@ -12,7 +12,7 @@
  *
  * Same shape as `core/monitor.ts`, which mutates a running repro the same way.
  */
-import { toYaml } from '../lib/compose';
+import { suppliedCredentials, toYaml } from '../lib/compose';
 import type { ComposeDoc } from '../lib/compose';
 import * as config from '../lib/config';
 import { DockerError, ValidationError } from '../lib/errors';
@@ -38,6 +38,7 @@ import { waitServing } from './lifecycle/ready';
 import { settingIds } from './rcapi';
 import { up } from './runner/engine';
 import { reproLock } from './runner/locks';
+import { workspace } from './runner/paths';
 import { rcContainerEnv } from './runner/queries';
 import { type Metadata, adminPass, readCompose, readMeta, write } from './runner/record';
 import * as topology from './topology';
@@ -494,6 +495,31 @@ export async function mergedOverrides(
   return { meta, overrides };
 }
 
+/**
+ * Create records whether Compose hands Rocket.Chat a licence (`licensed`) and a registration
+ * token (`reg_token_supplied`), and evidence and `inspect` read those before the Compose file.
+ * A change here can add, blank or remove either, so the recorded markers follow the document
+ * being written, env files included. A record without them is left as earlier releases write
+ * it back, and evidence asks its Compose file instead.
+ */
+async function refreshCredentialMarkers(
+  extra: Bag,
+  doc: ComposeDoc,
+  target: string,
+): Promise<void> {
+  const tokenMarker = typeof extra.reg_token_supplied === 'boolean';
+  if (!tokenMarker && extra.licensed !== true && typeof extra.effective_license !== 'boolean') {
+    return;
+  }
+  const supplied = await suppliedCredentials(doc, workspace(target));
+  if (tokenMarker) extra.reg_token_supplied = supplied.token;
+  // Absent means unlicensed once the token marker exists; before it, absent sends evidence to
+  // the Compose file, which finds a licence added here.
+  if (!supplied.license) delete extra.licensed;
+  else if (tokenMarker) extra.licensed = true;
+  if (typeof extra.effective_license === 'boolean') extra.effective_license = supplied.license;
+}
+
 export async function setEnvLocked(
   target: string,
   setsValue: Record<string, string> | null,
@@ -515,6 +541,7 @@ export async function setEnvLocked(
   // raised before anything is written. Assigned into `bagOf`'s throwaway `{}`, the override
   // reached docker-compose.yml and not repro.json, so the next `up --force` rebuilt it away.
   setItemChecked(meta.extra, 'env', overrides);
+  await refreshCredentialMarkers(meta.extra, doc as unknown as ComposeDoc, target);
   await write(target, toYaml(doc as unknown as ComposeDoc), meta);
   const changed = [...Object.keys(sets), ...unset].sort().join(', ');
   info(emit, `env updated on ${quotedText(target)}: ${changed}`, { phase: 'config' });
