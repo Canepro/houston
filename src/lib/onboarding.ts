@@ -6,6 +6,7 @@
  *
  *     onboarding:
  *       completed_at: "2026-10-15T09:14:02+00:00"
+ *       completed_by: person | defaults
  *     grants:
  *       owned_cluster: true | false
  *
@@ -13,6 +14,12 @@
  * denial, and only boolean `true` grants authority. Writers change only the named key and
  * retain other entries in both mappings. This matters when a newer build records a decision
  * this one does not know, or when a person has deliberately denied a capability.
+ *
+ * `completed_by` records who stopped the prompts. A person answers at a terminal, or runs
+ * `houston onboard complete`, `grant` or `revoke`. `defaults` marks `--accept-defaults`, JSON
+ * and piped setup writes: they fill safe answers, so prompts stop, but no person looked. A
+ * record without the field predates it and reads as a person. Only a person satisfies
+ * `requireOnboarded`, and a later person completion replaces `defaults`.
  *
  * The only standing grant is narrow: it permits Houston's own local Kind-cluster lifecycle.
  * It never permits selecting an ambient cluster or copying the local CA private key elsewhere.
@@ -23,9 +30,13 @@ import { AuthorityGateError, ValidationError } from './errors';
 export const GRANTS_KEY = 'grants';
 export const ONBOARDING_KEY = 'onboarding';
 export const COMPLETED_AT_KEY = 'completed_at';
+export const COMPLETED_BY_KEY = 'completed_by';
 export const RC_REPRO_VERSION_KEY = 'rc_repro_version';
 export const CLUSTERS_KEY = 'clusters';
 export const OWNED_CLUSTER_SCOPE = 'houston-local';
+
+/** Who ended the onboarding prompts. */
+export type OnboardedBy = 'person' | 'defaults';
 
 /** What a gate tells a person to run. The human path; never something a caller runs itself. */
 export const ONBOARD_COMMAND = 'houston onboard';
@@ -182,7 +193,7 @@ export function holdsGrant(id: string, cfg: Config = loadConfig()): boolean {
 
 /** Refuse an action until a person has recorded onboarding on this machine. */
 export function requireOnboarded(cfg: Config = loadConfig()): void {
-  if (completedAt(cfg) !== '') return;
+  if (completedBy(cfg) === 'person') return;
   throw new AuthorityGateError('houston has not been onboarded on this machine', {
     kind: 'onboarding',
     subject: 'machine',
@@ -210,6 +221,16 @@ function completedAt(cfg: Config): string {
   return typeof raw === 'string' ? raw : '';
 }
 
+/**
+ * Who completed onboarding: '' before it, a person for a record that predates the field,
+ * and `defaults` for that value or any other the reader does not recognise.
+ */
+function completedBy(cfg: Config): OnboardedBy | '' {
+  if (completedAt(cfg) === '') return '';
+  const raw = readMapping(cfg, ONBOARDING_KEY)[COMPLETED_BY_KEY];
+  return raw === undefined || raw === 'person' ? 'person' : 'defaults';
+}
+
 /** The UTC time to the second, in the form `config.yaml` already uses for timestamps. */
 function stamp(at: Date): string {
   return `${at.toISOString().slice(0, 19)}+00:00`;
@@ -224,6 +245,7 @@ export interface GrantState extends GrantSpec {
 export interface OnboardingState {
   completed: boolean;
   completed_at: string;
+  completed_by: OnboardedBy | '';
   rc_repro_version: string;
   grants: Record<string, boolean>;
   answered_grants: Record<string, boolean>;
@@ -237,6 +259,7 @@ export function state(cfg: Config = loadConfig()): OnboardingState {
   return {
     completed: completedAt(cfg) !== '',
     completed_at: completedAt(cfg),
+    completed_by: completedBy(cfg),
     rc_repro_version: versionAt(cfg),
     grants: Object.fromEntries(states.map((spec) => [grantKey(spec.id), spec.held])),
     answered_grants: Object.fromEntries(states.map((spec) => [grantKey(spec.id), spec.answered])),
@@ -247,29 +270,36 @@ export function state(cfg: Config = loadConfig()): OnboardingState {
 }
 
 /** Record a positive answer without disturbing other grants or unknown mapping entries. */
-export function grant(cfg: Config, id: string, at = new Date()): void {
+export function grant(cfg: Config, id: string, at = new Date(), by: OnboardedBy = 'person'): void {
   checkGrantId(id);
   requireWritableMapping(cfg, GRANTS_KEY);
   requireWritableMapping(cfg, ONBOARDING_KEY);
   if (id === OWNED_CLUSTER_GRANT) recordOwnedClusterScope(cfg, true);
   writeMapping(cfg, GRANTS_KEY)[grantKey(id)] = true;
-  complete(cfg, at);
+  complete(cfg, at, by);
 }
 
 /** Record an explicit denial. A later `grant` may change it, but absence is never fabricated. */
-export function revoke(cfg: Config, id: string, at = new Date()): void {
+export function revoke(cfg: Config, id: string, at = new Date(), by: OnboardedBy = 'person'): void {
   checkGrantId(id);
   requireWritableMapping(cfg, GRANTS_KEY);
   requireWritableMapping(cfg, ONBOARDING_KEY);
   if (id === OWNED_CLUSTER_GRANT) recordOwnedClusterScope(cfg, false);
   writeMapping(cfg, GRANTS_KEY)[grantKey(id)] = false;
-  complete(cfg, at);
+  complete(cfg, at, by);
 }
 
-/** Mark this machine onboarded while preserving a prior completion record and unknown fields. */
-export function complete(cfg: Config, at = new Date()): void {
+/**
+ * Mark this machine onboarded while preserving a prior completion record and unknown fields.
+ * A person replaces an earlier `defaults` completion; `defaults` never replaces a person's.
+ */
+export function complete(cfg: Config, at = new Date(), by: OnboardedBy = 'person'): void {
   const onboarding = writeMapping(cfg, ONBOARDING_KEY);
-  if (completedAt(cfg) === '') onboarding[COMPLETED_AT_KEY] = stamp(at);
+  const before = completedBy(cfg);
+  if (before === '' || (before === 'defaults' && by === 'person')) {
+    onboarding[COMPLETED_AT_KEY] = stamp(at);
+    onboarding[COMPLETED_BY_KEY] = by;
+  }
   onboarding[RC_REPRO_VERSION_KEY] = onboardingVersion;
 }
 

@@ -131,6 +131,16 @@ const ROOT = path.resolve(__dirname, '..');
 // One more refuses a tunnel port a preset or monitoring will publish, before create: 4747.
 // Onboarding grants add cluster-ownership, rollback, marker-publication and onboard-grant
 // boundary cases; a full collection of the merged tree measured 4831 tests.
+// Goal-first setup adds its owner-boundary cases, and four review fixes add one each: the setup
+// envelope schema, the first-run gates, the saved deployment alias probe and the destination
+// notice. A full collection of the merged tree measured 4863 tests.
+// The seventh PR 62 round adds thirteen: the Docker engine gate, two stale saved selectors, outdated
+// Kubernetes tools, the unused first-run name, who completed onboarding (three in the library, one
+// through the setup snapshot), the unknown-action text, the long help, and the force and fresh
+// rebuilds of a one-preset Docker workspace: total 4876.
+// The eighth adds five: the actor-prefixed first-run name, --reconfigure asking with an explicit
+// answer and rejecting it without a prompt, the saved selectors in capabilities, and the skill's
+// saved-selector recipe: 4876 + 5 = 4881.
 // Capture and its shell-roundtrip contract add twenty-three cases; seven repair regressions
 // bring that branch's total to 4,570. Workload-directory refusal and cleanup-fence regressions
 // and one recorded-target matrix (scheme semantics, nested userinfo, placeholders) bring its
@@ -139,7 +149,8 @@ const ROOT = path.resolve(__dirname, '..');
 // Round 7 adds six cases (unresolved placeholders, a leftover raw recording, its publication
 // in two modes, workspace HTTP credentials and the browser context options): 4867.
 // Round 8 adds one case (timing modifiers and fill values taken as authored or refused): 4868.
-const FLOOR = 4868;
+// Merged with PR 62 (base 4881): capture adds 4868 - 4831 = 37 cases, so 4881 + 37 = 4918.
+const FLOOR = 4918;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

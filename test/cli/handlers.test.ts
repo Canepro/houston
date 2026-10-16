@@ -1085,6 +1085,7 @@ describe('a usage mistake is exit 2 whichever command it is typed to (L7-07)', (
     // The action first: this answered "unknown key 'x'" about a mistake that was `frob`.
     [['config', 'frob', 'x'], "unknown action 'frob'"],
     [['config', 'set', 'gui.create_policy', 'nobody'], 'gui.create_policy takes'],
+    [['onboard', 'bogus'], 'want: status | setup | grant | revoke | complete'],
   ])('%j', async (argv, message) => {
     jest.resetModules();
     const ran = await fresh(argv);

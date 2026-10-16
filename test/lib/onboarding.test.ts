@@ -56,6 +56,7 @@ describe('persisted onboarding grants', () => {
       onboarding: {
         future_marker: 'keep',
         completed_at: '2026-10-15T00:00:00+00:00',
+        completed_by: 'person',
         rc_repro_version: expect.any(String),
       },
     });
@@ -75,9 +76,51 @@ describe('persisted onboarding grants', () => {
       onboarding: {
         future_marker: 'keep',
         completed_at: '2026-10-15T00:00:00+00:00',
+        completed_by: 'person',
         rc_repro_version: expect.any(String),
       },
     });
+  });
+
+  it('records who completed onboarding, gates on a person only, and never downgrades one', () => {
+    const cfg: Config = {};
+    complete(cfg, WHEN, 'defaults');
+    expect(state(cfg)).toMatchObject({
+      completed: true,
+      completed_at: '2026-10-15T00:00:00+00:00',
+      completed_by: 'defaults',
+    });
+    expect(() => requireOnboarded(cfg)).toThrow(AuthorityGateError);
+    complete(cfg, new Date('2026-10-16T00:00:00Z'), 'person');
+    expect(state(cfg)).toMatchObject({
+      completed_at: '2026-10-16T00:00:00+00:00',
+      completed_by: 'person',
+    });
+    expect(() => requireOnboarded(cfg)).not.toThrow();
+    complete(cfg, new Date('2026-10-17T00:00:00Z'), 'defaults');
+    expect(state(cfg)).toMatchObject({
+      completed_at: '2026-10-16T00:00:00+00:00',
+      completed_by: 'person',
+    });
+  });
+
+  it.each([
+    [
+      'a record written before completed_by existed',
+      { completed_at: '2026-10-15T00:00:00Z' },
+      true,
+    ],
+    [
+      'an unrecognised completed_by',
+      { completed_at: '2026-10-15T00:00:00Z', completed_by: 'x' },
+      false,
+    ],
+  ])('reads %s as a person only when it is legacy', (_label, onboarding, person) => {
+    const cfg: Config = { onboarding };
+    expect(state(cfg).completed).toBe(true);
+    expect(state(cfg).completed_by).toBe(person ? 'person' : 'defaults');
+    if (person) expect(() => requireOnboarded(cfg)).not.toThrow();
+    else expect(() => requireOnboarded(cfg)).toThrow(AuthorityGateError);
   });
 
   it('never treats a non-mapping legacy value as a grant or replaces it on write', () => {

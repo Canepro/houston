@@ -415,6 +415,23 @@ describe('creating', () => {
     expect(jest.mocked(createDocker.createRepro).mock.calls[0]?.[0].version).toBe('8.5.1');
   });
 
+  it('preserves an omitted preset so saved setup selectors can apply', async () => {
+    expect(
+      (await post('/api/repros', { version: '8.5.1', name: 'saved-selector' })).statusCode,
+    ).toBe(200);
+    await app.jobs.drain();
+    expect(jest.mocked(createDocker.createRepro).mock.calls[0]?.[0].preset).toBe('');
+  });
+
+  it('keeps an explicit default preset distinct from an omitted preset', async () => {
+    expect(
+      (await post('/api/repros', { version: '8.5.1', name: 'explicit-default', preset: 'default' }))
+        .statusCode,
+    ).toBe(200);
+    await app.jobs.drain();
+    expect(jest.mocked(createDocker.createRepro).mock.calls[0]?.[0].preset).toBe('default');
+  });
+
   it('takes several presets as a list, spelled into the one canonical preset', async () => {
     const response = await post('/api/repros', {
       version: '8.5.1',

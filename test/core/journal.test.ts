@@ -761,9 +761,9 @@ describe('the note a create writes before it starts', () => {
   });
 });
 
-describe('the note of a create the axes rename', () => {
-  // `--deployment multi-instance` with no `--name`: locked and noted under `rc8-5-1`, the
-  // name derived BEFORE `resolveAxes` ran, it makes `rc8-5-1-multi-instance`.
+describe('the note of a create with deployment-derived identity', () => {
+  // Deployment axes resolve before entry, so the lock, note and workspace all use
+  // `rc8-5-1-multi-instance` from the start.
   afterEach(() => {
     jest.doMock('../../src/core/runner/host', () =>
       (require('../testsetup-policy') as typeof TestsetupPolicyMod).healthyHost(),
@@ -836,7 +836,7 @@ describe('the note of a create the axes rename', () => {
 
   it('is handed to the caller under the name the create made', async () => {
     // With `seedHere` the note is the caller's to close, by the name it is handed back.
-    // Under the pre-rename name it was never closed; moved, it still covers the seed.
+    // The canonical identity must survive record writing and return so it covers seed.
     const during = builtToTheEnd();
     const { createRepro } =
       require('../../src/core/lifecycle/create-docker') as typeof CreateDockerMod;
@@ -851,7 +851,7 @@ describe('the note of a create the axes rename', () => {
       }),
     );
     expect(out.name).toBe('rc8-5-1-multi-instance');
-    expect(during).toEqual(['rc8-5-1']);
+    expect(during).toEqual(['rc8-5-1-multi-instance']);
     expect(unfinished()).toEqual([['rc8-5-1-multi-instance', true]]);
   });
 
