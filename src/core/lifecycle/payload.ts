@@ -6,6 +6,7 @@
  * green. One file is what the fixture-vs-real invariant test points at.
  */
 import * as fs from 'node:fs';
+import { isIP } from 'node:net';
 
 import * as config from '../../lib/config';
 import { storedText, toText } from '../../lib/format';
@@ -139,16 +140,17 @@ export async function bindHostOf(meta: Metadata): Promise<string> {
   const rc = bag(services.rocketchat ?? services['rocketchat-1']);
   const ports = Array.isArray(rc.ports) ? rc.ports : [];
   for (const port of ports) {
-    // The two rightmost fields are the ports; whatever stands before them is the address,
-    // bracketed or not: `bindPorts` writes `::1:3001:3000` with no brackets.
-    const published = String(port).replace(/\/[a-z]+$/iu, '');
+    // Interpolated mappings cannot establish an observed address without evaluation.
+    if (typeof port !== 'string' || port.includes('$')) continue;
+    // The two rightmost fields are the ports. A legacy IPv6 address can be bracketed or
+    // bare, but a malformed bracketed address must remain unknown rather than becoming `[`.
+    const published = port.replace(/\/(?:tcp|udp|sctp)$/iu, '');
     const parts = published.split(':');
     if (parts.length < 3) continue;
-    const address = parts
-      .slice(0, -2)
-      .join(':')
-      .replace(/^\[|\]$/gu, '');
-    if (address !== '') return address;
+    const address = parts.slice(0, -2).join(':');
+    const bracketed = address.startsWith('[') && address.endsWith(']') ? address.slice(1, -1) : '';
+    if (isIP(bracketed) === 6) return bracketed;
+    if (isIP(address) !== 0) return address;
   }
   return '';
 }

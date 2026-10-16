@@ -12,6 +12,7 @@ import { NotFoundError } from '../../src/lib/errors';
 
 import type * as PathsNS from '../../src/core/runner/paths';
 import type * as RecordNS from '../../src/core/runner/record';
+import type * as UsersNS from '../../src/core/users';
 
 import type * as AppNS from '../../src/cli/app';
 import { runCli } from '../../src/cli/app';
@@ -319,54 +320,235 @@ describe("a multi-instance workspace's info", () => {
 });
 
 describe('SSH loopback guidance', () => {
-  it('uses an existing workspace bind before rejecting unused tunnel overrides', async () => {
+  it.each([
+    { label: 'recorded wildcard', recorded: '0.0.0.0', configured: '127.0.0.1', fail: false },
+    {
+      label: 'owned typed name',
+      actor: 'operator',
+      owner: 'operator',
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: false,
+    },
+    {
+      label: 'foreign typed name resolves a new owned name',
+      actor: 'operator',
+      owner: 'other',
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: true,
+    },
+    {
+      label: 'reuse ignores a new bind flag',
+      flags: ['--bind', '127.0.0.1'],
+      mapping: '0.0.0.0:3123:3000',
+      configured: '127.0.0.1',
+      fail: false,
+    },
+    {
+      label: 'Kubernetes bind flag wins',
+      flags: ['--bind', '127.0.0.1'],
+      runtime: 'kubernetes',
+      recorded: '0.0.0.0',
+      configured: '0.0.0.0',
+      fail: true,
+    },
+    {
+      label: 'legacy wildcard',
+      mapping: '0.0.0.0:3123:3000',
+      configured: '127.0.0.1',
+      fail: false,
+    },
+    { label: 'legacy loopback', mapping: '127.0.0.2:3123:3000', configured: '0.0.0.0', fail: true },
+    {
+      label: 'legacy bracketed IPv6',
+      mapping: '[::1]:3123:3000',
+      configured: '0.0.0.0',
+      fail: true,
+    },
+    { label: 'legacy bare IPv6', mapping: '::1:3123:3000', configured: '0.0.0.0', fail: true },
+    { label: 'unknown legacy bind', configured: '127.0.0.1', fail: false },
+    {
+      label: 'invalid legacy bind',
+      mapping: '[::1:3123:3000',
+      configured: '127.0.0.1',
+      fail: false,
+    },
+    {
+      label: 'interpolated legacy bind',
+      mapping: '${BIND}:3123:3000',
+      configured: '127.0.0.1',
+      fail: false,
+    },
+    {
+      label: 'Kubernetes now wildcard',
+      runtime: 'kubernetes',
+      recorded: '127.0.0.1',
+      configured: '0.0.0.0',
+      fail: false,
+    },
+    {
+      label: 'Kubernetes now loopback',
+      runtime: 'kubernetes',
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: true,
+    },
+    {
+      label: 'explicit Kubernetes',
+      flags: ['--runtime', 'kubernetes'],
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: true,
+    },
+    {
+      label: 'explicit Docker reuse',
+      flags: ['--runtime', 'docker'],
+      runtime: 'kubernetes',
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: false,
+    },
+    {
+      label: 'force now wildcard',
+      flags: ['--force'],
+      recorded: '127.0.0.1',
+      configured: '0.0.0.0',
+      fail: false,
+    },
+    {
+      label: 'force now loopback',
+      flags: ['--force'],
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: true,
+    },
+    {
+      label: 'fresh now wildcard',
+      flags: ['--fresh'],
+      recorded: '127.0.0.1',
+      configured: '0.0.0.0',
+      fail: false,
+    },
+    {
+      label: 'fresh now loopback',
+      flags: ['--fresh'],
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: true,
+    },
+    { label: 'new wildcard', missing: true, configured: '0.0.0.0', fail: false },
+    { label: 'new loopback', missing: true, configured: '127.0.0.1', fail: true },
+    {
+      label: 'explicit bind wins',
+      flags: ['--force', '--bind', '0.0.0.0'],
+      recorded: '127.0.0.1',
+      configured: '127.0.0.1',
+      fail: false,
+    },
+  ])('preflights the bind the runtime will use: $label', async (scenario) => {
     const record = require('../../src/core/runner/record') as typeof RecordNS;
-    await record.writeRecord(
-      'ssh-public',
-      record.metadata({
-        name: 'ssh-public',
-        project: 'houston-ssh-public',
-        rcVersion: '8.5.1',
-        rcImage: 'i',
-        mongoTag: '8.0',
-        mongoFlavor: 'official',
-        preset: 'default',
+    const paths = require('../../src/core/runner/paths') as typeof PathsNS;
+    const name = 'ssh-preflight';
+    await paths.remove(name);
+    if (!('missing' in scenario)) {
+      const meta = record.metadata({
+        name,
         rootUrl: 'http://localhost:3123',
         hostPort: 3123,
-        versionSource: 'map',
-        extra: { bind_host: '0.0.0.0' },
-      }),
-    );
-    const keys = ['SSH_CONNECTION', 'SSH_CLIENT', 'SSH_TTY', 'HOUSTON_SSH_LOCAL_PORT'] as const;
+        extra: {
+          ...('runtime' in scenario ? { runtime: scenario.runtime } : {}),
+          ...('owner' in scenario ? { owner: scenario.owner } : {}),
+          ...('recorded' in scenario ? { bind_host: scenario.recorded } : {}),
+        },
+      });
+      await record.writeRecord(name, meta);
+      if ('mapping' in scenario) {
+        fs.writeFileSync(
+          `${paths.workspace(name)}/docker-compose.yml`,
+          `services:\n  rocketchat:\n    ports: [${JSON.stringify(scenario.mapping)}]\n`,
+        );
+      }
+    }
+    const keys = [
+      'SSH_CONNECTION',
+      'SSH_CLIENT',
+      'SSH_TTY',
+      'HOUSTON_SSH_LOCAL_PORT',
+      'HOUSTON_SSH_PORT',
+      'HOUSTON_BIND_HOST',
+      'HOUSTON_USER',
+    ] as const;
     const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    const users = require('../../src/core/users') as typeof UsersNS;
+    const priorUsers = users.readAll();
+    if ('actor' in scenario) {
+      users.writeAll(new Map([['operator', ['synthetic-unused-hash', '2026-01-01', 'member']]]));
+    }
     try {
-      delete process.env.SSH_CONNECTION;
-      delete process.env.SSH_CLIENT;
+      for (const key of keys) delete process.env[key];
       process.env.SSH_TTY = '/dev/ttys001';
-      process.env.HOUSTON_SSH_LOCAL_PORT = '80';
+      process.env.HOUSTON_BIND_HOST = scenario.configured;
+      if ('actor' in scenario) process.env.HOUSTON_USER = scenario.actor;
       jest.resetModules();
+      // The create boundary is stopped here. Preflight, parser, state reads and human
+      // dispatch are real; no engine is reached and a refusal must precede this call.
+      const create = jest.fn(async () => {
+        if ('missing' in scenario) {
+          await record.writeRecord(
+            name,
+            record.metadata({
+              name,
+              hostPort: 3123,
+              rootUrl: 'http://localhost:3123',
+              extra: { bind_host: scenario.configured },
+            }),
+          );
+        }
+        return { name, waited: true, booted_s: 1 };
+      });
       jest.doMock('../../src/core/lifecycle/create-docker', () => ({
         ...jest.requireActual<object>('../../src/core/lifecycle/create-docker'),
-        createRepro: async () => ({ name: 'ssh-public', waited: true, booted_s: 1 }),
+        createRepro: create,
       }));
       const app = require('../../src/cli/app') as typeof AppNS;
       const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
-      let stdout = '';
-      let stderr = '';
-      const io = {
-        writeOut: (text: string) => void (stdout += text),
-        writeErr: (text: string) => void (stderr += text),
-      };
-
-      expect(
-        await app.runCli(['up', '--version', '8.5.1', '--name', 'ssh-public', '--offline'], {
-          execute: handlers.createExecutor(io),
-          io,
-        }),
-      ).toBe(0);
-      expect(stderr).toBe('');
-      expect(stdout).not.toContain('remote access');
+      for (const [key, value] of [
+        ['HOUSTON_SSH_LOCAL_PORT', '80'],
+        ['HOUSTON_SSH_PORT', '70000'],
+      ] as const) {
+        delete process.env.HOUSTON_SSH_LOCAL_PORT;
+        delete process.env.HOUSTON_SSH_PORT;
+        process.env[key] = value;
+        create.mockClear();
+        let stdout = '';
+        let stderr = '';
+        const io = {
+          writeOut: (text: string) => void (stdout += text),
+          writeErr: (text: string) => void (stderr += text),
+        };
+        const code = await app.runCli(
+          [
+            'up',
+            '--version',
+            '8.5.1',
+            '--name',
+            name,
+            '--offline',
+            ...('flags' in scenario ? scenario.flags : []),
+          ],
+          { execute: handlers.createExecutor(io), io },
+        );
+        expect({ key, code, creates: create.mock.calls.length }).toEqual({
+          key,
+          code: scenario.fail ? 2 : 0,
+          creates: scenario.fail ? 0 : 1,
+        });
+        if (scenario.fail) expect(stderr).toContain(`${key} must be an integer`);
+        expect(stdout).not.toContain('tunnel :');
+      }
     } finally {
+      users.writeAll(priorUsers);
       jest.dontMock('../../src/core/lifecycle/create-docker');
       for (const key of keys) {
         if (saved[key] === undefined) delete process.env[key];
@@ -375,6 +557,78 @@ describe('SSH loopback guidance', () => {
       jest.resetModules();
     }
   });
+
+  it.each([
+    { bind: '127.0.0.2', advertised: '', local: '3123' },
+    { bind: '127.0.0.2', advertised: 'https://chat.example.test', local: '3123' },
+    { bind: '127.0.0.2', advertised: 'http://127.0.0.1:3123', local: '3123' },
+    { bind: '::1', advertised: '', local: '4311' },
+  ])(
+    'warns about unforwarded loopback URLs in human info: %j',
+    async ({ bind, advertised, local }) => {
+      const record = require('../../src/core/runner/record') as typeof RecordNS;
+      await record.writeRecord(
+        'ssh-origin',
+        record.metadata({
+          name: 'ssh-origin',
+          rootUrl: `http://${bind === '::1' ? '[::1]' : bind}:3123`,
+          hostPort: 3123,
+          preset: 'email',
+          extra: { bind_host: bind, sidecar_ports: [8025], advertised_url: advertised },
+        }),
+      );
+      const keys = [
+        'SSH_CONNECTION',
+        'SSH_CLIENT',
+        'SSH_TTY',
+        'HOUSTON_SSH_LOCAL_PORT',
+        'HOUSTON_SSH_PORT',
+        'HOUSTON_SSH_HOST',
+        'HOUSTON_SSH_USER',
+      ] as const;
+      const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+      try {
+        for (const key of keys) delete process.env[key];
+        process.env.SSH_TTY = '/dev/ttys001';
+        process.env.HOUSTON_SSH_LOCAL_PORT = local;
+        process.env.HOUSTON_SSH_HOST = 'ssh-proof.invalid';
+        process.env.HOUSTON_SSH_USER = 'operator';
+        let stdout = '';
+        let stderr = '';
+        const io = {
+          writeOut: (text: string) => void (stdout += text),
+          writeErr: (text: string) => void (stderr += text),
+        };
+        const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
+        expect(
+          await runCli(['info', '--name', 'ssh-origin'], {
+            execute: handlers.createExecutor(io),
+            io,
+          }),
+        ).toBe(0);
+        expect(stderr).toBe('');
+        const target = bind === '::1' ? '[::1]' : bind;
+        expect(stdout).toContain(`127.0.0.1:${local}:${target}:3123`);
+        expect(stdout).toContain(`127.0.0.1:8025:${target}:8025`);
+        expect(stdout).toContain(`browser: http://127.0.0.1:${local}`);
+        expect(stdout).toContain('callbacks');
+        expect(stdout).toContain('printed side-service URLs');
+        expect(stdout).toContain(`using ${bind} cannot use this handoff`);
+        expect(stdout).not.toContain('so their printed URLs work through the tunnel');
+        if (advertised === 'https://chat.example.test') {
+          expect(stdout).toContain('ROOT_URL is https://chat.example.test');
+          expect(stdout).not.toContain('still names port');
+        }
+        if (advertised === 'http://127.0.0.1:3123')
+          expect(stdout).not.toContain('rather than the tunnel');
+      } finally {
+        for (const key of keys) {
+          if (saved[key] === undefined) delete process.env[key];
+          else process.env[key] = saved[key];
+        }
+      }
+    },
+  );
 
   it('prints the tunnel only when human info verifies a loopback bind', async () => {
     const record = require('../../src/core/runner/record') as typeof RecordNS;

@@ -790,38 +790,44 @@ async function confirmDestruction(
 }
 
 /**
- * The bind relevant to a human `up` handoff preflight.
- *
- * Reusing a workspace keeps its recorded bind even when today's config or flags differ. The
- * lookup mirrors create's typed-name ownership resolution, but it remains read-only and
- * falls back to the requested/configured bind for a new, incomplete, forced, or fresh run.
+ * Docker reuse keeps the recorded bind, including legacy Compose recovery. Kubernetes
+ * resolves its bind afresh on every up. Unknown reused binds cannot produce a handoff.
+ * Resolve typed-name ownership just as create does before reading the existing record.
  */
-async function handoffBindForUp(o: Values): Promise<string> {
-  const requested =
-    text(o.bind) || toText((require('../lib/config') as typeof ConfigNS).loadConfig().bind_host);
-  if (bool(o.force) || bool(o.fresh)) return requested;
-
-  const audit = require('../core/audit') as typeof AuditNS;
-  const naming = require('../core/lifecycle/naming') as typeof NamingNS;
-  const ownership = require('../core/lifecycle/ownership') as typeof OwnershipNS;
-  const paths = require('../core/runner/paths') as typeof RunnerPathsNS;
-  const record = require('../core/runner/record') as typeof RecordNS;
+async function handoffBindForUp(o: Values): Promise<string | null> {
   const types = require('../core/lifecycle/types') as typeof LifecycleTypesNS;
-  const request = types.createReq({
+  const request = require('../core/lifecycle/request') as typeof RequestNS;
+  const audit = require('../core/audit') as typeof AuditNS;
+  const req = types.createReq({
     version: text(o.version),
     preset: strings(o.preset).length > 0 ? compositeName(strings(o.preset)) : '',
     name: text(o.name),
     actor: audit.actor(),
+    bind: text(o.bind),
   });
-  await ownership.claimTypedName(request);
-  const name = naming.deriveFor(request);
+  const requested = request.requestedBindHost(req);
+  if (bool(o.force) || bool(o.fresh)) return requested;
+
+  const naming = require('../core/lifecycle/naming') as typeof NamingNS;
+  const ownership = require('../core/lifecycle/ownership') as typeof OwnershipNS;
+  const paths = require('../core/runner/paths') as typeof RunnerPathsNS;
+  const record = require('../core/runner/record') as typeof RecordNS;
+  const topology = require('../core/topology') as typeof TopologyNS;
+  const payload = require('../core/lifecycle/payload') as typeof PayloadNS;
+  await ownership.claimTypedName(req);
+  const name = naming.deriveFor(req);
   if (!name || !(await paths.exists(name))) return requested;
+  let meta: RecordNS.Metadata;
   try {
-    const bind = (await record.readMeta(name)).extra.bind_host;
-    return typeof bind === 'string' && bind.trim() !== '' ? bind.trim() : requested;
+    meta = await record.readMeta(name);
   } catch {
-    return requested;
+    return null;
   }
+  // resolveAxesStep gives a recorded runtime precedence over an implicit default or
+  // --context, but an explicit --runtime selects the operation this up will perform.
+  const runtime = topology.normalize(text(o.runtime) || topology.ofMeta(meta));
+  if (runtime === topology.KUBERNETES) return requested;
+  return (await payload.bindHostOf(meta)) || null;
 }
 
 /** Name every destructive target before asking once. */
@@ -885,10 +891,13 @@ async function dispatch(
       // Only human output consumes a handoff. Refuse invalid overrides before creating
       // its loopback workspace, but leave JSON automation independent of tunnel advice.
       if (!active()) {
-        (require('../core/lifecycle/access') as typeof AccessNS).validateEnvironment(
-          process.env,
-          await handoffBindForUp(o),
-        );
+        const bind = await handoffBindForUp(o);
+        if (bind !== null) {
+          (require('../core/lifecycle/access') as typeof AccessNS).validateEnvironment(
+            process.env,
+            bind,
+          );
+        }
       }
       return await runUp(invocation, io);
     }

@@ -139,6 +139,15 @@ function safeDestinationPart(value: string, label: string): string {
   return value;
 }
 
+/** Browser origins ignore paths, trailing slashes, and default-port spellings. */
+function sameOrigin(left: string, right: string): boolean {
+  try {
+    return new URL(left).origin === new URL(right).origin;
+  } catch {
+    return left === right;
+  }
+}
+
 function shellWord(value: string): string {
   if (SAFE_SHELL_WORD.test(value)) return value;
   return `'${value.replace(/'/gu, "'\\''")}'`;
@@ -282,20 +291,22 @@ export function handoff(
   if (sides.length > 0) {
     notes.push(
       `The preset's side services and instances are forwarded on their own ports (${sides.join(', ')}), ` +
-        'so their printed URLs work through the tunnel.',
+        (target === '127.0.0.1'
+          ? 'so their printed URLs work through the tunnel.'
+          : 'so open them at 127.0.0.1 on those ports on your machine.'),
     );
   }
-  if (advertisedUrl !== null) {
+  const rootUrl = advertisedUrl ?? (meta.rootUrl || `http://localhost:${String(remotePort)}`);
+  if (!sameOrigin(rootUrl, browserUrl) && (advertisedUrl !== null || selectedPort !== remotePort)) {
     notes.push(
-      `Rocket.Chat's ROOT_URL is ${advertisedUrl}: absolute links (invitations, password resets, ` +
+      `Rocket.Chat's ROOT_URL is ${rootUrl}: absolute links (invitations, password resets, ` +
         `OAuth callbacks) use that origin rather than the tunnel's ${browserUrl}.`,
     );
-  } else if (selectedPort !== remotePort) {
+  }
+  if (target !== '127.0.0.1') {
     notes.push(
-      `Rocket.Chat's ROOT_URL still names port ${String(remotePort)}: absolute links it ` +
-        '(invitations, password resets, OAuth callbacks) point at ' +
-        `http://127.0.0.1:${String(remotePort)}, so free that port rather than override it ` +
-        'when a flow depends on them.',
+      'The tunnel listens on client 127.0.0.1 only. Absolute links, redirects, callbacks, and ' +
+        `printed side-service URLs using ${bind} cannot use this handoff.`,
     );
   }
   if (publicUrl !== null) {

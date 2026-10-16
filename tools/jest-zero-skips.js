@@ -95,7 +95,9 @@ const ROOT = path.resolve(__dirname, '..');
 // Kubernetes replica counts that do not create more application forwards.
 // Five R3 access regressions cover reused workspace binds, advertised origins, and Kubernetes
 // replica counts across the CLI, inspection, and recorded-port consumers.
-const FLOOR = 4527;
+// Thirty-three R4 cases cover runtime-aware preflight, legacy recovery, truthful origin
+// advice, malformed extra bags, and unforwarded client loopback URLs. Collection: 4560.
+const FLOOR = 4560;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

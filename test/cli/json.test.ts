@@ -141,6 +141,45 @@ describe('a command that fails', () => {
     expect(ran.code).toBe(4);
   });
 
+  it.each([null, []])(
+    'recovers legacy SSH access when the persisted extra bag is %j',
+    async (extra) => {
+      writeWorkspace('ssh-extra');
+      const file = path.join(home, 'repros', 'ssh-extra', 'repro.json');
+      const doc = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+      fs.writeFileSync(file, JSON.stringify({ ...doc, extra }));
+      fs.writeFileSync(
+        path.join(home, 'repros', 'ssh-extra', 'docker-compose.yml'),
+        'services:\n  rocketchat:\n    ports: ["127.0.0.1:3001:3000"]\n',
+      );
+      const keys = [
+        'SSH_CONNECTION',
+        'SSH_CLIENT',
+        'SSH_TTY',
+        'HOUSTON_SSH_LOCAL_PORT',
+        'HOUSTON_SSH_PORT',
+      ] as const;
+      const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+      try {
+        for (const key of keys) delete process.env[key];
+        process.env.SSH_TTY = '/dev/ttys001';
+        const ran = await run(['info', '--name', 'ssh-extra', '--json']);
+        expect([ran.code, ran.envelope.ok]).toEqual([0, true]);
+        expect((ran.envelope.data as Record<string, unknown>).access).toMatchObject({
+          mode: 'remote_ssh',
+          browser_url: 'http://127.0.0.1:3001',
+          side_ports: [],
+          tunnel_command: expect.stringContaining('-L 127.0.0.1:3001:127.0.0.1:3001 --'),
+        });
+      } finally {
+        for (const key of keys) {
+          if (saved[key] === undefined) delete process.env[key];
+          else process.env[key] = saved[key];
+        }
+      }
+    },
+  );
+
   it('includes copy-safe SSH handoff guidance in the real info JSON payload', async () => {
     writeWorkspace('ssh-access', true, '127.0.0.1');
     const saved = {
@@ -223,7 +262,8 @@ describe('a command that fails', () => {
           'The workspace listens on loopback on the remote host only. Run the tunnel command on your ' +
           'machine, then open the browser URL there. Credentials stay private to that tunnel. If the ' +
           'local port is occupied, set HOUSTON_SSH_LOCAL_PORT on the remote command and request the ' +
-          'handoff again.',
+          'handoff again. The tunnel listens on client 127.0.0.1 only. Absolute links, redirects, callbacks, and ' +
+          'printed side-service URLs using ::1 cannot use this handoff.',
       });
     } finally {
       if (saved.connection === undefined) delete process.env.SSH_CONNECTION;

@@ -76,7 +76,7 @@ describe('SSH access handoff', () => {
       tunnel_command:
         "ssh -N -o ExitOnForwardFailure=yes -L '127.0.0.1:4311:[::1]:3123' -- 'operator'\\''s team@repro; echo unsafe'",
       // A different local port is not transparent: ROOT_URL still names the server's.
-      note: expect.stringContaining("Rocket.Chat's ROOT_URL still names port 3123"),
+      note: expect.stringContaining("Rocket.Chat's ROOT_URL is http://localhost:3123"),
     });
   });
 
@@ -266,6 +266,27 @@ describe('SSH access handoff', () => {
     expect(answer?.note).not.toContain('still names port 3123');
   });
 
+  it.each(['http://127.0.0.1:3123', 'http://127.0.0.1:3123/', 'http://127.0.0.1:3123/chat'])(
+    'does not claim a different origin for an advertised URL on the tunnel origin: %s',
+    (advertised_url) => {
+      const answer = handoff(workspace({ extra: { advertised_url } }), { SSH_TTY: '/dev/ttys001' });
+      expect(answer?.browser_url).toBe('http://127.0.0.1:3123');
+      expect(answer?.note).not.toContain('rather than the tunnel');
+      expect(answer?.note).not.toContain('still names port');
+    },
+  );
+
+  it('warns when remapping separates an advertised local origin from the tunnel', () => {
+    const answer = handoff(workspace({ extra: { advertised_url: 'http://127.0.0.1:3123' } }), {
+      SSH_TTY: '/dev/ttys001',
+      HOUSTON_SSH_LOCAL_PORT: '4311',
+    });
+    expect(answer?.browser_url).toBe('http://127.0.0.1:4311');
+    expect(answer?.note).toContain('ROOT_URL is http://127.0.0.1:3123');
+    expect(answer?.note).toContain("rather than the tunnel's http://127.0.0.1:4311");
+    expect(answer?.note).not.toContain('still names port');
+  });
+
   it('refuses a bad session override before a create, and ignores one outside SSH', () => {
     expect(() =>
       validateEnvironment({ SSH_TTY: '/dev/ttys001', HOUSTON_SSH_LOCAL_PORT: '80' }),
@@ -293,6 +314,15 @@ describe('the bind address read back from a legacy compose file', () => {
       ['"::1:3001:3000"', '::1'],
       ['"127.0.0.2:3001:3000/tcp"', '127.0.0.2'],
       ['"3001:3000"', ''],
+      ['"0.0.0.0:3001:3000"', '0.0.0.0'],
+      ['"[::1:3001:3000"', ''],
+      ['"::1]:3001:3000"', ''],
+      ['"[127.0.0.1]:3001:3000"', ''],
+      ['"999.0.0.1:3001:3000"', ''],
+      ['"not-an-ip:3001:3000"', ''],
+      ['"${BIND}:3001:3000"', ''],
+      ['"127.0.0.1:${PORT}:3000"', ''],
+      ['"127.0.0.1:${PORT:-3001}:3000"', ''],
     ] as const) {
       const name = `legacy-${expected.replace(/[^a-z0-9]/gu, '') || 'none'}`;
       await write(

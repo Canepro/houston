@@ -70,8 +70,12 @@ export interface Metadata {
  * Compose too.
  */
 export function hasComposeInstancePorts(meta: Pick<Metadata, 'extra'>): boolean {
-  const runtime =
-    typeof meta.extra.runtime === 'string' ? meta.extra.runtime.trim().toLowerCase() : '';
+  const extra: unknown = meta.extra;
+  const bag =
+    typeof extra === 'object' && extra !== null && !Array.isArray(extra)
+      ? (extra as Record<string, unknown>)
+      : {};
+  const runtime = typeof bag.runtime === 'string' ? bag.runtime.trim().toLowerCase() : '';
   return runtime === '' || runtime === 'docker';
 }
 
