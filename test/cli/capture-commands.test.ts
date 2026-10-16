@@ -92,7 +92,12 @@ describe('capture commands', () => {
 
   test('reports a retained failed capture through the CLI error envelope', async () => {
     mockCaptureBundle.mockRejectedValue(
-      new CaptureFailedError('capture stopped', { details: { bundle: '/tmp/ticket-capture' } }),
+      new CaptureFailedError(
+        'capture stopped. Partial capture bundle retained at /tmp/ticket-capture.',
+        {
+          details: { bundle: '/tmp/ticket-capture' },
+        },
+      ),
     );
 
     const result = await invoke(['capture', '--name', 'ticket-1234', '--json']);
@@ -102,6 +107,13 @@ describe('capture commands', () => {
       schema: 'houston.error.v1',
       ok: false,
       error: { code: 'CAPTURE_FAILED', details: { bundle: '/tmp/ticket-capture' } },
+    });
+
+    const human = await invoke(['capture', '--name', 'ticket-1234']);
+    expect(human).toEqual({
+      code: 9,
+      out: '',
+      err: 'error: capture stopped. Partial capture bundle retained at /tmp/ticket-capture.\n',
     });
   });
 

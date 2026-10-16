@@ -30,6 +30,16 @@ function shellArgument(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
+/** A Markdown fence long enough that literal command bytes cannot close it. */
+function commandFence(value: string): string[] {
+  const longestBacktickRun = Math.max(
+    0,
+    ...[...value.matchAll(/`+/gu)].map((match) => match[0].length),
+  );
+  const fence = '`'.repeat(Math.max(3, longestBacktickRun + 1));
+  return [`${fence}bash`, value, fence];
+}
+
 /** A capture artifact must remain relative to its capture directory before becoming a link. */
 function captureArtifact(value: unknown): string {
   return toText(value)
@@ -219,8 +229,8 @@ export function renderMarkdown(payloadValue: unknown, captureValue?: unknown): s
         'Include a scripted capture with a later collection when that proof is needed.',
       '',
     );
-    if (/[\r\n]/u.test(command)) lines.push('Add one with:', '', '```bash', command, '```', '');
-    else lines.push(`Add one with \`${markdownCode(command)}\`.`, '');
+    if (/[\r\n\\`|]/u.test(command)) lines.push('Add one with:', '', ...commandFence(command), '');
+    else lines.push(`Add one with \`${command}\`.`, '');
   } else {
     lines.push(...renderCaptureSection(capture));
   }

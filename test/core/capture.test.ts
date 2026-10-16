@@ -13,6 +13,7 @@ jest.mock('../../src/core/runner/record', () => {
 import * as evidence from '../../src/core/evidence';
 import {
   captureBundle,
+  listWorkloads,
   loadWorkload,
   parseWorkload,
   prepareBundleRoot,
@@ -27,7 +28,12 @@ import { reproLock } from '../../src/core/runner/locks';
 import { renderCaptureSection } from '../../src/lib/capture-render';
 import { metadata, readMeta } from '../../src/core/runner/record';
 import * as config from '../../src/lib/config';
-import { CaptureFailedError, ConflictError, ValidationError } from '../../src/lib/errors';
+import {
+  CaptureFailedError,
+  ConflictError,
+  PreflightError,
+  ValidationError,
+} from '../../src/lib/errors';
 
 const ADMIN_PASSWORD = 'capture-admin-password-123';
 
@@ -127,6 +133,27 @@ describe('scripted browser capture', () => {
     await expect(loadWorkload('smoke')).rejects.toThrow(/cannot read workload.*EISDIR/u);
   });
 
+  test('names unreadable valid workload entries without advertising invalid names', async () => {
+    fs.mkdirSync(path.join(config.workloadDir(), 'broken.yaml'), { recursive: true });
+    writeWorkload('ready', 'name: ready\ndescription: ready to run\nsteps:\n  - goto: /\n');
+    writeWorkload('my flow', 'name: invalid\nsteps:\n  - goto: /\n');
+    writeWorkload('.hidden', 'name: hidden\nsteps:\n  - goto: /\n');
+
+    const rows = await listWorkloads();
+
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'ready', description: 'ready to run' }),
+        expect.objectContaining({
+          name: 'broken',
+          source: path.join(config.workloadDir(), 'broken.yaml'),
+          description: expect.stringMatching(/^UNREADABLE — cannot read workload /u),
+        }),
+      ]),
+    );
+    expect(rows.map((row) => row.name)).not.toEqual(expect.arrayContaining(['my flow', '.hidden']));
+  });
+
   test('passes the requested and default navigation deadlines to the driver', async () => {
     const dest = path.join(config.home(), 'navigation-timeouts');
     const driver = new FakeDriver(dest);
@@ -142,6 +169,32 @@ describe('scripted browser capture', () => {
     expect(goto.mock.calls).toEqual([
       ['/slow', 61000],
       ['/default', 15000],
+    ]);
+  });
+
+  test('resolves relative, root-relative and absolute goto targets without mangling them', async () => {
+    const dest = path.join(config.home(), 'navigation-targets');
+    const driver = new FakeDriver(dest);
+    const goto = jest.spyOn(driver, 'goto');
+    await run(
+      parseWorkload(
+        [
+          'steps:',
+          '  - goto: login',
+          '  - goto: /rooms/general',
+          '  - goto: "https://idp.example.test/login?prompt=login"',
+        ].join('\n'),
+        'fixture',
+      ),
+      driver,
+      dest,
+      { root_url: 'http://127.0.0.1:3000/customer/path?ticket=hidden' },
+    );
+
+    expect(goto.mock.calls).toEqual([
+      ['http://127.0.0.1:3000/login', 15000],
+      ['http://127.0.0.1:3000/rooms/general', 15000],
+      ['https://idp.example.test/login?prompt=login', 15000],
     ]);
   });
 
@@ -400,6 +453,24 @@ describe('scripted browser capture', () => {
     expect(fs.readFileSync(path.join(arbitrary, 'notes.txt'), 'utf8')).toBe('leave this alone');
   });
 
+  test('keeps an identifiable forced bundle when browser preflight fails', async () => {
+    writeWorkload('preflight', 'steps:\n  - goto: /\n');
+    const out = path.join(config.home(), 'preflight-bundle');
+    fs.mkdirSync(out, { recursive: true });
+    fs.writeFileSync(path.join(out, 'README.md'), '# prior evidence');
+    fs.writeFileSync(path.join(out, 'manifest.json'), '{"repro":{"name":"ticket-1234"}}');
+    const driverFactory: DriverFactory = async () => {
+      throw new PreflightError('Playwright is unavailable');
+    };
+
+    await expect(
+      captureBundle('ticket-1234', 'preflight', out, { force: true, driverFactory }),
+    ).rejects.toThrow(PreflightError);
+
+    expect(fs.readFileSync(path.join(out, 'README.md'), 'utf8')).toBe('# prior evidence');
+    expect(fs.readFileSync(path.join(out, 'manifest.json'), 'utf8')).toContain('ticket-1234');
+  });
+
   test('writes evidence first, then moves the staged capture into the fresh bundle root', async () => {
     writeWorkload(
       'stage',
@@ -456,6 +527,7 @@ describe('scripted browser capture', () => {
     const failure = caught as CaptureFailedError;
     const manifest = path.join(out, 'capture', 'manifest.json');
     expect(failure.details).toMatchObject({ bundle: out, manifest });
+    expect(failure.message).toContain(`Partial capture bundle retained at ${out}.`);
     expect(fs.existsSync(manifest)).toBe(true);
     expect(JSON.parse(fs.readFileSync(manifest, 'utf8'))).toMatchObject({ status: 'failed' });
   });

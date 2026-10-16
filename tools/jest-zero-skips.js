@@ -92,9 +92,9 @@ const ROOT = path.resolve(__dirname, '..');
 // runtime-correct artifact selection, registration-token provenance, normalized presets,
 // public URL plus byte-preserved cleanup rendering, artifact URL and scalar redaction,
 // metadata-only Docker records, legacy catalogue uncertainty, and provisional licensing.
-// Capture and its shell-roundtrip contract add twenty-three cases; four repair regressions
-// bring the collection-only measured total to 4,567 (237 files, no test bodies executed).
-const FLOOR = 4567;
+// Capture and its shell-roundtrip contract add twenty-three cases; seven repair regressions
+// bring the collection-only measured total to 4,570 (237 files, no test bodies executed).
+const FLOOR = 4570;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

@@ -353,38 +353,58 @@ async function yamlStems(dir: string): Promise<string[]> {
   } catch {
     return [];
   }
-  return entries
-    .filter((entry) => entry.endsWith('.yaml') && entry !== '.yaml')
-    .map((entry) => entry.slice(0, -'.yaml'.length))
-    .sort();
+  return (
+    entries
+      .filter((entry) => entry.endsWith('.yaml') && entry !== '.yaml')
+      .map((entry) => entry.slice(0, -'.yaml'.length))
+      // `loadWorkload` is deliberately strict about names. The list must never advertise a
+      // spelling the capture command will refuse before it even reads the file.
+      .filter((stem) => WORKLOAD_NAME.test(stem))
+      .sort()
+  );
 }
 
 /** Every workload available here, built-in and user, a user file winning on name. */
 export async function listWorkloads(): Promise<WorkloadRow[]> {
   const found = new Map<string, WorkloadRow>();
   for (const stem of await yamlStems(config.dataPath('workloads'))) {
-    const text = await readIfFile(config.dataPath('workloads', `${stem}.yaml`));
-    if (text === null) continue;
-    found.set(stem, {
-      name: stem,
-      description: parseWorkload(text, 'built-in').description,
-      source: 'built-in',
-    });
+    const file = config.dataPath('workloads', `${stem}.yaml`);
+    try {
+      const text = await readIfFile(file);
+      if (text === null) continue;
+      found.set(stem, {
+        name: stem,
+        description: parseWorkload(text, 'built-in').description,
+        source: 'built-in',
+      });
+    } catch (error) {
+      found.set(stem, {
+        name: stem,
+        description: `UNREADABLE — ${error instanceof Error ? error.message : 'workload could not be read'}`,
+        source: 'built-in',
+      });
+    }
   }
   const userDir = config.workloadDir();
   for (const stem of await yamlStems(userDir)) {
     const file = joinPath(userDir, `${stem}.yaml`);
-    const text = await readIfFile(file);
-    if (text === null) continue;
     // Per file, as the preset catalogue is: one half-written workload must not take out
     // the list, and a broken one is named rather than hidden.
-    let description: string;
     try {
-      description = parseWorkload(text, file).description;
+      const text = await readIfFile(file);
+      if (text === null) continue;
+      found.set(stem, {
+        name: stem,
+        description: parseWorkload(text, file).description,
+        source: file,
+      });
     } catch (error) {
-      description = `UNREADABLE — ${error instanceof Error ? error.message : String(error)}`;
+      found.set(stem, {
+        name: stem,
+        description: `UNREADABLE — ${error instanceof Error ? error.message : 'workload could not be read'}`,
+        source: file,
+      });
     }
-    found.set(stem, { name: stem, description, source: file });
   }
   return [...found.keys()].sort().map((key) => found.get(key) as WorkloadRow);
 }
@@ -396,6 +416,24 @@ function resolve(text: string, context: Context): string {
     out = out.replaceAll(`{{${key}}}`, value);
   }
   return out;
+}
+
+/** Browser captures use an origin only: metadata paths, queries and userinfo are not evidence. */
+function navigationOrigin(rootUrl: string): string {
+  if (rootUrl === '') return '';
+  try {
+    const parsed = new URL(rootUrl);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('not HTTP(S)');
+    return parsed.origin;
+  } catch {
+    throw new PreflightError('capture requires a valid HTTP(S) workspace origin');
+  }
+}
+
+/** Preserve a workload's valid URL shape instead of treating every target as a root path. */
+function navigationTarget(root: string, target: string, context: Context): string {
+  const resolved = resolve(target, context);
+  return root === '' ? resolved : new URL(resolved, root).toString();
 }
 
 /** Resolved context values that must not survive into an artifact, keyed off their names. */
@@ -461,7 +499,7 @@ async function apply(
   const timeout = step.timeoutMs || DEFAULT_TIMEOUT_MS;
   switch (step.action) {
     case 'goto':
-      await driver.goto(root + resolve(step.target, context), timeout);
+      await driver.goto(navigationTarget(root, step.target, context), timeout);
       return null;
     case 'click':
       await driver.click(step.target, timeout);
@@ -485,6 +523,13 @@ async function apply(
       return file;
     }
   }
+}
+
+/** Playwright call logs repeat navigation URLs, which cannot become attachable evidence. */
+function failureMessage(action: Action, error: unknown): string {
+  if (action !== 'goto') return error instanceof Error ? error.message : String(error);
+  const message = error instanceof Error ? error.message : String(error);
+  return /timeout/iu.test(message) ? 'navigation timed out' : 'navigation failed';
 }
 
 /** The banner narrates the video and the settle paces it; neither may fail a step. */
@@ -611,7 +656,7 @@ export async function run(
 ): Promise<Manifest> {
   const out = pathExpandUser(dest);
   const stepsDir = path.join(out, 'steps');
-  const root = (context.root_url ?? '').replace(/\/+$/u, '');
+  let root: string;
   const startedAt = stamp();
   const startedMs = Date.now();
 
@@ -626,6 +671,7 @@ export async function run(
 
   try {
     await fs.mkdir(stepsDir, { recursive: true });
+    root = navigationOrigin(context.root_url ?? '');
     try {
       for (const [i, step] of workload.steps.entries()) {
         const rec: StepRecord = {
@@ -682,7 +728,7 @@ export async function run(
           }
         } catch (error) {
           rec.outcome = 'failed';
-          rec.error = error instanceof Error ? error.message : String(error);
+          rec.error = failureMessage(step.action, error);
           failed = rec;
           // The page as it looked at the moment of failure is the single most useful
           // artifact a drifted workload can leave behind.
@@ -848,17 +894,25 @@ async function identifiesHoustonBundle(dest: string): Promise<boolean> {
  * evidence writer can claim a fresh root with exclusive creation.
  */
 export async function prepareBundleRoot(dest: string, force: boolean): Promise<void> {
-  const state = await bundleRoot(dest);
+  const state = await checkedBundleRoot(dest, force);
   if (state === 'missing') return;
+  if (state === 'empty') {
+    await fs.rmdir(dest);
+    return;
+  }
+  await fs.rm(dest, { recursive: true, force: false });
+}
+
+/** Check whether an output may be replaced without changing it. */
+async function checkedBundleRoot(dest: string, force: boolean): Promise<BundleRoot> {
+  const state = await bundleRoot(dest);
+  if (state === 'missing') return state;
   if (state === 'unsafe') {
     throw new ConflictError(
       `${dest} is not a plain directory; capture will not replace it, even with --force.`,
     );
   }
-  if (state === 'empty') {
-    await fs.rmdir(dest);
-    return;
-  }
+  if (state === 'empty') return state;
   if (!force) {
     throw new ConflictError(
       `${dest} already contains files. Pass a different --bundle, or --force to replace an ` +
@@ -870,7 +924,7 @@ export async function prepareBundleRoot(dest: string, force: boolean): Promise<v
       `${dest} is not an identifiable Houston evidence bundle; --force never removes arbitrary files.`,
     );
   }
-  await fs.rm(dest, { recursive: true, force: false });
+  return state;
 }
 
 /** Create a sibling so a failed evidence write cannot leave a partial bundle root behind. */
@@ -953,9 +1007,11 @@ export async function captureBundle(
     const meta = await readMeta(target);
     const out =
       dest === '' ? joinPath(config.reportsDir(), target, workloadName) : pathExpandUser(dest);
-    await prepareBundleRoot(out, force);
+    // Validate `--force` before opening a browser, but leave a prior bundle intact until that
+    // browser has completed its optional-dependency and Chromium preflight.
+    await checkedBundleRoot(out, force);
     const context: Context = {
-      root_url: externalUrl(meta),
+      root_url: navigationOrigin(externalUrl(meta)),
       admin_user: config.ADMIN_USERNAME,
       admin_pass: adminPass(meta),
     };
@@ -967,6 +1023,14 @@ export async function captureBundle(
     } catch (error) {
       // A driver that never started has no useful evidence. Delete its private staging directory
       // so a failed optional-dependency preflight cannot leave raw browser output behind.
+      await fs.rm(stage, { recursive: true, force: true }).catch(() => undefined);
+      throw error;
+    }
+
+    try {
+      await prepareBundleRoot(out, force);
+    } catch (error) {
+      await finishQuietly(driver);
       await fs.rm(stage, { recursive: true, force: true }).catch(() => undefined);
       throw error;
     }
@@ -1006,6 +1070,7 @@ export async function captureBundle(
       failure.details.bundle = bundle.path;
       if (capture !== null)
         failure.details.manifest = path.join(bundle.path, 'capture', 'manifest.json');
+      failure.message = `${failure.message} Partial capture bundle retained at ${bundle.path}.`;
       throw failure;
     }
     payload.capture = manifest;
@@ -1043,6 +1108,7 @@ interface PwElement {
     callback: (target: MaskTarget, color: string) => boolean,
     color: string,
   ): Promise<boolean>;
+  waitForElementState(state: 'visible', options: { timeout: number }): Promise<void>;
   fill(value: string, options: { timeout: number }): Promise<void>;
   dispose(): Promise<void>;
 }
@@ -1122,6 +1188,10 @@ function bannerScript(text: string): string {
  */
 interface MaskTarget {
   isConnected: boolean;
+  assignedSlot: MaskTarget | null;
+  parentElement: MaskTarget | null;
+  getRootNode(): { host?: MaskTarget };
+  matches(selector: string): boolean;
   scrollIntoView(options: { block: string; inline: string }): void;
   getBoundingClientRect(): { left: number; top: number; width: number; height: number };
 }
@@ -1134,6 +1204,7 @@ interface MaskCover {
     top: string;
     width: string;
     height: string;
+    pointerEvents: string;
   };
 }
 interface MaskState {
@@ -1145,13 +1216,40 @@ interface MaskState {
 function installSecretMask(target: MaskTarget, color: string): boolean {
   const browser = globalThis as unknown as {
     __houstonSecretMasks__?: MaskState;
+    innerHeight: number;
+    innerWidth: number;
     document: {
       createElement(tag: string): MaskCover;
       documentElement: { appendChild(cover: MaskCover): void };
+      elementFromPoint(left: number, top: number): MaskCover | null;
+      fullscreenElement: MaskTarget | null;
     };
     requestAnimationFrame(callback: () => void): void;
   };
+  const maskingUnproved = (): boolean => {
+    if (!target.isConnected) return true;
+    let current: MaskTarget | null = target;
+    while (current !== null) {
+      try {
+        if (
+          current === browser.document.fullscreenElement ||
+          current.matches(':fullscreen') ||
+          current.matches(':modal') ||
+          current.matches(':popover-open')
+        )
+          return true;
+      } catch {
+        // If the browser cannot answer whether this ancestry is top-layer, it cannot prove a
+        // document-local cover will be visible over the control.
+        return true;
+      }
+      current = current.assignedSlot ?? current.parentElement ?? current.getRootNode().host ?? null;
+    }
+    return false;
+  };
+  if (maskingUnproved()) return false;
   target.scrollIntoView({ block: 'center', inline: 'center' });
+  if (maskingUnproved()) return false;
   const state = (browser.__houstonSecretMasks__ ??= { entries: [], running: false });
   let entry = state.entries.find((item) => item.target === target);
   if (entry === undefined) {
@@ -1184,6 +1282,17 @@ function installSecretMask(target: MaskTarget, color: string): boolean {
   };
   position();
   if (entry.cover.style.display !== 'block') return false;
+  const rect = target.getBoundingClientRect();
+  const left = rect.left + rect.width / 2;
+  const top = rect.top + rect.height / 2;
+  if (left < 0 || top < 0 || left >= browser.innerWidth || top >= browser.innerHeight) return false;
+  const previousPointerEvents = entry.cover.style.pointerEvents;
+  entry.cover.style.pointerEvents = 'auto';
+  try {
+    if (browser.document.elementFromPoint(left, top) !== entry.cover) return false;
+  } finally {
+    entry.cover.style.pointerEvents = previousPointerEvents;
+  }
   if (!state.running) {
     state.running = true;
     const tick = (): void => {
@@ -1288,12 +1397,19 @@ class PlaywrightDriver implements Driver {
       // could put the value in a replacement input that has never received a cover.
       let element: PwElement | undefined;
       try {
-        element = await this.page.locator(selector).elementHandle({ timeout: timeoutMs });
+        const deadline = Date.now() + timeoutMs;
+        const remaining = (): number => {
+          const milliseconds = deadline - Date.now();
+          if (milliseconds <= 0) throw new Error('masked fill deadline elapsed');
+          return milliseconds;
+        };
+        element = await this.page.locator(selector).elementHandle({ timeout: remaining() });
+        await element.waitForElementState('visible', { timeout: remaining() });
         if (!(await element.evaluate(installSecretMask, SECRET_MASK_COLOR))) {
           throw new Error('visual mask unavailable');
         }
         this.secretTargets.add(selector);
-        await element.fill(value, { timeout: timeoutMs });
+        await element.fill(value, { timeout: remaining() });
       } catch {
         throw new PreflightError(
           `capture will not fill a known secret into '${selector}' because its visual mask or masked fill could not be completed`,
@@ -1315,7 +1431,7 @@ class PlaywrightDriver implements Driver {
   }
 
   async screenshot(file: string): Promise<void> {
-    await this.page.screenshot({ path: file, fullPage: true });
+    await this.page.screenshot({ path: file, fullPage: false });
   }
 
   async settle(ms: number): Promise<void> {

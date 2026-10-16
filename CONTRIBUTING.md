@@ -61,7 +61,7 @@ The browser suite drives the real GUI in Chromium:
 
 ```bash
 npx playwright install chromium                   # once
-yarn test:browser                                 # exactly 218 tests must pass
+yarn test:browser                                 # exactly 220 tests must pass
 ```
 
 Inside Jest the sandbox is automatic: `test/testsetup.ts` gives every spec file a fresh
@@ -161,9 +161,9 @@ runtime.
 ```yaml
 name: my-scenario
 description: What this reproduces.
-env:                       # merged into the rocketchat service
-  OVERWRITE_SETTING_Some_Setting: "true"
-services:                  # optional extra compose services
+env: # merged into the rocketchat service
+  OVERWRITE_SETTING_Some_Setting: 'true'
+services: # optional extra compose services
   my-sidecar: { image: some/image:tag }
 depends_on: [my-sidecar]
 ```
@@ -214,21 +214,21 @@ and the dark theme. Never stop a `serve` you did not start.
 
 ## The gates
 
-| Command | Proves | CI |
-|---|---|---|
-| `yarn lint` | eslint, including the seam fences and the strict boolean rule | yes |
-| `yarn typecheck` | `tsc --noEmit` over the whole tree | yes |
-| `yarn test --ci` | the Jest suite, zero skips, at least `FLOOR` tests | yes |
-| `yarn depcruise` | every module is ranked, and no import goes sideways or up | yes |
-| `yarn depcruise:selftest` | the layer gate still sees: it plants a cycle and a seam bypass and requires both reported | yes |
-| `yarn format` | Prettier, check only | |
-| `yarn test:zero-skips:selftest` | the zero-skips reporter still catches each defect it claims to | |
-| `yarn test:browser` | the GUI in Chromium, in-process: exactly 218 pass, none skip | |
-| `yarn verify:gui-hash` | `data/webui` is byte for byte the pinned GUI | |
-| `yarn test:process-contracts` | the process and Docker seams' contracts, run in band | |
-| `yarn test:timing` | sign-in takes as long for an unknown name as for a real one | |
-| `yarn lint:truthiness` | the lint rule that protects the three-state `Answer` is live | |
-| `yarn skill:check` | the skill file matches the build (also covered inside `yarn test --ci`) | |
+| Command                         | Proves                                                                                    | CI  |
+| ------------------------------- | ----------------------------------------------------------------------------------------- | --- |
+| `yarn lint`                     | eslint, including the seam fences and the strict boolean rule                             | yes |
+| `yarn typecheck`                | `tsc --noEmit` over the whole tree                                                        | yes |
+| `yarn test --ci`                | the Jest suite, zero skips, at least `FLOOR` tests                                        | yes |
+| `yarn depcruise`                | every module is ranked, and no import goes sideways or up                                 | yes |
+| `yarn depcruise:selftest`       | the layer gate still sees: it plants a cycle and a seam bypass and requires both reported | yes |
+| `yarn format`                   | Prettier, check only                                                                      |     |
+| `yarn test:zero-skips:selftest` | the zero-skips reporter still catches each defect it claims to                            |     |
+| `yarn test:browser`             | the GUI in Chromium, in-process: exactly 220 pass, none skip                              |     |
+| `yarn verify:gui-hash`          | `data/webui` is byte for byte the pinned GUI                                              |     |
+| `yarn test:process-contracts`   | the process and Docker seams' contracts, run in band                                      |     |
+| `yarn test:timing`              | sign-in takes as long for an unknown name as for a real one                               |     |
+| `yarn lint:truthiness`          | the lint rule that protects the three-state `Answer` is live                              |     |
+| `yarn skill:check`              | the skill file matches the build (also covered inside `yarn test --ci`)                   |     |
 
 CI (`.github/workflows/ci.yml`) runs the first five on Node 24 and 26. **Before a merge,
 run all of them.**

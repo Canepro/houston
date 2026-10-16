@@ -765,16 +765,17 @@ describe('the bundle', () => {
   });
 
   it('renders a capture instruction the shell parses as the original arguments', () => {
-    const name = "e7-public's\ncapture";
-    const readme = renderMarkdown({ repro: { name, rc_version: '8.5.1' } });
+    for (const name of ["e7-public's\ncapture", "e7-public's\\pipe|`tick"]) {
+      const readme = renderMarkdown({ repro: { name, rc_version: '8.5.1' } });
 
-    expect(captureInstructionArgs(readme)).toEqual([
-      'capture',
-      '--name',
-      name,
-      '--workload',
-      'smoke',
-    ]);
+      expect(captureInstructionArgs(readme)).toEqual([
+        'capture',
+        '--name',
+        name,
+        '--workload',
+        'smoke',
+      ]);
+    }
   });
 
   it('redacts credentials in a Kubernetes values artifact', async () => {

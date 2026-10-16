@@ -31,7 +31,12 @@ function close(server: Server): Promise<void> {
 }
 
 /** Decode the simple non-interlaced 8-bit PNG Playwright writes, including its row filters. */
-function pngPixels(bytes: Buffer): { channels: number; data: Buffer } {
+function pngPixels(bytes: Buffer): {
+  width: number;
+  height: number;
+  channels: number;
+  data: Buffer;
+} {
   if (!bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE))
     throw new Error('expected a PNG frame');
   let width = 0;
@@ -83,7 +88,7 @@ function pngPixels(bytes: Buffer): { channels: number; data: Buffer } {
       } else throw new Error(`unsupported PNG filter ${String(filter)}`);
     }
   }
-  return { channels, data: decoded };
+  return { width, height, channels, data: decoded };
 }
 
 /** WebM's YUV conversion shifts the mask RGB values slightly when the review page decodes it. */
@@ -170,6 +175,10 @@ describe('scripted capture in a real browser', () => {
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       response.end(`<!doctype html>
 <html><body>
+  <style>
+    body { margin: 0; min-height: 2600px; }
+    #sign-in { margin: 1800px 0 0 80px; }
+  </style>
   <form id="sign-in">
     <label>Credential <input id="credential" name="password"></label>
     <button id="submit" type="submit">Sign in</button>
@@ -239,6 +248,10 @@ describe('scripted capture in a real browser', () => {
     });
     expect(fs.existsSync(path.join(dest, 'video.webm'))).toBe(true);
     const frame = fs.readFileSync(path.join(dest, 'steps', 'step-02-fill.png'));
+    // A full-page image uses document coordinates while the recording uses viewport
+    // coordinates. The capture frame must stay a viewport image after the fill scrolls
+    // this tall document, so the same persistent cover protects both artifacts.
+    expect(pngPixels(frame).height).toBe(800);
     expect(countMaskPixels(frame)).toBeGreaterThan(500);
 
     // The PNG frame proves the browser page was masked. Play the retained WebM through a
@@ -310,6 +323,92 @@ describe('scripted capture in a real browser', () => {
     expect(manifestText).not.toContain(ADMIN_PASSWORD);
     expect(manifestText).not.toContain(LITERAL_PASSWORD);
   });
+
+  test('waits for an attached credential control to become visible within its one action deadline', async () => {
+    server = createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html>
+<input id="delayed-password" name="password" style="display:none">
+<script>
+  setTimeout(() => { document.getElementById('delayed-password').style.display = 'block'; }, 1500);
+</script>`);
+    });
+    await listen(server);
+    const address = server.address() as AddressInfo;
+    expect(address.address).toBe('127.0.0.1');
+    const origin = `http://127.0.0.1:${String(address.port)}`;
+    dest = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-capture-delayed-visible-'));
+    const driver = await browserDriver(origin, dest, [ADMIN_PASSWORD]);
+
+    const manifest = await run(
+      parseWorkload(
+        [
+          'steps:',
+          '  - goto: /',
+          '  - fill: "#delayed-password"',
+          '    value: "{{admin_pass}}"',
+          '    timeout_ms: 3000',
+        ].join('\n'),
+        'delayed visible fixture',
+      ),
+      driver,
+      dest,
+      { root_url: origin, admin_pass: ADMIN_PASSWORD },
+    );
+
+    expect(manifest.status).toBe('ok');
+    expect(manifest.privacy.masked_input_selectors).toEqual(['#delayed-password']);
+  });
+
+  test('refuses a native-modal credential control across a shadow boundary before it receives a secret', async () => {
+    let filled = false;
+    server = createServer((request, response) => {
+      if (request.url === '/filled') {
+        filled = true;
+        response.writeHead(204);
+        response.end();
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html>
+<dialog id="modal"><div id="modal-host"></div></dialog>
+<script>
+  const input = document.getElementById('modal-host').attachShadow({mode: 'open'}).appendChild(document.createElement('input'));
+  input.name = 'password';
+  input.addEventListener('input', () => { void fetch('/filled'); });
+  document.getElementById('modal').showModal();
+</script>`);
+    });
+    await listen(server);
+    const address = server.address() as AddressInfo;
+    expect(address.address).toBe('127.0.0.1');
+    const origin = `http://127.0.0.1:${String(address.port)}`;
+    dest = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-capture-modal-'));
+    const driver = await browserDriver(origin, dest, [ADMIN_PASSWORD]);
+
+    await expect(
+      run(
+        parseWorkload(
+          [
+            'steps:',
+            '  - goto: /',
+            '  - fill: "#modal-host >> input[name=password]"',
+            '    value: "{{admin_pass}}"',
+          ].join('\n'),
+          'native modal fixture',
+        ),
+        driver,
+        dest,
+        { root_url: origin, admin_pass: ADMIN_PASSWORD },
+      ),
+    ).rejects.toThrow(/capture stopped at step 1/u);
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(filled).toBe(false);
+    const manifest = fs.readFileSync(path.join(dest, 'manifest.json'), 'utf8');
+    expect(manifest).not.toContain(ADMIN_PASSWORD);
+  });
+
   test('honors a goto deadline and retains its honest failed capture', async () => {
     server = createServer((_request, response) => {
       setTimeout(() => {
@@ -321,20 +420,39 @@ describe('scripted capture in a real browser', () => {
     const address = server.address() as AddressInfo;
     expect(address.address).toBe('127.0.0.1');
     const origin = `http://127.0.0.1:${String(address.port)}`;
+    const urlMarker = 'capture-url-marker-987';
+    const unsafeRoot = `http://capture-user:${urlMarker}@127.0.0.1:${String(
+      address.port,
+    )}/customer/${urlMarker}?ticket=${urlMarker}`;
     dest = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-capture-timeout-'));
     const driver = await browserDriver(origin, dest);
-    await expect(
-      run(parseWorkload('steps:\n  - goto: /slow\n    timeout_ms: 50\n', 'fixture'), driver, dest, {
-        root_url: origin,
-      }),
-    ).rejects.toThrow(/Timeout 50ms exceeded/u);
+    let failure: unknown;
+    try {
+      await run(
+        parseWorkload('steps:\n  - goto: /slow\n    timeout_ms: 50\n', 'fixture'),
+        driver,
+        dest,
+        {
+          root_url: unsafeRoot,
+        },
+      );
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain('navigation timed out');
+    expect((failure as Error).message).not.toContain(urlMarker);
     const manifest = JSON.parse(fs.readFileSync(path.join(dest, 'manifest.json'), 'utf8')) as {
       status: string;
       failure_kind: string;
-      failed_step: { action: string };
+      failed_step: { action: string; error: string };
     };
     expect(manifest.status).toBe('failed');
     expect(manifest.failure_kind).toBe('step');
     expect(manifest.failed_step.action).toBe('goto');
+    expect(manifest.failed_step.error).toBe('navigation timed out');
+    const retained = fs.readFileSync(path.join(dest, 'manifest.json'), 'utf8');
+    expect(retained).not.toContain(urlMarker);
+    expect(fs.readFileSync(path.join(dest, 'trace.json'), 'utf8')).not.toContain(urlMarker);
   });
 });
