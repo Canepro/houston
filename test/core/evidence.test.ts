@@ -1595,8 +1595,32 @@ describe('the bundle', () => {
         '    image: example',
         '    entrypoint: [python]',
         '    command: [-u, app.py, -p, production]',
+        '  mysqlattached:',
+        '    image: example',
+        '    command: mysql -uroot -pAttachedSentinel',
+        '  redis:',
+        '    image: example',
+        '    command: [redis-cli, -a, RedisSentinel, PING]',
+        '  openssl:',
+        '    image: example',
+        '    command: openssl rsa -in key.pem -passin pass:PassinSentinel',
+        '  curlsplit:',
+        '    image: example',
+        '    entrypoint: [curl]',
+        '    command: [-u, "admin:CurlPairSentinel", https://x]',
+        '  jsonsplit:',
+        '    image: example',
+        `    environment: { SPEC: '{"command":["mongosh"],"args":["-u","root","-p","JsonPairSentinel"]}' }`,
+        '  copyarchive:',
+        '    image: example',
+        '    command: cp -a production /dst',
         'x-copy: QuotedSentinel',
         'x-split-copy: SplitSentinel',
+        'x-dup-attached: AttachedSentinel',
+        'x-dup-redis: RedisSentinel',
+        'x-dup-ssl: PassinSentinel',
+        'x-dup-curl: CurlPairSentinel',
+        'x-dup-json: JsonPairSentinel',
         'x-env: production',
         'x-escaped-copy: EscapedWordSentinel',
         'x-backtick-copy: BacktickSentinel',
@@ -1631,6 +1655,11 @@ describe('the bundle', () => {
       'EscapedWordSentinel',
       'SplitSentinel',
       'ExeSentinel',
+      'AttachedSentinel',
+      'RedisSentinel',
+      'PassinSentinel',
+      'CurlPairSentinel',
+      'JsonPairSentinel',
     ]) {
       expect(compose).not.toContain(sentinel);
     }
@@ -1658,6 +1687,8 @@ describe('the bundle', () => {
     // in both keys, while python's split command stays readable.
     expect(pick(parsed, 'services', 'split', 'entrypoint')).toBe('********');
     expect(pick(parsed, 'services', 'split', 'command')).toBe('********');
+    // `-a` is a password only for redis-cli; `cp -a` keeps its argument readable.
+    expect(pick(parsed, 'services', 'copyarchive', 'command')).toBe('cp -a production /dst');
     expect(pick(parsed, 'services', 'pysplit', 'command')).toEqual([
       '-u',
       'app.py',

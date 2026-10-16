@@ -38,7 +38,9 @@ import { ValidationError } from '../lib/errors';
 import { isTruthy, quotedText, toText } from '../lib/format';
 import { pathExpandUser } from '../lib/home';
 import {
+  argumentCredentials,
   argumentListKey,
+  argumentWords,
   authorizationCredentials,
   authorizationHeaders,
   commandCarriesCredential,
@@ -48,6 +50,7 @@ import {
   healthcheckKey,
   HTTP_USER_PREFIX,
   httpUsers,
+  shortOptionPasswords,
   userArgument,
   userPasswordClient,
   valueTakingCredentialFlag,
@@ -722,13 +725,6 @@ function redactArtifactValue(
   return out;
 }
 
-/** The words of a command, entrypoint, args or healthcheck value, a string split at spaces. */
-function argumentWords(value: unknown): string[] {
-  if (typeof value === 'string') return value.split(/\s+/u).filter((word) => word !== '');
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is string => typeof item === 'string');
-}
-
 /** Whether a command, entrypoint, args or healthcheck value names a credential flag. */
 function argumentsCarryCredential(value: unknown): boolean {
   if (typeof value === 'string') return commandCarriesCredential(value);
@@ -737,6 +733,7 @@ function argumentsCarryCredential(value: unknown): boolean {
   return (
     words.some((word) => credentialFlagWord(word) || commandCarriesCredential(word)) ||
     (words.includes('-p') && userPasswordClient(words) && words.some(userArgument)) ||
+    shortOptionPasswords(words).length > 0 ||
     httpUserPassword(words) ||
     authorizationHeaders(words).length > 0
   );
@@ -850,6 +847,7 @@ function discoverCommandText(text: string, add: (value: string) => void, depth =
       spellings(user.value, user.attached ? word.raw.replace(HTTP_USER_PREFIX, '') : word.raw);
       spellings(user.password);
     }
+    for (const password of shortOptionPasswords(texts)) spellings(password);
     // `-H 'Authorization: Bearer token'`: the header's credential, not the whole header line.
     for (const header of authorizationHeaders(command.map((word) => word.text))) {
       for (const credential of authorizationCredentials(header)) spellings(credential);
@@ -900,6 +898,9 @@ function discoverArtifactSecrets(
     // too. Copies may omit the scheme, including copies encountered before the header.
     const authorization = /^(?:Bearer|Basic)[ \t]+(\S+)$/iu.exec(text);
     if (authorization?.[1] !== undefined) add(authorization[1]);
+    // OpenSSL's `pass:secret` holds the passphrase after its prefix; a copy may omit it.
+    const passphrase = /^pass:(.+)$/su.exec(text);
+    if (passphrase?.[1] !== undefined) add(passphrase[1]);
     // Numeric text is still a credential, but its digits must not erase ports or replica
     // suffixes. Use the same core scalar parser as the artifact, including hex and .inf.
     const numeric = /^[-+.0-9]/u.test(text)
@@ -929,13 +930,8 @@ function discoverArtifactSecrets(
     );
     const command = [...siblings, ...strings];
     const userGiven = userPasswordClient(command) && command.some(userArgument);
-    for (const user of httpUsers(words)) {
-      add(user.value);
-      add(user.password);
-    }
-    for (const header of authorizationHeaders(words)) {
-      for (const credential of authorizationCredentials(header)) add(credential);
-    }
+    // Joined with its siblings, so `command: [curl]` and `args: [-u, user:pw]` read as one.
+    for (const credential of argumentCredentials([...siblings, ...words])) add(credential);
     for (let index = 0; index < items.length; index += 1) {
       const flag = items[index];
       if (!YAML.isScalar(flag) || typeof flag.value !== 'string') continue;

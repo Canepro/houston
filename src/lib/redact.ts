@@ -181,6 +181,7 @@ export function commandCarriesCredential(text: string): boolean {
   if (words.some(credentialFlagWord)) return true;
   return (
     (words.includes('-p') && userPasswordClient(words) && words.some(userArgument)) ||
+    shortOptionPasswords(words).length > 0 ||
     httpUserPassword(words) ||
     authorizationHeaders(words).length > 0
   );
@@ -288,6 +289,55 @@ export function userPasswordClient(words: readonly string[]): boolean {
 /** Whether one argument names a user: `-u x`, `-ux`, `--user[=x]`, `--username[=x]`. */
 export function userArgument(word: string): boolean {
   return /^(?:-u.*|--user(?:name)?(?:=.*)?)$/u.test(word);
+}
+
+/**
+ * The passwords a client's short option carries: MySQL's attached `-pS3cret`, the only form in
+ * which its `-p` takes a value, and `redis-cli -a S3cret`. Elsewhere `-pX` and `-a` mean other
+ * things (`mkdir -pv`, `cp -a`), so the program decides.
+ */
+export function shortOptionPasswords(words: readonly string[]): string[] {
+  const mysql = userPasswordClient(words);
+  const redis = words.some((word) =>
+    /^(?:redis|valkey|keydb)-cli[\w.-]*$/u.test(word.split(/[/\\]/u).pop() ?? ''),
+  );
+  const values: string[] = [];
+  words.forEach((word, index) => {
+    const attached = /^-p(.+)$/su.exec(word)?.[1];
+    if (mysql && attached !== undefined) values.push(attached);
+    const next = words[index + 1] ?? '';
+    if (redis && word === '-a' && next !== '') values.push(next);
+  });
+  return values;
+}
+
+/** The words of a command, entrypoint, args or healthcheck value, a string split at spaces. */
+export function argumentWords(value: unknown): string[] {
+  if (typeof value === 'string') return value.split(/\s+/u).filter((word) => word !== '');
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === 'string');
+}
+
+/**
+ * Every credential value one flat argument list carries: the value after a credential flag or
+ * in `--flag=value`, a client's short password option, `curl -u user:password` and an
+ * `Authorization:` header's credential.
+ */
+export function argumentCredentials(words: readonly string[]): string[] {
+  const userGiven = userPasswordClient(words) && words.some(userArgument);
+  const values = shortOptionPasswords(words);
+  for (const user of httpUsers(words)) values.push(user.value, user.password);
+  for (const header of authorizationHeaders(words))
+    values.push(...authorizationCredentials(header));
+  words.forEach((word, index) => {
+    const equals = word.indexOf('=');
+    if (equals > 0 && valueTakingCredentialFlag(word.slice(0, equals))) {
+      values.push(word.slice(equals + 1));
+    }
+    const next = words[index + 1];
+    if (next !== undefined && credentialArgument(word, next, userGiven)) values.push(next);
+  });
+  return values.filter((value) => value !== '');
 }
 
 /**
@@ -518,6 +568,7 @@ export function discoverTextSecrets(
       // In an argument array, the item after a credential flag is its value.
       const items = argv && open === '[' ? itemsOf(at) : [];
       const userGiven = userPasswordClient(items) && items.some(userArgument);
+      for (const password of shortOptionPasswords(items)) add(password);
       for (const user of httpUsers(items)) {
         add(user.value);
         add(user.password);
@@ -556,6 +607,22 @@ export function discoverTextSecrets(
       }
     };
     walk(jsonToken(JSON_SPACE, text, 0).length, false, depth);
+    // `{"command": ["mongosh"], "args": ["-u", "root", "-p", "x"]}` splits one command over two
+    // members; read them joined as well. A duplicate member is read in the walk above.
+    const joined = (value: unknown, level: number): void => {
+      if (level > 100 || typeof value !== 'object' || value === null) return;
+      const members = Array.isArray(value) ? [] : Object.entries(value);
+      const lists = members.filter(([key]) => argumentListKey(key));
+      if (lists.length > 1) {
+        for (const credential of argumentCredentials(
+          lists.flatMap(([, item]) => argumentWords(item)),
+        ))
+          add(credential);
+      }
+      for (const item of Array.isArray(value) ? value : members.map(([, item]) => item))
+        joined(item, level + 1);
+    };
+    joined(JSON.parse(text), depth);
     return;
   }
   // Inspect a complete assignment's RHS before URL matching, so a JSON string ends its URL.
