@@ -350,8 +350,11 @@ async function yamlStems(dir: string): Promise<string[]> {
   let entries: string[];
   try {
     entries = await fs.readdir(dir);
-  } catch {
-    return [];
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw new ValidationError(
+      `cannot list workloads ${dir}: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
   return (
     entries
@@ -434,6 +437,22 @@ function navigationOrigin(rootUrl: string): string {
 function navigationTarget(root: string, target: string, context: Context): string {
   const resolved = resolve(target, context);
   return root === '' ? resolved : new URL(resolved, root).toString();
+}
+
+/** Display the authored target without URL credentials; never rewrite the navigation input. */
+function recordedTarget(step: Step): string {
+  if (step.action !== 'goto') return step.target;
+  try {
+    const url = new URL(step.target, 'http://capture.invalid');
+    if (url.username === '' && url.password === '') return step.target;
+    url.username = '';
+    url.password = '';
+    return url.toString();
+  } catch {
+    // An invalid URL can still contain userinfo. Its navigation will fail with a generic
+    // error, and neither narration nor the retained partial manifest needs its raw bytes.
+    return REDACTED;
+  }
 }
 
 /** Resolved context values that must not survive into an artifact, keyed off their names. */
@@ -677,7 +696,7 @@ export async function run(
         const rec: StepRecord = {
           index: i,
           action: step.action,
-          target: step.target,
+          target: recordedTarget(step),
           outcome: 'ok',
           frame: null,
           ms: 0,
@@ -700,7 +719,7 @@ export async function run(
         // what it is doing while it does it.
         const banner = driver.banner?.bind(driver);
         const narration =
-          step.action === 'shot' ? '' : `step ${String(i)}: ${step.action} ${step.target}`;
+          step.action === 'shot' ? '' : `step ${String(i)}: ${step.action} ${rec.target}`;
         await quietly(
           banner === undefined
             ? undefined
@@ -1180,13 +1199,18 @@ function bannerScript(text: string): string {
 }
 
 /**
- * Install a document-local cover over a secret input before Playwright fills it.
- *
- * The cover stays above the target and follows layout changes, so it protects the real
- * browser video as well as a later PNG. `pointer-events: none` leaves the control usable.
- * Returning false refuses the fill before the secret reaches a page we cannot mask.
+ * Hide the resolved control itself and install a visible cover before Playwright fills it.
+ * The intrinsic hiding survives later top-layer moves and cover removal. Its style observer
+ * restores page edits in the mutation microtask, before paint, rather than detecting a leak
+ * after a screenshot or after video frames have already been recorded.
+ * Returning false refuses the fill before the secret reaches a control we cannot protect.
  */
 interface MaskTarget {
+  style: {
+    setProperty(name: string, value: string, priority: string): void;
+    getPropertyValue(name: string): string;
+    getPropertyPriority(name: string): string;
+  };
   isConnected: boolean;
   assignedSlot: MaskTarget | null;
   parentElement: MaskTarget | null;
@@ -1225,6 +1249,17 @@ function installSecretMask(target: MaskTarget, color: string): boolean {
       fullscreenElement: MaskTarget | null;
     };
     requestAnimationFrame(callback: () => void): void;
+    getComputedStyle(target: MaskTarget): {
+      opacity: string;
+      transitionProperty: string;
+      animationName: string;
+    };
+    MutationObserver: new (callback: () => void) => {
+      observe(
+        target: MaskTarget,
+        options: { attributes: boolean; attributeFilter: string[] },
+      ): void;
+    };
   };
   const maskingUnproved = (): boolean => {
     if (!target.isConnected) return true;
@@ -1293,6 +1328,34 @@ function installSecretMask(target: MaskTarget, color: string): boolean {
   } finally {
     entry.cover.style.pointerEvents = previousPointerEvents;
   }
+  // Opacity hides the whole native control, including its text, caret and internal shadow
+  // content, without changing its value, focusability or Playwright's visibility predicate.
+  // Inline !important defeats author CSS and animation; disabling transitions prevents a
+  // page style reset from animating a previously visible value back towards zero opacity.
+  const properties = [
+    ['transition', 'none'],
+    ['animation', 'none'],
+    ['opacity', '0'],
+  ] as const;
+  const hide = (): void => {
+    for (const [name, value] of properties) {
+      if (
+        target.style.getPropertyValue(name) !== value ||
+        target.style.getPropertyPriority(name) !== 'important'
+      )
+        target.style.setProperty(name, value, 'important');
+    }
+  };
+  hide();
+  const computed = browser.getComputedStyle(target);
+  if (
+    computed.opacity !== '0' ||
+    computed.transitionProperty !== 'none' ||
+    computed.animationName !== 'none'
+  )
+    return false;
+  const observer = new browser.MutationObserver(hide);
+  observer.observe(target, { attributes: true, attributeFilter: ['style'] });
   if (!state.running) {
     state.running = true;
     const tick = (): void => {

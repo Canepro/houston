@@ -93,8 +93,9 @@ const ROOT = path.resolve(__dirname, '..');
 // public URL plus byte-preserved cleanup rendering, artifact URL and scalar redaction,
 // metadata-only Docker records, legacy catalogue uncertainty, and provisional licensing.
 // Capture and its shell-roundtrip contract add twenty-three cases; seven repair regressions
-// bring the collection-only measured total to 4,570 (237 files, no test bodies executed).
-const FLOOR = 4570;
+// bring the total to 4,570. Workload-directory refusal and cleanup-fence regressions bring
+// the collection-only measured total to 4,572 (237 files, no test bodies executed).
+const FLOOR = 4572;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

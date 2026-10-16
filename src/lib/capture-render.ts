@@ -106,10 +106,10 @@ export function renderCaptureSection(value: unknown): string[] {
   );
   if (masks.length > 0) {
     lines.push(
-      `Houston covered known secret input${masks.length === 1 ? '' : 's'} ` +
+      `Houston hid known secret input${masks.length === 1 ? '' : 's'} ` +
         `(${masks.map((selector) => `\`${selector}\``).join(', ')}) before Playwright filled ${
           masks.length === 1 ? 'it' : 'them'
-        }. The retained PNG frames and video show that cover instead of the direct control value.`,
+        }. A visible cover marks ordinary inputs. The control itself stays hidden if a later page change removes that cover or paints above it.`,
     );
   } else {
     lines.push(
@@ -250,6 +250,6 @@ export function renderMarkdown(payloadValue: unknown, captureValue?: unknown): s
   // The record owns shell quoting. A fenced block must keep that command byte for byte,
   // including the final newline a legacy workspace name can legitimately contain.
   const cleanup = toText(bag(payload.retention).cleanup);
-  if (cleanup !== '') lines.push('## Cleanup', '', '```bash', cleanup, '```', '');
+  if (cleanup !== '') lines.push('## Cleanup', '', ...commandFence(cleanup), '');
   return lines.join('\n');
 }

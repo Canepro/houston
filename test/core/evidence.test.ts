@@ -778,6 +778,21 @@ describe('the bundle', () => {
     }
   });
 
+  it('keeps backticks in the cleanup command inside one Markdown code fence', () => {
+    const command = cleanupCommand('legacy```name');
+    const readme = renderMarkdown({
+      repro: { name: 'legacy```name' },
+      retention: { cleanup: command },
+    });
+    const section = readme.split('## Cleanup\n\n')[1]!;
+    const lines = section.split('\n');
+    const opener = lines[0]!;
+    const fence = opener.slice(0, -4);
+    expect(opener.endsWith('bash')).toBe(true);
+    expect(fence.length).toBeGreaterThan(3);
+    expect(lines.slice(1, -1).join('\n')).toBe(command + '\n' + fence);
+  });
+
   it('redacts credentials in a Kubernetes values artifact', async () => {
     await workspaceNamed('e7-kubernetes', { runtime: 'kubernetes' });
     fs.unlinkSync(path.join(workspace('e7-kubernetes'), 'docker-compose.yml'));

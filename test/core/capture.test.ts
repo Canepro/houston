@@ -151,7 +151,21 @@ describe('scripted browser capture', () => {
         }),
       ]),
     );
-    expect(rows.map((row) => row.name)).not.toEqual(expect.arrayContaining(['my flow', '.hidden']));
+    for (const invalid of ['my flow', '.hidden'])
+      expect(rows.map((row) => row.name)).not.toContain(invalid);
+  });
+
+  test('reports an unreadable workload directory instead of presenting an empty user catalogue', async () => {
+    const previousHome = config.home();
+    const home = path.join(previousHome, 'unreadable-home');
+    fs.mkdirSync(home);
+    fs.writeFileSync(path.join(home, 'workloads'), 'not a directory');
+    process.env.HOUSTON_HOME = home;
+    try {
+      await expect(listWorkloads()).rejects.toThrow(/cannot list workloads.*ENOTDIR/u);
+    } finally {
+      process.env.HOUSTON_HOME = previousHome;
+    }
   });
 
   test('passes the requested and default navigation deadlines to the driver', async () => {

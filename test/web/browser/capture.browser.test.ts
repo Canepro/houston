@@ -7,6 +7,8 @@ import * as zlib from 'node:zlib';
 
 import { chromium } from 'playwright';
 
+import * as config from '../../../src/lib/config';
+
 import { browserDriver, parseWorkload, run, SECRET_MASK_COLOR } from '../../../src/core/capture';
 
 const ADMIN_PASSWORD = 'browser-capture-password-123';
@@ -109,6 +111,60 @@ function countMaskPixels(bytes: Buffer): number {
       count += 1;
   }
   return count;
+}
+
+/** Inspect every presented decoded frame, retaining samples and any green credential glyphs. */
+async function inspectVideo(dest: string): Promise<{ frames: number; green: number }> {
+  const reviewer = await chromium.launch();
+  try {
+    const page = await reviewer.newPage({ viewport: { width: 1280, height: 800 } });
+    const encoded = fs.readFileSync(path.join(dest, 'video.webm')).toString('base64');
+    await page.setContent(`<video src="data:video/webm;base64,${encoded}" muted></video>`);
+    const result = await page.evaluate(async () => {
+      const video = document.querySelector('video')!;
+      const canvas = document.createElement('canvas');
+      canvas.width = 1280;
+      canvas.height = 800;
+      const context = canvas.getContext('2d')!;
+      const samples: { frame: number; png: string }[] = [];
+      const counts: number[] = [];
+      if (video.readyState < 2)
+        await new Promise<void>((resolve, reject) => {
+          video.addEventListener('loadeddata', () => resolve(), { once: true });
+          video.addEventListener('error', () => reject(new Error('video decode failed')), {
+            once: true,
+          });
+        });
+      // Playwright records at 25 fps. Seek to the middle of each encoded frame, including
+      // the final frame, so background-tab presentation throttling cannot skip evidence.
+      for (let at = 0.02; at < video.duration; at += 0.04) {
+        await new Promise<void>((resolve) => {
+          video.addEventListener('seeked', () => resolve(), { once: true });
+          video.currentTime = at;
+        });
+        await new Promise<void>((resolve) => setTimeout(resolve, 40));
+        context.drawImage(video, 0, 0);
+        const pixels = context.getImageData(0, 0, 1280, 800).data;
+        let green = 0;
+        for (let pixel = 0; pixel < pixels.length; pixel += 4) {
+          if (pixels[pixel]! < 80 && pixels[pixel + 1]! > 90 && pixels[pixel + 2]! < 80) green += 1;
+        }
+        counts.push(green);
+        if (green > 0 || counts.length % 25 === 0)
+          samples.push({ frame: counts.length, png: canvas.toDataURL('image/png').split(',')[1]! });
+      }
+      return { counts, samples };
+    });
+    fs.writeFileSync(path.join(dest, 'decoded-frame-counts.json'), JSON.stringify(result.counts));
+    for (const sample of result.samples)
+      fs.writeFileSync(
+        path.join(dest, `decoded-${String(sample.frame)}.png`),
+        Buffer.from(sample.png, 'base64'),
+      );
+    return { frames: result.counts.length, green: Math.max(0, ...result.counts) };
+  } finally {
+    await reviewer.close();
+  }
 }
 
 describe('scripted capture in a real browser', () => {
@@ -407,6 +463,137 @@ describe('scripted capture in a real browser', () => {
     expect(filled).toBe(false);
     const manifest = fs.readFileSync(path.join(dest, 'manifest.json'), 'utf8');
     expect(manifest).not.toContain(ADMIN_PASSWORD);
+  });
+
+  test.each(['modal', 'shadow-popover', 'removed-cover'])(
+    'protects the same filled control through a late %s transition and style reset',
+    async (mode) => {
+      server = createServer((_request, response) => {
+        response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        response.end(`<!doctype html><style>
+        body { margin: 0; background: white; }
+        dialog { margin: 100px; padding: 20px; }
+        input { width: 600px; height: 70px; font: 40px monospace; color: rgb(0,160,0); background: white; }
+      </style>
+      <dialog id="container" open><div id="host"></div></dialog>
+      <button id="change">Change layer</button><p id="done" hidden>Changed</p>
+      <script>
+        const container = document.getElementById('container');
+        const host = document.getElementById('host');
+        const root = ${JSON.stringify(mode)} === 'shadow-popover' ? host.attachShadow({mode:'open'}) : host;
+        root.innerHTML = '<input name="token" style="width:600px;height:70px;font:40px monospace;color:rgb(0,160,0);background:white">';
+        const input = root.querySelector('input');
+        document.getElementById('change').onclick = () => {
+          if (!input.value) throw new Error('transition must follow fill');
+          input.removeAttribute('style');
+          input.style.cssText = 'width:600px;height:70px;font:40px monospace;color:rgb(0,160,0);background:white;opacity:1!important;transition:opacity 10s!important';
+          if (${JSON.stringify(mode)} === 'removed-cover') for (const el of document.querySelectorAll('div[aria-hidden="true"]')) {
+            const replacement = el.cloneNode(true);
+            replacement.style.background = 'transparent';
+            el.replaceWith(replacement);
+          }
+          if (${JSON.stringify(mode)} === 'modal') { container.close(); container.showModal(); }
+          if (${JSON.stringify(mode)} === 'shadow-popover') {
+            container.close(); container.removeAttribute('open');
+            container.setAttribute('popover', 'manual'); container.showPopover();
+          }
+          document.getElementById('done').hidden = false;
+        };
+      </script>`);
+      });
+      await listen(server);
+      const address = server.address() as AddressInfo;
+      expect(address.address).toBe('127.0.0.1');
+      const origin = `http://127.0.0.1:${String(address.port)}`;
+      dest = fs.mkdtempSync(path.join(os.tmpdir(), `houston-capture-lifetime-${mode}-`));
+      const driver = await browserDriver(origin, dest, [ADMIN_PASSWORD]);
+      const manifest = await run(
+        parseWorkload(
+          [
+            'steps:',
+            '  - goto: /',
+            '  - fill: "#host >> input[name=token]"',
+            '    value: "{{admin_pass}}"',
+            '  - click: "#change"',
+            '    settle_ms: 1000',
+            '  - shot: after-transition',
+          ].join('\n'),
+          'late transition fixture',
+        ),
+        driver,
+        dest,
+        { root_url: origin, admin_pass: ADMIN_PASSWORD },
+      );
+      expect(manifest.status).toBe('ok');
+      expect(manifest.privacy.masked_input_selectors).toEqual(['#host >> input[name=token]']);
+      const decoded = await inspectVideo(dest);
+      expect(decoded.frames).toBeGreaterThan(20);
+      expect(decoded.green).toBe(0);
+      const image = pngPixels(fs.readFileSync(path.join(dest, 'shots/shot-01.png')));
+      let green = 0;
+      for (let at = 0; at < image.data.length; at += image.channels) {
+        if (image.data[at]! < 80 && image.data[at + 1]! > 90 && image.data[at + 2]! < 80)
+          green += 1;
+      }
+      expect(green).toBe(0);
+    },
+  );
+
+  test('keeps authored goto userinfo out of real banners and persisted records while navigating the original URL', async () => {
+    const requests: string[] = [];
+    const user = 'authored-user-marker';
+    const password = 'authored-password-marker';
+    const expectedAuth = `Basic ${Buffer.from(`${user}:${password}`).toString('base64')}`;
+    let authorized = false;
+    server = createServer((request, response) => {
+      requests.push(request.url ?? '');
+      if (request.url === '/destination') {
+        if (request.headers.authorization !== expectedAuth) {
+          response.writeHead(401, { 'www-authenticate': 'Basic realm=fixture' });
+          response.end();
+          return;
+        }
+        authorized = true;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end('<!doctype html><p>Synthetic navigation target</p>');
+    });
+    await listen(server);
+    const address = server.address() as AddressInfo;
+    expect(address.address).toBe('127.0.0.1');
+    const origin = `http://127.0.0.1:${String(address.port)}`;
+    const target = origin.replace('http://', `http://${user}:${password}@`) + '/destination';
+    const source = ['steps:', '  - goto: /', `  - goto: "${target}"`, '  - shot: result'].join(
+      '\n',
+    );
+    dest = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-capture-authored-url-'));
+    const sourceFile = path.join(config.home(), 'synthetic-workload.yaml');
+    fs.writeFileSync(sourceFile, source);
+    const workload = parseWorkload(fs.readFileSync(sourceFile, 'utf8'), sourceFile);
+    const driver = await browserDriver(origin, dest);
+    const banner = driver.banner!.bind(driver);
+    const narrations: string[] = [];
+    driver.banner = async (text) => {
+      narrations.push(text);
+      await banner(text);
+      if (text.startsWith('step 1:')) {
+        await driver.settle!(500);
+        await driver.screenshot(path.join(dest, 'authored-url-banner.png'));
+      }
+    };
+    const manifest = await run(workload, driver, dest, { root_url: origin });
+    expect(manifest.status).toBe('ok');
+    expect(requests).toContain('/destination');
+    expect(authorized).toBe(true);
+    expect(workload.steps[1]!.target).toBe(target);
+    expect(fs.readFileSync(sourceFile, 'utf8')).toBe(source);
+    for (const text of [
+      JSON.stringify(narrations),
+      fs.readFileSync(path.join(dest, 'manifest.json'), 'utf8'),
+    ]) {
+      expect(text).not.toContain(user);
+      expect(text).not.toContain(password);
+    }
   });
 
   test('honors a goto deadline and retains its honest failed capture', async () => {

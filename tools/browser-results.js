@@ -7,8 +7,9 @@
 // Five retained-job History behaviors extend the 205 baseline.
 // Five seed GUI behaviors, twenty-two re-verification regressions, and one loopback capture
 // proof extend the 178 baseline.
-// Two capture privacy regressions extend the 218 baseline.
-const EXPECTED = 220;
+// Two initial capture privacy regressions extend 218; four lifetime and authored-URL
+// regressions bring the measured browser total to 224.
+const EXPECTED = 224;
 
 module.exports = (results) => {
   const wanted = process.env.BROWSER_GATE_PROBE === 'count' ? EXPECTED + 1 : EXPECTED;
