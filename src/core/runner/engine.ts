@@ -74,7 +74,8 @@ async function mutating(name: string, args: readonly string[]): Promise<number |
 }
 
 /**
- * `docker compose up -d`. `forceRecreate` names ONE service to rebuild anyway.
+ * `docker compose up -d`. `forceRecreate` names the services to rebuild anyway: one
+ * service, or a list, such as every Rocket.Chat replica of a multi-instance workspace.
  *
  * Compose decides what to recreate by comparing a config hash it stores on the
  * container. MEASURED that this is not always enough: an `env` apply interrupted
@@ -83,12 +84,16 @@ async function mutating(name: string, args: readonly string[]): Promise<number |
  * running configuration its own recorded state disagreed with, and no houston command
  * reconverged it.
  *
- * Scoped to one service on purpose. Recreating everything would take Mongo down with it
- * on every apply, and the whole reason this is safe is that it does not.
+ * Scoped to the named services on purpose. Recreating everything would take Mongo down
+ * with it on every apply, and the whole reason this is safe is that it does not. An empty
+ * name or list recreates nothing by force.
  */
 export async function up(
   name: string,
-  { pull = true, forceRecreate = '' } = {},
+  {
+    pull = true,
+    forceRecreate = [],
+  }: { pull?: boolean; forceRecreate?: string | readonly string[] } = {},
 ): Promise<number | null> {
   if (pull) {
     // A failed pull is deliberately non-fatal: cached images may satisfy `up -d` anyway
@@ -99,7 +104,9 @@ export async function up(
   // --force), containers of dropped services are cleaned up.
   const args = ['up', '-d', '--remove-orphans'];
   // --no-deps so rebuilding Rocket.Chat does not take its database with it.
-  if (forceRecreate) args.push('--force-recreate', '--no-deps', forceRecreate);
+  const services = typeof forceRecreate === 'string' ? [forceRecreate] : forceRecreate;
+  const named = services.filter((service) => service !== '');
+  if (named.length > 0) args.push('--force-recreate', '--no-deps', ...named);
   return await mutating(name, args);
 }
 

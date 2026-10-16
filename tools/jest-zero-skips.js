@@ -88,24 +88,46 @@ const ROOT = path.resolve(__dirname, '..');
 // The final re-verification's fixes: up resolving a name the actor may act on, a rebuild's
 // monitoring, pin and port, the operator password off every argv, the operator's memory and
 // PodMonitor, serve's shutdown, and the usage and wording answers it found untrue.
-// Eleven SSH access-handoff cases cover local and remote guidance, IPv6, option safety,
-// invalid local ports, wildcard binds, legacy Compose recovery, and the CLI's JSON and
-// human consumers. The legacy IPv6 repair adds one direct assertion for each renderer.
-// Four SSH regressions cover unused JSON tunnel overrides, Compose instance forwards, and
-// Kubernetes replica counts that do not create more application forwards.
-// Five R3 access regressions cover reused workspace binds, advertised origins, and Kubernetes
-// replica counts across the CLI, inspection, and recorded-port consumers.
-// Thirty-three R4 cases cover runtime-aware preflight, legacy recovery, truthful origin
-// advice, malformed extra bags, and unforwarded client loopback URLs. Collection: 4560.
-// Four R5 cases retain malformed-neighbor host claims across runner and lifecycle scans.
-// Measured collection: 4564.
-// Two R6 cases cover human malformed-record rendering and invalid recorded IPv6 brackets.
-// Measured nonexecuting collection: 4566.
-// R7 adds 13 runtime-claim cases, six alias handoff cases and five pathname cases.
-// Measured nonexecuting collection: 4590.
-// R8 adds eight preflight rows for explicit/carried context and runtime precedence.
-// Measured nonexecuting collection: 4598.
-const FLOOR = 4598;
+// Bind enforcement covers protocol preservation, ephemeral long ports and invalid addresses.
+// Compose interpolation brackets an IPv6 bind before variable port fields, and monitoring reads
+// that bind back from both short and long syntax.
+// Whole-value interpolation refusals: 11 cases; IPv6 and long-syntax regressions: 2; total 4525.
+// Seven licence-warning cases, the licensed-user microservices regression, and two
+// end-to-end registration-token normalization regressions add ten exercised Jest cases above
+// the bind-enforcement base. One chart-consumer regression covers the winning Kubernetes token,
+// and one covers final Kubernetes licence precedence and warning presence.
+// R5 adds one workspace-owner credential promotion regression; collection measures 4538.
+// R6 adds one mixed-replica credential lifecycle regression; collection measures 4539.
+// R7 adds one equivalent-file regression and two interrupted-create cleanup cases; total 4542.
+// R8 adds two interrupted-install controls and one workspace-identity control; total 4545.
+// CI on 21aa5b3 measured 4550. This commit adds one created-namespace rollback regression.
+// Evidence-closeout regressions cover bundle help, Kubernetes ownership proof,
+// runtime-correct artifact selection, registration-token provenance, normalized presets,
+// public URL plus byte-preserved cleanup rendering, artifact URL and scalar redaction,
+// metadata-only Docker records, legacy catalogue uncertainty in both licence-output paths,
+// provisional licensing, Compose-list and env-file token presence, legacy sidecar
+// attribution, a preset-only Kubernetes token, and evidence reading `effective_license` before
+// the Secret lifecycle flag: 47 cases over 4551, total 4598. One more records the token
+// Helm accepted when a re-up stops after Helm: total 4599. One more masks user-only URL
+// credentials in the evidence bundle: CI on fe95a08 measured 4600. One more withholds an
+// interrupted Docker replacement: CI on 23f3b8e collected 4601. Three more follow an env change
+// to the recorded credentials, keep a loaded record's spellings through an interrupted write and
+// clear its marker on retry, and restrict the record a Compose write makes last: total 4604.
+// One more reports an env credential change only once a recreate deploys it: total 4605.
+// Five more: the engine recreates a named list of replicas, and none by force for an empty one
+// (one test became two rows, plus one); a deferred credential change is deployed by an upgrade
+// or its rollback, and an interrupted upgrade is finished only by the rollback that undoes it
+// (two); and by an `up` that starts the stopped workspace (one): total 4610.
+// Two more exercise automatic and explicit rollback startup, all-replica recreation,
+// and refusal before restore after either engine failure: total 4612.
+// Five more cover artifact-wide copies, nested JSON/scalars, cyclic aliases, ordered env files
+// and replica uncertainty, and env mutation of unresolved credentials: total 4617.
+// Seven bundle regressions cover duplicate YAML names and six numeric-text discovery routes.
+// Three more cover authorization copies, a failed licence write and an external kill during
+// that write. Existing complete-licence and Compose-kill cases are extended, not recounted.
+// Inspect adds twenty cases on top of the evidence base: total 4647.
+// SSH access adds ninety-eight cases over the inspect base: total 4745.
+const FLOOR = 4745;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

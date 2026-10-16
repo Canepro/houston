@@ -36,7 +36,7 @@ import {
   applyMongoOverride,
   resolve,
 } from '../../lib/versions';
-import { refuseChartOwnedEnv } from '../kube/chart';
+import { credentialInputs, refuseChartOwnedEnv } from '../kube/chart';
 import * as ownership from './ownership';
 import { refuseEnforcedBefore880 } from '../../lib/presets/e2ee';
 import { endpointString } from '../kube/endpoints';
@@ -116,6 +116,12 @@ export interface KubeCreate {
   envOverrides: Record<string, string | null>;
   /** Whether the release references the licence Secret: this run's, or a re-up's earlier one. */
   licensed: boolean;
+  /** A completed earlier create established the licence Secret, independent of this run's intent. */
+  retainedLicense: boolean;
+  /** Whether the final chart environment carries a nonblank licence, including a promoted preset input. */
+  effectiveLicense: boolean;
+  /** Whether the release already running has a registration token; null when its record cannot say. */
+  deployedRegToken: boolean | null;
   /** A re-up's forwards, read BEFORE the write-ahead record replaces the record holding them. */
   previous: { pid: number; port: number | null; scenarioForwards: Record<string, unknown> };
   /** The record a re-up replaces, read before the write-ahead record does. */
@@ -131,9 +137,13 @@ export interface KubeCreate {
   hostPort: number;
   cfg: config.Config;
   regToken: string;
+  /** In-memory payload for the existing licence Secret; never recorded. */
+  license: string;
   bindHost: string;
   root: string;
   microservices: boolean;
+  /** The catalog requirement captured before the write-ahead record becomes visible. */
+  licenseRequired: boolean | null;
   presetForNotes: Preset | null;
   /** Local Grafana claims are published before its later monitoring attachment. */
   monitoringPorts: number[];
@@ -159,6 +169,9 @@ export function kubeCreate(
     reused: false,
     envOverrides: {},
     licensed: false,
+    retainedLicense: false,
+    effectiveLicense: false,
+    deployedRegToken: false,
     previous: { pid: 0, port: null, scenarioForwards: {} },
     previousMeta: null,
     namespaceIdentity: null,
@@ -169,9 +182,11 @@ export function kubeCreate(
     hostPort: 0,
     cfg: {},
     regToken: '',
+    license: '',
     bindHost: '',
     root: '',
     microservices: false,
+    licenseRequired: null,
     presetForNotes: null,
     monitoringPorts: [],
     pre: null,
@@ -231,7 +246,8 @@ export async function settleName(job: KubeCreate): Promise<void> {
  */
 export async function settleEnv(job: KubeCreate): Promise<void> {
   job.envOverrides = {};
-  job.licensed = job.req.license !== '';
+  job.licensed = job.req.license.trim() !== '';
+  job.retainedLicense = false;
   if (job.reused) {
     let old: Metadata | null = null;
     try {
@@ -271,8 +287,16 @@ export async function settleEnv(job: KubeCreate): Promise<void> {
       }
       job.namespaceIdentity = { uid, owner };
       job.envOverrides = { ...(bag(previous.env) as Record<string, string | null>) };
-      // The Secret stays in the namespace across a `down`, so a re-up keeps referencing it.
-      job.licensed ||= previous.licensed === true;
+      // A provisional marker records intent before any Secret exists. Only a completed
+      // create, or its explicitly retained provenance, can suppress a new preset payload.
+      job.retainedLicense =
+        previous.licensed === true &&
+        (previous.incomplete !== true || previous.retained_license === true);
+      job.licensed ||= job.retainedLicense;
+      // The write-ahead record states what is deployed, as for the licence, so it carries the
+      // marker of the release this re-up has not replaced yet. A record without one cannot say.
+      job.deployedRegToken =
+        typeof previous.reg_token_supplied === 'boolean' ? previous.reg_token_supplied : null;
       // HERE, not after the write-ahead record: that record replaces this one, and reading
       // the forwards back from it found none -- so a re-up never retired its own forward,
       // which kept the port and failed the readiness wait, and `down` lost track of both
@@ -447,7 +471,7 @@ export function settleAddressing(job: KubeCreate): void {
   // Same resolution order Compose uses: the flag, then the box-level config, then
   // loopback. This was dropped entirely on the Kubernetes path.
   job.cfg = config.loadConfig();
-  job.regToken = job.req.regToken || toText(job.cfg.reg_token);
+  job.regToken = (job.req.regToken || toText(job.cfg.reg_token)).trim();
   if (job.req.bind) job.bindHost = String(job.req.bind);
   else if (isTruthy(job.cfg.bind_host)) job.bindHost = String(job.cfg.bind_host);
   else job.bindHost = config.DEFAULT_BIND_HOST;
@@ -457,13 +481,35 @@ export function settleAddressing(job: KubeCreate): void {
   // Allocation, deployment and notes share the same resolved scenario.
   requestedPreset(job);
   const names = namesOf(job.req.preset || 'default');
+  const credentials = credentialInputs(
+    (job.presetForNotes as Preset).env,
+    job.regToken,
+    job.req.license,
+    job.retainedLicense,
+    job.envOverrides,
+  );
+  job.regToken = credentials.regToken;
+  job.license = credentials.license;
+  job.licensed = credentials.licensed;
+  // Both provisional/final metadata and warnings describe the Secret we install or retain.
+  job.effectiveLicense = job.licensed;
+  const effectiveToken = job.regToken === '' ? '' : 'present';
   const premium = request.premiumAuthWarning(
     names,
     job.resolved?.rcVersion ?? '',
-    job.licensed,
-    job.regToken,
+    job.effectiveLicense,
+    effectiveToken,
   );
   if (premium !== '') warn(job.emit, premium, { phase: 'plan' });
+  const unlicensed = request.licenceAbsentWarning(
+    request.presetLicensing(names),
+    job.microservices,
+    job.effectiveLicense,
+    effectiveToken,
+  );
+  if (unlicensed !== '') {
+    warn(job.emit, unlicensed, { phase: 'plan', code: request.LICENSE_ABSENT_EE_PRESET });
+  }
   const samlEmail = request.samlEmailWarning(
     job.presetForNotes as Preset,
     job.resolved?.rcVersion ?? '',
@@ -652,7 +698,19 @@ export async function writeProvisionalRecord(job: KubeCreate): Promise<void> {
   if (job.req.actor) job.provisional.extra.created_by = job.req.actor;
   // In the write-ahead record too: a re-up after a killed create carries forward from it.
   if (Object.keys(job.envOverrides).length > 0) job.provisional.extra.env = job.envOverrides;
+  // Inspect and the microservices note trust this boolean and do not read `incomplete`.
+  // A retained licence is already effective. A licence this run has not installed yet is not.
+  job.provisional.extra.effective_license = job.retainedLicense;
   if (job.licensed) job.provisional.extra.licensed = true;
+  // Preserve a completed Secret across repeated interrupted re-ups without promoting new intent.
+  job.provisional.extra.retained_license = job.retainedLicense;
+  // A killed create leaves this record behind. Like the licence, the token marker here states
+  // what is already deployed, not what this run asked for: no Secret or Helm upgrade has run
+  // yet. The final record states this run's token.
+  if (job.deployedRegToken !== null) {
+    job.provisional.extra.reg_token_supplied = job.deployedRegToken;
+  }
+  job.provisional.extra.license_required = licenseRequirementOf(job);
   // Still recorded while the create runs, so a create killed part-way leaves `down` able to
   // stop them.
   if (job.previous.pid !== 0) job.provisional.extra.port_forward_pid = job.previous.pid;
@@ -765,8 +823,8 @@ export async function createTheWorkspace(job: KubeCreate): Promise<void> {
     // and a compose service on the other runtime -- one intent, two renderings.
     preset: job.presetForNotes,
     envOverrides: job.envOverrides,
-    license: job.req.license,
-    licensed: job.licensed,
+    license: job.license,
+    licensed: job.retainedLicense,
     plan: job.plan,
     emit: job.emit,
   });
@@ -858,13 +916,36 @@ export function recordTheRequest(job: KubeCreate): void {
   }
   // The same key Compose records them under, so re-up, `backup` and `restore --new` carry them.
   if (Object.keys(job.envOverrides).length > 0) meta.extra.env = job.envOverrides;
+  // This describes the final chart environment; `licensed` below remains the Secret lifecycle flag.
+  meta.extra.effective_license = job.effectiveLicense;
   if (job.licensed) meta.extra.licensed = true;
+  // `job.regToken` is the token credentialInputs chose for the chart: --reg-token or box
+  // config, else the preset's REG_TOKEN.
+  meta.extra.reg_token_supplied = job.regToken !== '';
+  meta.extra.license_required = licenseRequirementOf(job);
   // A preset's self-configuration actions, recorded exactly as the Compose path records
   // them. Without this the OIDC preset would create no OAuth provider and the SAML preset
   // no provider settings -- both recorded and neither applied.
   const postReady = (job.presetForNotes as Preset | null)?.postReady;
   if (postReady !== undefined && postReady.length > 0) meta.extra.post_ready = postReady;
   ownership.carryOwnership(job.provisional ?? job.previousMeta, meta);
+}
+
+/** The requirement the create knew, captured once for both its write-ahead and completed records. */
+function licenseRequirementOf(job: KubeCreate): boolean {
+  if (typeof job.licenseRequired === 'boolean') return job.licenseRequired;
+  // From the catalog, not the runtime adapter: the Kubernetes LDAP adapter's flag marks
+  // the microservices topology, which is recorded through `job.microservices` instead.
+  job.licenseRequired =
+    job.microservices ||
+    namesOf(job.req.preset || 'default').some((name) => {
+      try {
+        return presets.load(name).requiresLicense;
+      } catch {
+        return false;
+      }
+    });
+  return job.licenseRequired;
 }
 
 /** The notes a reader needs, then the record -- and no compose file, because it is not one. */

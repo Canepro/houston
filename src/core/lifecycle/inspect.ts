@@ -237,13 +237,20 @@ function scenarioOf(meta: Metadata): string {
 }
 
 /**
- * What the panel badges: the CI build a workspace runs (its ghcr tag, or ''), and whether it
- * was given a license. Always present, so the panel reads one shape.
+ * What the panel badges: the CI build a workspace runs (its ghcr tag, or ''), and whether its
+ * final configuration has an effective license. Always present, so the panel reads one shape.
  */
 function buildAndLicense(meta: Metadata): { ci_build: string; licensed: boolean } {
   const prefix = `${BUILD_IMAGE}:`;
   const tag = meta.rcImage.startsWith(prefix) ? meta.rcImage.slice(prefix.length) : '';
-  return { ci_build: isBuildTag(tag) ? tag : '', licensed: bag(meta.extra).licensed === true };
+  const extra = bag(meta.extra);
+  const licensed =
+    extra.effective_license === null
+      ? false
+      : typeof extra.effective_license === 'boolean'
+        ? extra.effective_license
+        : extra.licensed === true;
+  return { ci_build: isBuildTag(tag) ? tag : '', licensed };
 }
 
 /** The side ports and replicas are published on the workspace's recorded bind. */

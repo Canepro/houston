@@ -12,11 +12,13 @@ import * as config from '../../lib/config';
 import { storedText, toText } from '../../lib/format';
 import { pathExpandUser } from '../../lib/home';
 import { redactEnv } from '../../lib/redact';
+import { inventory as kubernetesInventory } from '../kube/inventory';
 import { CONTEXT as KUBE_CONTEXT } from '../kube/names';
 import { podRows } from '../kube/status';
 import { dockerAvailable } from '../runner/host';
+import { dockerInventory } from '../runner/inventory';
 import { containerDetails, rcRestartCount } from '../runner/queries';
-import { type Metadata, readCompose, readMeta } from '../runner/record';
+import { type Metadata, externalUrl, readCompose, readMeta } from '../runner/record';
 import * as paths from '../runner/paths';
 import * as topology from '../topology';
 
@@ -391,4 +393,75 @@ export async function detailOf(target: string, meta: Metadata): Promise<Record<s
     return await kubernetesDetail(d, meta, target, extra);
   }
   return await composeDetail(d, meta, target);
+}
+
+/** The URL's origin alone: a scheme, a host and a port carry no credential or token. */
+function originOf(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * The inspection record: what the workspace runs on and what is reachable, with nothing
+ * secret in it. Where `info` carries the login, this carries the nodes, the Services and
+ * their NodePorts, the containers and the addresses their ports are published on -- the
+ * record for someone deciding how to reach a workspace from another machine.
+ *
+ * BOTH RUNTIME SECTIONS ARE ALWAYS PRESENT, each empty for the runtime the workspace is
+ * not on: a key that appears only sometimes is how a payload drifts from what a caller
+ * reads. Empty arrays are only a known empty result. A refused or malformed engine/cluster
+ * read stays an empty array plus a warning, so the human renderer and JSON consumer can say
+ * `unknown` instead of asserting that no resource exists. Inspection still does not fail
+ * merely because a workspace is asleep.
+ */
+export async function inspection(name: string): Promise<Record<string, unknown>> {
+  const target = await naming.resolveName(name);
+  const meta = await readMeta(target);
+  const extra = bag(meta.extra);
+  const where = inspect.clusterOf(meta);
+  const kubernetes: Record<string, unknown> = {
+    context: where.context,
+    cluster: where.cluster,
+    namespace: '',
+    ingress_endpoint: '',
+    cluster_exists: null,
+    nodes: [],
+    services: [],
+    pods: [],
+    warnings: [],
+  };
+  const docker: Record<string, unknown> = {
+    containers: [],
+    networks: [],
+    volumes: [],
+    warnings: [],
+  };
+  if (topology.ofMeta(meta) === topology.KUBERNETES) {
+    const context = toText(extra[config.EXTRA_CONTEXT]);
+    const namespace = toText(extra.namespace);
+    const found = await kubernetesInventory({ context, namespace });
+    Object.assign(kubernetes, found, {
+      cluster: where.cluster,
+      ingress_endpoint: toText(extra.ingress_endpoint),
+    });
+  } else if (await dockerAvailable()) {
+    Object.assign(docker, await dockerInventory(target));
+  } else {
+    docker.warnings = ['could not inspect Docker engine'];
+  }
+  return {
+    name: meta.name,
+    rc_version: meta.rcVersion,
+    mongo_tag: meta.mongoTag,
+    preset: meta.preset,
+    runtime: topology.ofMeta(meta),
+    host_port: meta.hostPort,
+    bind_host: await bindHostOf(meta),
+    url: originOf(externalUrl(meta)),
+    kubernetes,
+    docker,
+  };
 }

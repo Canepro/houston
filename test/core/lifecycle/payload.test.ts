@@ -264,6 +264,33 @@ describe('the detail panel', () => {
     expect((await payload.detail('old')).bind_host).toBe('0.0.0.0');
   });
 
+  it('recovers a complete legacy IPv6 bind and leaves malformed or non-IP port maps unknown', async () => {
+    const compose = (port: string) =>
+      'services:\n  rocketchat:\n    image: i\n    ports:\n' +
+      `    - '${port}'\n` +
+      '    environment:\n      ROOT_URL: x\n';
+    const bracketed = sampleMeta('bracketed', { hostPort: 3001 });
+    const malformed = sampleMeta('malformed', { hostPort: 3002 });
+    const recorded = sampleMeta('recorded', {
+      hostPort: 3003,
+      extra: { bind_host: '127.0.0.1' },
+    });
+    const invalid = sampleMeta('invalid', { hostPort: 3004 });
+    const unresolved = sampleMeta('unresolved', { hostPort: 3005 });
+    await write('bracketed', compose('[::1]:3001:3000'), bracketed);
+    await write('malformed', compose('[::1:3002:3000'), malformed);
+    await write('recorded', compose('[::1:3003:3000'), recorded);
+    await write('invalid', compose('[not-an-ip]:3004:3000'), invalid);
+    await write('unresolved', compose('${BIND_ADDR}:3005:3000'), unresolved);
+
+    const { payload } = load(false);
+    await expect(payload.bindHostOf(bracketed)).resolves.toBe('::1');
+    await expect(payload.bindHostOf(malformed)).resolves.toBe('');
+    await expect(payload.bindHostOf(recorded)).resolves.toBe('127.0.0.1');
+    await expect(payload.bindHostOf(invalid)).resolves.toBe('');
+    await expect(payload.bindHostOf(unresolved)).resolves.toBe('');
+  });
+
   it.each([null, []])(
     'reads malformed extra %j as having no recorded env, as earlier releases do',
     async (extra) => {

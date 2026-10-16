@@ -356,6 +356,11 @@ describe('applying an env change', () => {
       ...jest.requireActual('../../src/core/runner/record'),
       readMeta: async () => meta,
       readCompose: async () => doc,
+      // The Rocket.Chat services of the document this store holds, as `rcServices` reads them.
+      rcServices: async () =>
+        Object.keys((doc as { services: object }).services)
+          .filter((service) => service === 'rocketchat' || service.startsWith('rocketchat-'))
+          .sort(),
       write: async (_n: string, y: string, m: unknown) => {
         captured['y'] = y;
         captured['meta'] = m;
@@ -367,13 +372,14 @@ describe('applying an env change', () => {
     }));
     jest.doMock('../../src/core/runner/engine', () => ({
       ...jest.requireActual('../../src/core/runner/engine'),
-      up: async (n: string, options: { pull?: boolean; forceRecreate?: string }) => {
+      up: async (n: string, options: { pull?: boolean; forceRecreate?: readonly string[] }) => {
         captured['up'] = [n, options.pull, options.forceRecreate];
         order.push('up');
         return 0;
       },
     }));
     jest.doMock('../../src/core/lifecycle/ready', () => ({
+      ...jest.requireActual('../../src/core/lifecycle/ready'),
       waitServing: async (waited: { name: string }) => {
         order.push(`wait ${waited.name}`);
         return {};

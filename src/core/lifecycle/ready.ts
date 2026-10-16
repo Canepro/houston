@@ -6,8 +6,15 @@
  * than a flag.
  */
 import { pendingReceipt } from '../../seed/receipt';
+import { CREDENTIALS_PENDING } from '../../lib/compose';
 import * as config from '../../lib/config';
-import { ConflictError, CreateFailedError, NotReadyError, ReproError } from '../../lib/errors';
+import {
+  ConflictError,
+  CreateFailedError,
+  DockerError,
+  NotReadyError,
+  ReproError,
+} from '../../lib/errors';
 import { type Emit, info, nullEmit, warn } from '../../lib/events';
 import { toInt, toText } from '../../lib/format';
 import { publicPathsOf } from '../../lib/presets/public';
@@ -32,7 +39,14 @@ import { workspaceReady, terminalPodFailure, servicesWithoutEndpoints } from '..
 import { CONTEXT as KUBE_CONTEXT } from '../kube/names';
 import { completeSetupWizard, NotReady, apiInfo, waitReady } from '../rcapi';
 import * as engine from '../runner/engine';
-import { type Metadata, adminPass, readMeta, updateMeta } from '../runner/record';
+import {
+  type Metadata,
+  adminPass,
+  rcServices,
+  readMeta,
+  updateMeta,
+  writeRecord,
+} from '../runner/record';
 import { oneShotSetups, rcRestartCount, rcState, servicesByProject } from '../runner/queries';
 import * as postready from '../postready';
 import * as topology from '../topology';
@@ -118,6 +132,36 @@ export async function upCompose(
   options: { pull: boolean; emit: Emit; streamOutput: boolean },
 ): Promise<number> {
   return await unwindsOnInterrupt(async () => await composeUp(name, options));
+}
+
+/**
+ * Recreate every Rocket.Chat service the Compose file names, in one Compose call, and only
+ * once it exits 0 drop `credentials_pending`: Rocket.Chat now runs the credentials the file
+ * names. MongoDB and the other services are not recreated (`--no-deps`).
+ *
+ * The services are read from the file here, not passed in, so a multi-instance workspace
+ * cannot be called deployed after its first replica alone. Nothing weaker clears the key:
+ * Compose's own change detection was measured to miss an interrupted apply, and a container
+ * that is running or ready may still hold the previous environment. A failed or interrupted
+ * call leaves the key, and evidence says unknown. The caller holds the repro lock.
+ */
+export async function recreateRocketChat(
+  name: string,
+  { pull = false }: { pull?: boolean } = {},
+): Promise<number | null> {
+  const services = await rcServices(name);
+  if (services.length === 0) {
+    throw new DockerError(`'${name}' has no rocketchat service to recreate`);
+  }
+  const rc = await engine.up(name, { pull, forceRecreate: services });
+  if (rc !== 0) return rc;
+  const meta = await readMeta(name);
+  const extra: unknown = meta.extra;
+  if (typeof extra === 'object' && extra !== null && Object.hasOwn(extra, CREDENTIALS_PENDING)) {
+    delete (extra as Record<string, unknown>)[CREDENTIALS_PENDING];
+    await writeRecord(name, meta);
+  }
+  return rc;
 }
 
 async function composeUp(

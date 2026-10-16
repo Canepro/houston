@@ -25,6 +25,7 @@ import type * as AdminNS from '../core/lifecycle/admin';
 import type * as CreateDockerNS from '../core/lifecycle/create-docker';
 import type * as DestroyNS from '../core/lifecycle/destroy';
 import type * as InspectNS from '../core/lifecycle/inspect';
+import type * as EvidenceNS from '../core/evidence';
 import type * as NamingNS from '../core/lifecycle/naming';
 import type * as OwnershipNS from '../core/lifecycle/ownership';
 import type * as PayloadNS from '../core/lifecycle/payload';
@@ -1056,6 +1057,25 @@ async function dispatch(
       // environment says nothing about the browser's, so the handoff is computed here.
       d.access = access.handoff(meta, process.env, String(d.bind_host));
       return d;
+    }
+    case 'evidence': {
+      const evidence = require('../core/evidence') as typeof EvidenceNS;
+      const name = await target(text(o.name));
+      const retain = bool(o.retain_for_task);
+      return await evidence.collect(name, {
+        retention: {
+          retained: retain ? true : null,
+          reason: retain ? 'explicit task' : '',
+        },
+        bundle: text(o.bundle),
+      });
+    }
+    case 'inspect': {
+      // The record, the engine and the cluster, with no login in it: what `info` is for a
+      // person at the keyboard, this is for someone deciding how to reach the workspace
+      // from somewhere else.
+      const payload = require('../core/lifecycle/payload') as typeof PayloadNS;
+      return await payload.inspection(await target(text(o.name)));
     }
     case 'users':
       // Printed as it goes (`handlers/users.ts`): it is `json: none`, so what it prints and
@@ -2955,6 +2975,142 @@ function renderImportPlan(io: CliIo, plan: Bag, dryRun: boolean): void {
   }
 }
 
+/**
+ * The inspection as short panels, one per section, each saying `none` rather than
+ * vanishing: a reader comparing two workspaces should find the same sections on both.
+ * Only the sections of the workspace's own runtime are drawn; the payload carries both.
+ */
+function renderInspection(io: CliIo, result: Bag): void {
+  const runtime = display(result.runtime, 'docker');
+  writePanel(io, display(result.name, 'repro'), [
+    ['Rocket.Chat', display(result.rc_version)],
+    ['MongoDB', display(result.mongo_tag)],
+    ['Preset', display(result.preset)],
+    ['Runtime', runtime],
+    ['URL', display(result.url)],
+    ['Bind', display(result.bind_host, 'unknown')],
+  ]);
+  const section = (title: string, rows: (readonly [string, string])[], unknown = false): void => {
+    writePanel(io, title, rows.length > 0 ? rows : [['', unknown ? 'unknown' : 'none']]);
+  };
+  const mentions = (warnings: string[], terms: string[]): boolean =>
+    warnings.some((warning) => {
+      const lower = warning.toLowerCase();
+      return terms.some((term) => lower.includes(term));
+    });
+  if (runtime === 'kubernetes') {
+    const kube = bag(result.kubernetes);
+    const warnings = strings(kube.warnings);
+    // No recorded context or namespace means none of the three resource reads ran. Keep
+    // that distinct from a cluster that answered each read with an empty collection.
+    const locationUnknown = warnings.includes(
+      'the repro has no recorded Kubernetes context or namespace',
+    );
+    writePanel(io, 'cluster', [
+      ['context', display(kube.context)],
+      ['cluster', display(kube.cluster)],
+      [
+        'exists',
+        kube.cluster_exists === null || kube.cluster_exists === undefined
+          ? 'unknown'
+          : display(kube.cluster_exists),
+      ],
+      ['namespace', display(kube.namespace)],
+      ['ingress', display(kube.ingress_endpoint, 'none')],
+    ]);
+    section(
+      'nodes',
+      bags(kube.nodes).map((node) => {
+        const roles = Array.isArray(node.roles) ? node.roles.map(toTextAny).join(',') : '';
+        const internalIp = display(node.internal_ip, 'unknown');
+        const externalIp = display(node.external_ip);
+        return [
+          display(node.name),
+          `${display(node.version)}  ${isTruthy(node.ready) ? 'Ready' : 'NotReady'}` +
+            `${roles === '' ? '' : `  ${roles}`}` +
+            `  INTERNAL-IP=${internalIp}` +
+            `${externalIp === '' ? '' : `  EXTERNAL-IP=${externalIp}`}` +
+            `  cpu=${display(node.allocatable_cpu, '?')} memory=${display(node.allocatable_memory, '?')}`,
+        ];
+      }),
+      locationUnknown || mentions(warnings, ['node']),
+    );
+    section(
+      'services',
+      bags(kube.services).map((service) => {
+        const ports = bags(service.ports)
+          .map(
+            (port) =>
+              `${display(port.port)}->${display(port.target_port)}/${display(port.protocol, 'TCP')}` +
+              `${isTruthy(port.node_port) ? ` nodePort=${display(port.node_port)}` : ''}`,
+          )
+          .join(', ');
+        const external = Array.isArray(service.external_ips)
+          ? service.external_ips.map(toTextAny).join(',')
+          : '';
+        return [
+          display(service.name),
+          `${display(service.type, 'ClusterIP')}  ${display(service.cluster_ip, '-')}` +
+            `${external === '' ? '' : `  external=${external}`}  ${ports === '' ? 'no ports' : ports}`,
+        ];
+      }),
+      locationUnknown || mentions(warnings, ['service']),
+    );
+    section(
+      'pods',
+      bags(kube.pods).map((pod) => [
+        display(pod.service),
+        `${display(pod.state, '?')}  ${display(pod.status)}`,
+      ]),
+      locationUnknown || mentions(warnings, ['pod']),
+    );
+    if (warnings.length > 0)
+      writePanel(
+        io,
+        'warnings',
+        warnings.map((warning) => ['', warning]),
+      );
+    return;
+  }
+  const docker = bag(result.docker);
+  const warnings = strings(docker.warnings);
+  const engineUnknown = mentions(warnings, ['docker engine']);
+  section(
+    'containers',
+    bags(docker.containers).map((container) => {
+      const ports = bags(container.ports)
+        .map(
+          (port) =>
+            `${display(port.host_ip).includes(':') ? `[${display(port.host_ip)}]` : display(port.host_ip)}:` +
+            `${display(port.host_port)}->${display(port.container_port)}/${display(port.protocol, 'tcp')}`,
+        )
+        .join(', ');
+      return [
+        display(container.service, display(container.name)),
+        `${display(container.state, '?')}  ${display(container.status)}` +
+          `${ports === '' ? '' : `  ${ports}`}`,
+      ];
+    }),
+    engineUnknown || mentions(warnings, ['container']),
+  );
+  section(
+    'networks',
+    strings(docker.networks).map((network) => ['', network]),
+    engineUnknown || mentions(warnings, ['network']),
+  );
+  section(
+    'volumes',
+    strings(docker.volumes).map((volume) => ['', volume]),
+    engineUnknown || mentions(warnings, ['volume']),
+  );
+  if (warnings.length > 0)
+    writePanel(
+      io,
+      'warnings',
+      warnings.map((warning) => ['', warning]),
+    );
+}
+
 /** Human output is an explicit part of every command, never a generic object dump. */
 export async function renderHuman(
   invocation: Invocation,
@@ -3136,6 +3292,32 @@ export async function renderHuman(
       await printNotes(meta, io);
       return;
     }
+    case 'evidence': {
+      const repro = bag(result.repro);
+      const artifact = bag(result.artifact);
+      const license = bag(result.license);
+      const retention = bag(result.retention);
+      io.writeOut(
+        `${display(repro.name)}  ${display(repro.rc_version)}  ${display(repro.runtime)}  ` +
+          `${display(bag(result.runtime).state)}\n`,
+      );
+      io.writeOut(
+        `  artifact  ${display(artifact.name)} sha256:${display(artifact.sha256).slice(0, 12)}\n`,
+      );
+      io.writeOut(
+        `  licensed  required=${display(license.required, 'unknown')} supplied=${display(license.supplied, 'unknown')}\n`,
+      );
+      io.writeOut(
+        `  retained  ${display(retention.retained)}` +
+          `${isTruthy(retention.reason) ? ` (${display(retention.reason)})` : ''}\n`,
+      );
+      io.writeOut(`  cleanup   ${display(retention.cleanup)}\n`);
+      if (isTruthy(result.bundle)) io.writeOut(`  bundle    ${display(bag(result.bundle).path)}\n`);
+      return;
+    }
+    case 'inspect':
+      renderInspection(io, result);
+      return;
     case 'users':
       // Printed by the handler as it went (`handlers/users.ts`): nothing is left to render.
       return;

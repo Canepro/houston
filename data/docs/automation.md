@@ -19,8 +19,8 @@ On a shared machine, set `HOUSTON_USER=<account>` so the audit log names who ran
 
 ## `--json`
 
-`up`, `ready`, `down`, `list`, `info`, `doctor`, `loadtest`, `capacity`, `cluster` and
-`skill` take `--json`; `capabilities` always prints JSON. Every reply is one envelope:
+`up`, `ready`, `down`, `list`, `info`, `inspect`, `evidence`, `doctor`, `loadtest`,
+`capacity`, `cluster` and `skill` take `--json`; `capabilities` always prints JSON. Every reply is one envelope:
 
 ```json
 {"schema":"houston.info.v1","contract":2,"houston_version":"2.1.1",
