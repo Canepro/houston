@@ -293,7 +293,7 @@ export function httpUsers(words: readonly string[]): HttpUser[] {
  */
 export function userPasswordClient(words: readonly string[]): boolean {
   return words.some((word) =>
-    /^(?:mysql|mariadb|mongo|mycli)[\w.-]*$/u.test(word.split(/[/\\]/u).pop() ?? ''),
+    /^(?:mysql|mariadb|mongo|mycli)[\w.-]*$/iu.test(word.split(/[/\\]/u).pop() ?? ''),
   );
 }
 
@@ -310,11 +310,11 @@ export function userArgument(word: string): boolean {
 export function shortOptionPasswords(words: readonly string[]): string[] {
   const mysql = userPasswordClient(words);
   const redis = words.some((word) =>
-    /^(?:redis|valkey|keydb)-cli[\w.-]*$/u.test(word.split(/[/\\]/u).pop() ?? ''),
+    /^(?:redis|valkey|keydb)-cli[\w.-]*$/iu.test(word.split(/[/\\]/u).pop() ?? ''),
   );
   // `docker login -p`; Docker's other `-p` publishes a port.
   const dockerLogin =
-    words.some((word) => /^docker(?:\.exe)?$/u.test(word.split(/[/\\]/u).pop() ?? '')) &&
+    words.some((word) => /^docker(?:\.exe)?$/iu.test(word.split(/[/\\]/u).pop() ?? '')) &&
     words.includes('login');
   const values: string[] = [];
   words.forEach((word, index) => {
@@ -518,6 +518,7 @@ export function discoverTextSecrets(
   text: string,
   add: (value: string, whole?: boolean) => void,
   depth = 0,
+  command?: (text: string) => void,
 ): void {
   if (depth > 100) throw new RangeError('artifact credential nesting exceeds limit');
   let valid = false;
@@ -568,8 +569,10 @@ export function discoverTextSecrets(
         if (argv && /\s/u.test(decoded) && commandCarriesCredential(decoded)) {
           add(decoded);
           add(token.slice(1, -1));
+          // `["sh", "-c", "client --password x"]`: the flag's value, for copies elsewhere.
+          command?.(decoded);
         }
-        discoverTextSecrets(decoded, add, level + 1);
+        discoverTextSecrets(decoded, add, level + 1, command);
         return at + token.length;
       }
       if (open !== '{' && open !== '[') {
@@ -607,7 +610,7 @@ export function discoverTextSecrets(
         if (open === '{') {
           const token = jsonToken(JSON_STRING, text, i);
           key = JSON.parse(token) as string;
-          discoverTextSecrets(key, add, level + 1);
+          discoverTextSecrets(key, add, level + 1, command);
           member ||= credentialKey(key) || (key === 'value' && named);
           list = argumentListKey(key, parent);
           i += token.length;
@@ -625,6 +628,21 @@ export function discoverTextSecrets(
     walk(jsonToken(JSON_SPACE, text, 0).length, false, depth);
     // `{"command": ["mongosh"], "args": ["-u", "root", "-p", "x"]}` splits one command over two
     // members; read them joined as well, in source order, so a duplicate member still counts.
+    /** The items of the array at `at` as arguments: strings decoded, scalars as spelled. */
+    const listTexts = (at: number): string[] => {
+      const items: string[] = [];
+      let i = at + 1;
+      for (;;) {
+        i += jsonToken(JSON_SPACE, text, i).length;
+        if (text[i] === ']' || i >= text.length) return items;
+        if (text[i] === ',') {
+          i += 1;
+          continue;
+        }
+        items.push(argumentText(i));
+        i = jsonValueEnd(text, i, ends);
+      }
+    };
     const joined = (at: number, level: number): void => {
       const open = text[at];
       if (level > 100 || (open !== '{' && open !== '[')) return;
@@ -649,7 +667,9 @@ export function discoverTextSecrets(
         const end = jsonValueEnd(text, i, ends);
         if (open === '{' && argumentListKey(key)) {
           lists += 1;
-          words.push(...argumentWords(JSON.parse(text.slice(i, end))));
+          // Numbers keep their source spelling: `"-p", 123456` passes `123456`.
+          if (text[i] === '[') words.push(...listTexts(i));
+          else words.push(...argumentWords(JSON.parse(text.slice(i, end))));
         }
         joined(i, level + 1);
         i = end;
@@ -667,7 +687,7 @@ export function discoverTextSecrets(
     const lastWord = text.slice(0, equals).split(/\s+/u).pop() ?? '';
     const modeSwitch = credentialFlag(lastWord) && !valueTakingCredentialFlag(lastWord);
     if (assignsCredential(text.slice(0, equals)) && !modeSwitch) add(value);
-    discoverTextSecrets(value, add, depth + 1);
+    discoverTextSecrets(value, add, depth + 1, command);
     return;
   }
   const urls = new RegExp(URL_ANY_USERINFO.source, 'gu');

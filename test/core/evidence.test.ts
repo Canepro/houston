@@ -1647,8 +1647,24 @@ describe('the bundle', () => {
         '  wincurl:',
         '    image: example',
         String.raw`    command: ['C:\Windows\System32\curl.exe', -u, 'admin:WinCurlSentinel', https://x]`,
+        '  jsonshell:',
+        '    image: example',
+        `    environment: { SPEC: '{"command":["sh","-c","client --password JsonShellSentinel"]}' }`,
+        '  upperclient:',
+        '    image: example',
+        String.raw`    command: ['C:\BIN\MYSQL.EXE', -uroot, -pUpperSentinel]`,
+        '  jsonnumber:',
+        '    image: example',
+        `    environment: { SPEC: '{"command":["mongosh"],"args":["-u","root","-p",987654321]}' }`,
+        '  printfheredoc:',
+        '    image: example',
+        `    command: ["sh", "-c", "printf '%s' sh <<EOF\\nclient --password PrintfHeredocData\\nEOF"]`,
         'x-copy: QuotedSentinel',
         'x-split-copy: SplitSentinel',
+        'x-dup-json-shell: JsonShellSentinel',
+        'x-dup-upper: UpperSentinel',
+        'x-dup-number: 987654321',
+        'x-printf-heredoc: PrintfHeredocData',
         'x-dup-json-dup: DupJsonSentinel',
         'x-dup-wrapped: WrappedHeredocSentinel',
         'x-dup-literal: $LiteralBearerSentinel',
@@ -1713,6 +1729,9 @@ describe('the bundle', () => {
       'WrappedHeredocSentinel',
       'LiteralBearerSentinel',
       'WinCurlSentinel',
+      'JsonShellSentinel',
+      'UpperSentinel',
+      '987654321',
     ]) {
       expect(compose).not.toContain(sentinel);
     }
@@ -1743,6 +1762,8 @@ describe('the bundle', () => {
     // A short credential masks whole values only, not every place its letters appear.
     expect(parsed['x-short-copy']).toBe('********');
     expect(parsed['x-short-word']).toBe('cabbage');
+    // `printf` names `sh` as data, so its heredoc is data too.
+    expect(parsed['x-printf-heredoc']).toBe('PrintfHeredocData');
     // A heredoc fed to `cat` is data, and `--sort-keys` sorts: their values stay readable.
     expect(parsed['x-heredoc']).toBe('HeredocData');
     expect(parsed['x-input']).toBe('input.json');

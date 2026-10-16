@@ -747,6 +747,26 @@ interface ShellWord {
   readonly quoted: boolean;
 }
 
+/**
+ * The program a command runs, past `env`, `sudo`, `exec`, `nohup`, `command`, `time`, `nice`
+ * and `doas`, their options and `NAME=value` assignments: `env sh <<EOF` runs `sh`, while
+ * `printf '%s' sh <<EOF` runs `printf`. An option that takes a value (`sudo -u alice`) skips it.
+ */
+function heredocProgram(command: readonly ShellWord[]): string {
+  for (let index = 0; index < command.length; index += 1) {
+    const word = (command[index] as ShellWord).text;
+    const name = word.split('/').pop() ?? '';
+    if (/^-[ugCDhpnrt]$/u.test(word)) index += 1;
+    else if (
+      !/^(?:env|sudo|exec|nohup|command|time|nice|doas)$/u.test(name) &&
+      !word.startsWith('-') &&
+      !/^[A-Za-z_]\w*=/u.test(word)
+    )
+      return name;
+  }
+  return '';
+}
+
 /** Bash's single-character ANSI-C escapes; any other escaped character stands for itself. */
 const ANSI_C_ESCAPES: Readonly<Record<string, string>> = {
   a: '\x07',
@@ -822,10 +842,7 @@ function shellCommands(text: string): ShellWord[][] {
       } else index += 1;
     } else if (char === '\n' && heredocs.length > 0) {
       // A shell reading the heredoc runs it, so its lines stay commands then.
-      // `env sh <<EOF` and `sudo bash <<EOF` run it through a wrapper.
-      const shell = command.some((word) =>
-        /^(?:sh|bash|zsh|dash|ash|ksh)$/u.test(word.text.split('/').pop() ?? ''),
-      );
+      const shell = /^(?:sh|bash|zsh|dash|ash|ksh)$/u.test(heredocProgram(command));
       endCommand(index);
       let line = index + 1;
       for (const heredoc of heredocs) {
@@ -1017,7 +1034,7 @@ function discoverArtifactSecrets(
     const value: unknown = node.value;
     if (typeof value === 'string') {
       if (secret) add(value);
-      discoverTextSecrets(value, add);
+      discoverTextSecrets(value, add, 0, (text) => discoverCommandText(text, add));
     } else if (secret) {
       add(String(value), true);
       add(YAML.stringify(value).replace(/\n$/u, ''), true);
