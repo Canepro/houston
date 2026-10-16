@@ -9,10 +9,11 @@ import re
 import shutil
 import shlex
 import signal
+import selectors
 import stat
 import subprocess
+import sys
 import tempfile
-import threading
 import time
 
 
@@ -86,8 +87,11 @@ def yaml_document(node_exec, root, env, path):
         'const yaml=require(require.resolve("yaml",{paths:[process.argv[1]]}));'
         'process.stdout.write(JSON.stringify(yaml.parse(fs.readFileSync(process.argv[2],"utf8"))));'
     )
-    result = subprocess.check_output(
-        [str(node_exec), '-e', script, str(root), str(path)], cwd=root, env=env,
+    result = bounded_output(
+        'YAML projection reader',
+        [str(node_exec), '-e', script, str(root), str(path)],
+        cwd=root,
+        env=env,
     )
     return json.loads(result)
 
@@ -119,18 +123,31 @@ def scan_command_receipts(secret, out, *labels):
 
 
 def source_manifest(root):
-    paths = subprocess.check_output(
+    paths = bounded_output(
+        'candidate source manifest',
         ['git', 'ls-files', '--cached', '--others', '--exclude-standard', '-z', '--',
-         'src', 'bin', 'tools', 'data', 'package.json', 'yarn.lock', '.yarnrc.yml'], cwd=root)
+         'src', 'bin', 'tools', 'data', 'package.json', 'yarn.lock', '.yarnrc.yml'],
+        cwd=root,
+    )
     return {name: path_fingerprint(root / name)
             for name in sorted(set(paths.decode().split('\0'))) if name}
 
 
 def candidate_fingerprint(root):
     return {
-        'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip(),
+        'head': bounded_output(
+            'candidate revision lookup',
+            ['git', 'rev-parse', 'HEAD'],
+            cwd=root,
+            text=True,
+        ).strip(),
         'diff_sha256': hashlib.sha256(
-            subprocess.check_output(['git', 'diff', 'HEAD'], cwd=root)).hexdigest(),
+            bounded_output(
+                'candidate diff lookup',
+                ['git', 'diff', 'HEAD'],
+                cwd=root,
+            ),
+        ).hexdigest(),
         'source': source_manifest(root),
     }
 
@@ -148,14 +165,22 @@ TERM_GRACE_SECONDS = 5
 GROUP_CLEANUP_SECONDS = 5
 PIPE_DRAIN_SECONDS = 5
 POLL_SECONDS = 0.05
+PIPE_READ_BYTES = 64 * 1024
+AUXILIARY_TIMEOUT_SECONDS = COMMAND_TIMEOUT_SECONDS
 
 
 def require_unreaped_group_wait():
-    require(hasattr(os, 'waitid') and hasattr(os, 'WNOWAIT'),
+    require(all(hasattr(os, name) for name in ('waitid', 'WNOWAIT', 'WEXITED', 'WNOHANG', 'P_PID')),
             'POSIX process-group cleanup requires waitid with WNOWAIT')
+    if sys.platform.startswith('linux'):
+        proc = Path('/proc')
+        require(proc.is_dir() and os.access(proc, os.R_OK | os.X_OK),
+                'Linux process-group cleanup requires readable /proc process status')
+    elif sys.platform != 'darwin':
+        raise RuntimeError('POSIX process-group cleanup has no supported liveness probe on this platform')
 
 
-def wait_for_exit_unreaped(process, timeout_seconds):
+def wait_for_exit_unreaped(process, timeout_seconds, drain=None):
     """Observe a POSIX child exit while keeping its leader PID reserved."""
     require_unreaped_group_wait()
     deadline = time.monotonic() + timeout_seconds
@@ -169,7 +194,38 @@ def wait_for_exit_unreaped(process, timeout_seconds):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False
-        time.sleep(min(POLL_SECONDS, remaining))
+        if drain is None:
+            time.sleep(min(POLL_SECONDS, remaining))
+        else:
+            drain.read_for(min(POLL_SECONDS, remaining))
+
+
+def linux_group_has_live_members(pgid):
+    """Inspect only Linux process state and group IDs; never retain a process listing."""
+    try:
+        entries = list(Path('/proc').iterdir())
+    except OSError as error:
+        raise RuntimeError('Could not inspect Linux process status') from error
+    for entry in entries:
+        if not entry.name.isdecimal():
+            continue
+        try:
+            status = (entry / 'stat').read_text()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise RuntimeError('Could not inspect Linux process status') from error
+        close = status.rfind(')')
+        fields = status[close + 2:].split() if close >= 0 else []
+        if close < 0 or len(fields) < 3 or len(fields[0]) != 1:
+            raise RuntimeError('Could not parse Linux process status')
+        try:
+            member_pgid = int(fields[2])
+        except ValueError as error:
+            raise RuntimeError('Could not parse Linux process group') from error
+        if member_pgid == pgid and fields[0] != 'Z':
+            return True
+    return False
 
 
 def group_has_live_members(pgid, leader_exited):
@@ -181,9 +237,11 @@ def group_has_live_members(pgid, leader_exited):
         # Darwin reports EPERM for a group containing only an unreaped zombie.
         # Keeping the leader unreaped holds this PGID against reuse, so after its
         # observed exit EPERM means no signalable member remains in this command's group.
-        if leader_exited:
+        if leader_exited and sys.platform == 'darwin':
             return False
         raise RuntimeError('Process group became unsignalable before its leader exited') from error
+    if leader_exited and sys.platform.startswith('linux'):
+        return linux_group_has_live_members(pgid)
     return True
 
 
@@ -193,12 +251,12 @@ def signal_process_group(pgid, signum, leader_exited):
     except ProcessLookupError:
         return
     except PermissionError as error:
-        if leader_exited:
+        if leader_exited and sys.platform == 'darwin':
             return
         raise RuntimeError('Could not signal a live command process group') from error
 
 
-def force_and_confirm_process_group(process, pgid, leader_exited):
+def force_and_confirm_process_group(process, pgid, leader_exited, drain):
     """Kill the verifier command group before reaping its leader and reusing its PGID."""
     errors = []
     try:
@@ -209,7 +267,7 @@ def force_and_confirm_process_group(process, pgid, leader_exited):
     while True:
         try:
             if not leader_exited:
-                leader_exited = wait_for_exit_unreaped(process, 0)
+                leader_exited = wait_for_exit_unreaped(process, 0, drain)
             if leader_exited and not group_has_live_members(pgid, leader_exited):
                 return leader_exited, errors
         except Exception as error:
@@ -222,41 +280,126 @@ def force_and_confirm_process_group(process, pgid, leader_exited):
             else:
                 errors.append('Command process group still had live members after forced cleanup')
             return leader_exited, errors
-        time.sleep(min(POLL_SECONDS, remaining))
+        drain.read_for(min(POLL_SECONDS, remaining))
 
 
-def drain_pipes(process):
-    values = {'stdout': b'', 'stderr': b''}
-    errors = []
+class PipeDrain:
+    """Collect command output through nonblocking descriptors without reader threads."""
 
-    def read(name, stream):
+    def __init__(self, process):
+        self.values = {'stdout': bytearray(), 'stderr': bytearray()}
+        self.errors = []
+        self.selector = selectors.DefaultSelector()
+        self.streams = [('stdout', process.stdout), ('stderr', process.stderr)]
+        self.open_fds = set()
+        for name, stream in self.streams:
+            try:
+                fd = stream.fileno()
+                os.set_blocking(fd, False)
+                self.selector.register(fd, selectors.EVENT_READ, name)
+                self.open_fds.add(fd)
+            except Exception as error:
+                self.errors.append(f'Could not prepare command {name} pipe: {error}')
+
+    def unregister(self, fd):
         try:
-            values[name] = stream.read()
+            self.selector.unregister(fd)
+        except (KeyError, ValueError):
+            pass
+        self.open_fds.discard(fd)
+
+    def read_for(self, timeout_seconds):
+        if not self.open_fds:
+            return
+        try:
+            events = self.selector.select(timeout_seconds)
         except Exception as error:
-            errors.append(f'Could not read command {name}: {error}')
+            self.errors.append(f'Could not wait for command output: {error}')
+            return
+        for key, _ in events:
+            if key.fd not in self.open_fds:
+                continue
+            try:
+                chunk = os.read(key.fd, PIPE_READ_BYTES)
+            except BlockingIOError:
+                continue
+            except OSError as error:
+                self.errors.append(f'Could not read command {key.data}: {error}')
+                self.unregister(key.fd)
+                continue
+            if chunk:
+                self.values[key.data].extend(chunk)
+            else:
+                self.unregister(key.fd)
 
-    threads = [
-        threading.Thread(target=read, args=('stdout', process.stdout), daemon=True),
-        threading.Thread(target=read, args=('stderr', process.stderr), daemon=True),
-    ]
-    for thread in threads:
-        thread.start()
-    return values, errors, threads
-
-
-def finish_pipe_drain(process, threads, errors):
-    for thread in threads:
-        thread.join(PIPE_DRAIN_SECONDS)
-    if any(thread.is_alive() for thread in threads):
-        for stream in (process.stdout, process.stderr):
+    def finish(self, errors):
+        deadline = time.monotonic() + PIPE_DRAIN_SECONDS
+        while self.open_fds:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                errors.append('Command output pipes did not close after process-group cleanup')
+                break
+            self.read_for(min(POLL_SECONDS, remaining))
+        for name, stream in self.streams:
             try:
                 stream.close()
-            except Exception:
-                pass
-        for thread in threads:
-            thread.join(POLL_SECONDS)
-    if any(thread.is_alive() for thread in threads):
-        errors.append('Command output pipes did not close after process-group cleanup')
+            except Exception as error:
+                errors.append(f'Could not close command {name} pipe: {error}')
+        try:
+            self.selector.close()
+        except Exception as error:
+            errors.append(f'Could not close command output selector: {error}')
+        errors.extend(self.errors)
+
+
+def close_stdin(stream, errors):
+    if stream is None:
+        return
+    try:
+        stream.close()
+    except Exception as error:
+        errors.append(f'Could not close command stdin: {error}')
+
+
+def write_stdin_nonblocking(process, stdin, deadline, drain, errors):
+    if stdin is None:
+        return False
+    stream = process.stdin
+    selector = None
+    try:
+        fd = stream.fileno()
+        os.set_blocking(fd, False)
+        selector = selectors.DefaultSelector()
+        selector.register(fd, selectors.EVENT_WRITE)
+        data = bytes_from(stdin)
+        offset = 0
+        while offset < len(data):
+            drain.read_for(0)
+            try:
+                written = os.write(fd, data[offset:])
+            except BrokenPipeError:
+                return False
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return True
+                selector.select(min(POLL_SECONDS, remaining))
+                continue
+            except Exception as error:
+                errors.append(f'Could not write command stdin: {error}')
+                return False
+            if written > 0:
+                offset += written
+    except Exception as error:
+        errors.append(f'Could not prepare command stdin: {error}')
+    finally:
+        if selector is not None:
+            try:
+                selector.close()
+            except Exception as error:
+                errors.append(f'Could not close command stdin selector: {error}')
+        close_stdin(stream, errors)
+    return False
 
 
 def run_posix_command(command, cwd, env, stdin, timeout_seconds, term_grace_seconds):
@@ -273,35 +416,38 @@ def run_posix_command(command, cwd, env, stdin, timeout_seconds, term_grace_seco
     # start_new_session makes the child the new session and process-group leader.
     # The leader stays unreaped through cleanup, so this PGID cannot be recycled.
     pgid = process.pid
-    values, cleanup_errors, threads = drain_pipes(process)
-    if stdin is not None:
-        try:
-            process.stdin.write(stdin)
-        except BrokenPipeError:
-            pass
-        except Exception as error:
-            cleanup_errors.append(f'Could not write command stdin: {error}')
-        finally:
-            try:
-                process.stdin.close()
-            except Exception:
-                pass
+    drain = PipeDrain(process)
+    cleanup_errors = []
     timed_out = False
     leader_exited = False
+    deadline = time.monotonic() + timeout_seconds
     try:
-        leader_exited = wait_for_exit_unreaped(process, timeout_seconds)
-        if not leader_exited:
+        stdin_timed_out = write_stdin_nonblocking(process, stdin, deadline, drain, cleanup_errors)
+        leader_exited = wait_for_exit_unreaped(
+            process,
+            max(0, deadline - time.monotonic()),
+            drain,
+        )
+        if stdin_timed_out or not leader_exited:
             timed_out = True
             try:
                 signal_process_group(pgid, signal.SIGTERM, leader_exited)
             except Exception as error:
                 cleanup_errors.append(f'Could not terminate timed-out command group: {error}')
-            leader_exited = wait_for_exit_unreaped(process, term_grace_seconds)
+            leader_exited = wait_for_exit_unreaped(process, term_grace_seconds, drain)
     except Exception as error:
         cleanup_errors.append(f'Could not wait for command completion: {error}')
     finally:
-        leader_exited, group_errors = force_and_confirm_process_group(process, pgid, leader_exited)
-        cleanup_errors.extend(group_errors)
+        try:
+            leader_exited, group_errors = force_and_confirm_process_group(
+                process,
+                pgid,
+                leader_exited,
+                drain,
+            )
+            cleanup_errors.extend(group_errors)
+        except Exception as error:
+            cleanup_errors.append(f'Could not force command process-group cleanup: {error}')
         try:
             process.wait(timeout=GROUP_CLEANUP_SECONDS)
         except subprocess.TimeoutExpired:
@@ -313,8 +459,8 @@ def run_posix_command(command, cwd, env, stdin, timeout_seconds, term_grace_seco
                 cleanup_errors.append(f'Could not reap command leader: {error}')
         except Exception as error:
             cleanup_errors.append(f'Could not reap command leader: {error}')
-        finish_pipe_drain(process, threads, cleanup_errors)
-    return {'stdout': bytes_from(values['stdout']), 'stderr': bytes_from(values['stderr']),
+        drain.finish(cleanup_errors)
+    return {'stdout': bytes(drain.values['stdout']), 'stderr': bytes(drain.values['stderr']),
             'exit': process.returncode, 'timed_out': timed_out,
             'timeout_seconds': timeout_seconds, 'cleanup_errors': cleanup_errors}
 
@@ -357,6 +503,26 @@ def run_command(command, cwd, env, stdin=None, timeout_seconds=COMMAND_TIMEOUT_S
     return run_nonposix_command(command, cwd, env, stdin, timeout_seconds, term_grace_seconds)
 
 
+def bounded_output(label, command, cwd=None, env=None, text=False):
+    """Run a verifier auxiliary process under the same bounded cleanup contract as the CLI."""
+    result = run_command(
+        command,
+        cwd,
+        env,
+        timeout_seconds=AUXILIARY_TIMEOUT_SECONDS,
+    )
+    errors = []
+    if result['timed_out']:
+        errors.append(f"timed out after {result['timeout_seconds']} seconds")
+    if result['exit'] != 0:
+        errors.append(f"exited with status {result['exit']}")
+    errors.extend(result['cleanup_errors'])
+    if errors:
+        raise RuntimeError(f"{label}: {'; '.join(errors)}")
+    output = result['stdout']
+    return output.decode() if text else output
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--evidence-dir', required=True, type=Path)
@@ -394,8 +560,12 @@ def main():
         toolbin.mkdir()
         node_shim = shutil.which('node')
         require(node_shim is not None, 'Missing prerequisite: node')
-        node_exec = Path(subprocess.check_output(
-            [node_shim, '-p', 'process.execPath'], text=True).strip())
+        node_exec = Path(bounded_output(
+            'Node executable discovery',
+            [node_shim, '-p', 'process.execPath'],
+            cwd=root,
+            text=True,
+        ).strip())
         require(node_exec.is_file(), 'Node did not expose its executable path')
         for tool in ('dirname', 'readlink'):
             executable = shutil.which(tool)
@@ -875,9 +1045,15 @@ def main():
                     and saved['persisted']['grants']['owned_cluster'] is False
                     and saved['capacity']['supported_action'] is None
                     and saved['actions'] == []
-                    and '--runtime kubernetes' in saved['first_run_command']
-                    and '--seed' not in saved['first_run_command'],
+                    and any(gate['code'] == 'GATE_OWNED_CLUSTER' for gate in saved['gates']),
                     'Setup failed to persist explicit choices or changed authority')
+            first_run_tokens = shlex.split(saved['first_run_command'])
+            require(first_run_tokens[:2] == ['houston', 'up']
+                    and '--version' in first_run_tokens and '--name' in first_run_tokens
+                    and '--wait' in first_run_tokens
+                    and not any(flag in first_run_tokens for flag in
+                                ('--runtime', '--deployment', '--preset', '--seed', '--seed-profile')),
+                    'Setup first-run command must use saved topology without explicit axes or seed flags')
             after = config_file.read_bytes()
             repeated = run('setup-readback', ['onboard', '--show', '--json'],
                            schema='houston.onboard.v1')['data']
@@ -886,8 +1062,10 @@ def main():
             defaults = run('setup-defaults', ['onboard', '--accept-defaults', '--json'],
                            schema='houston.onboard.v1')['data']
             require(defaults['selection'] == saved['selection']
-                    and defaults['persisted']['grants']['owned_cluster'] is False,
-                    'Accepting defaults overwrote answered choices or granted authority')
+                    and defaults['persisted']['grants']['owned_cluster'] is False
+                    and defaults['action'] == 'unchanged'
+                    and config_file.read_bytes() == after,
+                    'Accepting redundant defaults rewrote answered choices or granted authority')
             human = run('setup-human', ['onboard', '--show'])
             require('microservices' in human and 'GATE_OWNED_CLUSTER' in human,
                     'Human setup omitted selected deployment or authority gate')

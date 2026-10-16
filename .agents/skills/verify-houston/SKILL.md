@@ -33,7 +33,9 @@ evidence outside both checkouts.
 
 The helper requires Python 3.9+, Node, `dirname`, and `readlink`. On POSIX it also
 requires `waitid` with `WNOWAIT`, and refuses before launching a command if that
-cleanup primitive is unavailable. It creates a unique
+cleanup primitive is unavailable. On Linux, readable `/proc` process-status files
+are also required to distinguish the reserved zombie leader from live group members.
+It creates a unique
 temporary directory containing `HOUSTON_HOME`, `HOUSTON_SKILL_HOME`, a synthetic
 user home, and synthetic Docker, Kubernetes, IPv6 and wildcard-bind workspaces. Only
 entry-point utilities are initially on the child's PATH. The onboarding refusal
@@ -116,8 +118,9 @@ plants a synthetic secret to detect leaks.
 The helper removes only the scratch directory it created, including the fixture,
 in a `finally` block on success or ordinary failure. On POSIX, it keeps the CLI
 leader unreaped while it force-kills and boundedly confirms the command group has
-no signalable member, then reaps the leader. Pipe closure does not complete that
-cleanup. The non-POSIX path has only direct-child cleanup. The onboarding path runs two guarded synthetic
+no live member, then reaps the leader. Linux confirms that state from `/proc` while
+the leader reserves its group ID. Pipe closure does not complete that cleanup. The
+non-POSIX path has only direct-child cleanup. The onboarding path runs two guarded synthetic
 `down --name verify-owned-kube-fixture --yes --json` probes. Its isolated home
 and `kubectl` trap require the missing-onboarding and denied-grant gates to stop
 before a cluster client or mutation can run. No `prune`, Docker, Kubernetes,

@@ -13,10 +13,13 @@ automatic infrastructure actions. Empty JSON setup, an invalid deployment, and
 
 The helper saves microservices, no scenarios, no seed, and retention enabled. A
 separate preview process must read these choices back. Accepting defaults must
-preserve those answers and the denied owned-cluster grant. The resulting command
-must select Kubernetes without seed flags. Human output must show the deployment
-and authority gate. Persisted YAML must retain unknown fields and legacy denials.
-Receipts are `setup-*`, `setup-persisted.json`, and `commands.json`.
+preserve those answers and the denied owned-cluster grant without rewriting the
+configuration when every default was already answered. The resulting command must
+use the saved topology and omit `--runtime`, `--deployment`, and `--preset`; parse
+it as shell tokens before checking that it also omits seed flags. Human output must
+show the deployment and authority gate. Persisted YAML must retain unknown fields
+and legacy denials. Receipts are `setup-*`, `setup-persisted.json`, and
+`commands.json`.
 
 The helper then pipes answers through the real interactive seed section. Cancelling
 must preserve config bytes. Accepting a new seed answer must survive a separate
