@@ -24,7 +24,7 @@ import type * as CreateK8sNS from '../../../src/core/lifecycle/create-k8s';
 let mockPlanCluster: ((context?: string) => Promise<ContextNS.ClusterPlan>) | null = null;
 let mockPreflight: (() => Promise<Preflight>) | null = null;
 let mockHelmReachable: ((context?: string) => Promise<string>) | null = null;
-let mockPortFree: (() => Promise<boolean>) | null = null;
+let mockPortFree: ((port: number, host?: string) => Promise<boolean>) | null = null;
 
 jest.mock('../../../src/core/kube/probe', () => {
   const actual = jest.requireActual<typeof ProbeNS>('../../../src/core/kube/probe');
@@ -51,7 +51,7 @@ jest.mock('../../../src/core/runner/ports', () => {
   const actual = jest.requireActual<typeof RunnerPortsNS>('../../../src/core/runner/ports');
   return {
     ...actual,
-    portFree: () => (mockPortFree ?? actual.portFree)(),
+    portFree: (port: number, host = '') => (mockPortFree ?? actual.portFree)(port, host),
   };
 });
 jest.mock('../../../src/core/lifecycle/create-k8s', () => ({
