@@ -27,9 +27,10 @@ list exactly `README.md`, `docker-compose.yml`, and `manifest.json`; each must b
 a self-contained regular file. Compare the manifest projection with the bundle
 response and fixture. The README must identify the fixture, and the parsed Compose
 attachment must preserve the Rocket.Chat service while masking its synthetic
-credentials. Scan JSON stdout and stderr plus every bundle file for the synthetic
-secret and fail on any occurrence. Raw artifact copying that leaks the sentinel is
-a product failure.
+credentials. The shared command-receipt check scans every stdout and stderr file,
+including both evidence commands; this recipe also scans every bundle file for the
+synthetic sentinel and fails on any occurrence. Raw artifact copying that leaks the
+sentinel is a product failure.
 
 Keep stdout, stderr, bundle files, exit receipts, and hashes after scratch
 cleanup. Record the before/after topology manifest for the synthetic workspace

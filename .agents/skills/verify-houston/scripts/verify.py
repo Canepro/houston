@@ -12,6 +12,8 @@ import signal
 import stat
 import subprocess
 import tempfile
+import threading
+import time
 
 
 def require(condition, message):
@@ -106,6 +108,16 @@ def receipt_paths(out, *labels):
     )]
 
 
+def scan_command_receipts(secret, out, *labels):
+    paths = receipt_paths(out, *labels) if labels else sorted(
+        (path for path in out.iterdir() if path.name.endswith(('.stdout', '.stderr'))),
+        key=lambda path: path.name,
+    )
+    require(paths, 'No command stdout/stderr receipts were retained')
+    no_synthetic_secret(secret, paths)
+    return paths
+
+
 def source_manifest(root):
     paths = subprocess.check_output(
         ['git', 'ls-files', '--cached', '--others', '--exclude-standard', '-z', '--',
@@ -131,20 +143,218 @@ def bytes_from(value):
     return str(value).encode()
 
 
-def stop_process_group(process, force=False):
-    # Descendants can retain the output pipes after the CLI leader has exited.
-    # Its session still needs termination in that case.
-    if os.name != 'posix' and process.poll() is not None:
-        return
+COMMAND_TIMEOUT_SECONDS = 60
+TERM_GRACE_SECONDS = 5
+GROUP_CLEANUP_SECONDS = 5
+PIPE_DRAIN_SECONDS = 5
+POLL_SECONDS = 0.05
+
+
+def require_unreaped_group_wait():
+    require(hasattr(os, 'waitid') and hasattr(os, 'WNOWAIT'),
+            'POSIX process-group cleanup requires waitid with WNOWAIT')
+
+
+def wait_for_exit_unreaped(process, timeout_seconds):
+    """Observe a POSIX child exit while keeping its leader PID reserved."""
+    require_unreaped_group_wait()
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            result = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError as error:
+            raise RuntimeError('Could not observe command leader without reaping it') from error
+        if result is not None:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(POLL_SECONDS, remaining))
+
+
+def group_has_live_members(pgid, leader_exited):
     try:
-        if os.name == 'posix':
-            os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
-        elif force:
-            process.kill()
-        else:
-            process.terminate()
+        os.killpg(pgid, 0)
     except ProcessLookupError:
-        pass
+        return False
+    except PermissionError as error:
+        # Darwin reports EPERM for a group containing only an unreaped zombie.
+        # Keeping the leader unreaped holds this PGID against reuse, so after its
+        # observed exit EPERM means no signalable member remains in this command's group.
+        if leader_exited:
+            return False
+        raise RuntimeError('Process group became unsignalable before its leader exited') from error
+    return True
+
+
+def signal_process_group(pgid, signum, leader_exited):
+    try:
+        os.killpg(pgid, signum)
+    except ProcessLookupError:
+        return
+    except PermissionError as error:
+        if leader_exited:
+            return
+        raise RuntimeError('Could not signal a live command process group') from error
+
+
+def force_and_confirm_process_group(process, pgid, leader_exited):
+    """Kill the verifier command group before reaping its leader and reusing its PGID."""
+    errors = []
+    try:
+        signal_process_group(pgid, signal.SIGKILL, leader_exited)
+    except Exception as error:
+        errors.append(f'Could not force command process group: {error}')
+    deadline = time.monotonic() + GROUP_CLEANUP_SECONDS
+    while True:
+        try:
+            if not leader_exited:
+                leader_exited = wait_for_exit_unreaped(process, 0)
+            if leader_exited and not group_has_live_members(pgid, leader_exited):
+                return leader_exited, errors
+        except Exception as error:
+            errors.append(f'Could not confirm command process-group cleanup: {error}')
+            return leader_exited, errors
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            if not leader_exited:
+                errors.append('Command leader did not exit after forced process-group cleanup')
+            else:
+                errors.append('Command process group still had live members after forced cleanup')
+            return leader_exited, errors
+        time.sleep(min(POLL_SECONDS, remaining))
+
+
+def drain_pipes(process):
+    values = {'stdout': b'', 'stderr': b''}
+    errors = []
+
+    def read(name, stream):
+        try:
+            values[name] = stream.read()
+        except Exception as error:
+            errors.append(f'Could not read command {name}: {error}')
+
+    threads = [
+        threading.Thread(target=read, args=('stdout', process.stdout), daemon=True),
+        threading.Thread(target=read, args=('stderr', process.stderr), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    return values, errors, threads
+
+
+def finish_pipe_drain(process, threads, errors):
+    for thread in threads:
+        thread.join(PIPE_DRAIN_SECONDS)
+    if any(thread.is_alive() for thread in threads):
+        for stream in (process.stdout, process.stderr):
+            try:
+                stream.close()
+            except Exception:
+                pass
+        for thread in threads:
+            thread.join(POLL_SECONDS)
+    if any(thread.is_alive() for thread in threads):
+        errors.append('Command output pipes did not close after process-group cleanup')
+
+
+def run_posix_command(command, cwd, env, stdin, timeout_seconds, term_grace_seconds):
+    require_unreaped_group_wait()
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    # start_new_session makes the child the new session and process-group leader.
+    # The leader stays unreaped through cleanup, so this PGID cannot be recycled.
+    pgid = process.pid
+    values, cleanup_errors, threads = drain_pipes(process)
+    if stdin is not None:
+        try:
+            process.stdin.write(stdin)
+        except BrokenPipeError:
+            pass
+        except Exception as error:
+            cleanup_errors.append(f'Could not write command stdin: {error}')
+        finally:
+            try:
+                process.stdin.close()
+            except Exception:
+                pass
+    timed_out = False
+    leader_exited = False
+    try:
+        leader_exited = wait_for_exit_unreaped(process, timeout_seconds)
+        if not leader_exited:
+            timed_out = True
+            try:
+                signal_process_group(pgid, signal.SIGTERM, leader_exited)
+            except Exception as error:
+                cleanup_errors.append(f'Could not terminate timed-out command group: {error}')
+            leader_exited = wait_for_exit_unreaped(process, term_grace_seconds)
+    except Exception as error:
+        cleanup_errors.append(f'Could not wait for command completion: {error}')
+    finally:
+        leader_exited, group_errors = force_and_confirm_process_group(process, pgid, leader_exited)
+        cleanup_errors.extend(group_errors)
+        try:
+            process.wait(timeout=GROUP_CLEANUP_SECONDS)
+        except subprocess.TimeoutExpired:
+            cleanup_errors.append('Command leader did not reap after process-group cleanup')
+            try:
+                process.kill()
+                process.wait(timeout=GROUP_CLEANUP_SECONDS)
+            except Exception as error:
+                cleanup_errors.append(f'Could not reap command leader: {error}')
+        except Exception as error:
+            cleanup_errors.append(f'Could not reap command leader: {error}')
+        finish_pipe_drain(process, threads, cleanup_errors)
+    return {'stdout': bytes_from(values['stdout']), 'stderr': bytes_from(values['stderr']),
+            'exit': process.returncode, 'timed_out': timed_out,
+            'timeout_seconds': timeout_seconds, 'cleanup_errors': cleanup_errors}
+
+
+def run_nonposix_command(command, cwd, env, stdin, timeout_seconds, term_grace_seconds):
+    """Keep the previous direct-child timeout behavior where POSIX groups are unavailable."""
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    timed_out = False
+    cleanup_errors = []
+    try:
+        stdout, stderr = process.communicate(input=stdin, timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        process.terminate()
+        try:
+            stdout, stderr = process.communicate(timeout=term_grace_seconds)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            try:
+                stdout, stderr = process.communicate(timeout=GROUP_CLEANUP_SECONDS)
+            except subprocess.TimeoutExpired as error:
+                cleanup_errors.append(f'Could not stop non-POSIX command: {error}')
+                stdout, stderr = b'', b''
+    return {'stdout': bytes_from(stdout), 'stderr': bytes_from(stderr),
+            'exit': process.returncode, 'timed_out': timed_out,
+            'timeout_seconds': timeout_seconds, 'cleanup_errors': cleanup_errors}
+
+
+def run_command(command, cwd, env, stdin=None, timeout_seconds=COMMAND_TIMEOUT_SECONDS,
+                term_grace_seconds=TERM_GRACE_SECONDS):
+    if os.name == 'posix':
+        return run_posix_command(command, cwd, env, stdin, timeout_seconds, term_grace_seconds)
+    return run_nonposix_command(command, cwd, env, stdin, timeout_seconds, term_grace_seconds)
 
 
 def main():
@@ -176,6 +386,7 @@ def main():
     failure = None
     completed = False
     cleanup_errors = []
+    sentinel = 'VERIFY_SYNTHETIC_SECRET_59c8'
     try:
         # Only entry-point utilities can execute. No inherited credentials, engine socket,
         # kubeconfig, user home, proxy or ambient HOUSTON_* overrides reach the CLI.
@@ -197,7 +408,6 @@ def main():
         Path(env['HOME']).mkdir()
         workspace = scratch / 'home' / 'repros' / 'verify-fixture'
         workspace.mkdir(parents=True)
-        sentinel = 'VERIFY_SYNTHETIC_SECRET_59c8'
         record = {'name': 'verify-fixture', 'project': 'houston-verify-fixture',
                   'rc_version': '8.5.1', 'rc_image': 'rocketchat/rocket.chat',
                   'mongo_tag': '8.0', 'mongo_flavor': 'mongodb', 'preset': 'default',
@@ -256,38 +466,33 @@ def main():
         def run(label, argv, expected=0, schema=None, ok=True, overrides=None, stdin=None):
             command = [str(root / 'bin' / 'houston'), *argv]
             child_env = dict(env, **(overrides or {}))
-            process = subprocess.Popen(
-                command,
-                cwd=root,
-                env=child_env,
-                stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                start_new_session=os.name == 'posix',
-            )
-            timed_out = False
-            try:
-                stdout, stderr = process.communicate(input=stdin, timeout=60)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                stop_process_group(process)
-                try:
-                    stdout, stderr = process.communicate(timeout=5)
-                except subprocess.TimeoutExpired:
-                    stop_process_group(process, force=True)
-                    stdout, stderr = process.communicate()
-            stdout = bytes_from(stdout)
-            stderr = bytes_from(stderr)
+            result = run_command(command, root, child_env, stdin=stdin)
+            stdout = result['stdout']
+            stderr = result['stderr']
             (out / f'{label}.stdout').write_bytes(stdout)
             (out / f'{label}.stderr').write_bytes(stderr)
-            receipt = {'argv': ['bin/houston', *argv], 'exit': process.returncode}
-            if timed_out:
-                receipt.update({'timed_out': True, 'timeout_seconds': 60})
+            receipt = {'argv': ['bin/houston', *argv], 'exit': result['exit']}
+            scan_error = None
+            try:
+                scan_command_receipts(sentinel, out, label)
+            except Exception as error:
+                scan_error = str(error)
+            if result['timed_out']:
+                receipt.update({'timed_out': True, 'timeout_seconds': result['timeout_seconds']})
+            if result['cleanup_errors']:
+                receipt['cleanup_errors'] = result['cleanup_errors']
             receipts.append(receipt)
             (out / 'commands.json').write_text(json.dumps(receipts, indent=2) + '\n')
-            require(not timed_out, f'{label}: timed out after 60 seconds')
-            require(process.returncode == expected,
-                    f'{label}: expected exit {expected}, got {process.returncode}')
+            errors = []
+            if scan_error is not None:
+                errors.append(f'{label}: {scan_error}')
+            if result['timed_out']:
+                errors.append(f"{label}: timed out after {result['timeout_seconds']} seconds")
+            if result['exit'] != expected:
+                errors.append(f"{label}: expected exit {expected}, got {result['exit']}")
+            errors.extend(f'{label}: {error}' for error in result['cleanup_errors'])
+            if errors:
+                raise RuntimeError('; '.join(errors))
             if schema is None:
                 return stdout.decode().strip()
             lines = stdout.decode().splitlines()
@@ -328,7 +533,6 @@ def main():
                 inspect_label = f'inspect-{runtime}'
                 envelope = run(inspect_label, ['inspect', '--name', name, '--json'],
                                schema='houston.inspect.v1')
-                no_synthetic_secret(sentinel, receipt_paths(out, inspect_label))
                 data = envelope['data']
                 require(data['name'] == name and data['runtime'] == runtime, 'Inspect chose another workspace/runtime')
                 require(data['url'] == 'http://127.0.0.1:39999' and data['bind_host'] == '127.0.0.1',
@@ -355,7 +559,6 @@ def main():
                             'Unavailable Docker engine must report a warning')
                 human_label = f'inspect-{runtime}-human'
                 human = run(human_label, ['inspect', '--name', name])
-                no_synthetic_secret(sentinel, receipt_paths(out, human_label))
                 require_unknown_panels(
                     human,
                     ('nodes', 'services', 'pods') if runtime == 'kubernetes'
@@ -375,7 +578,6 @@ def main():
                     'Evidence missing name must be NOT_FOUND')
             payload = run('evidence-json', ['evidence', '--name', 'verify-fixture', '--json'],
                           schema='houston.evidence.v1')['data']
-            no_synthetic_secret(sentinel, receipt_paths(out, 'evidence-json'))
             require(payload['repro']['root_url'] == 'http://127.0.0.1:39999', 'Evidence URL is not origin-only')
             require('login' not in payload and 'env' not in payload, 'Evidence contains private sections')
             expected_seed = {'profile': 'standard', 'planned': {'users': 1}, 'actual': {'users': 1}}
@@ -395,7 +597,6 @@ def main():
                 'evidence-bundle', ['evidence', '--name', 'verify-fixture', '--bundle', str(bundle), '--json'],
                 schema='houston.evidence.v1',
             )['data']
-            no_synthetic_secret(sentinel, receipt_paths(out, 'evidence-bundle'))
             expected_bundle_files = ['README.md', 'docker-compose.yml', 'manifest.json']
             bundle_names = bundle_payload.get('bundle', {}).get('files')
             require(isinstance(bundle_names, list) and sorted(bundle_names) == expected_bundle_files,
@@ -498,7 +699,6 @@ def main():
                     and local['tunnel_command'] is None and local['note'] is None,
                     'Local access handoff differs from recorded workspace')
             local_human = run('access-local-human', ['info', '--name', access_workspace.name])
-            no_synthetic_secret(sentinel, receipt_paths(out, 'access-discovery', 'access-local-human'))
             require(local['browser_url'] in local_human,
                     'Human local access guidance omitted the browser URL')
             ssh_values = {
@@ -530,8 +730,6 @@ def main():
                          overrides['HOUSTON_SSH_USER'] + '@' + overrides['HOUSTON_SSH_HOST']],
                         'Tunnel must bind client loopback and preserve one option-safe destination')
                 human = run('access-' + label + '-human', ['info', '--name', name], overrides=overrides)
-                no_synthetic_secret(sentinel, receipt_paths(out, 'access-' + label,
-                                                            'access-' + label + '-human'))
                 require(data['tunnel_command'] in human and data['browser_url'] in human,
                         'Human access guidance differs from JSON')
             for marker in ssh_values:
@@ -759,6 +957,15 @@ def main():
                         f'Retained bundle attachment changed after cleanup: {file.name}')
             except Exception as error:
                 cleanup_errors.append(str(error))
+        try:
+            scanned_receipts = scan_command_receipts(sentinel, out)
+            summary['receipt_scan'] = {
+                'result': 'PASS',
+                'files': len(scanned_receipts),
+                'scope': 'all retained command stdout/stderr receipts',
+            }
+        except Exception as error:
+            cleanup_errors.append(f'Final command receipt scan failed: {error}')
         if cleanup_errors:
             summary['cleanup_errors'] = cleanup_errors
             if failure is None:

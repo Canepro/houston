@@ -31,7 +31,9 @@ first and keep its source fixed during the run. The receipt records the candidat
 path, head and tracked diff digest, plus this verifier script's digest. Store
 evidence outside both checkouts.
 
-The helper requires Python 3.9+, Node, `dirname`, and `readlink`. It creates a unique
+The helper requires Python 3.9+, Node, `dirname`, and `readlink`. On POSIX it also
+requires `waitid` with `WNOWAIT`, and refuses before launching a command if that
+cleanup primitive is unavailable. It creates a unique
 temporary directory containing `HOUSTON_HOME`, `HOUSTON_SKILL_HOME`, a synthetic
 user home, and synthetic Docker, Kubernetes, IPv6 and wildcard-bind workspaces. Only
 entry-point utilities are initially on the child's PATH. The onboarding refusal
@@ -96,9 +98,11 @@ strings or branch names, when choosing applicability.
 ## Evidence
 
 `commands.json` records actual argv and exit codes. Each command has separate
-stdout and stderr files. `summary.json` binds results to the revision, records the
-fixture immutability check, and names pending coverage. `sha256.json` hashes the
-retained files and the helper reads them back after cleanup. Evidence bundles,
+stdout and stderr files. The helper scans each pair at the command-output boundary,
+including refusals and timeouts, then repeats the scan over every retained command
+receipt before it can report `PASS_SCOPED` or write `sha256.json`. `summary.json`
+binds results to the revision, records the fixture immutability check, and names
+pending coverage. The helper reads retained files back after cleanup. Evidence bundles,
 when applicable, also survive under the evidence directory.
 
 Pass predicates live in each feature recipe and the helper. Inspect failures and
@@ -110,8 +114,10 @@ plants a synthetic secret to detect leaks.
 ## Cleanup
 
 The helper removes only the scratch directory it created, including the fixture,
-in a `finally` block on success or ordinary failure. A timeout terminates the
-whole CLI process group. The onboarding path runs two guarded synthetic
+in a `finally` block on success or ordinary failure. On POSIX, it keeps the CLI
+leader unreaped while it force-kills and boundedly confirms the command group has
+no signalable member, then reaps the leader. Pipe closure does not complete that
+cleanup. The non-POSIX path has only direct-child cleanup. The onboarding path runs two guarded synthetic
 `down --name verify-owned-kube-fixture --yes --json` probes. Its isolated home
 and `kubectl` trap require the missing-onboarding and denied-grant gates to stop
 before a cluster client or mutation can run. No `prune`, Docker, Kubernetes,

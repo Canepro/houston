@@ -13,3 +13,7 @@ Read capability command paths and their flags at each exact candidate revision.
 An entry being present establishes discovery only. It does not prove that feature
 works. The parent extends and runs every applicable pending recipe after the
 migration ports are integrated. `PASS_SCOPED` never means the full migration passed.
+
+Every command receipt is a shared safety check: the helper scans its stdout and
+stderr at capture time, then scans every retained command receipt again before
+`PASS_SCOPED` and `sha256.json`. Bundle attachments retain their recipe-specific scan.

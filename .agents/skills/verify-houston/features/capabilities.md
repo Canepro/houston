@@ -16,3 +16,5 @@ Prerequisites are installed dependencies and the source checkout. The helper
 compares `bin/houston --version` with `package.json` first. Receipts are
 `version.*`, `capabilities.*`, `missing-workspace.*`, and `commands.json`. These
 commands establish parser and failure behavior without an engine or live server.
+The shared receipt check scans both streams for these commands, including the
+missing-workspace refusal, before their envelopes are accepted.
