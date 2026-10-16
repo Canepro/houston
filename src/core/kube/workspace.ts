@@ -22,7 +22,7 @@ import {
   waitForCertificate,
   type IssuerSpec,
 } from './certmanager';
-import { deleteCluster, ensureKubeconfig } from './cluster';
+import { deleteCluster, ensureKubeconfig, type ClusterReceipt } from './cluster';
 import { planCluster, type ClusterPlan } from './context';
 import { ensureRepo, resolveChartVersion, valuesFor } from './chart';
 import { Interrupted, cleanup } from '../../seams/exec';
@@ -96,11 +96,13 @@ async function prepareCluster(
 ): Promise<{
   plan: ClusterPlan;
   context: string;
-  hadCluster: boolean;
+  createdHere: boolean;
   chartVersion: string;
 }> {
   const plan = given ?? (await planCluster());
-  const context = await ensureKubeconfig(plan, emit);
+  // Only the locked Kind result, not this earlier plan, can prove this call made the cluster.
+  const receipt: ClusterReceipt = { createdHere: false };
+  const context = await ensureKubeconfig(plan, emit, receipt);
   if (!plan.create && !isOurs(context)) {
     info(
       emit,
@@ -109,8 +111,7 @@ async function prepareCluster(
       { phase: 'provision', pct: 5 },
     );
   }
-  const hadCluster = !plan.create;
-  if (!hadCluster || plan.distribution !== 'kind') {
+  if (plan.create || plan.distribution !== 'kind') {
     info(
       emit,
       `the ${plan.distribution} cluster has its own image store, separate from Docker's — ` +
@@ -126,7 +127,7 @@ async function prepareCluster(
   const blocked =
     storageBlocker(pre) || architectureBlocker(pre, resolved.rcVersion, resolved.rcImage);
   if (blocked !== '') throw new PreflightError(blocked);
-  return { plan, context, hadCluster, chartVersion };
+  return { plan, context, createdHere: receipt.createdHere, chartVersion };
 }
 
 /** Create or adopt the namespace, and remember whether rollback may remove it. */
@@ -365,7 +366,7 @@ async function rollbackCreate(
   namespace: string,
   context: string,
   receipt: NamespaceReceipt,
-  hadCluster: boolean,
+  createdHere: boolean,
   emit: Emit,
 ): Promise<void> {
   if (receipt.createdUid === '') {
@@ -383,7 +384,7 @@ async function rollbackCreate(
       expectedUid: receipt.createdUid,
       emit,
     });
-    if (gone && !hadCluster) await deleteCluster({ emit });
+    if (gone && createdHere) await deleteCluster({ emit });
   } catch {
     // The ORIGINAL failure is what matters; a rollback that fails must not replace it.
   }
@@ -562,7 +563,7 @@ export async function createWorkspace({
   sleep = realSleep,
 }: CreateWorkspaceOptions): Promise<Record<string, unknown>> {
   const prepared = await prepareCluster(plan, resolved, emit);
-  const { context, hadCluster, chartVersion } = prepared;
+  const { context, createdHere, chartVersion } = prepared;
 
   const { namespace, receipt } = await ensureWorkspaceNamespace(name, context, owner, emit);
   let database: Database;
@@ -620,7 +621,7 @@ export async function createWorkspace({
     // when the failure IS a Ctrl-C or a stopped job: refused there, it left a namespace
     // no record pointed at.
     await cleanup(async () => {
-      await rollbackCreate(name, namespace, context, receipt, hadCluster, emit);
+      await rollbackCreate(name, namespace, context, receipt, createdHere, emit);
     });
     throw error;
   }

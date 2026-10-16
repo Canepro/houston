@@ -17,11 +17,17 @@ import { Interrupted } from '../../../src/seams/exec';
 import type { KubectlResult } from '../../../src/seams/kubectl';
 
 import { workspaceNamespaces } from '../../../src/core/kube/capabilities';
-import { adoptIfUnmarked, deleteCluster, ensureCluster } from '../../../src/core/kube/cluster';
+import {
+  CREATE_TIMEOUT,
+  adoptIfUnmarked,
+  deleteCluster,
+  ensureCluster,
+} from '../../../src/core/kube/cluster';
 import { kube, ownedKubeconfig, type RunOptions } from '../../../src/core/kube/exec';
 import { mongoManifest } from '../../../src/core/kube/manifests';
 import {
   CHART,
+  APPLY_TIMEOUT,
   CLUSTER_NAME,
   CLUSTER_OWNER_CONFIGMAP,
   CONTEXT,
@@ -106,6 +112,39 @@ function installTools(...names: string[]): void {
 }
 
 const sleep = () => Promise.resolve();
+
+/** Drive collision polling on a monotonic clock without making the suite wait ten minutes. */
+async function withCollisionClock<T>(
+  operation: () => Promise<T>,
+): Promise<{ value: T; elapsed: number }> {
+  jest.useFakeTimers();
+  const started = performance.now();
+  const outcome: { current: { value: T } | { error: unknown } | null } = { current: null };
+  void operation().then(
+    (value) => {
+      outcome.current = { value };
+    },
+    (error: unknown) => {
+      outcome.current = { error };
+    },
+  );
+  try {
+    for (
+      let tick = 0;
+      tick <= Math.ceil((CREATE_TIMEOUT * 1000) / 1000) + 1 && outcome.current === null;
+      tick += 1
+    ) {
+      await jest.advanceTimersByTimeAsync(1000);
+    }
+    const settled = outcome.current;
+    if (settled === null)
+      throw new Error('the collision waiter did not settle before its deadline');
+    if ('error' in settled) throw settled.error;
+    return { value: settled.value, elapsed: performance.now() - started };
+  } finally {
+    jest.useRealTimers();
+  }
+}
 
 afterEach(() => {
   kube.run = realRun;
@@ -431,7 +470,9 @@ describe('the cluster houston makes for itself', () => {
         return undefined;
       });
 
-      await expect(ensureCluster()).resolves.toBe(CONTEXT);
+      const receipt = { createdHere: true };
+      await expect(ensureCluster(undefined, receipt)).resolves.toBe(CONTEXT);
+      expect(receipt.createdHere).toBe(false);
 
       const exports = calls.filter(
         ({ argv }) => argv.includes('export') && argv.includes('kubeconfig'),
@@ -465,6 +506,32 @@ describe('the cluster houston makes for itself', () => {
     },
   );
 
+  it('waits through a collision winner startup that exceeds ten seconds', async () => {
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
+    let reads = 0;
+    route((joined) => {
+      if (joined.includes('get clusters')) return { stdout: '' };
+      if (joined.includes('create cluster')) {
+        return { returncode: 1, stderr: 'ERROR: node(s) already exist' };
+      }
+      if (joined.includes('current-context')) return { stdout: CONTEXT };
+      if (joined.includes(`get configmap ${CLUSTER_OWNER_CONFIGMAP}`)) {
+        reads += 1;
+        return { stdout: reads <= 21 ? '' : ownedClusterMarker() };
+      }
+      if (joined.includes('/readyz')) return { stdout: 'ok' };
+      return undefined;
+    });
+
+    const { value, elapsed } = await withCollisionClock(async () => await ensureCluster());
+    expect(value).toBe(CONTEXT);
+    expect(reads).toBe(22);
+    expect(elapsed).toBeGreaterThan(10_000);
+    expect(elapsed).toBeLessThan(CREATE_TIMEOUT * 1000);
+  });
+
   it.each(['absent', 'unavailable'])(
     'bounds a cross-home collision wait with marker %s',
     async (state) => {
@@ -484,18 +551,27 @@ describe('the cluster houston makes for itself', () => {
         return undefined;
       });
 
-      await expect(ensureCluster()).rejects.toBeInstanceOf(
-        state === 'absent' ? ConflictError : DockerError,
-      );
+      const { elapsed } = await withCollisionClock(async () => {
+        await expect(ensureCluster()).rejects.toBeInstanceOf(
+          state === 'absent' ? ConflictError : DockerError,
+        );
+      });
+      expect(elapsed).toBeGreaterThanOrEqual(CREATE_TIMEOUT * 1000);
 
       const exports = calls.filter(
         ({ argv }) => argv.includes('export') && argv.includes('kubeconfig'),
       );
-      expect(exports).toHaveLength(20);
+      expect(exports.length).toBeGreaterThan(20);
       expect(
         exports.every(
           (call) => String(call.argv[call.argv.indexOf('--kubeconfig') + 1]) !== ownedKubeconfig(),
         ),
+      ).toBe(true);
+      expect(
+        exports.every((call) => {
+          const timeout = call.options.timeout;
+          return timeout !== undefined && timeout > 0 && timeout <= APPLY_TIMEOUT;
+        }),
       ).toBe(true);
       expect(calls.some(({ argv }) => argv.includes('apply') && argv.includes('--filename'))).toBe(
         false,
@@ -505,6 +581,50 @@ describe('the cluster houston makes for itself', () => {
       );
     },
   );
+
+  it('does not begin another collision probe call after its deadline', async () => {
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
+    calls = [];
+    kube.run = async (argv, options = {}) => {
+      calls.push({ argv: [...argv], options });
+      const joined = argv.join(' ');
+      if (joined.includes('get clusters')) return { argv, returncode: 0, stdout: '', stderr: '' };
+      if (joined.includes('create cluster')) {
+        return { argv, returncode: 1, stdout: '', stderr: 'ERROR: node(s) already exist' };
+      }
+      if (joined.includes('export kubeconfig')) {
+        const timeout = options.timeout;
+        if (timeout === undefined) throw new Error('collision export received no timeout');
+        await new Promise<void>((resolve) => setTimeout(resolve, timeout * 1000));
+        return { argv, returncode: 0, stdout: '', stderr: '' };
+      }
+      if (joined.includes('current-context')) {
+        return { argv, returncode: 0, stdout: CONTEXT, stderr: '' };
+      }
+      if (joined.includes(`get configmap ${CLUSTER_OWNER_CONFIGMAP}`)) {
+        return { argv, returncode: 0, stdout: '', stderr: '' };
+      }
+      return { argv, returncode: 1, stdout: '', stderr: 'unexpected collision probe' };
+    };
+
+    const { elapsed } = await withCollisionClock(async () => {
+      await expect(ensureCluster()).rejects.toBeInstanceOf(ConflictError);
+    });
+
+    const exports = calls.filter(
+      ({ argv }) => argv.includes('export') && argv.includes('kubeconfig'),
+    );
+    const contexts = calls.filter(({ argv }) => argv.includes('current-context'));
+    expect(exports.length).toBeGreaterThan(1);
+    expect(contexts).toHaveLength(exports.length - 1);
+    const lastExport = exports[exports.length - 1];
+    if (lastExport?.options.timeout === undefined)
+      throw new Error('last collision export received no timeout');
+    expect(lastExport.options.timeout).toBeLessThan(APPLY_TIMEOUT);
+    expect(elapsed).toBeGreaterThanOrEqual(CREATE_TIMEOUT * 1000);
+  });
 
   it('adopts an unmarked legacy cluster with a Houston-labelled workspace through a private probe', async () => {
     config.updateConfig((stored) => {

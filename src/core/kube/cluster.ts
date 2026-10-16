@@ -46,7 +46,6 @@ export const CREATE_TIMEOUT = 600.0;
 export const DELETE_TIMEOUT = 120.0;
 
 /** A cross-home Kind winner has a brief window to publish its ownership receipt. */
-const MARKER_PUBLICATION_TRIES = 20;
 const MARKER_PUBLICATION_INTERVAL_MS = 500;
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -92,6 +91,25 @@ type MarkerState = 'owned' | 'absent' | 'not-owned';
 /** Transport failures can be retried only by the bounded create-collision waiter. */
 class OwnershipProbeUnavailable extends DockerError {}
 class KubeconfigUnavailable extends CreateFailedError {}
+class CollisionProbeDeadlineElapsed extends Error {}
+
+/** Bound each collision probe by the time left when it actually starts. */
+function collisionProbeTimeout(deadline?: number): number {
+  if (deadline === undefined) return APPLY_TIMEOUT;
+  const remaining = deadline - performance.now();
+  if (remaining <= 0) throw new CollisionProbeDeadlineElapsed();
+  return Math.min(APPLY_TIMEOUT, remaining / 1000);
+}
+
+/** The exact local-cluster lifecycle outcome a caller may use for later rollback. */
+export interface ClusterReceipt {
+  createdHere: boolean;
+}
+
+interface ReadyCluster {
+  readonly context: string;
+  readonly createdHere: boolean;
+}
 
 /**
  * Read the exact ownership receipt for the selected local Kind context.
@@ -99,7 +117,11 @@ class KubeconfigUnavailable extends CreateFailedError {}
  * A failed or malformed read is not evidence of ownership. Workspace labels are not that
  * receipt; the approved legacy migration consults them before it writes the receipt.
  */
-async function markerState(context: string, env?: NodeJS.ProcessEnv): Promise<MarkerState> {
+async function markerState(
+  context: string,
+  env?: NodeJS.ProcessEnv,
+  deadline?: number,
+): Promise<MarkerState> {
   const result = await kube.run(
     [
       'kubectl',
@@ -114,7 +136,7 @@ async function markerState(context: string, env?: NodeJS.ProcessEnv): Promise<Ma
       '--output',
       'json',
     ],
-    { timeout: APPLY_TIMEOUT, own: true, ...(env === undefined ? {} : { env }) },
+    { timeout: collisionProbeTimeout(deadline), own: true, ...(env === undefined ? {} : { env }) },
   );
   if (result.returncode !== 0) {
     throw new OwnershipProbeUnavailable(
@@ -147,10 +169,14 @@ async function clusterIsOurs(context: string, env?: NodeJS.ProcessEnv): Promise<
 }
 
 /** Export a Kind kubeconfig and read its context through that exact private file. */
-async function exportKubeconfig(kubeconfig: string, env: NodeJS.ProcessEnv): Promise<string> {
+async function exportKubeconfig(
+  kubeconfig: string,
+  env: NodeJS.ProcessEnv,
+  deadline?: number,
+): Promise<string> {
   const exported = await kube.run(
     ['kind', 'export', 'kubeconfig', '--name', CLUSTER_NAME, '--kubeconfig', kubeconfig],
-    { timeout: APPLY_TIMEOUT, own: true, env },
+    { timeout: collisionProbeTimeout(deadline), own: true, env },
   );
   if (exported.returncode !== 0) {
     throw new KubeconfigUnavailable(
@@ -158,7 +184,7 @@ async function exportKubeconfig(kubeconfig: string, env: NodeJS.ProcessEnv): Pro
     );
   }
   const current = await kube.run(['kubectl', 'config', 'current-context'], {
-    timeout: APPLY_TIMEOUT,
+    timeout: collisionProbeTimeout(deadline),
     own: true,
     env,
   });
@@ -180,13 +206,17 @@ function ownershipConflict(): ConflictError {
 }
 
 /** Probe through a disposable kubeconfig before Houston accepts an existing cluster. */
-async function privateMarkerState(adopt = false, emit: Emit = nullEmit): Promise<MarkerState> {
+async function privateMarkerState(
+  adopt = false,
+  emit: Emit = nullEmit,
+  deadline?: number,
+): Promise<MarkerState> {
   const directory = makeTempDir('houston-kind-probe-');
   const kubeconfig = path.join(directory, 'config');
   const env = { ...process.env, KUBECONFIG: kubeconfig };
   try {
-    const context = await exportKubeconfig(kubeconfig, env);
-    const state = await markerState(context, env);
+    const context = await exportKubeconfig(kubeconfig, env, deadline);
+    const state = await markerState(context, env, deadline);
     if (state !== 'absent' || !adopt) return state;
     const result = await kube.run(
       [
@@ -200,7 +230,7 @@ async function privateMarkerState(adopt = false, emit: Emit = nullEmit): Promise
         '--output',
         'json',
       ],
-      { timeout: APPLY_TIMEOUT, own: true, env },
+      { timeout: collisionProbeTimeout(deadline), own: true, env },
     );
     if (result.returncode !== 0) {
       throw new DockerError(`legacy cluster workspaces could not be read: ${why(result)}`);
@@ -246,19 +276,29 @@ async function verifyExistingClusterOwnership(emit: Emit): Promise<void> {
  * an existing foreign or malformed marker remains a refusal immediately.
  */
 async function waitForCollisionMarker(): Promise<void> {
+  const deadline = performance.now() + CREATE_TIMEOUT * 1000;
   let unavailable: OwnershipProbeUnavailable | KubeconfigUnavailable | undefined;
-  for (let attempt = 0; attempt < MARKER_PUBLICATION_TRIES; attempt += 1) {
+  for (;;) {
+    if (deadline - performance.now() <= 0) break;
     try {
-      const state = await privateMarkerState();
+      // Every external probe recomputes from this deadline, so one late export cannot
+      // start a context or marker read after the winning create has had its full window.
+      const state = await privateMarkerState(false, nullEmit, deadline);
       if (state === 'owned') return;
       if (state !== 'absent') throw ownershipConflict();
       unavailable = undefined;
     } catch (error) {
+      if (error instanceof CollisionProbeDeadlineElapsed) break;
       if (!(error instanceof OwnershipProbeUnavailable || error instanceof KubeconfigUnavailable))
         throw error;
       unavailable = error;
     }
-    if (attempt + 1 < MARKER_PUBLICATION_TRIES) await sleep(MARKER_PUBLICATION_INTERVAL_MS);
+    const pause = Math.min(
+      MARKER_PUBLICATION_INTERVAL_MS,
+      Math.max(0, deadline - performance.now()),
+    );
+    if (pause <= 0) break;
+    await sleep(pause);
   }
   if (unavailable !== undefined) throw unavailable;
   throw ownershipConflict();
@@ -347,19 +387,24 @@ async function createIfAbsent(
  * environment is redirected, because kind writes the file it is given and also honours
  * KUBECONFIG for the context switch.
  */
-export async function ensureCluster(emit: Emit = nullEmit): Promise<string> {
+export async function ensureCluster(
+  emit: Emit = nullEmit,
+  receipt?: ClusterReceipt,
+): Promise<string> {
   if (which('kind') === '') {
     throw new PreflightError(
       'kind is not installed, so houston cannot create a cluster. Install kind, or point ' +
         'kubectl at a cluster you already have.',
     );
   }
-  return await reproLock(CLUSTER_LOCK, async () => await ensureClusterLocked(emit), {
+  const ready = await reproLock(CLUSTER_LOCK, async () => await ensureClusterLocked(emit), {
     timeoutMs: CREATE_TIMEOUT * 1000,
   });
+  if (receipt !== undefined) receipt.createdHere = ready.createdHere;
+  return ready.context;
 }
 
-async function ensureClusterLocked(emit: Emit): Promise<string> {
+async function ensureClusterLocked(emit: Emit): Promise<ReadyCluster> {
   const kubeconfig = ownedKubeconfig();
   const create = await createIfAbsent(emit, kubeconfig);
   const createdHere = create === 'created';
@@ -396,7 +441,7 @@ async function ensureClusterLocked(emit: Emit): Promise<string> {
   // The marker has been recorded. A downstream progress listener may fail, but that
   // must not turn a healthy marked cluster into a rollback candidate.
   info(emit, `cluster ${CLUSTER_NAME} ready at ${context}`, { phase: 'provision' });
-  return context;
+  return { context, createdHere };
 }
 
 /**
@@ -413,13 +458,18 @@ async function ensureClusterLocked(emit: Emit): Promise<string> {
  * For a context other than the selected local Kind context there is nothing to export: the
  * user's own kubeconfig already names it, and rewriting it is not ours to do.
  */
-export async function ensureKubeconfig(plan: ClusterPlan, emit: Emit = nullEmit): Promise<string> {
+export async function ensureKubeconfig(
+  plan: ClusterPlan,
+  emit: Emit = nullEmit,
+  receipt?: ClusterReceipt,
+): Promise<string> {
   if (plan.create || plan.context === CONTEXT) {
     // Even when this home's kubeconfig already names the context, go through
     // `ensureCluster`: the ConfigMap receipt is the proof that the fixed Kind name is
     // actually ours. Returning early would turn a readable context into ownership.
-    return await ensureCluster(emit);
+    return await ensureCluster(emit, receipt);
   }
+  if (receipt !== undefined) receipt.createdHere = false;
   return plan.context;
 }
 

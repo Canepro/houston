@@ -91,8 +91,9 @@ const ROOT = path.resolve(__dirname, '..');
 // Eight onboarding-grant and local-Kind lifecycle boundary cases complete the port.
 // Ownership and rollback cases preserve concurrent creators. Landing cases cover transient
 // collision probes, granted legacy adoption, unknown reads, locked teardown, final-namespace
-// reclamation, and the reachability message. Collection measured 4541 tests.
-const FLOOR = 4541;
+// reclamation, the reachability message, and collision-winner startup, rollback and deadline.
+// Collection measured 4544 tests.
+const FLOOR = 4544;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

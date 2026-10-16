@@ -122,10 +122,12 @@ function harness({
   plan = { context: 'prod', distribution: 'k3s', create: false },
   held = [] as string[] | null,
   alive = true,
+  createdHere = plan.create,
 }: {
   plan?: { context: string; distribution: string; create: boolean };
   held?: string[] | null;
   alive?: boolean;
+  createdHere?: boolean;
 } = {}): void {
   // The call history goes too, not only `ran`: several cases build a second workspace to
   // contrast with the first, and a `mock.calls[0]` that still belongs to the previous one
@@ -172,7 +174,11 @@ function harness({
     return Promise.resolve({ argv, returncode: 0, stdout: '', stderr: '' });
   };
   mocked(context.planCluster).mockResolvedValue(plan);
-  mocked(cluster.ensureKubeconfig).mockResolvedValue(plan.context);
+  mocked(cluster.ensureKubeconfig).mockImplementation(((...args: unknown[]) => {
+    const receipt = args[2] as { createdHere: boolean } | undefined;
+    if (receipt !== undefined) receipt.createdHere = createdHere;
+    return Promise.resolve(plan.context);
+  }) as typeof cluster.ensureKubeconfig);
   mocked(cluster.deleteCluster).mockResolvedValue(true);
   mocked(chart.ensureRepo).mockResolvedValue(undefined);
   mocked(chart.resolveChartVersion).mockResolvedValue('7.0.2');
@@ -344,6 +350,22 @@ describe('what a failed create is entitled to destroy', () => {
     harness({ plan: { context: 'prod', distribution: 'k3s', create: false }, held: [] });
     mocked(release.install).mockRejectedValue(new CreateFailedError('helm said no'));
     await expect(create()).rejects.toBeInstanceOf(CreateFailedError);
+    expect(mocked(cluster.deleteCluster)).not.toHaveBeenCalled();
+  });
+
+  it('leaves a collision-winner cluster after a later workspace rollback', async () => {
+    // Separate homes can both plan a local create. If Kind reports a collision, the winner's
+    // marker proves it owns the cluster, but the losing workspace may still create and later
+    // roll back its namespace. That rollback must not treat its stale plan as ownership.
+    harness({
+      plan: { context: 'kind-houston-local', distribution: 'kind', create: true },
+      held: [],
+      createdHere: false,
+    });
+    mocked(release.install).mockRejectedValue(new CreateFailedError('helm said no'));
+
+    await expect(create()).rejects.toThrow(/helm said no/u);
+    expect(namespacePresent).toBe(false);
     expect(mocked(cluster.deleteCluster)).not.toHaveBeenCalled();
   });
 
