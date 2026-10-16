@@ -63,6 +63,8 @@ describe('the shipped skill file', () => {
     );
     expect(recipe).toContain('`houston onboard --show --json`');
     expect(recipe).toContain('`capabilities.setup_defaults`');
+    // The key lives in capabilities, not in the --show snapshot.
+    expect(recipe).toContain('`capabilities.setup_defaults.up_without_selectors`');
     expect(recipe).toMatch(/--deployment monolith --preset default/u);
   });
 

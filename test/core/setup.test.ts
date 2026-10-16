@@ -565,6 +565,12 @@ it('probes the first-run name as up will materialise it, with the actor prefix',
     taken('alice-first-repro-3');
     expect(await name()).toBe('first-repro-4');
   });
+  // An asserted actor name is sanitised as `up` stores it.
+  fs.rmSync(path.join(config.home(), 'repros'), { recursive: true, force: true });
+  await runWithContext({ actor: 'bob.smith' }, async () => {
+    taken('bob-smith-first-repro');
+    expect(await name()).toBe('first-repro-2');
+  });
   // Without accounts the same directories mean nothing: only the bare name counts.
   expect(await name()).toBe('first-repro');
 });

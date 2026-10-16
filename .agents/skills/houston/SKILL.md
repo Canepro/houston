@@ -20,11 +20,11 @@ documented behaviour rather than observed behaviour.
 command takes it and read the last line (see [The output contract](#the-output-contract)).
 `houston capabilities` always prints JSON and takes no `--json`.
 
-**Before the first `up`, read `houston onboard --show --json`** (or `capabilities.setup_defaults`,
-which needs no container engine). An `up` that names no `--deployment`, `--preset` or `--runtime`
-builds the deployment and scenarios the person saved in setup, so on a configured machine the
-recipes below can start a local Kubernetes workspace or add scenario services.
-`up_without_selectors` says what that is. When you need plain Docker, add
+**Before the first `up`, read `capabilities.setup_defaults`** (no container engine needed;
+`houston onboard --show --json` has the full setup snapshot). An `up` that names no `--deployment`,
+`--preset` or `--runtime` builds the deployment and scenarios the person saved in setup, so on a configured
+machine the recipes below can start a local Kubernetes workspace or add scenario services.
+`capabilities.setup_defaults.up_without_selectors` says what that is. When you need plain Docker, add
 `--deployment monolith --preset default` to the command; when a recipe names its own preset or
 deployment, that already wins over the saved choice.
 

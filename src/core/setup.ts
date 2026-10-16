@@ -36,7 +36,7 @@ import type { Tool } from './kube/tools';
 import { tools as toolFloors } from './kube/names';
 import * as paths from './runner/paths';
 import { ownedRuntimeState } from './kube/cluster';
-import { ownerPrefix } from './lifecycle/naming';
+import { ownerPrefix, sanitize } from './lifecycle/naming';
 import { ENGINE_FLOOR_CPUS, ENGINE_FLOOR_MEMORY_GIB, engineFloorApplies } from './lifecycle/sizing';
 
 export const SECTIONS = [
@@ -66,7 +66,8 @@ async function firstRunName(): Promise<string> {
   try {
     for (let n = 1; n <= FIRST_NAME_TRIES; n += 1) {
       const name = n === 1 ? FIRST_NAME : `${FIRST_NAME}-${String(n)}`;
-      const forms = new Set([name, ownerPrefix(name, actor)]);
+      // As `deriveFor` stores it: `bob.smith` becomes `bob-smith-first-repro`.
+      const forms = new Set([name, sanitize(ownerPrefix(sanitize(name), actor))]);
       const used = await Promise.all([...forms].map((form) => paths.exists(form)));
       if (!used.includes(true)) return name;
     }
