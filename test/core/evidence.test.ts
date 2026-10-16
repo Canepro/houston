@@ -1632,8 +1632,29 @@ describe('the bundle', () => {
         '  jq:',
         '    image: example',
         '    command: jq --sort-keys input.json',
+        '  jsondup:',
+        '    image: example',
+        `    environment: { SPEC: '{"command":["mongosh"],"args":["-u","root","-p","DupJsonSentinel"],"args":[]}' }`,
+        '  wrappedheredoc:',
+        '    image: example',
+        '    command: ["sh", "-c", "env sh <<EOF\\nclient --password WrappedHeredocSentinel\\nEOF"]',
+        '  literalbearer:',
+        '    image: example',
+        '    command: [curl, -H, "Authorization: Bearer $LiteralBearerSentinel", https://x]',
+        '  shortpw:',
+        '    image: example',
+        '    command: [mysql, -u, root, -p, ab]',
+        '  wincurl:',
+        '    image: example',
+        String.raw`    command: ['C:\Windows\System32\curl.exe', -u, 'admin:WinCurlSentinel', https://x]`,
         'x-copy: QuotedSentinel',
         'x-split-copy: SplitSentinel',
+        'x-dup-json-dup: DupJsonSentinel',
+        'x-dup-wrapped: WrappedHeredocSentinel',
+        'x-dup-literal: $LiteralBearerSentinel',
+        'x-dup-wincurl: WinCurlSentinel',
+        'x-short-copy: ab',
+        'x-short-word: cabbage',
         'x-dup-docker: DockerLoginSentinel',
         'x-dup-oauth: OauthSentinel',
         'x-dup-ansi: AnsiSentinel',
@@ -1688,6 +1709,10 @@ describe('the bundle', () => {
       'OauthSentinel',
       'AnsiSentinel',
       'ShellHeredocSentinel',
+      'DupJsonSentinel',
+      'WrappedHeredocSentinel',
+      'LiteralBearerSentinel',
+      'WinCurlSentinel',
     ]) {
       expect(compose).not.toContain(sentinel);
     }
@@ -1715,6 +1740,9 @@ describe('the bundle', () => {
     // in both keys, while python's split command stays readable.
     expect(pick(parsed, 'services', 'split', 'entrypoint')).toBe('********');
     expect(pick(parsed, 'services', 'split', 'command')).toBe('********');
+    // A short credential masks whole values only, not every place its letters appear.
+    expect(parsed['x-short-copy']).toBe('********');
+    expect(parsed['x-short-word']).toBe('cabbage');
     // A heredoc fed to `cat` is data, and `--sort-keys` sorts: their values stay readable.
     expect(parsed['x-heredoc']).toBe('HeredocData');
     expect(parsed['x-input']).toBe('input.json');

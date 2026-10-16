@@ -822,8 +822,10 @@ function shellCommands(text: string): ShellWord[][] {
       } else index += 1;
     } else if (char === '\n' && heredocs.length > 0) {
       // A shell reading the heredoc runs it, so its lines stay commands then.
-      const program = (command[0]?.text ?? '').split('/').pop() ?? '';
-      const shell = /^(?:sh|bash|zsh|dash|ash|ksh)$/u.test(program);
+      // `env sh <<EOF` and `sudo bash <<EOF` run it through a wrapper.
+      const shell = command.some((word) =>
+        /^(?:sh|bash|zsh|dash|ash|ksh)$/u.test(word.text.split('/').pop() ?? ''),
+      );
       endCommand(index);
       let line = index + 1;
       for (const heredoc of heredocs) {
@@ -911,7 +913,7 @@ function discoverCommandText(text: string, add: (value: string) => void, depth =
     for (const password of shortOptionPasswords(texts)) spellings(password);
     // `-H 'Authorization: Bearer token'`: the header's credential, not the whole header line.
     for (const header of authorizationHeaders(command.map((word) => word.text))) {
-      for (const credential of authorizationCredentials(header)) spellings(credential);
+      for (const credential of authorizationCredentials(header, true)) spellings(credential);
     }
     for (let index = 0; index < command.length; index += 1) {
       const word = command[index] as ShellWord;
@@ -928,6 +930,12 @@ function discoverCommandText(text: string, add: (value: string) => void, depth =
     }
   }
 }
+
+/**
+ * A discovered credential shorter than this matches whole values only: `-p a` must not mask
+ * every `a` in the bundle. Its own place is masked by the flag rule regardless.
+ */
+const SHORT_SECRET = 6;
 
 /** Discover before `toJS` loses duplicate members and original numeric spellings. */
 function discoverArtifactSecrets(
@@ -977,7 +985,7 @@ function discoverArtifactSecrets(
       wholeSecrets.add(text);
       wholeSecrets.add(String(numeric.contents.value));
       wholeSecrets.add(YAML.stringify(numeric.contents.value).replace(/\n$/u, ''));
-    } else (whole ? wholeSecrets : secrets).add(text);
+    } else (whole || text.length < SHORT_SECRET ? wholeSecrets : secrets).add(text);
   };
   // The item after a credential flag is its value, as in `--flag=value`; neither item names
   // a credential on its own, so classify it here, before any scalar renders.

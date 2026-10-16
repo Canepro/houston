@@ -228,13 +228,13 @@ const AUTHORIZATION_SCHEME = /^(?:bearer|basic|digest|negotiate|ntlm|token)$/iu;
 
 /**
  * The strings that give away an `Authorization:` header value, for copies elsewhere: the value
- * and the credential after its scheme (`Bearer abc` holds `abc`). A bare scheme and a shell
- * variable (`$TOKEN`) hold no secret, and registering either would mask it everywhere.
+ * and the credential after its scheme (`Bearer abc` holds `abc`). A bare scheme holds no secret,
+ * nor does a variable (`$TOKEN`) in a `shell` command, which expands it; a list item is literal.
  */
-export function authorizationCredentials(value: string): string[] {
+export function authorizationCredentials(value: string, shell = false): string[] {
   const scheme = /^(\S+)[ \t]+(\S.*)$/su.exec(value);
   const credential = scheme?.[2] ?? value;
-  if (credential === '' || credential.startsWith('$')) return [];
+  if (credential === '' || (shell && credential.startsWith('$'))) return [];
   if (scheme === null && AUTHORIZATION_SCHEME.test(value)) return [];
   return scheme === null ? [value] : [value, credential];
 }
@@ -260,9 +260,9 @@ export interface HttpUser {
  * without a colon has no password in it.
  */
 export function httpUsers(words: readonly string[]): HttpUser[] {
-  const program = words.findIndex((word) => /(?:^|\/)(?:curl|wget)$/u.test(word));
+  const program = words.findIndex((word) => /(?:^|[/\\])(?:curl|wget)(?:\.exe)?$/iu.test(word));
   if (program < 0) return [];
-  const curl = /curl$/u.test(words[program] ?? '');
+  const curl = /curl(?:\.exe)?$/iu.test(words[program] ?? '');
   const separateFlag = curl ? /^(?:-[uU]|--user|--proxy-user)$/u : /^(?:-u|--user|--proxy-user)$/u;
   const attachedFlag = curl
     ? /^(?:--(?:proxy-)?user=|-[uU](?!-))(.*)$/su
@@ -624,21 +624,39 @@ export function discoverTextSecrets(
     };
     walk(jsonToken(JSON_SPACE, text, 0).length, false, depth);
     // `{"command": ["mongosh"], "args": ["-u", "root", "-p", "x"]}` splits one command over two
-    // members; read them joined as well. A duplicate member is read in the walk above.
-    const joined = (value: unknown, level: number): void => {
-      if (level > 100 || typeof value !== 'object' || value === null) return;
-      const members = Array.isArray(value) ? [] : Object.entries(value);
-      const lists = members.filter(([key]) => argumentListKey(key));
-      if (lists.length > 1) {
-        for (const credential of argumentCredentials(
-          lists.flatMap(([, item]) => argumentWords(item)),
-        ))
-          add(credential);
+    // members; read them joined as well, in source order, so a duplicate member still counts.
+    const joined = (at: number, level: number): void => {
+      const open = text[at];
+      if (level > 100 || (open !== '{' && open !== '[')) return;
+      const words: string[] = [];
+      let lists = 0;
+      let i = at + 1;
+      for (;;) {
+        i += jsonToken(JSON_SPACE, text, i).length;
+        if (i >= text.length || text[i] === '}' || text[i] === ']') break;
+        if (text[i] === ',') {
+          i += 1;
+          continue;
+        }
+        let key = '';
+        if (open === '{') {
+          const token = jsonToken(JSON_STRING, text, i);
+          key = JSON.parse(token) as string;
+          i += token.length;
+          i += jsonToken(JSON_SPACE, text, i).length + 1;
+          i += jsonToken(JSON_SPACE, text, i).length;
+        }
+        const end = jsonValueEnd(text, i, ends);
+        if (open === '{' && argumentListKey(key)) {
+          lists += 1;
+          words.push(...argumentWords(JSON.parse(text.slice(i, end))));
+        }
+        joined(i, level + 1);
+        i = end;
       }
-      for (const item of Array.isArray(value) ? value : members.map(([, item]) => item))
-        joined(item, level + 1);
+      if (lists > 1) for (const credential of argumentCredentials(words)) add(credential);
     };
-    joined(JSON.parse(text), depth);
+    joined(jsonToken(JSON_SPACE, text, 0).length, depth);
     return;
   }
   // Inspect a complete assignment's RHS before URL matching, so a JSON string ends its URL.
