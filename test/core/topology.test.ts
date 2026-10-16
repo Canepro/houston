@@ -479,6 +479,7 @@ describe('each command asks the runtime the workspace is on', () => {
     '../../src/core/data',
     '../../src/core/edge/networks',
     '../../src/core/kube/capabilities',
+    '../../src/core/kube/cluster',
     '../../src/core/kube/forward',
     '../../src/core/kube/monitoring',
     '../../src/core/kube/namespace',
@@ -695,6 +696,13 @@ describe('each command asks the runtime the workspace is on', () => {
     return require('../../src/core/lifecycle/pruning') as typeof PruningNS;
   }
 
+  function isolateLegacyAdoption(): void {
+    jest.doMock('../../src/core/kube/cluster', () => ({
+      ...jest.requireActual('../../src/core/kube/cluster'),
+      adoptIfUnmarked: async () => undefined,
+    }));
+  }
+
   it('asks Kubernetes, not Docker, whether a Kubernetes workspace is down', async () => {
     // `prunable` listed a repro when no compose PROJECT was running, and a Kubernetes
     // workspace never has one -- so a healthy workspace serving traffic was offered for
@@ -755,6 +763,7 @@ describe('each command asks the runtime the workspace is on', () => {
       ...jest.requireActual('../../src/core/edge/networks'),
       detach: async () => undefined,
     }));
+    isolateLegacyAdoption();
     const prune = pruning({ workload: async () => false });
     const out = await prune.prune({ confirm: true });
     expect(deleted).toEqual([['k', true]]);
@@ -805,6 +814,7 @@ describe('each command asks the runtime the workspace is on', () => {
         return true;
       },
     }));
+    isolateLegacyAdoption();
     const destroy = require('../../src/core/lifecycle/destroy') as typeof DestroyNS;
     // The registry's own `nullEmit`: the module under test was loaded fresh, so the one
     // imported at the top of this file is a different function with the same name.
@@ -848,6 +858,7 @@ describe('each command asks the runtime the workspace is on', () => {
       ...jest.requireActual('../../src/core/kube/monitoring'),
       removeMonitoring: async () => false,
     }));
+    isolateLegacyAdoption();
     const destroy = require('../../src/core/lifecycle/destroy') as typeof DestroyNS;
     await destroy.teardown('kws', { volumes: true, confirm: true });
     expect(fs.existsSync(route)).toBe(false);

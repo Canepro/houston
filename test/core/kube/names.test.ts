@@ -648,6 +648,49 @@ describe('the cluster houston makes for itself', () => {
     },
   );
 
+  it('reports an unready cluster according to whether this call created it', async () => {
+    // Reuse and a collision winner have already proved or published their receipt. A later
+    // reachability miss must leave them in place, while a newly created unmarked cluster rolls
+    // back through the catch below. The message must tell the operator which happened.
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
+    for (const scenario of [
+      { name: 'existing', listed: `${CLUSTER_NAME}\n`, collision: false, created: false },
+      { name: 'collision winner', listed: '', collision: true, created: false },
+      { name: 'new cluster', listed: '', collision: false, created: true },
+    ]) {
+      route((joined) => {
+        if (joined.includes('get clusters')) return { stdout: scenario.listed };
+        if (joined.includes('create cluster') && scenario.collision)
+          return { returncode: 1, stderr: 'already exists' };
+        if (joined.includes('current-context')) return { stdout: CONTEXT };
+        if (joined.includes(`get configmap ${CLUSTER_OWNER_CONFIGMAP}`)) {
+          return { stdout: ownedClusterMarker() };
+        }
+        if (joined.includes('/readyz')) return { returncode: 1, stderr: 'not ready' };
+        return undefined;
+      });
+
+      const failure = await ensureCluster().catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(CreateFailedError);
+      const message = (failure as Error).message;
+      const deletes = calls.filter(
+        ({ argv }) => argv[0] === 'kind' && argv.includes('delete') && argv.includes('cluster'),
+      );
+      expect(message).not.toContain('kind delete cluster');
+      if (scenario.created) {
+        expect(message).toContain('was created but its API server is not answering');
+        expect(message).toContain('the unmarked cluster was rolled back');
+        expect(deletes).toHaveLength(1);
+      } else {
+        expect(message).toContain('was not created by this call');
+        expect(message).toContain('Houston left it in place');
+        expect(deletes).toHaveLength(0);
+      }
+    }
+  });
+
   it.each([
     [
       'throws',

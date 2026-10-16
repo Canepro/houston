@@ -94,10 +94,10 @@ class OwnershipProbeUnavailable extends DockerError {}
 class KubeconfigUnavailable extends CreateFailedError {}
 
 /**
- * Read an existing fixed-name cluster's exact ownership receipt.
+ * Read the exact ownership receipt for the selected local Kind context.
  *
- * A failed or malformed read is not evidence of ownership. This check intentionally does
- * not use namespace labels: those prove individual workspace ownership, not the cluster.
+ * A failed or malformed read is not evidence of ownership. Workspace labels are not that
+ * receipt; the approved legacy migration consults them before it writes the receipt.
  */
 async function markerState(context: string, env?: NodeJS.ProcessEnv): Promise<MarkerState> {
   const result = await kube.run(
@@ -374,9 +374,14 @@ async function ensureClusterLocked(emit: Emit): Promise<string> {
     // if it cannot establish that proof.
     context = await exportKubeconfig(kubeconfig, ownedEnv());
     if (!(await reachable(context))) {
+      if (createdHere) {
+        throw new CreateFailedError(
+          `cluster ${CLUSTER_NAME} was created but its API server is not answering at '${context}'.`,
+        );
+      }
       throw new CreateFailedError(
-        `cluster ${CLUSTER_NAME} was created but its API server is not answering at ` +
-          `'${context}'. \`kind delete cluster --name ${CLUSTER_NAME}\` and try again.`,
+        `cluster ${CLUSTER_NAME} was not created by this call and its API server is not ` +
+          `answering at '${context}'. Houston left it in place.`,
       );
     }
     if (createdHere) {
@@ -405,8 +410,8 @@ async function ensureClusterLocked(emit: Emit): Promise<string> {
  * `CLAUDE.md` tells anyone writing a script to `export HOUSTON_HOME=$(mktemp -d)`, so this
  * was reachable by following our own instructions once a cluster existed.
  *
- * For a cluster houston did not create there is nothing to export: the user's own
- * kubeconfig already names it, and rewriting it is not ours to do.
+ * For a context other than the selected local Kind context there is nothing to export: the
+ * user's own kubeconfig already names it, and rewriting it is not ours to do.
  */
 export async function ensureKubeconfig(plan: ClusterPlan, emit: Emit = nullEmit): Promise<string> {
   if (plan.create || plan.context === CONTEXT) {

@@ -69,15 +69,17 @@ error codes and exit codes. Read it instead of assuming a flag exists.
 | `GATE_DELETE_UNOWNED`, `GATE_KEEP_UNOWNED`, `GATE_SHARE_UNOWNED` | `cluster delete`, `keep` or `share` on a cluster houston did not build |
 | `GATE_WRONG_ACCOUNT` | `cluster connect` or `cluster delete` when the AWS sign-in is a different account from the cluster's |
 | `GATE_WRONG_CLUSTER` | `cluster delete` when AWS returns a different cluster than the one selected |
+| `GATE_NOT_ONBOARDED` | a local-cluster lifecycle action before onboarding is recorded |
 | `GATE_OWNED_CLUSTER` | creating or reclaiming `houston-local`, or tearing down or pruning one of its recorded local workspaces |
 | `GATE_UNAPPROVED_CLUSTER` | `--https` on a cluster that is not on this machine |
 
 `error.gate.approve_with` is the command or action to **ask a person for**. A script or
 agent never runs it itself, and `--force` does not get past a gate.
 
-For the local-cluster decision above, a person can review and save the answer with
-`houston onboard --json`, then run the `houston onboard grant owned-cluster` command named in
-the gate. It does not authorise copying houston's private CA key to another cluster.
+For the local-cluster decision above, a person can review the current state with
+`houston onboard --json`, record that review with `houston onboard complete`, or run the
+`houston onboard grant owned-cluster` command named in the gate. It does not authorise
+copying houston's private CA key to another cluster.
 
 ## The event log
 

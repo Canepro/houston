@@ -89,10 +89,10 @@ const ROOT = path.resolve(__dirname, '..');
 // monitoring, pin and port, the operator password off every argv, the operator's memory and
 // PodMonitor, serve's shutdown, and the usage and wording answers it found untrue.
 // Eight onboarding-grant and local-Kind lifecycle boundary cases complete the port.
-// Ownership and rollback cases preserve concurrent creators. Fifteen landing cases cover
-// transient collision probes, granted legacy adoption, unknown reads, locked teardown,
-// and reclaiming the cluster after the final namespace. Collection measured 4540 tests.
-const FLOOR = 4540;
+// Ownership and rollback cases preserve concurrent creators. Landing cases cover transient
+// collision probes, granted legacy adoption, unknown reads, locked teardown, final-namespace
+// reclamation, and the reachability message. Collection measured 4541 tests.
+const FLOOR = 4541;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [
