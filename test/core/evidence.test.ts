@@ -820,6 +820,7 @@ describe('the bundle', () => {
             '      EMPTY_USER_URL: https://:EmptyUserValueSentinel@example.test/?q=a=b',
             '      RAW_AT_URL: https://reader:Raw@AtValueSentinel@example.test/?q=a=b',
             '      BEARER_URL: https://BearerOnlySentinel@example.test/x',
+            '      GIT_URL: https://GitTokenSentinel:x-oauth-basic@github.com/org/repo.git',
             '      BLANK_SECOND_URL: https://EmptyPasswordSentinel:@example.test',
           ].join('\n'),
         ),
@@ -842,6 +843,7 @@ describe('the bundle', () => {
     expect(artifact).not.toContain('ListRaw@AtValueSentinel');
     expect(artifact).not.toContain('ListMongoUrlSentinel');
     expect(artifact).not.toContain('BearerOnlySentinel');
+    expect(artifact).not.toContain('GitTokenSentinel');
     expect(artifact).not.toContain('EmptyPasswordSentinel');
     expect(artifact).not.toContain('ListBearerSentinel');
     const rendered = YAML.parse(artifact) as {
@@ -850,31 +852,30 @@ describe('the bundle', () => {
       'list-environment': string[];
     };
     expect(rendered.services.rocketchat.environment.MONGO_URL).toBe(
-      'mongodb://rocket:********@mongodb:27017/rocketchat?replicaSet=rs0',
+      'mongodb://********@mongodb:27017/rocketchat?replicaSet=rs0',
     );
     expect(rendered.services.rocketchat.environment.SERVICE_URL).toBe(
-      'postgresql://reader:********@db:5432/rocketchat',
+      'postgresql://********@db:5432/rocketchat',
     );
     expect(rendered.services.rocketchat.environment.EMPTY_USER_URL).toBe(
-      'https://:********@example.test/?q=a=b',
+      'https://********@example.test/?q=a=b',
     );
     expect(rendered.services.rocketchat.environment.RAW_AT_URL).toBe(
-      'https://reader:********@example.test/?q=a=b',
+      'https://********@example.test/?q=a=b',
     );
     expect(rendered.services.rocketchat.environment.BEARER_URL).toBe(
       'https://********@example.test/x',
     );
     expect(rendered.services.rocketchat.environment.BLANK_SECOND_URL).toBe(
-      'https://********:@example.test',
+      'https://********@example.test',
     );
     expect(Object.keys(rendered['x-reference']).sort()).toEqual([
-      'https://:********@example.test?mode=read',
-      'https://reader:********@example.test?mode=read',
+      'https://********@example.test?mode=read',
     ]);
     expect(rendered['list-environment']).toEqual([
-      'APP_URL=https://reader:********@example.test/?q=a=b',
+      'APP_URL=https://********@example.test/?q=a=b',
       'PORT=3000',
-      'MONGO_URL=https://reader:********@example.test/?q=a=b',
+      'MONGO_URL=https://********@example.test/?q=a=b',
       'HOOK_URL=https://********@example.test/hook',
     ]);
   });
@@ -941,7 +942,7 @@ describe('the bundle', () => {
     expect(rendered.supportNote).toBe('********');
     expect(rendered.extraSecret.stringData.ordinary).toBe('********');
     expect(Object.keys(rendered['x-reference'])).toEqual([
-      'https://reader:********@example.test?mode=read',
+      'https://********@example.test?mode=read',
     ]);
   });
 

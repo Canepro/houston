@@ -39,7 +39,7 @@ import * as config from '../lib/config';
 import { ValidationError } from '../lib/errors';
 import { isTruthy, quotedText, toText } from '../lib/format';
 import { pathExpandUser } from '../lib/home';
-import { REDACTED, redactBareUserinfo, redactEnv, SECRET_KEY_HINTS } from '../lib/redact';
+import { REDACTED, redactAllUserinfo, redactEnv, SECRET_KEY_HINTS } from '../lib/redact';
 import { namesOf } from '../lib/presets/composite';
 import * as presets from '../lib/presets/index';
 import { PROFILES } from '../lib/seed-profiles';
@@ -643,9 +643,9 @@ function redactArtifactText(
 ): string {
   if (secret) return REDACTED;
   // A URL password or query can contain `=`. Mask userinfo in the complete string before
-  // treating an equals sign as a list-form environment assignment. A bundle also masks a
-  // user-only credential such as `https://TOKEN@host`, which log redaction leaves readable.
-  const urlRedacted = redactBareUserinfo(redactEnv('', value));
+  // treating an equals sign as a list-form environment assignment. A bundle also masks the
+  // user name, which log redaction leaves readable and which can be the credential itself.
+  const urlRedacted = redactAllUserinfo(redactEnv('', value));
   const equals = urlRedacted.indexOf('=');
   if (equals > 0) {
     const key = urlRedacted.slice(0, equals);

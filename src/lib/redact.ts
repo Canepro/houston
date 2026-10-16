@@ -59,20 +59,18 @@ export const URL_USERINFO = new RegExp(
 );
 
 /**
- * Any URL userinfo with no nonempty password: `scheme://TOKEN@host` or `scheme://TOKEN:@host`.
+ * The whole user info of a URL authority, user name included: `scheme://<userinfo>@`.
  * `URL_USERINFO` keeps the user name readable and needs a password, which is what earlier
- * releases print in logs and argv. An attachable artifact cannot assume a bare user name is
- * not itself the credential, so the evidence bundle masks it too. The user info runs to the
- * last `@` before the authority ends, as in `URL_USERINFO`.
+ * releases print in logs and argv. An attachable artifact cannot assume the user name is not
+ * itself the credential (`https://TOKEN@host`, `https://TOKEN:x-oauth-basic@host`), so the
+ * evidence bundle masks all of it. The user info runs to the last `@` before the authority
+ * ends, as in `URL_USERINFO`.
  */
-const URL_BARE_USERINFO = new RegExp(
-  `([a-zA-Z][a-zA-Z0-9+.-]*://)([^/${SPACE_CLASS}:?#]+)(:?)@`,
-  'gu',
-);
+const URL_ANY_USERINFO = new RegExp(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^/${SPACE_CLASS}?#]+@`, 'gu');
 
-/** Mask user-only URL credentials that `URL_USERINFO` leaves readable. */
-export function redactBareUserinfo(value: string): string {
-  return value.replace(URL_BARE_USERINFO, `$1${REDACTED}$3@`);
+/** Mask every URL's user info, user name included, for an artifact a person attaches. */
+export function redactAllUserinfo(value: string): string {
+  return value.replace(URL_ANY_USERINFO, `$1${REDACTED}@`);
 }
 
 /** Mask credentials named by their key or embedded in URL userinfo. */

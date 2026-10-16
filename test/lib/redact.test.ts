@@ -6,7 +6,7 @@ import {
   REDACTED,
   SECRET_KEY_HINTS,
   URL_USERINFO,
-  redactBareUserinfo,
+  redactAllUserinfo,
   redactArgv,
   redactEnv,
 } from '../../src/lib/redact';
@@ -161,16 +161,18 @@ describe('redactEnv', () => {
   });
 });
 
-describe('redactBareUserinfo', () => {
-  it('masks user-only URL credentials an attachable bundle cannot assume are public', () => {
-    const masked = (value: string) => redactBareUserinfo(redactEnv('', value));
+describe('redactAllUserinfo', () => {
+  it('masks the whole URL user info an attachable bundle cannot assume is public', () => {
+    const masked = (value: string) => redactAllUserinfo(redactEnv('', value));
     expect(
       [
         'https://BEARER_TOKEN@example.test/x',
         'https://TOKEN:@h',
+        'https://ghp_SECRETTOKEN:x-oauth-basic@github.com/org/repo.git',
         'https://user:pw@h',
         'https://a@b@h/p',
         'https://example.com/a@b',
+        'https://example.com?next=a@b',
         'mongodb://rc:s3cret@mongo:27017/db',
         'https://:pw@h',
         'https://@h',
@@ -178,14 +180,16 @@ describe('redactBareUserinfo', () => {
       ].map(masked),
     ).toEqual([
       `https://${REDACTED}@example.test/x`,
-      `https://${REDACTED}:@h`,
-      `https://user:${REDACTED}@h`,
+      `https://${REDACTED}@h`,
+      `https://${REDACTED}@github.com/org/repo.git`,
+      `https://${REDACTED}@h`,
       `https://${REDACTED}@h/p`,
       'https://example.com/a@b',
-      `mongodb://rc:${REDACTED}@mongo:27017/db`,
-      `https://:${REDACTED}@h`,
+      'https://example.com?next=a@b',
+      `mongodb://${REDACTED}@mongo:27017/db`,
+      `https://${REDACTED}@h`,
       'https://@h',
-      `x https://${REDACTED}@h y https://u:${REDACTED}@h2`,
+      `x https://${REDACTED}@h y https://${REDACTED}@h2`,
     ]);
   });
 });
