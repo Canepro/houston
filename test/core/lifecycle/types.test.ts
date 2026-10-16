@@ -12,7 +12,7 @@ import { preflight as emptyPreflight } from '../../../src/core/kube/tools';
 import type * as CreateDockerNS from '../../../src/core/lifecycle/create-docker';
 import type * as CreateK8sNS from '../../../src/core/lifecycle/create-k8s';
 import { deriveFor } from '../../../src/core/lifecycle/naming';
-import { reqContext } from '../../../src/core/lifecycle/request';
+import { reqContext, sayWhereThisIsGoing } from '../../../src/core/lifecycle/request';
 import { resolveTls } from '../../../src/core/lifecycle/tlsplan';
 import * as Types from '../../../src/core/lifecycle/types';
 
@@ -165,6 +165,27 @@ describe('a create request', () => {
     expect(reqContext(Types.createReq({ version: '8.5.1' }))).toBe('eks-support');
     // ...and an explicit --context still wins.
     expect(reqContext(Types.createReq({ version: '8.5.1', context: 'other' }))).toBe('other');
+
+    const implicitOwnedLocal = Types.createReq({
+      version: '8.5.1',
+      runtime: 'kubernetes',
+      implicitOwnedLocal: true,
+    });
+    expect(reqContext(implicitOwnedLocal)).toBe('');
+    expect(
+      reqContext(
+        Types.createReq({
+          version: '8.5.1',
+          context: 'other',
+          implicitOwnedLocal: true,
+        }),
+      ),
+    ).toBe('other');
+    const said: string[] = [];
+    sayWhereThisIsGoing(implicitOwnedLocal, '', (event) => {
+      said.push(event.message);
+    });
+    expect(said).toEqual([]);
   });
 });
 

@@ -69,7 +69,7 @@ const RANKS = [
     '^src/lib/seed-profiles\\.ts$',
   ],
   [
-    '^src/lib/(monitoring|version-spec|json-text|seed-options|onboarding)\\.ts$',
+    '^src/lib/(monitoring|version-spec|json-text|seed-options|onboarding|setup-selectors)\\.ts$',
     '^src/lib/presets/registry\\.ts$',
   ],
   // `targz` sits ABOVE `format`, because its only refusal message is
@@ -258,6 +258,7 @@ const RANKS = [
   // `doctor` composes the completed service layer: every check reads a module below it,
   // and nothing imports doctor but the front doors.
   ['^src/core/doctor\\.ts$'],
+  ['^src/core/setup\\.ts$'],
   // Promotion composes the state readers and exposes the serve liveness marker. Both
   // front doors may ask it; keeping the path here avoids duplicating serve.pid policy.
   ['^src/core/promote\\.ts$'],
@@ -304,7 +305,7 @@ const RANKS = [
   // the handler registry, importing nothing sideways.
   ['^src/cli/(index|entry)\\.ts$'],
   [
-    '^src/core/(?!runner/|kube/|edge/|tls-local\\.ts$|tls\\.ts$|rcapi\\.ts$|eks\\.ts$|eks-docs\\.ts$|audit\\.ts$|sessions\\.ts$|sso-identities\\.ts$|users\\.ts$|firstrun\\.ts$|skill\\.ts$|sso\\.ts$|diagnose\\.ts$|topology\\.ts$|journal\\.ts$|eventlog\\.ts$|postready\\.ts$|scaleseed\\.ts$|configimport\\.ts$|cluster\\.ts$|migrate\\.ts$|promote\\.ts$|lifecycle/|evidence\\.ts$|envvars\\.ts$|monitor\\.ts$|data\\.ts$|loadtest\\.ts$|backup\\.ts$|backup-compat\\.ts$|database-of\\.ts$|seed-db\\.ts$|recovery\\.ts$|upgrade\\.ts$|doctor\\.ts$)',
+    '^src/core/(?!runner/|kube/|edge/|tls-local\\.ts$|tls\\.ts$|rcapi\\.ts$|eks\\.ts$|eks-docs\\.ts$|audit\\.ts$|sessions\\.ts$|sso-identities\\.ts$|users\\.ts$|firstrun\\.ts$|skill\\.ts$|sso\\.ts$|diagnose\\.ts$|topology\\.ts$|journal\\.ts$|eventlog\\.ts$|postready\\.ts$|scaleseed\\.ts$|configimport\\.ts$|cluster\\.ts$|migrate\\.ts$|promote\\.ts$|lifecycle/|evidence\\.ts$|envvars\\.ts$|monitor\\.ts$|data\\.ts$|loadtest\\.ts$|backup\\.ts$|backup-compat\\.ts$|database-of\\.ts$|seed-db\\.ts$|recovery\\.ts$|upgrade\\.ts$|setup\\.ts$|doctor\\.ts$)',
     '^src/web/(?!(jobs|signin|security|route-deps|route-table|app)\\.ts$|routes/)',
   ],
 ];

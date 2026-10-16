@@ -140,9 +140,20 @@ const ROOT = path.resolve(__dirname, '..');
 // Six more cover the PR 64 round-three findings, one case each: total 4779.
 // Onboarding grants add cluster-ownership, rollback, marker-publication and onboard-grant
 // boundary cases; a full collection of the merged tree measured 4831 tests.
+// Goal-first setup adds its owner-boundary cases, and four review fixes add one each: the setup
+// envelope schema, the first-run gates, the saved deployment alias probe and the destination
+// notice. A full collection of the merged tree measured 4863 tests.
+// The seventh PR 62 round adds thirteen: the Docker engine gate, two stale saved selectors, outdated
+// Kubernetes tools, the unused first-run name, who completed onboarding (three in the library, one
+// through the setup snapshot), the unknown-action text, the long help, and the force and fresh
+// rebuilds of a one-preset Docker workspace: total 4876.
+// The eighth adds five: the actor-prefixed first-run name, --reconfigure asking with an explicit
+// answer and rejecting it without a prompt, the saved selectors in capabilities, and the skill's
+// saved-selector recipe: 4876 + 5 = 4881.
 // Credential arguments add thirty-two over the grants base of 4831: total 4863.
 // One more names credential option words ending in pass and leaves lookalikes readable: 4864.
-const FLOOR = 4864;
+// Merged with PR 62 (base 4881): credential arguments add 4864 - 4831 = 33, so 4881 + 33 = 4914.
+const FLOOR = 4914;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

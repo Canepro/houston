@@ -9,7 +9,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import type * as DoctorNS from '../../src/core/doctor';
+import type * as ContextNS from '../../src/core/kube/context';
+import type * as KubeToolsNS from '../../src/core/kube/tools';
 import type * as CreateDockerNS from '../../src/core/lifecycle/create-docker';
+import type * as RequestNS from '../../src/core/lifecycle/request';
+import type * as LifecycleTypesNS from '../../src/core/lifecycle/types';
 import type * as EksNS from '../../src/core/eks';
 import type * as ConfigNS from '../../src/lib/config';
 import type { Emit } from '../../src/lib/events';
@@ -425,6 +429,35 @@ describe('the capabilities document', () => {
       ]),
     );
 
+  it('exposes the saved setup selectors that change what a flagless up does', () => {
+    const cfg = require('../../src/lib/config') as typeof ConfigNS;
+    const saved = () => doc().setup_defaults as Record<string, unknown>;
+    expect(saved()).toMatchObject({
+      deployment: 'monolith',
+      scenarios: [],
+      answered_deployment: false,
+      answered_scenarios: false,
+      up_without_selectors: { runtime: 'docker', deployment: 'monolith', preset: 'default' },
+    });
+    cfg.saveConfig({
+      default_deployment: 'microservices',
+      default_scenarios: ['email'],
+      preferences: { seed_profile: 'standard', retain_runs: true },
+    });
+    expect(saved()).toMatchObject({
+      deployment: 'microservices',
+      scenarios: ['email'],
+      answered_deployment: true,
+      answered_scenarios: true,
+      seed_profile: 'standard',
+      retain_runs: true,
+      invalid: false,
+      up_without_selectors: { runtime: 'kubernetes', deployment: 'microservices', preset: 'email' },
+    });
+    cfg.saveConfig({ default_deployment: 'bogus' });
+    expect(saved()).toMatchObject({ invalid: true, up_without_selectors: null });
+  });
+
   it('carries no pre-rename key, and says so with the wire generation', () => {
     // Removing `rc_repro_version` and `schema_legacy` is a BREAKING change, so it comes
     // with the bump of `contract`: either alone is a bug.
@@ -552,6 +585,7 @@ describe('onboard --json', () => {
     expect(completed.envelope.data).toMatchObject({
       action: 'complete',
       completed: true,
+      completed_by: 'person',
       rc_repro_version: expect.any(String),
       grants: { owned_cluster: false },
       answered_grants: { owned_cluster: false },
@@ -591,6 +625,17 @@ describe('onboard --json', () => {
       answered_grants: { owned_cluster: true },
       clusters: [],
     });
+  });
+
+  it('documents setup, --show and --accept-defaults in the long help, and who completed onboarding', async () => {
+    const help = await run(['onboard', '--help']);
+    for (const text of [
+      'houston onboard --show',
+      'houston onboard setup',
+      'houston onboard --accept-defaults',
+      'completed_by',
+    ])
+      expect(help.stdout).toContain(text);
   });
 
   it.each(['status', 'complete'])(
@@ -876,5 +921,368 @@ describe('up --json', () => {
     const ran = await run(['up', '--version', '8.5.1', '--offline', '--name', 'alpha', '--json']);
     expect(errorOf(ran).code).toBe('NOT_READY');
     expect(seen.streamOutput).toBe(false);
+  });
+});
+
+describe('goal-first setup CLI', () => {
+  it('shows transient facts and applicable questions without creating config or exposing a token', async () => {
+    process.env.HOUSTON_REG_TOKEN = 'setup-private-sentinel';
+    try {
+      const result = await run(['onboard', '--show', '--json']);
+      expect(result.code).toBe(0);
+      expect(result.envelope.data).toMatchObject({
+        schema: 'houston.setup.v1',
+        selection: { deployment: 'monolith', seed_profile: 'small', retain_runs: false },
+      });
+      const data = result.envelope.data as Record<string, unknown>;
+      expect((data.questions as { section: string }[]).map((q) => q.section)).not.toContain(
+        'authority',
+      );
+      expect(result.stdout).not.toContain('setup-private-sentinel');
+      expect(fs.existsSync(path.join(home, 'config.yaml'))).toBe(false);
+    } finally {
+      delete process.env.HOUSTON_REG_TOKEN;
+    }
+  });
+  it('fills only unanswered defaults and preserves settled authority and unknown mappings', async () => {
+    const cfg = require('../../src/lib/config') as typeof ConfigNS;
+    cfg.saveConfig({
+      grants: { owned_cluster: true, engine_resize: false, clusters: ['houston-local', 'future'] },
+      preferences: { seed_profile: 'large', future: 'keep' },
+      onboarding: { marker: 'keep' },
+    });
+    const result = await run(['onboard', '--accept-defaults', '--json']);
+    expect(result.code).toBe(0);
+    expect(cfg.loadConfig(false)).toMatchObject({
+      default_deployment: 'monolith',
+      default_scenarios: [],
+      grants: { owned_cluster: true, engine_resize: false, clusters: ['houston-local', 'future'] },
+      preferences: { seed_profile: 'large', retain_runs: false, future: 'keep' },
+      onboarding: {
+        marker: 'keep',
+        completed_at: expect.any(String),
+        completed_by: 'defaults',
+      },
+    });
+    expect((result.envelope.data as Record<string, unknown>).first_run_command).toContain(
+      '--seed-profile large',
+    );
+  });
+  it('leaves fully answered defaults unchanged without refreshing onboarding state', async () => {
+    const cfg = require('../../src/lib/config') as typeof ConfigNS;
+    cfg.saveConfig({
+      default_deployment: 'monolith',
+      default_scenarios: [],
+      preferences: { seed_profile: 'small', retain_runs: false },
+      onboarding: { completed_at: '2026-10-15T00:00:00Z', rc_repro_version: '0.0.0' },
+    });
+    const before = fs.readFileSync(path.join(home, 'config.yaml'));
+    const result = await run(['onboard', '--accept-defaults', '--json']);
+    expect(result.code).toBe(0);
+    expect(result.envelope.data).toMatchObject({
+      action: 'unchanged',
+      persisted: { completed_at: '2026-10-15T00:00:00Z', rc_repro_version: '0.0.0' },
+    });
+    expect(fs.readFileSync(path.join(home, 'config.yaml'))).toEqual(before);
+  });
+  it('limits defaults to a requested section and never grants unanswered authority', async () => {
+    const result = await run(['onboard', '--accept-defaults', '--section', 'seed', '--json']);
+    expect(result.code).toBe(0);
+    const cfg = (require('../../src/lib/config') as typeof ConfigNS).loadConfig(false);
+    expect(cfg.preferences).toEqual({ seed_profile: 'small' });
+    expect(cfg.default_deployment).toBeUndefined();
+    expect(cfg.default_scenarios).toBeUndefined();
+    expect(cfg.grants).toBeUndefined();
+  });
+  it('refuses an incompatible explicit scenario without changing stored bytes', async () => {
+    const cfg = require('../../src/lib/config') as typeof ConfigNS;
+    cfg.saveConfig({ default_deployment: 'monolith', preferences: { seed_profile: 'none' } });
+    const before = fs.readFileSync(path.join(home, 'config.yaml'));
+    const result = await run([
+      'onboard',
+      '--deployment',
+      'microservices',
+      '--scenario',
+      'not-a-preset',
+      '--json',
+    ]);
+    expect(result.code).toBe(2);
+    expect(fs.readFileSync(path.join(home, 'config.yaml'))).toEqual(before);
+  });
+  it('advertises the setup schema on the envelope of every setup mode, and keeps the grant schema for grants', async () => {
+    const setupModes = [
+      ['onboard', '--show', '--json'],
+      ['onboard', 'setup', '--accept-defaults', '--json'],
+      ['onboard', '--accept-defaults', '--json'],
+      ['onboard', '--deployment', 'monolith', '--json'],
+    ];
+    for (const argv of setupModes) {
+      const result = await run(argv);
+      expect([argv.join(' '), result.code, result.envelope.schema]).toEqual([
+        argv.join(' '),
+        0,
+        'houston.setup.v1',
+      ]);
+      expect((result.envelope.data as Record<string, unknown>).schema).toBe('houston.setup.v1');
+    }
+    for (const argv of [
+      ['onboard', '--json'],
+      ['onboard', 'grant', 'owned-cluster', '--json'],
+    ]) {
+      const result = await run(argv);
+      expect([argv.join(' '), result.envelope.schema]).toEqual([
+        argv.join(' '),
+        'houston.onboard.v1',
+      ]);
+    }
+    const caps = await run(['capabilities']);
+    const commands = (caps.envelope.data as { commands: { name: string; schemas?: string[] }[] })
+      .commands;
+    expect(commands.find((command) => command.name === 'onboard')?.schemas).toEqual([
+      'houston.onboard.v1',
+      'houston.setup.v1',
+    ]);
+  });
+  it('defers licensed seed and blocks an unusable first run without persisting a token', async () => {
+    const result = await run([
+      'onboard',
+      '--deployment',
+      'microservices',
+      '--seed-profile',
+      'standard',
+      '--json',
+    ]);
+    expect(result.code).toBe(0);
+    expect(result.envelope.data).toMatchObject({
+      selection: { deployment: 'microservices' },
+      license: { required: true, supplied: false, seed_deferred: true },
+      environment: { microservices_ready: false, kubernetes_provisioning_available: false },
+      first_run_command: '',
+      gates: expect.arrayContaining([
+        expect.objectContaining({ kind: 'tools', code: 'KUBERNETES_TOOLS_MISSING' }),
+      ]),
+    });
+    expect(
+      (require('../../src/lib/config') as typeof ConfigNS).loadConfig(false).reg_token,
+    ).toBeUndefined();
+  });
+  it('parses the setup-generated command into an owned local plan and keeps explicit remote use', async () => {
+    const cfg = require('../../src/lib/config') as typeof ConfigNS;
+    cfg.saveConfig({
+      [cfg.KUBE_CONTEXT_KEY]: 'shared-k3s',
+      onboarding: { completed_at: '2026-10-15T00:00:00Z' },
+      grants: { owned_cluster: true },
+    });
+    const tools = require('../../src/core/kube/tools') as typeof KubeToolsNS;
+    const presence = jest
+      .spyOn(tools, 'which')
+      .mockImplementation((name) =>
+        ['kubectl', 'helm', 'kind'].includes(name) ? `/test/${name}` : '',
+      );
+    let setupResult: Ran;
+    try {
+      setupResult = await run([
+        'onboard',
+        '--deployment',
+        'microservices',
+        '--seed-profile',
+        'none',
+        '--json',
+      ]);
+    } finally {
+      presence.mockRestore();
+    }
+    expect(setupResult.envelope.data).toMatchObject({
+      environment: { microservices_ready: false, kubernetes_provisioning_available: true },
+    });
+    const command = String(
+      (setupResult.envelope.data as Record<string, unknown>).first_run_command,
+    );
+    expect(command).toBe('houston up --version 8.6.1 --name first-repro --wait');
+
+    // Reload the real lifecycle after the setup command has persisted its choices, with only
+    // the cluster-planning seam doubled. This makes the second command pass through the actual
+    // parser and resolver while keeping the test off a real cluster.
+    jest.resetModules();
+    const planned: string[] = [];
+    const seen: {
+      before: Pick<LifecycleTypesNS.CreateReq, 'runtime' | 'deployment' | 'preset' | 'context'>;
+      after: Pick<
+        LifecycleTypesNS.CreateReq,
+        'runtime' | 'deployment' | 'preset' | 'context' | 'implicitOwnedLocal'
+      >;
+      context: string;
+      willProvision: boolean;
+    }[] = [];
+    jest.doMock('../../src/core/kube/context', () => {
+      const actual = jest.requireActual<typeof ContextNS>('../../src/core/kube/context');
+      return {
+        ...actual,
+        planCluster: async (context = '') => {
+          planned.push(context);
+          return {
+            context: context || 'kind-houston-local',
+            distribution: context === '' ? 'kind' : 'k3s',
+            create: context === '',
+          } as ContextNS.ClusterPlan;
+        },
+      };
+    });
+    jest.doMock('../../src/core/lifecycle/create-docker', () => {
+      // Load this dependent first so it receives the cluster-planning double rather than the
+      // `requireActual` module graph below.
+      const request = require('../../src/core/lifecycle/request') as typeof RequestNS;
+      const actual = jest.requireActual<typeof CreateDockerNS>(
+        '../../src/core/lifecycle/create-docker',
+      );
+      return {
+        ...actual,
+        createRepro: async (req: LifecycleTypesNS.CreateReq) => {
+          const before = {
+            runtime: req.runtime,
+            deployment: req.deployment,
+            preset: req.preset,
+            context: req.context,
+          };
+          const plan = actual.createPlan({ req, emit: () => undefined });
+          await actual.resolveAxesStep(plan);
+          seen.push({
+            before,
+            after: {
+              runtime: req.runtime,
+              deployment: req.deployment,
+              preset: req.preset,
+              context: req.context,
+              implicitOwnedLocal: req.implicitOwnedLocal,
+            },
+            context: request.reqContext(req),
+            willProvision: await request.willProvision(req),
+          });
+          return { name: req.name, runtime: req.runtime };
+        },
+      };
+    });
+    try {
+      const local = await run([...command.split(' ').slice(1), '--json']);
+      const remote = await run([
+        'up',
+        '--version',
+        '8.6.1',
+        '--name',
+        'explicit-remote',
+        '--runtime',
+        'kubernetes',
+        '--context',
+        'shared-k3s',
+        '--json',
+      ]);
+      expect([local.code, remote.code]).toEqual([0, 0]);
+      expect(planned).toEqual(['', 'shared-k3s']);
+      expect(seen).toEqual([
+        {
+          before: { runtime: '', deployment: '', preset: '', context: '' },
+          after: {
+            runtime: 'kubernetes',
+            deployment: 'microservices',
+            preset: 'default',
+            context: '',
+            implicitOwnedLocal: true,
+          },
+          context: '',
+          willProvision: true,
+        },
+        {
+          before: { runtime: 'kubernetes', deployment: '', preset: '', context: 'shared-k3s' },
+          after: {
+            runtime: 'kubernetes',
+            deployment: 'microservices',
+            preset: 'default',
+            context: 'shared-k3s',
+            implicitOwnedLocal: false,
+          },
+          context: 'shared-k3s',
+          willProvision: false,
+        },
+      ]);
+    } finally {
+      jest.dontMock('../../src/core/kube/context');
+      jest.dontMock('../../src/core/lifecycle/create-docker');
+    }
+  });
+  it('shows facts and gates before a no-op interactive confirmation without claiming a write', async () => {
+    const cfg = require('../../src/lib/config') as typeof ConfigNS;
+    cfg.saveConfig({
+      default_deployment: 'microservices',
+      default_scenarios: [],
+      preferences: { seed_profile: 'standard', retain_runs: false },
+      grants: { owned_cluster: false },
+      onboarding: { completed_at: '2026-10-15T00:00:00Z', rc_repro_version: '2.1.1' },
+    });
+    const before = fs.readFileSync(path.join(home, 'config.yaml'));
+    const confirm = jest.fn(async () => {
+      const printed = (process.stdout.write as unknown as jest.Mock).mock.calls
+        .map(([chunk]) => String(chunk))
+        .join('');
+      expect(printed).toContain('GATE_OWNED_CLUSTER');
+      return true;
+    });
+    jest.doMock('../../src/cli/handlers/prompt', () => ({
+      ...jest.requireActual('../../src/cli/handlers/prompt'),
+      confirm,
+      setupAnswer: jest.fn(async () => 'unused'),
+    }));
+    try {
+      const result = await run(['onboard', 'setup']);
+      expect(confirm).toHaveBeenCalledWith('Apply these setup choices?');
+      for (const label of ['engine', 'capacity', 'tools', 'kernel', 'licence', 'seed deferred'])
+        expect(result.stdout).toContain(label);
+      expect(result.stdout).toContain('Setup choices unchanged.');
+      expect(result.stdout).not.toContain('Setup choices recorded.');
+      expect(fs.readFileSync(path.join(home, 'config.yaml'))).toEqual(before);
+    } finally {
+      jest.dontMock('../../src/cli/handlers/prompt');
+    }
+  });
+  it('asks every question and the confirmation for --reconfigure, with an explicit answer as the default', async () => {
+    const cfg = require('../../src/lib/config') as typeof ConfigNS;
+    cfg.saveConfig({
+      default_deployment: 'monolith',
+      default_scenarios: [],
+      preferences: { seed_profile: 'small', retain_runs: false },
+    });
+    const before = fs.readFileSync(path.join(home, 'config.yaml'));
+    const confirm = jest.fn(async () => false);
+    const setupAnswer = jest.fn(async (_question: string, fallback: string) => fallback);
+    jest.doMock('../../src/cli/handlers/prompt', () => ({
+      ...jest.requireActual('../../src/cli/handlers/prompt'),
+      confirm,
+      setupAnswer,
+    }));
+    try {
+      const result = await run(['onboard', '--reconfigure', '--deployment', 'multi-instance']);
+      expect(result.code).toBe(0);
+      expect(setupAnswer.mock.calls.length).toBeGreaterThan(1);
+      const asked = setupAnswer.mock.calls.find(([question]) => question.includes('deployment'));
+      expect(asked?.[1]).toBe('multi-instance');
+      expect(confirm).toHaveBeenCalledWith('Apply these setup choices?');
+      expect(fs.readFileSync(path.join(home, 'config.yaml'))).toEqual(before);
+    } finally {
+      jest.dontMock('../../src/cli/handlers/prompt');
+    }
+  });
+  it('rejects --reconfigure with an answer when no prompt can be shown', async () => {
+    const cfg = require('../../src/lib/config') as typeof ConfigNS;
+    cfg.saveConfig({ default_deployment: 'monolith' });
+    const before = fs.readFileSync(path.join(home, 'config.yaml'));
+    const result = await run([
+      'onboard',
+      '--reconfigure',
+      '--deployment',
+      'microservices',
+      '--json',
+    ]);
+    expect(result.code).toBe(2);
+    expect(errorOf(result).message).toContain('--reconfigure asks the setup questions');
+    expect(fs.readFileSync(path.join(home, 'config.yaml'))).toEqual(before);
   });
 });

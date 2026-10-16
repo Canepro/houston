@@ -108,7 +108,12 @@ const VERSION_ARGV: Readonly<Record<string, readonly string[]>> = Object.freeze(
 
 /** Locate one tool and read its version. */
 export async function tool(name: string): Promise<Tool> {
-  const found = makeTool({ name, path: which(name) });
+  return await toolAt(name, which(name));
+}
+
+/** Read the version of a tool already located at `where`, or return it absent when `where` is ''. */
+export async function toolAt(name: string, where: string): Promise<Tool> {
+  const found = makeTool({ name, path: where });
   if (!toolPresent(found)) return found;
   const argv = [name, ...(VERSION_ARGV[name] ?? ['--version'])];
   const res = await kube.run(argv, { timeout: PROBE_TIMEOUT });

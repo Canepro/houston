@@ -9,6 +9,7 @@
  * comment saying what broke when it was somewhere else. Each step names what it does, and
  * the order is visible in one screen at the bottom of this module.
  */
+import { savedSelectors } from '../../lib/setup-selectors';
 import { seedSelection } from '../../lib/seed-options';
 import * as fs from 'node:fs/promises';
 
@@ -250,14 +251,8 @@ export async function createUnderTheLock(
       journalClear(note);
       throw error;
     }
-    // RE-KEYED TO THE WORKSPACE THAT EXISTS. The note is recorded under the name derived
-    // BEFORE `resolveAxes` ran, and `--deployment multi-instance` without a `--name` renames
-    // the workspace on the way (`rc8-5-1` becomes `rc8-5-1-multi-instance`). With `seedHere`
-    // the note is the CALLER's to close, by the name it is handed back -- so the one under
-    // the old name was never cleared, and `doctor` reported an unfinished create for a
-    // workspace that does not exist. Moved rather than dropped: until the caller's seed
-    // lands, a kill must still leave a note, for the right name. The previous
-    // implementation moves it the same way.
+    // Direct callers can still supply a pre-normalized name. Keep their seedHere
+    // recovery note under the returned workspace until the caller finishes seeding.
     const created = isTruthy(out.name) ? String(out.name) : name;
     if (req.seedHere && created !== name) {
       journalClear(note);
@@ -310,30 +305,24 @@ export async function createRepro(
   // ONCE, HERE, before anything reads it. `runtime` is consulted at a dozen places
   // downstream and inferring it at each would be a dozen chances to disagree; after this
   // `req.runtime` means what the caller meant rather than only what they typed.
-  const typedRuntime = String(req.runtime).trim();
   // Before the first `deriveFor`: a typed name that is an existing workspace this actor may
   // act on means that workspace, not a new `<actor>-<name>` beside it.
   await ownership.claimTypedName(req);
   // A workspace brought back goes to its recorded cluster: carried before anything says
   // where this is going, or that would name the box's default instead.
-  await carryRecordedAxes(req, naming.deriveFor(req));
+  const recordedName = naming.deriveFor(req);
+  await carryRecordedAxes(req, recordedName);
+  // A recorded preset may differ from the spelling that originally derived this name.
+  // Reusing that workspace must not derive a different lock from its recorded preset.
+  if (req.name === '' && recordedName !== '' && (await paths.exists(recordedName)))
+    req.name = recordedName;
+  await applySavedSelectors(req);
   req.runtime = request.inferRuntime(req);
-  request.sayWhereThisIsGoing(req, typedRuntime, emit);
-  // SAID, not dropped: these two mean nothing to Compose, and a Docker workspace came up
-  // without a word that the operator (or the ingress class) asked for was not there.
-  if (req.runtime !== topology.KUBERNETES) {
-    const ignored = [
-      req.mongoOperator ? '--mongo-operator' : '',
-      req.ingressClass !== '' ? '--ingress-class' : '',
-    ].filter((flag) => flag !== '');
-    if (ignored.length > 0) {
-      warn(emit, `${ignored.join(' and ')}: Kubernetes only, ignored on Docker`, {
-        phase: 'plan',
-      });
-    }
-  }
 
-  const name = naming.deriveFor(req);
+  // Deployment aliases can add a preset suffix too. The lock and recovery journal
+  // must use the same effective name that the runtime planner will write.
+  const axes = topology.resolveAxes(req);
+  const name = naming.deriveFor({ ...req, preset: axes.preset });
   if (!name) {
     throw new ValidationError(
       `name '${req.name}' contains no usable characters (want a-z, 0-9, '-')`,
@@ -480,6 +469,97 @@ export async function carryRecordedAxes(req: CreateReq, name: string): Promise<v
   req.monitor ||= isTruthy(meta.extra.monitoring);
 }
 
+/**
+ * A workspace this flagless request already has, once the saved selectors are applied.
+ *
+ * `up --version 8.6.1` derives `rc8-6-1` before saved selectors run. The record can exist
+ * only as `rc8-6-1-email`, or as `rc8-6-1-email--multi-instance` when the saved deployment
+ * is the multi-instance alias, which resolves into the preset. That is the same workspace,
+ * and its recorded axes win. Treating the miss as a new workspace set `implicitOwnedLocal`,
+ * and `planClusterStep` then refused the recorded remote context; a multi-instance miss
+ * rebuilt the workspace on the default replica count.
+ */
+async function savedScenarioRecord(
+  req: CreateReq,
+  saved: ReturnType<typeof savedSelectors>,
+): Promise<string> {
+  const axes = topology.resolveAxes({
+    deployment: saved.deployment,
+    preset: compositeName(saved.scenarios),
+  });
+  const derived = naming.deriveFor({ ...req, preset: axes.preset });
+  if (!derived || derived === naming.deriveFor(req) || !(await paths.exists(derived))) return '';
+  return derived;
+}
+
+/** Saved defaults must be applied before the front door derives its lock/journal name. */
+async function applySavedSelectors(req: CreateReq): Promise<void> {
+  const existing = naming.deriveFor(req);
+  // Saved choices apply only to a new workspace with no explicit topology/scenario.
+  // Reusing a record must keep its recorded axes, even after setup defaults change.
+  if (
+    !(existing && (await paths.exists(existing))) &&
+    req.runtime === '' &&
+    req.context === '' &&
+    req.deployment === '' &&
+    req.preset === ''
+  ) {
+    const saved = savedSelectors();
+    if (saved.answered_deployment || saved.answered_scenarios) {
+      const recorded = await savedScenarioRecord(req, saved);
+      if (recorded !== '') {
+        req.name = recorded;
+        await carryRecordedAxes(req, recorded);
+        // The record holds the scenario the saved selectors chose. Leaving the preset empty
+        // let a forced or fresh rebuild of a one-preset Docker workspace fall back to
+        // `default` and drop it, under a name that still says it has the scenario.
+        await carryRecordedPreset(req, recorded, true);
+        return;
+      }
+      req.deployment = saved.deployment;
+      req.preset = compositeName(saved.scenarios);
+      req.implicitOwnedLocal = saved.deployment === 'microservices';
+    } else {
+      // Freeze the unanswered choice too: a config update during the workspace-lock
+      // wait must not choose another workspace after its lock has already been taken.
+      req.preset = 'default';
+    }
+  }
+}
+
+/**
+ * Keep an existing workspace's recorded preset, and its params when none were given, as the
+ * rebuild of that workspace. Returns the preset kept, or '' when the record keeps none.
+ *
+ * `always` keeps a one-preset Compose record too. The ordinary rule leaves that to behave as
+ * it always has, but a record reached through the saved setup selectors is the workspace
+ * those selectors named, so its scenario must survive a forced or fresh rebuild.
+ */
+async function carryRecordedPreset(
+  req: CreateReq,
+  existing: string,
+  always: boolean,
+): Promise<string> {
+  try {
+    const meta = await record.readMeta(existing);
+    const composed = namesOf(meta.preset).length > 1;
+    const kept =
+      composed ||
+      ((meta.preset || 'default') !== 'default' &&
+        (always || topology.ofMeta(meta) === topology.KUBERNETES));
+    if (!kept) return '';
+    req.preset = meta.preset;
+    if (Object.keys(req.params).length === 0) {
+      req.params = composed
+        ? qualifiedParams(bag(meta.extra.preset_params))
+        : { ...bag(meta.extra.params) };
+    }
+    return meta.preset;
+  } catch {
+    return ''; // a half-written record: nothing to keep
+  }
+}
+
 /** Runtime x deployment x scenario, decided before anything else reads the request. */
 export async function resolveAxesStep(plan: CreatePlan): Promise<void> {
   // An existing workspace's RECORDED runtime beats the flag default. Without this,
@@ -487,7 +567,10 @@ export async function resolveAxesStep(plan: CreatePlan): Promise<void> {
   // `docker compose up` against a workspace with no compose file.
   //
   // Read BEFORE resolveAxes: it normalises an empty --runtime to "docker", after which
-  // `!req.runtime` is never true and this could not fire.
+  // `!req.runtime` is never true and this could not fire. Read AFTER saved selectors too:
+  // a record visible only with the saved scenario suffix is the workspace whose runtime
+  // and axes are kept.
+  await applySavedSelectors(plan.req);
   const existing = naming.deriveFor(plan.req);
   if (!plan.req.runtime && existing && (await paths.exists(existing))) {
     plan.req.runtime = await topology.ofRepro(existing);
@@ -499,25 +582,11 @@ export async function resolveAxesStep(plan: CreatePlan): Promise<void> {
   // it re-installed Rocket.Chat without the preset's settings while the preset's own
   // objects stayed in the namespace. A one-preset Compose workspace behaves as it always has.
   if (plan.req.preset === '' && existing && (await paths.exists(existing))) {
-    try {
-      const meta = await record.readMeta(existing);
-      const composed = namesOf(meta.preset).length > 1;
-      const kept =
-        composed ||
-        (topology.ofMeta(meta) === topology.KUBERNETES && (meta.preset || 'default') !== 'default');
-      if (kept) {
-        plan.req.preset = meta.preset;
-        if (Object.keys(plan.req.params).length === 0) {
-          plan.req.params = composed
-            ? qualifiedParams(bag(meta.extra.preset_params))
-            : { ...bag(meta.extra.params) };
-        }
-        info(plan.emit, `'${existing}' is a ${meta.preset} workspace — keeping those presets`, {
-          phase: 'plan',
-        });
-      }
-    } catch {
-      // a half-written record: nothing to keep
+    const kept = await carryRecordedPreset(plan.req, existing, false);
+    if (kept !== '') {
+      info(plan.emit, `'${existing}' is a ${kept} workspace — keeping those presets`, {
+        phase: 'plan',
+      });
     }
   }
   const axes = topology.resolveAxes({
@@ -1452,7 +1521,22 @@ export async function createReproLocked(
   // Before anything, on either runtime: the format check is also what keeps the licence to
   // one line of the env file it is written to.
   if (req.license !== '') req.license = request.requireLicense(req.license);
+  const typedRuntime = String(req.runtime).trim();
   await resolveAxesStep(plan);
+  request.sayWhereThisIsGoing(req, typedRuntime, emit);
+  // SAID, not dropped: these two mean nothing to Compose, and a Docker workspace came up
+  // without a word that the operator (or the ingress class) asked for was not there.
+  if (req.runtime !== topology.KUBERNETES) {
+    const ignored = [
+      req.mongoOperator ? '--mongo-operator' : '',
+      req.ingressClass !== '' ? '--ingress-class' : '',
+    ].filter((flag) => flag !== '');
+    if (ignored.length > 0) {
+      warn(emit, `${ignored.join(' and ')}: Kubernetes only, ignored on Docker`, {
+        phase: 'plan',
+      });
+    }
+  }
 
   if (req.runtime === topology.KUBERNETES) {
     // A PARALLEL path, not a branch woven through this function. Everything below is

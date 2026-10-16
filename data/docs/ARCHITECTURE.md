@@ -381,3 +381,34 @@ else, saying a certificate failed when it had not arrived yet, or telling somebo
 costs nothing because the pointer file was lost. Most of this document applies that idea in
 different places. Say what you know, say what you could not find out, and never let the
 second turn into the first.
+
+### Goal-first setup
+
+`core/setup.ts` owns the shared `houston.setup.v1` snapshot and partial config
+writer. `onboard --json` stamps that schema on its envelope in every setup mode and
+keeps `houston.onboard.v1` for grant state; `capabilities` lists both.
+`cli/handlers/setup.ts` asks progressive questions through that snapshot;
+`GET /api/setup` reads it under the readonly route role. There is no GUI writer or
+setup panel. Host and engine facts are read at request time. Configuration writes
+use the existing cross-process config lock and omit environment token values.
+`lib/setup-selectors.ts` reads saved deployment and scenario defaults with the
+legacy key precedence. The lifecycle planner applies them to new workspaces only
+when no runtime, context, deployment or preset was explicitly selected. Existing
+workspaces keep their recorded choices, including a one-preset Docker workspace's
+scenario on `up --force` and `--fresh`.
+
+A setup write completes onboarding so the prompts stop, and records who did it in
+`onboarding.completed_by`. A person at a terminal, or `onboard complete`, `grant` or
+`revoke`, records `person`. `--accept-defaults`, `--json` and piped writes record
+`defaults`, which `requireOnboarded` and the snapshot's onboarding gate do not accept
+as a person. A later person completion replaces `defaults`, and `defaults` never
+replaces `person`. A record without the field predates it and reads as a person.
+`onboard --show` and `GET /api/setup` report the value in `persisted.completed_by`.
+
+The snapshot describes a state that needs repair rather than throwing on it. A saved
+scenario no preset provides, or a saved deployment that is not one, adds the
+`SETUP_SELECTION_INVALID` gate with the repair command. A Docker selection adds
+`ENGINE_UNAVAILABLE` while no engine answers, and Kubernetes tools below their floors
+(kubectl 1.21, Helm 3, Kind 0.20) add `KUBERNETES_TOOLS_OUTDATED`. Each gate withholds
+`first_run_command`. The command names the first of `first-repro`, `first-repro-2`,
+`first-repro-3` ... that is not already a workspace.
