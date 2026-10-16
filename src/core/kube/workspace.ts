@@ -343,8 +343,9 @@ async function installChart(options: ChartInstall): Promise<Record<string, unkno
     { phase: 'boot', pct: 60 },
   );
   await install({ namespace, context, values, chartVersion, emit });
-  // The tools Ingress is later work. Helm has already accepted the Secret reference, and
-  // a failure there must not leave an adopted namespace without retained_license.
+  // The tools Ingress is later work. Helm has accepted the release. A failure there must
+  // not leave an adopted namespace without the licence markers, and a failed Helm install
+  // must not gain them for a licence that was not already retained.
   if (options.license !== '') {
     await noteInstalledLicense(name, namespace, context, options.receipt);
   }
@@ -467,27 +468,10 @@ function recordsThisInstall(
 }
 
 /**
- * The licence Secret is in the namespace. Inspect reads `effective_license` and ignores
- * `incomplete`, so this is the first moment that boolean may be true.
+ * Helm has accepted a release that references this run's licence Secret.
+ * Inspect reads `effective_license` and ignores `incomplete`, so that boolean becomes
+ * true here, together with `retained_license`, and not when the Secret alone exists.
  */
-async function noteEffectiveLicense(
-  name: string,
-  namespace: string,
-  context: string,
-  receipt: NamespaceReceipt,
-): Promise<void> {
-  try {
-    await updateMeta(name, (meta) => {
-      if (!recordsThisInstall(meta, name, namespace, context, receipt)) return;
-      meta.extra.effective_license = true;
-    });
-  } catch (error) {
-    // Direct workspace callers can operate without a lifecycle write-ahead record.
-    if (!(error instanceof MissingRecordError)) throw error;
-  }
-}
-
-/** A release that references the licence Secret has been accepted. */
 async function noteInstalledLicense(
   name: string,
   namespace: string,
@@ -503,6 +487,7 @@ async function noteInstalledLicense(
       }
       meta.extra.licensed = true;
       meta.extra.retained_license = true;
+      meta.extra.effective_license = true;
     });
   } catch (error) {
     // Direct workspace callers can operate without a lifecycle write-ahead record.
@@ -674,7 +659,6 @@ export async function createWorkspace({
       // Where a browser reaches Rocket.Chat: the HTTPS name, else the workspace's own URL.
       tlsHost !== '' ? `https://${tlsHost}` : rootUrl,
     );
-    if (license !== '') await noteEffectiveLicense(name, namespace, context, receipt);
     values = await installChart({
       name,
       resolved,

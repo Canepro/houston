@@ -194,12 +194,6 @@ function isKnownNonBlankComposeValue(value: unknown): boolean {
   return true;
 }
 
-/** Whether one final Compose environment gives Rocket.Chat a known supplied non-blank value. */
-function environmentHasKnownValue(environment: unknown, name: string): boolean {
-  const entry = environmentEntry(environment, name);
-  return entry.present && isKnownNonBlankComposeValue(entry.value);
-}
-
 /** Trim an explicit registration token in its final Compose environment. */
 function normalizeRegToken(environment: unknown): void {
   if (isPlainObject(environment)) {
@@ -240,18 +234,26 @@ export function licenseEnvFiles(
   });
 }
 
+/** Presence only. null means the file leaves that key unchanged. */
+export interface EnvFileCredentials {
+  readonly license: boolean | null;
+  readonly token: boolean | null;
+}
+
 /**
  * Presence only: no credential text leaves this parser. Unsupported or interpolated
- * input cannot establish a licence. null means the file leaves the key unchanged.
+ * input cannot establish a licence or a registration token. null means the file leaves
+ * that key unchanged.
  */
-export function licenseInEnvFile(text: string, raw: boolean): boolean | null {
-  let result: boolean | null = null;
+export function credentialsInEnvFile(text: string, raw: boolean): EnvFileCredentials {
+  let license: boolean | null = null;
+  let token: boolean | null = null;
   const lines = text.split(/\r?\n/u);
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index] ?? '';
     if (/^\s*(?:#.*)?$/u.test(line)) continue;
     const entry = /^\s*(?:export\s+)?([A-Za-z0-9_.\-[\]]+)(?:\s*([=:])\s*(.*))?$/u.exec(line);
-    if (entry === null) return false;
+    if (entry === null) return { license: false, token: false };
     const key = entry[1];
     let value = entry[3] ?? '';
     let literal = raw;
@@ -266,15 +268,17 @@ export function licenseInEnvFile(text: string, raw: boolean): boolean | null {
           value += `\n${lines[index] ?? ''}`;
         }
         const quoted = pattern.exec(value);
-        if (quoted === null) return false;
+        if (quoted === null) return { license: false, token: false };
         value = quoted[1] ?? quoted[2] ?? '';
         literal = quote === "'";
         if (!literal)
           value = value.replace(/\\([abfnrtv$"\\]|0[0-9]{0,3})/gu, (match, code: string) => {
             if (code.startsWith('0')) {
+              // compose-go accepts one to three octal digits after the leading 0.
+              // \040 is a space. Requiring three digits kept that text and cleared only \0040.
               const octal = code.slice(1);
               const number = Number.parseInt(octal, 8);
-              return /^[0-7]{3}$/u.test(octal) && number <= 255
+              return /^[0-7]{1,3}$/u.test(octal) && number <= 255
                 ? String.fromCharCode(number)
                 : match;
             }
@@ -295,28 +299,43 @@ export function licenseInEnvFile(text: string, raw: boolean): boolean | null {
           });
       } else value = value.replace(/\s+#.*$/u, '').trim();
     }
-    if (key === 'ROCKETCHAT_LICENSE') {
-      result = literal ? value.trim() !== '' : isKnownNonBlankComposeValue(value);
-    }
+    const present = literal ? value.trim() !== '' : isKnownNonBlankComposeValue(value);
+    if (key === 'ROCKETCHAT_LICENSE') license = present;
+    else if (key === 'REG_TOKEN') token = present;
   }
-  return result;
+  return { license, token };
 }
 
-/** Env files apply in order; a later known assignment replaces any earlier state. */
-function hasLicenseFile(
+/** Presence only: no licence text leaves this parser. null means the file leaves the key unchanged. */
+export function licenseInEnvFile(text: string, raw: boolean): boolean | null {
+  return credentialsInEnvFile(text, raw).license;
+}
+
+/**
+ * Env files apply in order. A later known assignment replaces any earlier state.
+ * null leaves the earlier state. An optional file with no recorded state is one Compose
+ * skips, including a missing `.license.env` this run is not writing.
+ */
+function assignmentFromFiles(
   service: Service | undefined,
-  licensed: boolean,
   projectDirectory: string,
-  fileLicenses: ReadonlyMap<string, boolean | null>,
+  states: ReadonlyMap<string, boolean | null>,
+  supplyingLicense: boolean,
 ): boolean {
   const licenseFile = path.resolve(projectDirectory, LICENSE_ENV_FILE);
   let present = false;
   for (const file of licenseEnvFiles(service, projectDirectory)) {
-    if (file.path === licenseFile && licensed) present = true;
-    else {
-      const state = fileLicenses.get(JSON.stringify([file.path, file.raw, file.optional]));
-      if (state !== null) present = state ?? false;
+    if (supplyingLicense && file.path === licenseFile) {
+      present = true;
+      continue;
     }
+    const state = states.get(JSON.stringify([file.path, file.raw, file.optional]));
+    if (state === undefined) {
+      if (file.optional) continue;
+      present = false;
+      continue;
+    }
+    if (state !== null) present = state;
   }
   return present;
 }
@@ -330,7 +349,19 @@ function serviceHasLicense(
   const entry = environmentEntry(service?.environment, 'ROCKETCHAT_LICENSE');
   return entry.present
     ? isKnownNonBlankComposeValue(entry.value)
-    : hasLicenseFile(service, licensed, projectDirectory, fileLicenses);
+    : assignmentFromFiles(service, projectDirectory, fileLicenses, licensed);
+}
+
+/** An explicit REG_TOKEN wins, including a blank one. Otherwise the ordered env files apply. */
+function serviceHasToken(
+  service: Service | undefined,
+  projectDirectory: string,
+  fileTokens: ReadonlyMap<string, boolean | null>,
+): boolean {
+  const entry = environmentEntry(service?.environment, 'REG_TOKEN');
+  return entry.present
+    ? isKnownNonBlankComposeValue(entry.value)
+    : assignmentFromFiles(service, projectDirectory, fileTokens, false);
 }
 
 /** Whether every final Rocket.Chat service gets a known licence from its environment or file. */
@@ -353,11 +384,12 @@ export function hasEffectiveCredential(
   licensed: boolean,
   projectDirectory: string,
   fileLicenses: ReadonlyMap<string, boolean | null> = new Map(),
+  fileTokens: ReadonlyMap<string, boolean | null> = new Map(),
 ): boolean {
   return rcServiceNames(instances).every((name) => {
     const service = doc.services[name];
     return (
-      environmentHasKnownValue(service?.environment, 'REG_TOKEN') ||
+      serviceHasToken(service, projectDirectory, fileTokens) ||
       serviceHasLicense(service, licensed, projectDirectory, fileLicenses)
     );
   });

@@ -949,44 +949,44 @@ export async function buildDocument(plan: CreatePlan): Promise<void> {
   // patches apply after the base environment, so an earlier token or licence is not enough.
   const projectDirectory = paths.workspace(plan.reproName);
   const fileLicenses = new Map<string, boolean | null>();
+  const fileTokens = new Map<string, boolean | null>();
   for (const name of compose.rcServiceNames((plan.pre as Preset).instances)) {
     for (const file of compose.licenseEnvFiles(plan.doc.services[name], projectDirectory)) {
       const key = JSON.stringify([file.path, file.raw, file.optional]);
-      if (
-        fileLicenses.has(key) ||
-        file.path === joinPath(projectDirectory, compose.LICENSE_ENV_FILE)
-      )
-        continue;
+      if (fileLicenses.has(key)) continue;
       if (file.path === '') {
         fileLicenses.set(key, false);
+        fileTokens.set(key, false);
         continue;
       }
       try {
-        fileLicenses.set(
-          key,
-          compose.licenseInEnvFile(await fs.readFile(file.path, 'utf8'), file.raw),
-        );
+        const found = compose.credentialsInEnvFile(await fs.readFile(file.path, 'utf8'), file.raw);
+        fileLicenses.set(key, found.license);
+        fileTokens.set(key, found.token);
       } catch (error) {
-        fileLicenses.set(
-          key,
-          file.optional && (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : false,
-        );
+        const missing =
+          file.optional && (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : false;
+        fileLicenses.set(key, missing);
+        fileTokens.set(key, missing);
       }
     }
   }
+  // The file on disk is read above. This flag is only the licence this run will write.
+  const supplyingLicense = plan.req.license !== '';
   const effectiveCredential = compose.hasEffectiveCredential(
     plan.doc,
     (plan.pre as Preset).instances,
-    plan.spec.licensed,
+    supplyingLicense,
     projectDirectory,
     fileLicenses,
+    fileTokens,
   )
     ? 'present'
     : '';
   plan.effectiveLicense = compose.hasEffectiveLicense(
     plan.doc,
     (plan.pre as Preset).instances,
-    plan.spec.licensed,
+    supplyingLicense,
     projectDirectory,
     fileLicenses,
   );

@@ -1008,6 +1008,7 @@ describe('the values the release is installed with', () => {
       expect(since(helmAt)).not.toContain('tools');
       const refused = await readMeta('tk');
       expect(refused.extra.retained_license).toBe(false);
+      expect(refused.extra.effective_license).toBe(false);
       expect(JSON.stringify(refused)).not.toContain(LICENSE);
       expect(ran.some((argv) => argv.includes('delete'))).toBe(false);
 
@@ -1032,8 +1033,19 @@ describe('the values the release is installed with', () => {
       expect(stuck.extra.effective_license).toBe(true);
       expect(JSON.stringify(stuck)).not.toContain(LICENSE);
 
+      // The Secret and release from the accepted install are still the ones Rocket.Chat
+      // uses. A later Helm refusal must not make that workspace look unlicensed.
+      failHelm = true;
       failTools = false;
       useTls = false;
+      await expect(createKubernetes(req(''))).rejects.toThrow('helm install failed: refused');
+      const retained = await readMeta('tk');
+      expect(retained.extra.retained_license).toBe(true);
+      expect(retained.extra.effective_license).toBe(true);
+      expect(JSON.stringify(retained)).not.toContain(LICENSE);
+      expect(ran.some((argv) => argv.includes('delete'))).toBe(false);
+
+      failHelm = false;
       await createKubernetes(req(''));
       const retry = helmValues.at(-1);
       expect(refOf(retry)).toContainEqual(licenseRef);

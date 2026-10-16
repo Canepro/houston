@@ -633,6 +633,25 @@ describe('the create path end to end, stopped at the write seam', () => {
         licensed: false,
       },
       {
+        // compose-go turns \040, \011 and \012 into whitespace. \0040 already did.
+        label: 'later double quoted octal space',
+        envFile: [],
+        later: 'ROCKETCHAT_LICENSE="\\011\\012\\040"\n',
+        licensed: false,
+      },
+      {
+        label: 'later single quoted octal space',
+        envFile: [],
+        later: "ROCKETCHAT_LICENSE='\\040'\n",
+        licensed: true,
+      },
+      {
+        label: 'later octal space beside a character',
+        envFile: [],
+        later: 'ROCKETCHAT_LICENSE="x\\040"\n',
+        licensed: true,
+      },
+      {
         label: 'later single quoted dollars',
         envFile: [],
         later: "ROCKETCHAT_LICENSE='${LITERAL}'\n",
@@ -1006,6 +1025,174 @@ describe('the create path end to end, stopped at the write seam', () => {
       context.runWithContext({ actor: 'mem' }, () => createDocker.createReproLocked(req)),
     ).rejects.toThrow('g3 belongs to alice');
     expect(seen.meta).toBeUndefined();
+  });
+
+  it('keeps an earlier licence when Compose will skip a missing licence file', async () => {
+    // An optional .license.env that is not on disk was treated as a blank assignment, so
+    // it cleared the licence an earlier env file had already set. A file that is present
+    // still counts only for the assignment it actually contains.
+    const preset = path.join(config.presetDir(), 'env-licence.yaml');
+    const earlier = path.join(config.presetDir(), 'synthetic-earlier-licence.env');
+    const earlierText = 'synthetic-earlier-licence';
+    const presentText = 'synthetic-present-licence';
+    const cases = [
+      {
+        label: 'optional missing keeps earlier',
+        license: '',
+        licensed: true,
+        writeEarlier: true,
+        writeLicenseFile: false,
+        licenseBody: '',
+      },
+      {
+        label: 'present blank clears',
+        license: '',
+        licensed: false,
+        writeEarlier: false,
+        writeLicenseFile: true,
+        licenseBody: 'ROCKETCHAT_LICENSE=\n',
+      },
+      {
+        label: 'present assignment sets',
+        license: '',
+        licensed: true,
+        writeEarlier: false,
+        writeLicenseFile: true,
+        licenseBody: `ROCKETCHAT_LICENSE=${presentText}\n`,
+      },
+    ];
+    config.updateConfig((cfg) => {
+      delete cfg.reg_token;
+    });
+    fs.mkdirSync(config.presetDir(), { recursive: true });
+    fs.writeFileSync(earlier, `ROCKETCHAT_LICENSE=${earlierText}\n`);
+    const observed: unknown[] = [];
+    try {
+      for (const [index, one] of cases.entries()) {
+        const name = `env-licence-${String(index)}`;
+        const licenseFile = path.join(config.reprosDir(), name, '.license.env');
+        fs.rmSync(path.dirname(licenseFile), { recursive: true, force: true });
+        if (one.writeLicenseFile) {
+          fs.mkdirSync(path.dirname(licenseFile), { recursive: true });
+          fs.writeFileSync(licenseFile, one.licenseBody, { mode: 0o600 });
+        }
+        const envFile = one.writeEarlier
+          ? [earlier, { path: './.license.env', required: false }]
+          : [{ path: './.license.env', required: false }];
+        fs.writeFileSync(
+          preset,
+          YAML.stringify({
+            name: 'env-licence',
+            requires_license: true,
+            rocketchat: { env_file: envFile },
+          }),
+        );
+        const { seen, createDocker } = capture();
+        const codes: string[] = [];
+        await expect(
+          createDocker.createRepro(
+            createReq({
+              version: '8.5.1',
+              name,
+              preset: 'env-licence',
+              license: one.license,
+              wait: false,
+              offline: true,
+            }),
+            (event) => codes.push(event.code),
+          ),
+        ).rejects.toThrow('stopped at the write seam');
+        const meta = seen.meta as Metadata;
+        observed.push([
+          one.label,
+          codes.includes('LICENSE_ABSENT_EE_PRESET'),
+          meta.extra.licensed === true,
+        ]);
+        const stored = JSON.stringify(meta);
+        expect(stored).not.toContain(earlierText);
+        expect(stored).not.toContain(presentText);
+      }
+      expect(observed).toEqual(cases.map((one) => [one.label, !one.licensed, one.licensed]));
+    } finally {
+      fs.rmSync(preset, { force: true });
+      fs.rmSync(earlier, { force: true });
+    }
+  });
+
+  it('counts a registration token that arrives only through an env file', async () => {
+    // REG_TOKEN was read from the explicit environment and not from the same ordered env
+    // files as a licence, so a registered container still warned that no credential existed.
+    const preset = path.join(config.presetDir(), 'token-file.yaml');
+    const tokenFile = path.join(config.presetDir(), 'synthetic-token.env');
+    const blankFile = path.join(config.presetDir(), 'synthetic-token-blank.env');
+    const token = 'synthetic-reg-token';
+    const cases = [
+      {
+        label: 'file token',
+        envFile: [tokenFile],
+        env: {},
+        warns: false,
+      },
+      {
+        label: 'blank file',
+        envFile: [blankFile],
+        env: {},
+        warns: true,
+      },
+      {
+        label: 'explicit blank wins',
+        envFile: [tokenFile],
+        env: { REG_TOKEN: '' },
+        warns: true,
+      },
+      {
+        label: 'later blank file',
+        envFile: [tokenFile, blankFile],
+        env: {},
+        warns: true,
+      },
+    ];
+    config.updateConfig((cfg) => {
+      delete cfg.reg_token;
+    });
+    fs.mkdirSync(config.presetDir(), { recursive: true });
+    fs.writeFileSync(tokenFile, `REG_TOKEN=${token}\n`);
+    fs.writeFileSync(blankFile, 'REG_TOKEN=\n');
+    const observed: unknown[] = [];
+    try {
+      for (const [index, one] of cases.entries()) {
+        fs.writeFileSync(
+          preset,
+          YAML.stringify({
+            name: 'token-file',
+            requires_license: true,
+            rocketchat: { env_file: one.envFile, environment: one.env },
+          }),
+        );
+        const { seen, createDocker } = capture();
+        const codes: string[] = [];
+        await expect(
+          createDocker.createRepro(
+            createReq({
+              version: '8.5.1',
+              name: `token-file-${String(index)}`,
+              preset: 'token-file',
+              wait: false,
+              offline: true,
+            }),
+            (event) => codes.push(event.code),
+          ),
+        ).rejects.toThrow('stopped at the write seam');
+        observed.push([one.label, codes.includes('LICENSE_ABSENT_EE_PRESET')]);
+        const stored = `${JSON.stringify(seen.meta)}\n${String(seen.yaml)}`;
+        expect(stored).not.toContain(token);
+      }
+      expect(observed).toEqual(cases.map((one) => [one.label, one.warns]));
+    } finally {
+      fs.rmSync(preset, { force: true });
+      fs.rmSync(tokenFile, { force: true });
+      fs.rmSync(blankFile, { force: true });
+    }
   });
 });
 

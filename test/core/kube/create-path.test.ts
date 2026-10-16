@@ -742,6 +742,37 @@ describe('a Kubernetes create', () => {
     }
   });
 
+  it('keeps a completed licence effective when a later re-up is interrupted', async () => {
+    // A re-up of a finished licensed workspace stored effective_license false before the
+    // new create reached the cluster. Inspect trusts that boolean, so the still-licensed
+    // workspace was reported as unlicensed. A licence that is only planned stays false.
+    const LICENSE = 'synthetic-retained-license';
+    const req = (license = '') =>
+      createReq({
+        version: '8.5.1',
+        name: 'kkeep',
+        runtime: 'kubernetes',
+        deployment: 'microservices',
+        offline: true,
+        license,
+      });
+    try {
+      await createKubernetes(req(LICENSE));
+      expect((await readMeta('kkeep')).extra.effective_license).toBe(true);
+      mockCreate = () => Promise.reject(new Error('stopped during the retained re-up'));
+      await expect(createKubernetes(req())).rejects.toThrow('stopped during the retained re-up');
+      const meta = await readMeta('kkeep');
+      expect(meta.extra.incomplete).toBe(true);
+      expect(meta.extra.retained_license).toBe(true);
+      expect(meta.extra.effective_license).toBe(true);
+      expect(JSON.stringify(meta)).not.toContain(LICENSE);
+      expect((await describeWorkspace('kkeep')).licensed).toBe(true);
+    } finally {
+      mockCreate = null;
+      await remove('kkeep');
+    }
+  });
+
   it('takes back the edge route it registered when the create fails', async () => {
     // The route goes in before the create, so an ACME challenge has somewhere to land. On a
     // k3s playground a create whose ClusterIssuer never became ready rolled its namespace

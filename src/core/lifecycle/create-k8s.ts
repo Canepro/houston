@@ -688,9 +688,9 @@ export async function writeProvisionalRecord(job: KubeCreate): Promise<void> {
   if (job.req.actor) job.provisional.extra.created_by = job.req.actor;
   // In the write-ahead record too: a re-up after a killed create carries forward from it.
   if (Object.keys(job.envOverrides).length > 0) job.provisional.extra.env = job.envOverrides;
-  // False until the Secret exists. Inspect and the microservices note trust this boolean
-  // and do not read `incomplete`, so a planned or carried licence is not effective yet.
-  job.provisional.extra.effective_license = false;
+  // Inspect and the microservices note trust this boolean and do not read `incomplete`.
+  // A retained licence is already effective. A licence this run has not installed yet is not.
+  job.provisional.extra.effective_license = job.retainedLicense;
   if (job.licensed) job.provisional.extra.licensed = true;
   // Preserve a completed Secret across repeated interrupted re-ups without promoting new intent.
   job.provisional.extra.retained_license = job.retainedLicense;
