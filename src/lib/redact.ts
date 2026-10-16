@@ -39,13 +39,13 @@ const JOINED_KEY_HINTS: readonly string[] = ['privatekey', 'sshkey'];
 const HEADER_KEY = /^(?:(?:proxy|http)_)?(?:authorization(?:_?headers?)?|auth_?headers?)$/u;
 
 /**
- * Endings that contain `pass` and are not credentials: `--bypass`, `--proxybypass`,
- * `--nopass`, `--lowpass`, `--bypassfile`. Checked after the digits and the named forms are
- * removed, so any other word ending in `pass` or a password spelling is a credential:
- * `--requirepass`, `-storepass`, `--db2pass`, `--password2`.
+ * Words containing `pass` that are not credentials: anything ending in `bypass`
+ * (`--proxybypass`, `--bypassfile`), and a few whole words (`--nopass`, `--lowpass`). Checked
+ * after the digits and the named forms are removed, so any other word ending in `pass` or a
+ * password spelling is a credential: `--requirepass`, `--installpassword`, `--db2pass`.
  */
 const NOT_A_PASS =
-  /(?:bypass|compass|trespass|overpass|underpass|surpass|lowpass|highpass|bandpass|allpass|nopass|skippass|mispass)$/u;
+  /^(?:[a-z0-9]*bypass|compass|trespass|overpass|underpass|surpass|lowpass|highpass|bandpass|allpass|nopass|skippass|mispass)$/u;
 
 /**
  * One word of an option name that names a credential:
@@ -56,7 +56,7 @@ const NOT_A_PASS =
  * - a credential stem followed by `key`, `accesskey`, `file`, `value`, `data`, `string` or
  *   `text`: `--secretkey`, `--secretaccesskey`, `--apikeyvalue`, `--sshkeydata`.
  */
-const PASS_WORD = /^[a-z0-9]*pass(?:word|wd|phrase)?\d*(?:in|out|code|file|key)?\d*$/u;
+const PASS_WORD = /^[a-z0-9]*pass\d*(?:w[o0]rd|wd|phrase)?\d*(?:in|out|code|file|key)?\d*$/u;
 const STEM =
   'password|passwd|passphrase|secret|token|apikey|credential|privatekey|sshkey|accesskey';
 const STEM_WORD = new RegExp(
@@ -70,7 +70,8 @@ function credentialWord(word: string): boolean {
       .replace(/\d+$/u, '')
       .replace(/(?:in|out|code|file|key)$/u, '')
       .replace(/\d+$/u, '')
-      .replace(/(?:word|wd|phrase)$/u, '');
+      .replace(/\d*(?:w[o0]rd|wd|phrase)$/u, '')
+      .replace(/\d+$/u, '');
     return !NOT_A_PASS.test(core);
   }
   return STEM_WORD.test(word);

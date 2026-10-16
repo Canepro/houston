@@ -252,6 +252,11 @@ describe('credentialFlag', () => {
       '--db2password',
       '--apikeyvalue',
       '--sshkeydata',
+      '--installpassword',
+      '--installpass',
+      '--sanopass',
+      '--pass2word',
+      '--passw0rd',
     ];
     const readable = [
       '--bypass',
