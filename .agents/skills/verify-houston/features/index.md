@@ -23,3 +23,12 @@ temp directory under scratch is scanned for the synthetic sentinel before that
 scratch tree is removed. Failure receipts and a hash manifest may remain after a failed
 scan. Require `summary.result: PASS_SCOPED` and successful `summary.receipt_scan`;
 file existence alone proves no verdict. Bundle attachments retain their recipe-specific scan.
+
+The shared finalization contract is in [Doctor](../SKILL.md#doctor) and
+[Cleanup](../SKILL.md#cleanup). Use the actual printed summary path and exit
+status. PASS also requires a real evidence directory, regular receipts and the
+original bytes of mandatory provenance and every emitted feature snapshot.
+Final inventory hashes include that printed summary and exclude the inventory
+itself. A missing inventory after a finalizer failure is incomplete proof.
+The Python safety regression drives actual verifier `main` with a synthetic
+candidate CLI; it does not replace the real Houston CLI integration sweep.

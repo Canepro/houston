@@ -31,7 +31,9 @@ attachment must preserve the Rocket.Chat service while masking its synthetic
 credentials. The shared command-receipt check scans every stdout and stderr file,
 including both evidence commands; this recipe also scans every bundle file for the
 synthetic sentinel and fails on any occurrence. Raw artifact copying that leaks the
-sentinel is a product failure.
+sentinel is a product failure. The manifest, README and parsed Compose input
+each have a 1 MiB descriptor read cap; oversized candidate output fails before
+parsing. Hash and sentinel scans remain chunked independently of that cap.
 
 Keep stdout, stderr, bundle files, exit receipts, and hashes after scratch
 cleanup. Record the before/after topology manifest for the synthetic workspace

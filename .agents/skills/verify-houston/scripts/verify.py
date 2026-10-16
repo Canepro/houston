@@ -17,9 +17,11 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 
 
 SCAN_CHUNK_BYTES = 1024 * 1024
+PARSE_LIMIT_BYTES = 1024 * 1024
 RECEIPT_REFUSAL = 'Refused pre-existing non-regular receipt path'
 EVIDENCE_DIRECTORY_MESSAGE = 'Evidence directory must be a real directory'
 PROVENANCE_MESSAGE = 'Mandatory provenance artifact is not a regular file'
@@ -96,6 +98,16 @@ def open_regular_file(path):
     except Exception:
         os.close(descriptor)
         raise
+
+
+def read_bounded_file(path, limit=PARSE_LIMIT_BYTES):
+    """Cap candidate-controlled input on the opened descriptor, including growth."""
+    with open_regular_file(path) as handle:
+        require(os.fstat(handle.fileno()).st_size <= limit,
+                f'Candidate file exceeds parse limit: {path.name}')
+        payload = handle.read(limit + 1)
+    require(len(payload) <= limit, f'Candidate file exceeds parse limit: {path.name}')
+    return payload
 
 
 def hash_file(path, chunk_size=SCAN_CHUNK_BYTES):
@@ -182,9 +194,12 @@ def require_real_evidence_directory(path):
     require(stat.S_ISDIR(mode), EVIDENCE_DIRECTORY_MESSAGE)
 
 
-def require_provenance_receipts(out, names=PROVENANCE_RECEIPTS):
+def require_provenance_receipts(out, expected_hashes=None, names=PROVENANCE_RECEIPTS):
     irregular = [name for name in names if not regular_file(out / name)]
     require(not irregular, PROVENANCE_MESSAGE + ': ' + ', '.join(irregular))
+    for name, digest in (expected_hashes or {}).items():
+        require(regular_file(out / name) and hash_file(out / name) == digest,
+                f'Verifier receipt integrity failed: {name}')
 
 
 def require_masked_admin_pass(value, sentinel):
@@ -218,11 +233,11 @@ def unused_receipt_name(path):
 
 
 def claim_regular_receipt(path):
-    """Return a path that can be created as a regular file.
+    """Select a receipt destination and record any non-regular refusal.
 
-    lstat decides. unlink removes a symlink, FIFO, or socket without opening
-    it, so a FIFO cannot block and a symlink cannot redirect the write. A
-    directory stays in place and the write uses a fresh sibling name.
+    Remove special entries without opening them. Keep directories in place
+    and select a sibling. The caller must atomically replace the selected
+    entry, including a regular file, rather than open its existing inode.
     """
     kind = receipt_entry_kind(path)
     if kind in ('absent', 'file'):
@@ -263,8 +278,27 @@ def inventory_regular_files(root, skipped):
     return found
 
 
+def atomic_receipt_bytes(path, payload):
+    # Pin the real parent directory. Never open an existing destination inode.
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    parent_fd = os.open(path.parent, flags)
+    temporary = f'.verify-receipt-{uuid.uuid4().hex}'
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600, dir_fd=parent_fd)
+        with os.fdopen(descriptor, 'wb') as handle:
+            handle.write(payload)
+        os.replace(temporary, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+        os.close(parent_fd)
+
+
 def write_summary_file(path, summary):
-    path.write_text(json.dumps(summary, indent=2) + '\n')
+    atomic_receipt_bytes(path, (json.dumps(summary, indent=2) + '\n').encode())
 
 
 def write_failure_summary(out, summary):
@@ -284,7 +318,7 @@ def write_evidence_bytes(out, name, payload):
     """Write one evidence receipt without following a symlink or opening a FIFO."""
     require_real_evidence_directory(out)
     path, refusal = claim_regular_receipt(out / name)
-    path.write_bytes(payload)
+    atomic_receipt_bytes(path, payload)
     if refusal:
         raise RuntimeError(refusal)
     return path
@@ -297,8 +331,7 @@ def write_evidence_text(out, name, text):
 def write_verification_receipts(out, summary):
     if receipt_entry_kind(out) != 'directory':
         record_receipt_refusal(summary, [EVIDENCE_DIRECTORY_MESSAGE])
-        write_failure_summary(out, summary)
-        raise RuntimeError(summary['error'])
+        return write_failure_summary(out, summary)
     summary_target = out / 'summary.json'
     manifest_target = out / 'sha256.json'
     summary_kind = receipt_entry_kind(summary_target)
@@ -312,18 +345,25 @@ def write_verification_receipts(out, summary):
         (summary_target, summary_kind),
         (manifest_target, manifest_kind),
     ) if kind == 'directory']
+    skipped.extend([manifest_target, manifest_path])
     files = {
         str(path.relative_to(out)): hash_file(path)
         for path in inventory_regular_files(out, skipped)
     }
-    manifest_path.write_text(json.dumps(files, indent=2) + '\n')
+    atomic_receipt_bytes(manifest_path, (json.dumps(files, indent=2) + '\n').encode())
     for name, digest in files.items():
         target = out / name
         require_regular_file(target, f'Evidence entry disappeared after cleanup: {name}')
         require(hash_file(target) == digest, f'Evidence unreadable after cleanup: {name}')
-    if refusals:
-        raise RuntimeError('; '.join(refusals))
     return summary_path
+
+
+def invalidate_inventory(out):
+    if receipt_entry_kind(out) != 'directory':
+        return
+    for path in [out / 'sha256.json', *out.glob('sha256.json.refused.*')]:
+        if receipt_entry_kind(path) not in ('absent', 'directory'):
+            path.unlink()
 
 
 def require_revoked_onboarding_persisted(persisted, completed_at, version, legacy):
@@ -460,13 +500,14 @@ def yaml_document(node_exec, root, env, path):
     script = (
         'const fs=require("node:fs");'
         'const yaml=require(require.resolve("yaml",{paths:[process.argv[1]]}));'
-        'process.stdout.write(JSON.stringify(yaml.parse(fs.readFileSync(process.argv[2],"utf8"))));'
+        'process.stdout.write(JSON.stringify(yaml.parse(fs.readFileSync(0,"utf8"))));'
     )
     result = bounded_output(
         'YAML projection reader',
-        [str(node_exec), '-e', script, str(root), str(path)],
+        [str(node_exec), '-e', script, str(root)],
         cwd=root,
         env=env,
+        stdin=read_bounded_file(path),
     )
     return json.loads(result)
 
@@ -994,13 +1035,14 @@ def run_command(command, cwd, env, stdin=None, timeout_seconds=COMMAND_TIMEOUT_S
     return run_nonposix_command(command, cwd, env, stdin, timeout_seconds, term_grace_seconds)
 
 
-def bounded_output(label, command, cwd=None, env=None, text=False):
+def bounded_output(label, command, cwd=None, env=None, text=False, stdin=None):
     """Run a verifier auxiliary process under the same bounded cleanup contract as the CLI."""
     result = run_command(
         command,
         cwd,
         env,
         timeout_seconds=AUXILIARY_TIMEOUT_SECONDS,
+        stdin=stdin,
     )
     errors = []
     if result['timed_out']:
@@ -1028,13 +1070,19 @@ def main():
     out.mkdir(parents=True, exist_ok=False)
     candidate_before = candidate_fingerprint(root)
     source_before = candidate_before['source']
-    write_evidence_text(out, 'candidate-source.json', json.dumps(source_before, indent=2) + '\n')
-    write_evidence_text(out, 'candidate-fingerprint-before.json',
-                        json.dumps(candidate_before, indent=2) + '\n')
+    expected_provenance = {}
+
+    def retain_provenance(name, text):
+        write_evidence_text(out, name, text)
+        expected_provenance[name] = hashlib.sha256(text.encode()).hexdigest()
+
+    retain_provenance('candidate-source.json', json.dumps(source_before, indent=2) + '\n')
+    retain_provenance('candidate-fingerprint-before.json',
+                      json.dumps(candidate_before, indent=2) + '\n')
     summary = {'head': candidate_before['head'],
                'diff_sha256': candidate_before['diff_sha256'],
                'checkout': str(root),
-               'verifier_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+               'verifier_sha256': hash_file(Path(__file__)),
                'features': {}, 'boundary': 'Real checkout CLI; synthetic workspace; engine tools unavailable. No live runtime proof.'}
     scratch = Path(tempfile.mkdtemp(prefix='verify-houston-'))
     fixture_root = None
@@ -1137,8 +1185,8 @@ def main():
 
         fixture_root = workspace.parent
         fixture_before = tree_manifest(fixture_root)
-        write_evidence_text(out, 'fixture-manifest-before.json',
-                            json.dumps(fixture_before, indent=2) + '\n')
+        retain_provenance('fixture-manifest-before.json',
+                          json.dumps(fixture_before, indent=2) + '\n')
         receipts = []
 
         def run(label, argv, expected=0, schema=None, ok=True, overrides=None, stdin=None):
@@ -1183,7 +1231,7 @@ def main():
             require(envelope.get('houston_version') == version, f'{label}: wrong build version')
             return envelope
 
-        package = json.loads((root / 'package.json').read_text())
+        package = json.loads(read_bounded_file(root / 'package.json'))
         version = package['version']
         require(run('version', ['--version']) == f'houston {version}', 'Version differs from package.json')
         caps = run('capabilities', ['capabilities'], schema='houston.capabilities.v1')['data']
@@ -1285,7 +1333,7 @@ def main():
             bundle_files = [bundle / name for name in expected_bundle_files]
             for file in bundle_files:
                 require_regular_file(file, f'Missing regular bundle file: {file.name}')
-            manifest = json.loads((bundle / 'manifest.json').read_text())
+            manifest = json.loads(read_bounded_file(bundle / 'manifest.json'))
             require(manifest['repro']['name'] == 'verify-fixture', 'Bundle names another workspace')
             require(evidence_projection(payload) == evidence_projection(bundle_payload)
                     == evidence_projection(manifest),
@@ -1305,7 +1353,7 @@ def main():
             attached_hash = hash_file(bundle / sanitized['name'])
             require(sanitized['sha256'] == attached_hash and attached_hash != raw_hash,
                     'Sanitized attachment digest must match its bytes and differ from secret-bearing source')
-            readme = (bundle / 'README.md').read_text()
+            readme = read_bounded_file(bundle / 'README.md').decode()
             require('Workspace `verify-fixture`' in readme and 'Rocket.Chat 8.5.1' in readme
                     and 'http://127.0.0.1:39999' in readme,
                     'Bundle README lost workspace identity')
@@ -1465,13 +1513,13 @@ def main():
                       'default_deployment': 'default', 'default_scenarios': [],
                       'future_config': {'nested': ['preserve']}}
             config_file.write_text(json.dumps(legacy))
-            original = config_file.read_bytes()
+            original = read_bounded_file(config_file)
             state = run('onboard-status', ['onboard', '--json'],
                         schema='houston.onboard.v1')['data']
             require(state['completed'] is False and state['grants']['owned_cluster'] is False
                     and state['answered_grants']['owned_cluster'] is False,
                     'Missing grant must remain unanswered')
-            require(config_file.read_bytes() == original, 'Onboarding status rewrote config')
+            require(read_bounded_file(config_file) == original, 'Onboarding status rewrote config')
             # Satisfy executable discovery with a trap, never an actual cluster client.
             # Either authority refusal must happen before the trap is invoked.
             trap_called = scratch / 'kubectl-was-invoked'
@@ -1484,13 +1532,13 @@ def main():
                           expected=6, schema='houston.error.v1', ok=False)
             require(refused['error']['code'] == 'GATE_NOT_ONBOARDED'
                     and refused['error']['gate']['approve_with'] == 'houston onboard'
-                    and not trap_called.exists() and config_file.read_bytes() == original,
+                    and not trap_called.exists() and read_bounded_file(config_file) == original,
                     'Local teardown must refuse an unanswered machine before cluster invocation')
 
             invalid = run('onboard-invalid', ['onboard', 'grant', 'verify-unknown', '--json'],
                           expected=2, schema='houston.error.v1', ok=False)
             require(invalid['error']['code'] == 'VALIDATION_FAILED'
-                    and config_file.read_bytes() == original,
+                    and read_bounded_file(config_file) == original,
                     'Unknown grant must refuse without writing config')
             granted = run('onboard-grant', ['onboard', 'grant', 'owned-cluster', '--json'],
                           schema='houston.onboard.v1')['data']
@@ -1511,13 +1559,13 @@ def main():
                     and revoked['clusters'] == ['preserved-cluster']
                     and revoked['completed_at'] == granted['completed_at'],
                     'Revoke must record a denial and remove only the owned cluster scope')
-            denied_config = config_file.read_bytes()
+            denied_config = read_bounded_file(config_file)
             denied = run('onboard-teardown-denied',
                          ['down', '--name', local_kube.name, '--yes', '--json'],
                          expected=6, schema='houston.error.v1', ok=False)
             require(denied['error']['code'] == 'GATE_OWNED_CLUSTER'
                     and denied['error']['gate']['approve_with'] == 'houston onboard grant owned-cluster'
-                    and not trap_called.exists() and config_file.read_bytes() == denied_config,
+                    and not trap_called.exists() and read_bounded_file(config_file) == denied_config,
                     'Local teardown must refuse a denied grant before cluster invocation')
 
             # Read the actual YAML written by the CLI using its existing dependency.
@@ -1525,8 +1573,8 @@ def main():
             persisted = yaml_document(node_exec, root, env, config_file)
             require_revoked_onboarding_persisted(
                 persisted, revoked['completed_at'], version, legacy)
-            write_evidence_text(out, 'onboarding-persisted.json',
-                                json.dumps(persisted, indent=2) + '\n')
+            retain_provenance('onboarding-persisted.json',
+                              json.dumps(persisted, indent=2) + '\n')
             kubectl_trap.unlink()
             summary['features']['onboarding'] = (
                 'PASS: synthetic-home status, invalid grant, grant/revoke persistence and '
@@ -1536,20 +1584,20 @@ def main():
                 ['--show', '--deployment', '--scenario', '--seed-profile', '--retain-runs/--no-retain-runs',
                  '--accept-defaults', '--reconfigure', '--section'], 'houston.onboard.v1')
             config_file = Path(env['HOUSTON_HOME']) / 'config.yaml'
-            setup_before = config_file.read_bytes()
+            setup_before = read_bounded_file(config_file)
             shown = run('setup-show', ['onboard', 'setup', '--show', '--json'],
                         schema='houston.onboard.v1')['data']
             require(shown['schema'] == 'houston.setup.v1'
                     and shown['selection']['deployment'] == 'monolith'
                     and shown['persisted']['grants']['owned_cluster'] is False
                     and shown['actions'] == [], 'Setup preview lost saved answers or offers actions')
-            require(config_file.read_bytes() == setup_before, 'Setup preview wrote answers')
+            require(read_bounded_file(config_file) == setup_before, 'Setup preview wrote answers')
             for label, args in [('empty', []), ('invalid', ['--deployment', 'not-a-deployment']),
                                 ('show-write', ['--show', '--seed-profile', 'none'])]:
                 refused = run('setup-' + label, ['onboard', 'setup', *args, '--json'],
                               expected=2, schema='houston.error.v1', ok=False)
                 require(refused['error']['code'] == 'VALIDATION_FAILED'
-                        and config_file.read_bytes() == setup_before,
+                        and read_bounded_file(config_file) == setup_before,
                         'Invalid or ambiguous setup must refuse without writing')
             saved = run('setup-save', ['onboard', 'setup', '--deployment', 'microservices',
                         '--scenario', 'none', '--seed-profile', 'none', '--retain-runs', '--json'],
@@ -1564,17 +1612,17 @@ def main():
                     and any(gate['code'] == 'GATE_OWNED_CLUSTER' for gate in saved['gates']),
                     'Setup failed to persist explicit choices or changed authority')
             summary['setup_first_run'] = require_setup_first_run(saved)
-            after = config_file.read_bytes()
+            after = read_bounded_file(config_file)
             repeated = run('setup-readback', ['onboard', '--show', '--json'],
                            schema='houston.onboard.v1')['data']
             require(repeated['selection'] == saved['selection']
-                    and config_file.read_bytes() == after, 'Setup choices did not survive process exit')
+                    and read_bounded_file(config_file) == after, 'Setup choices did not survive process exit')
             defaults = run('setup-defaults', ['onboard', '--accept-defaults', '--json'],
                            schema='houston.onboard.v1')['data']
             require(defaults['selection'] == saved['selection']
                     and defaults['persisted']['grants']['owned_cluster'] is False
                     and defaults['action'] == 'unchanged'
-                    and config_file.read_bytes() == after,
+                    and read_bounded_file(config_file) == after,
                     'Accepting redundant defaults rewrote answered choices or granted authority')
             human = run('setup-human', ['onboard', '--show'])
             require('microservices' in human and 'GATE_OWNED_CLUSTER' in human,
@@ -1585,12 +1633,12 @@ def main():
                     and persisted_setup['grants'] == persisted['grants']
                     and persisted_setup['onboarding'] == persisted['onboarding'],
                     'Setup discarded unrelated legacy fields')
-            write_evidence_text(out, 'setup-persisted.json',
-                                json.dumps(persisted_setup, indent=2) + '\n')
-            before_prompt = config_file.read_bytes()
+            retain_provenance('setup-persisted.json',
+                              json.dumps(persisted_setup, indent=2) + '\n')
+            before_prompt = read_bounded_file(config_file)
             cancelled = run('setup-prompt-cancel', ['onboard', 'setup', '--reconfigure', '--section', 'seed'],
                             stdin=b'large\nno\n')
-            require('No changes written.' in cancelled and config_file.read_bytes() == before_prompt,
+            require('No changes written.' in cancelled and read_bounded_file(config_file) == before_prompt,
                     'Cancelled setup prompt persisted a draft')
             accepted = run('setup-prompt-accept', ['onboard', 'setup', '--reconfigure', '--section', 'seed'],
                            stdin=b'small\nyes\n')
@@ -1606,8 +1654,8 @@ def main():
             expected_interactive['preferences']['seed_profile'] = 'small'
             require(interactive_setup == expected_interactive,
                     'Interactive setup discarded legacy fields, scope, denials or unrelated state')
-            write_evidence_text(out, 'setup-interactive-persisted.json',
-                                json.dumps(interactive_setup, indent=2) + '\n')
+            retain_provenance('setup-interactive-persisted.json',
+                              json.dumps(interactive_setup, indent=2) + '\n')
             summary['features']['setup'] = ('PASS: real CLI preview, explicit choices, readback, '
                 'safe defaults, no-write refusals, prompts and legacy preservation; API and live engine pending')
         else:
@@ -1675,7 +1723,7 @@ def main():
                 except Exception as error:
                     cleanup_errors.append(str(error))
             try:
-                require_provenance_receipts(out)
+                require_provenance_receipts(out, expected_provenance)
             except Exception as error:
                 cleanup_errors.append(str(error))
             try:
@@ -1706,6 +1754,8 @@ def main():
         summary_path = None
         try:
             summary_path = write_verification_receipts(out, summary)
+            if summary['result'] == 'FAIL' and failure is None:
+                failure = RuntimeError(summary.get('error', 'Receipt finalization failed'))
         except Exception as error:
             if failure is None:
                 failure = error
@@ -1714,6 +1764,7 @@ def main():
             summary['error'] = str(failure)
             summary['cleanup_errors'] = cleanup_errors
             try:
+                invalidate_inventory(out)
                 summary_path = write_failure_summary(out, summary)
             except Exception as second:
                 cleanup_errors.append(f'Could not write a safe failure summary: {second}')

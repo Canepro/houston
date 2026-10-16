@@ -61,11 +61,14 @@ directories; scratch homes are unique per invocation.
 
 ## Doctor
 
-Read the retained launch result:
-
-```bash
-python3 -m json.tool /absolute/durable/proof/run-001/summary.json
-```
+Use the process exit status together with the summary path printed on stdout.
+Read that exact path after exit, for example with `python3 -m json.tool`.
+A nonzero exit is a failed run even if another file claims `PASS_SCOPED`.
+When the evidence root is replaced by a symlink or another non-directory, the
+failure summary is a lexical sibling, `<evidence-directory>.summary.json`.
+A directory occupying a receipt name remains in place and the failure receipt
+uses `<receipt-name>.refused.N`. Trust only the printed summary path. Reading a
+fixed `run-001/summary.json` can follow a candidate-controlled symlink.
 
 Require `result: PASS_SCOPED`, `scratch_removed: true`, and
 `fixture_unchanged: true`, plus `source_unchanged: true`. Check `head` against the intended candidate and inspect
@@ -119,7 +122,7 @@ A symlink or other special entry anywhere in that retained tree fails the run.
 Before scratch cleanup, a secret-bearing file in the candidate temp directory fails the run.
 Failure receipts and `sha256.json` may still be written when that scan fails.
 Require `summary.result: PASS_SCOPED` and a successful `summary.receipt_scan`;
-the existence of a hash manifest does not establish acceptance. `summary.json`
+the existence of a hash manifest does not establish acceptance. The printed summary
 binds results to the revision, records the fixture immutability check, and names
 pending coverage. The helper reads retained files back after cleanup. Evidence bundles,
 when applicable, also survive under the evidence directory.
@@ -148,7 +151,28 @@ termination can leave its uniquely named `verify-houston-*` scratch directory;
 remove only that run's confirmed directory after checking its owner and retaining
 proof. Never clean by a shared name or glob.
 
-Read `summary.json` and `sha256.json` after the helper exits. Keep the evidence
-directory for the parent or reviewer. End the verification report with the exact
+After exit, read the printed summary and the regular `sha256.json` manifest in
+the evidence directory. A refused manifest destination can instead produce
+`sha256.json.refused.N`; the summary records that refusal. The final inventory
+includes the printed summary's exact bytes and excludes the manifest itself.
+If later finalization fails, the helper removes the obsolete inventory before
+writing a failure summary. A missing inventory means the evidence package is
+incomplete, never successful verification. A replaced evidence root receives
+only the sibling failure summary and has no valid inventory.
+
+`PASS_SCOPED` requires a real directory at the evidence root, regular retained
+receipts, unchanged mandatory before-state provenance, and unchanged emitted
+onboarding and setup snapshots. The helper retains expected hashes when it
+writes those snapshots and rechecks them before selecting PASS. Absent feature
+capabilities remain pending and do not require snapshots for unexecuted features.
+Receipt writes atomically replace the destination with a new regular inode, so
+an existing hardlink cannot redirect a write into candidate source. Non-regular
+receipt destinations still fail the run.
+
+Candidate package, bundle manifest, README, Compose and onboarding/setup config
+parse or comparison reads are capped at 1 MiB on the opened descriptor. Oversized
+inputs fail with the file name in the summary. Hashing and sentinel scans use
+bounded chunks, with sentinel overlap across chunk boundaries.
+Keep the evidence directory for the parent or reviewer. End the verification report with the exact
 branch/head, this skill's name, demonstrated CLI paths, and remaining pending or
 live-runtime coverage.
