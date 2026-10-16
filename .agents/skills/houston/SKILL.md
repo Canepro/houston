@@ -134,7 +134,7 @@ configuration enables `GatewayPorts`, and it ends SSH option parsing before the 
 
 3. **Never import houston's internals and never scrape human output.**
    Use `--json` on the commands that have it — `capabilities.commands[].json` says
-   which, and it is a minority, not all of them: `capabilities`, `capacity`, `cluster`, `doctor`, `down`, `evidence`, `info`, `inspect`, `list`, `loadtest`, `ready`, `skill install`, `skill status`, `up` (`capabilities` prints
+   which, and it is a minority, not all of them: `capabilities`, `capacity`, `cluster`, `doctor`, `down`, `evidence`, `info`, `inspect`, `list`, `loadtest`, `onboard`, `ready`, `skill install`, `skill status`, `up` (`capabilities` prints
    JSON without the flag). For the rest (`seed`, `logs`,
    `env`, `backup`, `restore`, `upgrade`, `prune`, `tls-status`, …) the **exit code** is
    the machine-readable part. stdout is the document; anything on stderr is for a

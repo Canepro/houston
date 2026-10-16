@@ -1,8 +1,11 @@
+import type * as KubeExecNS from '../../../src/core/kube/exec';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
+import * as config from '../../../src/lib/config';
 import type { Event } from '../../../src/lib/events';
+import { grant, revoke } from '../../../src/lib/onboarding';
 import type { KubectlResult } from '../../../src/core/kube/exec';
 
 import type * as PruningNS from '../../../src/core/lifecycle/pruning';
@@ -64,6 +67,7 @@ type Mode = (typeof MODES)[number];
 
 describe('removing one workspace', () => {
   afterEach(() => {
+    jest.dontMock('../../../src/core/kube/cluster');
     jest.resetModules();
   });
 
@@ -84,6 +88,13 @@ describe('removing one workspace', () => {
 
   async function load(mode: Mode): Promise<typeof PruningNS> {
     jest.resetModules();
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster');
+    });
+    jest.doMock('../../../src/core/kube/cluster', () => ({
+      ...jest.requireActual('../../../src/core/kube/cluster'),
+      adoptIfUnmarked: async () => undefined,
+    }));
     const errors = require('../../../src/lib/errors') as typeof ErrorsNS;
     jest.doMock('../../../src/core/runner/engine', () => ({
       ...jest.requireActual('../../../src/core/runner/engine'),
@@ -244,9 +255,13 @@ describe('a whole prune', () => {
 
   interface World {
     namespaces?: string[];
+    realAdoption?: boolean;
+    namespaceDeleted?: () => void;
     context?: string;
     owners?: Record<string, string | null>;
     deleteCluster?: () => Promise<boolean>;
+    reclaimError?: () => Error;
+    reclaimable?: boolean | (() => boolean);
     down?: (name: string) => Promise<number>;
     running?: Record<string, string>;
     /** Whether a Kubernetes workspace's workload answers: true is "not down". */
@@ -281,6 +296,13 @@ describe('a whole prune', () => {
     }));
     jest.doMock('../../../src/core/kube/cluster', () => ({
       ...jest.requireActual('../../../src/core/kube/cluster'),
+      ...(world.realAdoption ? {} : { adoptIfUnmarked: async () => undefined }),
+      clusterReclaimable: async () => {
+        if (world.reclaimError !== undefined) throw world.reclaimError();
+        return typeof world.reclaimable === 'function'
+          ? world.reclaimable()
+          : (world.reclaimable ?? false);
+      },
       deleteCluster: async (options: unknown) => {
         reclaimed.push(options);
         return world.deleteCluster === undefined ? false : await world.deleteCluster();
@@ -296,7 +318,10 @@ describe('a whole prune', () => {
         return true;
       },
       // Reached only by a Kubernetes workspace that is prunable, which `workload` decides.
-      deleteNamespace: async () => true,
+      deleteNamespace: async () => {
+        world.namespaceDeleted?.();
+        return true;
+      },
     }));
     jest.doMock('../../../src/core/kube/exec', () => {
       const actual = jest.requireActual('../../../src/core/kube/exec');
@@ -306,6 +331,7 @@ describe('a whole prune', () => {
           run: async (argv: string[]): Promise<KubectlResult> => {
             if (argv.includes('delete') && argv.includes('namespace')) {
               deleted.push(argv[argv.indexOf('namespace') + 1] as string);
+              world.namespaceDeleted?.();
             }
             return { returncode: 0, stdout: '', stderr: '' } as KubectlResult;
           },
@@ -344,11 +370,46 @@ describe('a whole prune', () => {
     }
   }
 
+  it('prunes a marked local workspace through the real adoption helper without Kind', async () => {
+    const world = load({ realAdoption: true, workload: false });
+    const { kube, ownedKubeconfig } = require('../../../src/core/kube/exec') as typeof KubeExecNS;
+    fs.mkdirSync(path.dirname(ownedKubeconfig()), { recursive: true });
+    fs.writeFileSync(ownedKubeconfig(), 'synthetic client');
+    const run = jest.spyOn(kube, 'run').mockImplementation(async (argv) => ({
+      argv,
+      returncode: argv[0] === 'kind' ? 1 : 0,
+      stdout: argv.includes('configmap')
+        ? JSON.stringify({
+            metadata: { labels: { 'app.kubernetes.io/managed-by': 'houston' } },
+            data: { cluster: 'houston-local' },
+          })
+        : '',
+      stderr: argv[0] === 'kind' ? 'kind missing' : '',
+    }));
+    config.updateConfig((stored) => grant(stored, 'owned-cluster'));
+    await world.record.writeRecord(
+      'marked',
+      world.record.metadata({
+        name: 'marked',
+        extra: { runtime: 'kubernetes', context: 'kind-houston-local' },
+      }),
+    );
+    const out = await world.pruning.prune({ confirm: true, orphans: false, only: ['marked'] });
+    expect(out.removed).toEqual(['marked']);
+    expect(run.mock.calls.some(([argv]) => argv[0] === 'kind')).toBe(false);
+  });
+
   it('gives back the cluster it created once nothing is left in it', async () => {
     // Measured live: with every workspace gone, `prune` said "Nothing to prune" and left
     // houston's own kind control plane running -- 514 MiB holding nothing -- while the
     // README and the agent skill both said it reclaims it.
-    const world = load({ deleteCluster: async () => true });
+    const world = load({ reclaimable: true, deleteCluster: async () => true });
+    await expect(world.pruning.prune({ confirm: true })).rejects.toMatchObject({
+      code: 'GATE_NOT_ONBOARDED',
+    });
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
     expect((await world.pruning.prune({ confirm: true })).cluster).toBe(true);
     expect(world.reclaimed).toHaveLength(1);
     // And the same offer applies on the other early path.
@@ -357,13 +418,150 @@ describe('a whole prune', () => {
     expect(world.reclaimed).toHaveLength(1);
   });
 
+  it('does not gate a compose prune for an existing local cluster that is not reclaimable', async () => {
+    // `deleteCluster` requires the grant whenever the fixed local cluster exists, even when
+    // it is occupied or otherwise not reclaimable. Plan that fact before deleting unrelated
+    // Compose work, so a later best-effort cleanup cannot turn a successful prune into a gate.
+    let gate: Error | null = null;
+    const world = load({
+      reclaimable: false,
+      deleteCluster: async () => {
+        throw gate ?? new Error('missing test gate');
+      },
+    });
+    gate = new world.errors.AuthorityGateError('the local cluster is not authorised', {
+      code: 'GATE_OWNED_CLUSTER',
+    });
+    await composeRecords(world.record, 'compose');
+
+    const out = await world.pruning.prune({ confirm: true, only: ['compose'] });
+
+    expect(out.removed).toEqual(['compose']);
+    expect(out.cluster).toBe(false);
+    expect(world.audited).toEqual([['prune', 'compose']]);
+    expect(world.reclaimed).toEqual([]);
+  });
+
+  it('leaves an unreadable cluster alone while pruning a compose target', async () => {
+    // A failed marker read is not a reason to abandon a separate selected workspace. It is
+    // still not authority to call `deleteCluster`, so it is reported as the existing
+    // best-effort cleanup warning after the unrelated removal completes.
+    let errors: typeof ErrorsNS | null = null;
+    const world = load({
+      reclaimError: () =>
+        new (errors as typeof ErrorsNS).DockerError('cluster ownership marker could not be read'),
+    });
+    errors = world.errors;
+    await composeRecords(world.record, 'compose');
+    const events: Event[] = [];
+
+    const out = await world.pruning.prune({
+      confirm: true,
+      only: ['compose'],
+      emit: (event) => events.push(event),
+    });
+
+    expect(out.removed).toEqual(['compose']);
+    expect(out.cluster).toBe(false);
+    expect(world.reclaimed).toEqual([]);
+    expect(events.some((event) => event.message.includes('the cluster was left alone'))).toBe(true);
+  });
+
+  it('stops a confirmed reclaim before auditing or removing a compose target without the grant', async () => {
+    const world = load({ reclaimable: true, deleteCluster: async () => true });
+    await composeRecords(world.record, 'compose');
+
+    await expect(world.pruning.prune({ confirm: true, only: ['compose'] })).rejects.toMatchObject({
+      code: 'GATE_NOT_ONBOARDED',
+    });
+
+    expect(world.audited).toEqual([]);
+    expect(world.reclaimed).toEqual([]);
+  });
+
+  it('reclaims a confirmed empty cluster after a selected compose cleanup with the grant', async () => {
+    const world = load({ reclaimable: true, deleteCluster: async () => true });
+    await composeRecords(world.record, 'compose');
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
+
+    const out = await world.pruning.prune({ confirm: true, only: ['compose'] });
+
+    expect(out.removed).toEqual(['compose']);
+    expect(out.cluster).toBe(true);
+    expect(world.reclaimed).toHaveLength(1);
+  });
+
+  it.each(['workspace', 'orphan'])(
+    'rechecks reclamation after the last local %s is removed',
+    async (kind) => {
+      const state = { empty: false };
+      const world = load({
+        namespaces: kind === 'orphan' ? ['houston-last'] : [],
+        owners: { 'houston-last': 'me' },
+        workload: false,
+        reclaimable: () => state.empty,
+        deleteCluster: async () => true,
+        namespaceDeleted: () => {
+          state.empty = true;
+        },
+      });
+      config.updateConfig((stored) => {
+        grant(stored, 'owned-cluster');
+      });
+      if (kind === 'workspace') {
+        await world.record.writeRecord(
+          'last',
+          world.record.metadata({
+            name: 'last',
+            extra: { runtime: 'kubernetes', context: 'kind-houston-local' },
+          }),
+        );
+      }
+      const out = await world.pruning.prune({
+        confirm: true,
+        orphans: kind === 'orphan',
+        only: kind === 'workspace' ? ['last'] : [],
+      });
+      expect(out.cluster).toBe(true);
+      expect(world.reclaimed).toHaveLength(1);
+      expect(kind === 'workspace' ? out.removed : out.orphans).toEqual(
+        kind === 'workspace' ? ['last'] : ['houston-last'],
+      );
+    },
+  );
+
   it('audits the namespaces it swept, not only the records', async () => {
     // The subject was the local records alone, so a sweep of namespaces and no records
     // wrote `prune` with an empty subject -- no trace anywhere of what was destroyed.
     const world = load({ namespaces: ['houston-ghost'] });
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
     await world.pruning.prune({ confirm: true, orphans: true });
     expect(world.audited[0]?.[0]).toBe('prune');
     expect(world.audited[0]?.[1]).toContain('houston-ghost');
+  });
+
+  it('gates a local orphan sweep before it records or deletes anything', async () => {
+    // With no record target, the former precheck saw neither a local workspace nor a
+    // reclaimable cluster and deleted the namespace under an unanswered grant.
+    const world = load({ namespaces: ['houston-ghost'], owners: { 'houston-ghost': 'me' } });
+    await expect(world.pruning.prune({ confirm: true, orphans: true })).rejects.toMatchObject({
+      code: 'GATE_NOT_ONBOARDED',
+    });
+    expect(world.audited).toEqual([]);
+    expect(world.deleted).toEqual([]);
+
+    config.updateConfig((stored) => {
+      revoke(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
+    await expect(world.pruning.prune({ confirm: true, orphans: true })).rejects.toMatchObject({
+      code: 'GATE_OWNED_CLUSTER',
+    });
+    expect(world.audited).toEqual([]);
+    expect(world.deleted).toEqual([]);
   });
 
   it('skips one unreadable workspace rather than abandoning the rest', async () => {
@@ -419,7 +617,7 @@ describe('a whole prune', () => {
       world.record.metadata({
         name: 'kub',
         project: 'houston-kub',
-        extra: { runtime: 'kubernetes', context: 'default' },
+        extra: { runtime: 'kubernetes', context: 'kind-houston-local' },
       }),
     );
     for (const name of ['cmp', 'kub', 'stuck']) {
@@ -428,6 +626,22 @@ describe('a whole prune', () => {
     }
     journal.record(journal.CREATE_UNFINISHED, 'bystander');
 
+    await expect(
+      world.pruning.prune({ confirm: true, only: ['cmp', 'kub', 'stuck'] }),
+    ).rejects.toMatchObject({
+      code: 'GATE_NOT_ONBOARDED',
+    });
+    config.updateConfig((stored) => {
+      revoke(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
+    await expect(
+      world.pruning.prune({ confirm: true, only: ['cmp', 'kub', 'stuck'] }),
+    ).rejects.toMatchObject({
+      code: 'GATE_OWNED_CLUSTER',
+    });
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
     const out = await world.pruning.prune({ confirm: true, only: ['cmp', 'kub', 'stuck'] });
 
     expect(out.removed).toEqual(['cmp', 'kub']);
@@ -463,6 +677,9 @@ describe('a whole prune', () => {
     expect((await world.pruning.prune({ confirm: true })).orphans).toEqual([]);
     expect(world.deleted).toEqual([]);
     // Asked for explicitly, it removes exactly the unexplained one.
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
     expect((await world.pruning.prune({ confirm: true, orphans: true })).orphans).toEqual([
       'houston-p3',
     ]);
@@ -474,6 +691,7 @@ describe('a whole prune', () => {
     // in. No kind binary here, so nothing of ours to give back; and a cluster that still
     // holds a workspace refuses while the prune itself succeeds.
     const world = load({
+      reclaimable: true,
       deleteCluster: async () => {
         throw new (require('../../../src/lib/errors') as typeof ErrorsNS).ConflictError(
           'cluster houston-local still holds 1 workspace namespace(s)',
@@ -484,6 +702,9 @@ describe('a whole prune', () => {
       clusterReclaimable: () => Promise<boolean>;
     };
     expect(await cluster.clusterReclaimable()).toBe(false);
+    config.updateConfig((stored) => {
+      grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+    });
     const events: Event[] = [];
     const out = await world.pruning.prune({ confirm: true, emit: (event) => events.push(event) });
     expect(out.cluster).toBe(false);

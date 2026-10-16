@@ -43,6 +43,7 @@ import type * as RunnerEngineNS from '../core/runner/engine';
 import type * as RunnerQueriesNS from '../core/runner/queries';
 import type * as RunnerPathsNS from '../core/runner/paths';
 import type * as LocksNS from '../core/runner/locks';
+import type * as OnboardingNS from '../lib/onboarding';
 import type * as RecordNS from '../core/runner/record';
 import type * as ScaleseedNS from '../core/scaleseed';
 import type * as SsoNS from '../core/sso';
@@ -1233,6 +1234,33 @@ async function dispatch(
         stored[internal] = value;
       });
       return { key, value };
+    }
+    case 'onboard': {
+      const onboarding = require('../lib/onboarding') as typeof OnboardingNS;
+      const action = text(a.action) || 'status';
+      const id = text(a.id);
+      if (['status', 'complete', 'setup'].includes(action) && id !== '')
+        throw new ValidationError(`\`onboard ${action}\` does not take a grant ID`);
+      if (action === 'status') return { ...onboarding.state(), action };
+      if (!['grant', 'revoke', 'complete'].includes(action))
+        throw new ValidationError(
+          `unknown action ${quotedText(action)} (want: status | grant | revoke | complete)`,
+        );
+      // The id is checked BEFORE the lock is taken and the file rewritten, so an unknown
+      // grant is a usage error (exit 2) with nothing written, not a stamped onboarding.
+      if (action !== 'complete') {
+        if (id === '')
+          throw new ValidationError(
+            `\`onboard ${action}\` needs a grant (want: ${onboarding.grantIds().join(' | ')})`,
+          );
+        onboarding.checkGrantId(id);
+      }
+      await (require('../core/runner/locks') as typeof LocksNS).updateConfig((stored) => {
+        if (action === 'grant') onboarding.grant(stored, id);
+        else if (action === 'revoke') onboarding.revoke(stored, id);
+        else onboarding.complete(stored);
+      });
+      return { ...onboarding.state(), action, id };
     }
     case 'env': {
       const envvars = require('../core/envvars') as typeof EnvvarsNS;
@@ -3400,6 +3428,33 @@ export async function renderHuman(
     case 'edge':
       // Printed by the handler as it went (`handlers/https.ts`): nothing is left to render.
       return;
+    case 'onboard': {
+      const available = bags(result.grants_available);
+      const held = available.filter((spec) => isTruthy(spec.held)).map((spec) => display(spec.id));
+      if (result.action === 'grant') say(io, `✓ granted ${display(result.id)}`);
+      else if (result.action === 'revoke') say(io, `✓ denied ${display(result.id)}`);
+      else if (result.action === 'complete') say(io, '✓ onboarding recorded');
+      say(
+        io,
+        isTruthy(result.completed)
+          ? `onboarded  yes, ${display(result.completed_at)}`
+          : 'onboarded  no — a person has not answered any of these yet',
+      );
+      say(io, `grants     ${held.length > 0 ? held.join(', ') : '(none held)'}`);
+      for (const spec of available) {
+        const answer = isTruthy(spec.held)
+          ? 'granted '
+          : isTruthy(spec.answered)
+            ? 'denied  '
+            : 'unanswered';
+        say(io, `  ${display(spec.id).padEnd(20)} ${answer} ` + `${display(spec.unlocks)}`);
+      }
+      say(
+        io,
+        '  grant one with `houston onboard grant <id>`; record a denial with `houston onboard revoke <id>`',
+      );
+      return;
+    }
     case 'config':
       // `toTextAny(value)`: a stored boolean reads `False`, not `false`, which is the whole
       // difference between "set to false" and "unset" on this screen.

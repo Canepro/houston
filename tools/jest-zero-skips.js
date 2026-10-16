@@ -129,7 +129,9 @@ const ROOT = path.resolve(__dirname, '..');
 // SSH access adds ninety-eight cases over the inspect base: total 4745.
 // One more passes a bracketed IPv6 SSH host bare: total 4746.
 // One more refuses a tunnel port a preset or monitoring will publish, before create: 4747.
-const FLOOR = 4747;
+// Onboarding grants add cluster-ownership, rollback, marker-publication and onboard-grant
+// boundary cases; a full collection of the merged tree measured 4831 tests.
+const FLOOR = 4831;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

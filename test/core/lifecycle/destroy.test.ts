@@ -1,12 +1,16 @@
+import type * as KubeExecNS from '../../../src/core/kube/exec';
 import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 
 import * as config from '../../../src/lib/config';
 import { type Emit } from '../../../src/lib/events';
+import { grant, revoke } from '../../../src/lib/onboarding';
 import { metadata, writeRecord } from '../../../src/core/runner/record';
 import * as paths from '../../../src/core/runner/paths';
 
 import type * as DestroyNS from '../../../src/core/lifecycle/destroy';
 import type * as JournalNS from '../../../src/core/journal';
+import type * as LocksNS from '../../../src/core/runner/locks';
 
 it('Grafana public URL regression: destroying a TLS workspace removes its shared-namespace resources', async () => {
   jest.resetModules();
@@ -158,7 +162,11 @@ describe('tearing a workspace down when its record will not go', () => {
 
   it('warns, keeps the record and still drops the edge route', async () => {
     const destroy = await load();
-    const ws = await makeUnremovable('kub', { runtime: 'kubernetes', namespace: 'houston-kub' });
+    const ws = await makeUnremovable('kub', {
+      runtime: 'kubernetes',
+      namespace: 'houston-kub',
+      context: 'prod',
+    });
     config.updateConfig((cfg) => {
       cfg.default_repro = 'kub';
     });
@@ -171,7 +179,7 @@ describe('tearing a workspace down when its record will not go', () => {
       removed: true,
       found: true,
       runtime: 'kubernetes',
-      context: 'kind-houston-local',
+      context: 'prod',
     });
 
     expect(await paths.exists('kub')).toBe(true);
@@ -298,6 +306,7 @@ describe('the repair notes of a workspace that is torn down', () => {
       '../../../src/core/edge/routes',
       '../../../src/core/runner/engine',
       '../../../src/core/kube/namespace',
+      '../../../src/core/kube/cluster',
       '../../../src/core/kube/operator',
       '../../../src/core/kube/monitoring',
     ]) {
@@ -306,8 +315,19 @@ describe('the repair notes of a workspace that is torn down', () => {
     jest.resetModules();
   });
 
-  function load() {
+  function load(adoption?: { events: string[]; fail: boolean }, realAdoption = false) {
     jest.resetModules();
+    jest.doMock('../../../src/core/kube/cluster', () => ({
+      ...jest.requireActual('../../../src/core/kube/cluster'),
+      ...(realAdoption
+        ? {}
+        : {
+            adoptIfUnmarked: async () => {
+              adoption?.events.push('adopt');
+              if (adoption?.fail === true) throw new Error('ownership unknown');
+            },
+          }),
+    }));
     jest.doMock('../../../src/core/lifecycle/ownership', () => ({
       ...jest.requireActual('../../../src/core/lifecycle/ownership'),
       mayDestroy: async () => [true, ''],
@@ -335,7 +355,10 @@ describe('the repair notes of a workspace that is torn down', () => {
     }));
     jest.doMock('../../../src/core/kube/namespace', () => ({
       ...jest.requireActual('../../../src/core/kube/namespace'),
-      deleteNamespace: async () => true,
+      deleteNamespace: async () => {
+        adoption?.events.push('delete');
+        return true;
+      },
     }));
     jest.doMock('../../../src/core/kube/operator', () => ({
       ...jest.requireActual('../../../src/core/kube/operator'),
@@ -350,6 +373,37 @@ describe('the repair notes of a workspace that is torn down', () => {
       journal: require('../../../src/core/journal') as typeof JournalNS,
     };
   }
+
+  it('tears down a marked local workspace through the real adoption helper without Kind', async () => {
+    const { destroy } = load(undefined, true);
+    const { kube, ownedKubeconfig } = require('../../../src/core/kube/exec') as typeof KubeExecNS;
+    await fs.mkdir(path.dirname(ownedKubeconfig()), { recursive: true });
+    await fs.writeFile(ownedKubeconfig(), 'synthetic client');
+    const run = jest.spyOn(kube, 'run').mockImplementation(async (argv) => ({
+      argv,
+      returncode: argv[0] === 'kind' ? 1 : 0,
+      stdout: argv.includes('configmap')
+        ? JSON.stringify({
+            metadata: { labels: { 'app.kubernetes.io/managed-by': 'houston' } },
+            data: { cluster: 'houston-local' },
+          })
+        : '',
+      stderr: argv[0] === 'kind' ? 'kind missing' : '',
+    }));
+    config.updateConfig((stored) => grant(stored, 'owned-cluster'));
+    await writeRecord(
+      'marked',
+      metadata({ name: 'marked', extra: { runtime: 'kubernetes', context: 'kind-houston-local' } }),
+    );
+    await expect(
+      destroy.teardown('marked', { volumes: true, confirm: true }),
+    ).resolves.toMatchObject({ removed: true });
+    expect(run.mock.calls.some(([argv]) => argv[0] === 'kind')).toBe(false);
+    config.updateConfig((stored) => {
+      delete stored.onboarding;
+      delete stored.grants;
+    });
+  });
 
   it('says it is waiting when another command holds the workspace, then goes ahead', async () => {
     // `down --volumes` behind a running `backup` waited for the whole backup in silence.
@@ -382,6 +436,70 @@ describe('the repair notes of a workspace that is torn down', () => {
     expect(said.at(-1)).toBe("'busy' down (data kept)");
   });
 
+  it('rechecks local-cluster authority after a waiting teardown acquires the workspace lock', async () => {
+    const { destroy } = load();
+    const { reproLock } = require('../../../src/core/runner/locks') as typeof LocksNS;
+    await writeRecord('changed', metadata({ name: 'changed', extra: { runtime: 'docker' } }));
+    let release = (): void => undefined;
+    const gate = { taken: false };
+    const held = reproLock('changed', async () => {
+      await new Promise<void>((done) => {
+        release = done;
+        gate.taken = true;
+      });
+      await writeRecord(
+        'changed',
+        metadata({
+          name: 'changed',
+          extra: { runtime: 'kubernetes', context: 'kind-houston-local' },
+        }),
+      );
+    });
+    for (let wait = 0; wait < 200 && !gate.taken; wait += 1)
+      await new Promise((done) => setTimeout(done, 10));
+    const said: string[] = [];
+    const down = destroy.teardown('changed', { emit: (event) => void said.push(event.message) });
+    const result = down.catch((error: unknown) => error);
+    for (let wait = 0; wait < 200 && said.length === 0; wait += 1)
+      await new Promise((done) => setTimeout(done, 10));
+    expect(said[0]).toContain('waiting');
+    release();
+    await held;
+    expect(await result).toMatchObject({ code: 'GATE_NOT_ONBOARDED' });
+    expect(await paths.exists('changed')).toBe(true);
+  });
+
+  it.each([false, true])(
+    'adopts before deleting the final legacy namespace, unknown=%s',
+    async (fail) => {
+      const adoption = { events: [] as string[], fail };
+      const { destroy } = load(adoption);
+      config.updateConfig((stored) => {
+        grant(stored, 'owned-cluster');
+      });
+      await writeRecord(
+        'legacy',
+        metadata({
+          name: 'legacy',
+          extra: { runtime: 'kubernetes', context: 'kind-houston-local' },
+        }),
+      );
+      const result = destroy.teardown('legacy', { volumes: true, confirm: true });
+      if (fail) {
+        await expect(result).rejects.toThrow('ownership unknown');
+        expect(adoption.events).toEqual(['adopt']);
+        expect(await paths.exists('legacy')).toBe(true);
+      } else {
+        await expect(result).resolves.toMatchObject({ removed: true });
+        expect(adoption.events).toEqual(['adopt', 'delete']);
+      }
+      config.updateConfig((stored) => {
+        delete stored.onboarding;
+        delete stored.grants;
+      });
+    },
+  );
+
   it('takes them on --volumes, keeps them on a plain down, and leaves every other subject alone', async () => {
     // Seen on the owner's box: 28 `create_unfinished` notes for `alice-rc8-5-1`, all still
     // there after `down --volumes` had removed its containers, its volume and its record, so
@@ -400,7 +518,11 @@ describe('the repair notes of a workspace that is torn down', () => {
     journal.record(journal.CREATE_UNFINISHED, 'bystander');
     const runtimes: Record<string, Record<string, unknown>> = {
       'notes-cmp': { runtime: 'docker' },
-      'notes-kub': { runtime: 'kubernetes', namespace: 'houston-notes-kub', context: 'default' },
+      'notes-kub': {
+        runtime: 'kubernetes',
+        namespace: 'houston-notes-kub',
+        context: 'kind-houston-local',
+      },
     };
     for (const [name, extra] of Object.entries(runtimes)) {
       await writeRecord(name, metadata({ name, project: `houston-${name}`, extra }));
@@ -411,6 +533,21 @@ describe('the repair notes of a workspace that is torn down', () => {
         journal.CLUSTER_UNFINISHED,
       ]) {
         journal.record(kind, name);
+      }
+
+      if (extra.runtime === 'kubernetes') {
+        await expect(destroy.teardown(name, { volumes: false })).rejects.toMatchObject({
+          code: 'GATE_NOT_ONBOARDED',
+        });
+        config.updateConfig((stored) => {
+          revoke(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+        });
+        await expect(destroy.teardown(name, { volumes: false })).rejects.toMatchObject({
+          code: 'GATE_OWNED_CLUSTER',
+        });
+        config.updateConfig((stored) => {
+          grant(stored, 'owned-cluster', new Date('2026-10-15T00:00:00Z'));
+        });
       }
 
       await destroy.teardown(name, { volumes: false });

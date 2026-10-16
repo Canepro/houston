@@ -20,12 +20,15 @@ import * as path from 'node:path';
 import { Project, SyntaxKind, type SourceFile } from 'ts-morph';
 
 import {
+  AuthorityGateError,
   ERROR_CLASSES,
   GATE_CODES,
   RAISED_GATE_CODES,
   ReproError,
   errorCodes,
 } from '../../../src/lib/errors';
+
+import { GRANTS, requireGrant } from '../../../src/lib/onboarding';
 
 const ROOT = path.resolve(__dirname, '..', '..', '..');
 
@@ -83,6 +86,20 @@ export function refuseTwo() {
 
   it('raises no gate code it has not written down', () => {
     const raised = productionSources().flatMap(gateCodesRaisedIn);
+    // Grant codes come from a registry rather than literal throw expressions. Exercise
+    // each declared refusal so the inventory proves the dynamic path can raise its code.
+    for (const spec of GRANTS) {
+      let refusal: unknown;
+      try {
+        requireGrant(spec.id, {});
+      } catch (error) {
+        refusal = error;
+      }
+      expect(refusal).toBeInstanceOf(AuthorityGateError);
+      expect(refusal).toMatchObject({ code: spec.gate });
+      raised.push({ code: spec.gate, where: `grant:${spec.id}` });
+    }
+
     // A positive control with teeth: this build really does raise gates, so an empty walk
     // is a broken walk rather than a tree with no gates in it.
     expect(raised.length).toBeGreaterThanOrEqual(3);

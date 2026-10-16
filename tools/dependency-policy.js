@@ -69,7 +69,7 @@ const RANKS = [
     '^src/lib/seed-profiles\\.ts$',
   ],
   [
-    '^src/lib/(monitoring|version-spec|json-text|seed-options)\\.ts$',
+    '^src/lib/(monitoring|version-spec|json-text|seed-options|onboarding)\\.ts$',
     '^src/lib/presets/registry\\.ts$',
   ],
   // `targz` sits ABOVE `format`, because its only refusal message is
