@@ -61,7 +61,7 @@ The browser suite drives the real GUI in Chromium:
 
 ```bash
 npx playwright install chromium                   # once
-yarn test:browser                                 # exactly 217 tests must pass
+yarn test:browser                                 # exactly 218 tests must pass
 ```
 
 Inside Jest the sandbox is automatic: `test/testsetup.ts` gives every spec file a fresh
@@ -223,7 +223,7 @@ and the dark theme. Never stop a `serve` you did not start.
 | `yarn depcruise:selftest` | the layer gate still sees: it plants a cycle and a seam bypass and requires both reported | yes |
 | `yarn format` | Prettier, check only | |
 | `yarn test:zero-skips:selftest` | the zero-skips reporter still catches each defect it claims to | |
-| `yarn test:browser` | the GUI in Chromium, in-process: exactly 217 pass, none skip | |
+| `yarn test:browser` | the GUI in Chromium, in-process: exactly 218 pass, none skip | |
 | `yarn verify:gui-hash` | `data/webui` is byte for byte the pinned GUI | |
 | `yarn test:process-contracts` | the process and Docker seams' contracts, run in band | |
 | `yarn test:timing` | sign-in takes as long for an unknown name as for a real one | |

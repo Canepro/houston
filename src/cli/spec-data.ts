@@ -1,6 +1,6 @@
 import { defineCommand } from './spec-types';
 
-/** The frozen command surface: 40 routable paths; root invocation is separate. */
+/** The declared command paths; root invocation is separate. */
 export const COMMAND_SPECS = [
   defineCommand({
     id: 'up',
