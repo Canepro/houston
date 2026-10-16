@@ -17,6 +17,10 @@
  * every workspace earlier releases made holds.
  */
 
+import { promises as fs } from 'node:fs';
+import { isIP } from 'node:net';
+import * as path from 'node:path';
+
 import {
   ADMIN_EMAIL,
   ADMIN_NAME,
@@ -31,7 +35,7 @@ import {
 import { ValidationError } from './errors';
 import * as monitoring from './monitoring';
 import type { Preset } from './presets/types';
-import { toText, toTextYaml } from './format';
+import { toTextYaml } from './format';
 import { safeDump, type ImplicitResolver } from './yaml-dump';
 
 /** A compose service body. Deliberately open: presets merge arbitrary keys into it. */
@@ -127,20 +131,6 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-/** Whether an effective Compose environment provides a nonblank registration token. */
-export function hasEffectiveRegToken(environment: unknown): boolean {
-  if (Array.isArray(environment)) {
-    let token: string | null = null;
-    for (const entry of environment) {
-      const text = toText(entry);
-      if (!text.startsWith('REG_TOKEN=')) continue;
-      token = text.slice('REG_TOKEN='.length);
-    }
-    return token !== null && token.trim() !== '';
-  }
-  return isPlainObject(environment) && toText(environment.REG_TOKEN).trim() !== '';
-}
-
 /** Recursively merge `patch` into `base` (patch wins), returning `base`. */
 function deepMerge(
   base: Record<string, unknown>,
@@ -160,6 +150,309 @@ function deepMerge(
 /** A deep copy, matching `copy.deepcopy` for the JSON-shaped values used here. */
 function clone<T>(value: T): T {
   return structuredClone(value);
+}
+
+interface EnvironmentEntry {
+  present: boolean;
+  value: unknown;
+}
+
+/** The final explicit value for one Compose environment name, if it has one. */
+function environmentEntry(environment: unknown, name: string): EnvironmentEntry {
+  if (isPlainObject(environment)) {
+    return Object.prototype.hasOwnProperty.call(environment, name)
+      ? { present: true, value: environment[name] }
+      : { present: false, value: undefined };
+  }
+  if (!Array.isArray(environment)) return { present: false, value: undefined };
+  // Compose also accepts `environment: [NAME=value]`. A bare name inherits an ambient host
+  // value, which is not a value Houston can claim it supplied.
+  let result: EnvironmentEntry = { present: false, value: undefined };
+  for (const item of environment) {
+    if (typeof item !== 'string') return { present: true, value: undefined };
+    if (item === name) result = { present: true, value: undefined };
+    else if (item.startsWith(`${name}=`)) {
+      result = { present: true, value: item.slice(name.length + 1) };
+    }
+  }
+  return result;
+}
+
+/**
+ * Compose resolves unescaped `$NAME` and `${NAME}` only when it starts the service. Houston
+ * deliberately does not inherit ambient values into its warning path, so only a known literal
+ * can suppress a missing-token or missing-licence warning. `$$` is Compose's literal-dollar
+ * escape and remains a supplied value.
+ */
+function isKnownNonBlankComposeValue(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  const text = String(value).trim();
+  if (text === '') return false;
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] !== '$') continue;
+    if (text[index + 1] === '$') {
+      index += 1;
+      continue;
+    }
+    const next = text[index + 1] ?? '';
+    if (next === '{' || /[A-Za-z_]/u.test(next)) return false;
+  }
+  return true;
+}
+
+/** Trim an explicit registration token in its final Compose environment. */
+function normalizeRegToken(environment: unknown): void {
+  if (isPlainObject(environment)) {
+    const token = environment.REG_TOKEN;
+    if (token !== null && token !== undefined) environment.REG_TOKEN = String(token).trim();
+    return;
+  }
+  if (!Array.isArray(environment)) return;
+  for (let index = 0; index < environment.length; index += 1) {
+    const entry = environment[index];
+    if (typeof entry === 'string' && entry.startsWith('REG_TOKEN=')) {
+      environment[index] = `REG_TOKEN=${entry.slice('REG_TOKEN='.length).trim()}`;
+    }
+  }
+}
+
+/** One final env_file reference, without consulting the host environment. */
+export function licenseEnvFiles(
+  service: Service | undefined,
+  projectDirectory: string,
+): {
+  path: string;
+  raw: boolean;
+  optional: boolean;
+}[] {
+  const files = service?.env_file;
+  const entries = Array.isArray(files) ? files : files === undefined ? [] : [files];
+  return entries.map((entry) => {
+    const file = isPlainObject(entry) ? entry.path : entry;
+    return {
+      path:
+        typeof file === 'string' && isKnownNonBlankComposeValue(file)
+          ? path.resolve(projectDirectory, file.replace(/\$\$/gu, '$'))
+          : '',
+      raw: isPlainObject(entry) && entry.format === 'raw',
+      optional: isPlainObject(entry) && entry.required === false,
+    };
+  });
+}
+
+/** Presence only. null means the file leaves that key unchanged. */
+export interface EnvFileCredentials {
+  readonly license: boolean | null;
+  readonly token: boolean | null;
+}
+
+/**
+ * Presence only: no credential text leaves this parser. Unsupported or interpolated
+ * input cannot establish a licence or a registration token. null means the file leaves
+ * that key unchanged.
+ */
+export function credentialsInEnvFile(text: string, raw: boolean): EnvFileCredentials {
+  let license: boolean | null = null;
+  let token: boolean | null = null;
+  const lines = text.split(/\r?\n/u);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? '';
+    if (/^\s*(?:#.*)?$/u.test(line)) continue;
+    const entry = /^\s*(?:export\s+)?([A-Za-z0-9_.\-[\]]+)(?:\s*([=:])\s*(.*))?$/u.exec(line);
+    if (entry === null) return { license: false, token: false };
+    const key = entry[1];
+    let value = entry[3] ?? '';
+    let literal = raw;
+    if (!raw) {
+      const quote = value[0];
+      if (quote === "'" || quote === '"') {
+        // Consume quoted multiline values together, including unrelated keys. Their
+        // contents must never be mistaken for subsequent assignments.
+        const pattern = /^(?:'((?:[^'\\]|\\[\s\S])*)'|"((?:[^"\\]|\\[\s\S])*)")\s*(?:#.*)?$/u;
+        while (!pattern.test(value) && index + 1 < lines.length) {
+          index += 1;
+          value += `\n${lines[index] ?? ''}`;
+        }
+        const quoted = pattern.exec(value);
+        if (quoted === null) return { license: false, token: false };
+        value = quoted[1] ?? quoted[2] ?? '';
+        literal = quote === "'";
+        if (!literal)
+          value = value.replace(/\\([abfnrtv$"\\]|0[0-9]{0,3})/gu, (match, code: string) => {
+            if (code.startsWith('0')) {
+              // compose-go accepts one to three octal digits after the leading 0.
+              // \040 is a space. Requiring three digits kept that text and cleared only \0040.
+              const octal = code.slice(1);
+              const number = Number.parseInt(octal, 8);
+              return /^[0-7]{1,3}$/u.test(octal) && number <= 255
+                ? String.fromCharCode(number)
+                : match;
+            }
+            return (
+              {
+                a: '\x07',
+                b: '\b',
+                f: '\f',
+                n: '\n',
+                r: '\r',
+                t: '\t',
+                v: '\v',
+                $: '$$',
+                '"': '"',
+                '\\': '\\',
+              }[code] ?? match
+            );
+          });
+      } else value = value.replace(/\s+#.*$/u, '').trim();
+    }
+    const present = literal ? value.trim() !== '' : isKnownNonBlankComposeValue(value);
+    if (key === 'ROCKETCHAT_LICENSE') license = present;
+    else if (key === 'REG_TOKEN') token = present;
+  }
+  return { license, token };
+}
+
+/** Presence states per env_file reference, keyed as the effective-credential readers expect. */
+export interface EnvFileStates {
+  readonly fileLicenses: ReadonlyMap<string, boolean | null>;
+  readonly fileTokens: ReadonlyMap<string, boolean | null>;
+}
+
+/**
+ * Read every env_file the named services reference, presence only. An unreadable or
+ * unresolvable file supplies nothing; a missing optional file leaves earlier state unchanged.
+ */
+export async function readEnvFileStates(
+  doc: ComposeDoc,
+  names: readonly string[],
+  projectDirectory: string,
+): Promise<EnvFileStates> {
+  const fileLicenses = new Map<string, boolean | null>();
+  const fileTokens = new Map<string, boolean | null>();
+  for (const name of names) {
+    for (const file of licenseEnvFiles(doc.services[name], projectDirectory)) {
+      const key = JSON.stringify([file.path, file.raw, file.optional]);
+      if (fileLicenses.has(key)) continue;
+      if (file.path === '') {
+        fileLicenses.set(key, false);
+        fileTokens.set(key, false);
+        continue;
+      }
+      try {
+        const found = credentialsInEnvFile(await fs.readFile(file.path, 'utf8'), file.raw);
+        fileLicenses.set(key, found.license);
+        fileTokens.set(key, found.token);
+      } catch (error) {
+        const missing =
+          file.optional && (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : false;
+        fileLicenses.set(key, missing);
+        fileTokens.set(key, missing);
+      }
+    }
+  }
+  return { fileLicenses, fileTokens };
+}
+
+/** Presence only: no licence text leaves this parser. null means the file leaves the key unchanged. */
+export function licenseInEnvFile(text: string, raw: boolean): boolean | null {
+  return credentialsInEnvFile(text, raw).license;
+}
+
+/**
+ * Env files apply in order. A later known assignment replaces any earlier state.
+ * null leaves the earlier state. An optional file with no recorded state is one Compose
+ * skips, including a missing `.license.env` this run is not writing.
+ */
+function assignmentFromFiles(
+  service: Service | undefined,
+  projectDirectory: string,
+  states: ReadonlyMap<string, boolean | null>,
+  supplyingLicense: boolean,
+): boolean {
+  const licenseFile = path.resolve(projectDirectory, LICENSE_ENV_FILE);
+  let present = false;
+  for (const file of licenseEnvFiles(service, projectDirectory)) {
+    if (supplyingLicense && file.path === licenseFile) {
+      present = true;
+      continue;
+    }
+    const state = states.get(JSON.stringify([file.path, file.raw, file.optional]));
+    if (state === undefined) {
+      if (file.optional) continue;
+      present = false;
+      continue;
+    }
+    if (state !== null) present = state;
+  }
+  return present;
+}
+
+function serviceHasLicense(
+  service: Service | undefined,
+  licensed: boolean,
+  projectDirectory: string,
+  fileLicenses: ReadonlyMap<string, boolean | null>,
+): boolean {
+  const entry = environmentEntry(service?.environment, 'ROCKETCHAT_LICENSE');
+  return entry.present
+    ? isKnownNonBlankComposeValue(entry.value)
+    : assignmentFromFiles(service, projectDirectory, fileLicenses, licensed);
+}
+
+/** An explicit REG_TOKEN wins, including a blank one. Otherwise the ordered env files apply. */
+function serviceHasToken(
+  service: Service | undefined,
+  projectDirectory: string,
+  fileTokens: ReadonlyMap<string, boolean | null>,
+): boolean {
+  const entry = environmentEntry(service?.environment, 'REG_TOKEN');
+  return entry.present
+    ? isKnownNonBlankComposeValue(entry.value)
+    : assignmentFromFiles(service, projectDirectory, fileTokens, false);
+}
+
+/** Whether every final Rocket.Chat service gets a known licence from its environment or file. */
+export function hasEffectiveLicense(
+  doc: ComposeDoc,
+  instances: number,
+  licensed: boolean,
+  projectDirectory: string,
+  fileLicenses: ReadonlyMap<string, boolean | null> = new Map(),
+): boolean {
+  return rcServiceNames(instances).every((name) =>
+    serviceHasLicense(doc.services[name], licensed, projectDirectory, fileLicenses),
+  );
+}
+
+/**
+ * Whether any named Rocket.Chat service gets a known registration token, by the same rule
+ * the create warnings use. Presence only; the evidence record never holds the value.
+ */
+export function suppliesRegToken(
+  doc: ComposeDoc,
+  names: readonly string[],
+  projectDirectory: string,
+  fileTokens: ReadonlyMap<string, boolean | null>,
+): boolean {
+  return names.some((name) => serviceHasToken(doc.services[name], projectDirectory, fileTokens));
+}
+
+/** Every replica needs a credential, but replicas may use different credential types. */
+export function hasEffectiveCredential(
+  doc: ComposeDoc,
+  instances: number,
+  licensed: boolean,
+  projectDirectory: string,
+  fileLicenses: ReadonlyMap<string, boolean | null> = new Map(),
+  fileTokens: ReadonlyMap<string, boolean | null> = new Map(),
+): boolean {
+  return rcServiceNames(instances).every((name) => {
+    const service = doc.services[name];
+    return (
+      serviceHasToken(service, projectDirectory, fileTokens) ||
+      serviceHasLicense(service, licensed, projectDirectory, fileLicenses)
+    );
+  });
 }
 
 function rcEnvironment(s: Spec): Record<string, string> {
@@ -572,6 +865,9 @@ export function build(s: Spec): ComposeDoc {
     if (Object.keys(s.preset.rocketchat).length > 0) deepMerge(svc, clone(s.preset.rocketchat));
     addDepends(svc, s.preset.dependsOn);
   }
+  // Presets and `--env` can win over the flag-derived token. Trim that final value before
+  // Compose reads it, so the deployed token and the create-time warning describe one state.
+  for (const name of rcServiceNames(n)) normalizeRegToken(doc.services[name]?.environment);
 
   publishThroughEntryService(doc, rcServices, s);
 
@@ -593,70 +889,171 @@ export function build(s: Spec): ComposeDoc {
   return doc;
 }
 
-/** "8000-8005:8000-8005", and the single-sided "8000-8005" form. */
-const RANGE_RE = /^\d+-\d+(:\d+(-\d+)?)?$/;
+/** A port or a range of them: "8025", "8000-8005". Either side of a short-syntax entry. */
+const PORT_RE = /^\d+(-\d+)?$/;
 
 /**
- * Prefix every published port with the bind host, unless one is already given. Applied
- * to ALL services in one pass -- RC, multi-instance direct ports, the load balancer, and
- * preset sidecars -- mirroring the official rocketchat-compose
- * `${BIND_IP}:${HOST_PORT}:${PORT}` pattern.
+ * Positions of a separator outside Compose interpolation and bracketed IPv6 literals.
+ *
+ * A port mapping's address and both port fields may use Compose variables. Their default
+ * forms commonly contain `:`, so splitting the string at every colon turns a valid mapping
+ * such as `${BIND_IP:-127.0.0.1}:${HOST_PORT:-8080}:${CONTAINER_PORT:-80}` into nonsense.
+ */
+export function topLevelPositions(text: string, separator: string): number[] {
+  const positions: number[] = [];
+  let interpolationDepth = 0;
+  let bracketDepth = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index] ?? '';
+    if (interpolationDepth > 0) {
+      if (character === '{') interpolationDepth += 1;
+      else if (character === '}') interpolationDepth -= 1;
+      continue;
+    }
+    if (character === '$' && text[index + 1] === '{') {
+      interpolationDepth = 1;
+      index += 1;
+      continue;
+    }
+    if (character === '[') {
+      bracketDepth += 1;
+      continue;
+    }
+    if (character === ']' && bracketDepth > 0) {
+      bracketDepth -= 1;
+      continue;
+    }
+    if (character === separator && bracketDepth === 0) positions.push(index);
+  }
+  return positions;
+}
+
+/** A whole Compose variable expression, including its default or required form. */
+function composeVariable(value: string): boolean {
+  if (/^\$[A-Za-z_][A-Za-z0-9_]*$/u.test(value)) return true;
+  if (!value.startsWith('${')) return false;
+  let depth = 0;
+  let close = -1;
+  for (let index = 1; index < value.length; index += 1) {
+    const character = value[index] ?? '';
+    if (character === '{') depth += 1;
+    else if (character === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        close = index;
+        break;
+      }
+    }
+  }
+  if (close !== value.length - 1) return false;
+  const expression = value.slice(2, -1);
+  const name = /^[A-Za-z_][A-Za-z0-9_]*/u.exec(expression);
+  if (name === null) return false;
+  const suffix = expression.slice(name[0].length);
+  return suffix === '' || /^(?::-|:\?|:\+|-|\?|\+)/u.test(suffix);
+}
+
+function portField(value: string): boolean {
+  return PORT_RE.test(value) || composeVariable(value);
+}
+
+function addressField(value: string): boolean {
+  const ip = value.startsWith('[') && value.endsWith(']') ? value.slice(1, -1) : value;
+  // Docker rejects scope IDs, though Node's isIP accepts them.
+  return composeVariable(value) || (isIP(ip) !== 0 && !ip.includes('%'));
+}
+
+/**
+ * Bind every published port to ONE host address. Applied to ALL services in one pass --
+ * RC, multi-instance direct ports, the load balancer, and preset sidecars -- mirroring the
+ * official rocketchat-compose `${BIND_IP}:${HOST_PORT}:${PORT}` pattern.
+ *
+ * A host address an entry already names is REPLACED, not kept. The bind host is the one
+ * posture `info` reports and `detectBind` reads back, and a custom preset that writes
+ * `0.0.0.0:9000:9000` would otherwise publish a sidecar on every interface of a remote
+ * sandbox while the workspace says it is loopback-bound. Short syntax keeps its host port
+ * (or its absence: `IP::CONTAINER` is an ephemeral host port), its range and its
+ * `/protocol`; long syntax gets `host_ip` even when `published` is omitted for an
+ * ephemeral host port.
  */
 export function bindPorts(doc: ComposeDoc, bind: string): void {
   if (!bind) return;
+  const shortBind = isIP(bind) === 6 ? `[${bind}]` : bind;
   for (const [name, svc] of Object.entries(doc.services)) {
     const ports = svc.ports;
     if (!Array.isArray(ports) || ports.length === 0) continue;
     const out: unknown[] = [];
     for (const p of ports) {
       // THE TYPE CHECK COMES FIRST. Stringifying compose long syntax gives the object's
-      // text containing two colons, which matched the already-IP-qualified branch below
-      // -- the object's text was appended as a ports entry. Any shape that is not a
-      // string has to be recognised before it is stringified.
+      // text containing two colons, which once matched the IP-qualified branch below --
+      // the object's text was appended as a ports entry. Any shape that is not a string
+      // has to be recognised before it is stringified.
       if (isPlainObject(p)) {
         const long = { ...p };
-        if ('published' in long && (long.host_ip ?? '') === '') long.host_ip = bind;
+        long.host_ip = bind;
         out.push(long);
         continue;
       }
-      const str = String(p);
-      const colons = str.split(':').length - 1;
-      const head = str.split(':')[0] ?? '';
-      if (colons >= 2) {
-        // Already IP-qualified ("127.0.0.1:8025:8025") -- prefixing again would produce
-        // a double-IP mapping.
-        out.push(str);
-      } else if (colons === 1 && head !== '' && /^[0-9]+$/.test(head)) {
-        out.push(`${bind}:${str}`); // "8025:8025"
-      } else if (str !== '' && /^[0-9]+$/.test(str)) {
-        // A BARE container port. "127.0.0.1:8025" would be parsed as host:container with
-        // an invalid host port, so use compose's IP::CONTAINER form: an ephemeral host
-        // port, still bound to `bind` rather than every interface.
-        out.push(`${bind}::${str}`);
-      } else if (RANGE_RE.test(str)) {
-        // A PORT RANGE ("8000-8005:8000-8005"). This fell through to the `else` below
-        // and was appended UNCHANGED, so it published on every interface while `info`
-        // and the detail panel both reported the workspace as loopback-bound: a silent
-        // opt-out of the default posture, on a workspace running fixed weak credentials.
-        // Legal Compose, and reachable through the custom presets the README documents.
-        // A one-sided range means CONTAINER ports with ephemeral host ports.
-        // Preserve that with IP::RANGE; IP:RANGE is invalid HOST:CONTAINER.
-        out.push(str.includes(':') ? `${bind}:${str}` : `${bind}::${str}`);
-      } else {
-        // NOT SILENTLY PASSED THROUGH. Everything above is a shape this function
-        // understands; anything else is a published port it would be leaving on every
+      const entry = String(p);
+      const slash = topLevelPositions(entry, '/')[0] ?? entry.length;
+      if (composeVariable(entry.slice(0, slash))) {
+        // The variable can expand to an entire mapping, including a wildcard address.
+        // Its default cannot prove the shape of the value Compose will read later.
+        throw new ValidationError(
+          `whole-value Compose interpolation in port entry ${JSON.stringify(p)} in service ` +
+            `${JSON.stringify(name)} cannot be safely bound to ${bind}. Use Compose ` +
+            'long syntax with separate target and published fields, or resolve the mapping ' +
+            'to literal ports before loading the preset.',
+        );
+      }
+      const parsed = shortPort(entry);
+      if (parsed === null) {
+        // NOT SILENTLY PASSED THROUGH. Everything this function understands is bound
+        // above; anything else is a published port it would be leaving on every
         // interface, which is the one outcome that must never be the default. Named so
         // the preset author can see what to change.
         throw new ValidationError(
           `port entry ${JSON.stringify(p)} in service ${JSON.stringify(name)} is a shape ` +
             `houston cannot bind to ${bind}. Write it as "HOST:CONTAINER", a range, or ` +
-            'compose long syntax with `published:` -- leaving it unbound would publish ' +
+            'compose long syntax -- leaving it unbound would publish ' +
             'it on every interface.',
         );
       }
+      out.push(`${shortBind}:${parsed.host}:${parsed.container}${parsed.protocol}`);
     }
     svc.ports = out;
   }
+}
+
+/**
+ * The host-side and container-side of a compose short-syntax port entry, with its
+ * protocol suffix, and WITHOUT the host address it may name: `[IP:][HOST:]CONTAINER[/PROTO]`,
+ * where HOST and CONTAINER are each a port or a range, and HOST may be empty
+ * (`IP::CONTAINER`). `null` for anything else.
+ *
+ * READ FROM THE RIGHT. The address may be dotted, bracketed IPv6, or the unbracketed IPv6
+ * the Compose specification's own examples use (`::1:6000:6000`); counting colons from
+ * the left refused the last of these. The two rightmost fields are the ports. Any
+ * preceding address must be a valid IP literal before `bind` replaces it.
+ */
+function shortPort(entry: string): { host: string; container: string; protocol: string } | null {
+  const slashes = topLevelPositions(entry, '/');
+  const slash = slashes.length === 0 ? -1 : (slashes[slashes.length - 1] ?? -1);
+  // Docker lowercases the protocol before it validates it, so `/UDP` is `/udp`.
+  const protocol = slash === -1 ? '' : entry.slice(slash).toLowerCase();
+  const rest = slash === -1 ? entry : entry.slice(0, slash);
+  if (protocol !== '' && !/^\/[a-z]+$/u.test(protocol)) return null;
+  const colons = topLevelPositions(rest, ':');
+  const last = colons.length - 1;
+  const containerStart = last < 0 ? 0 : (colons[last] ?? -1) + 1;
+  const container = rest.slice(containerStart);
+  const hostStart = last < 1 ? 0 : (colons[last - 1] ?? -1) + 1;
+  const host = last < 0 ? '' : rest.slice(hostStart, colons[last] ?? rest.length);
+  const address = last < 1 ? '' : rest.slice(0, colons[last - 1] ?? 0);
+  if (address !== '' && !addressField(address)) return null;
+  if (!portField(container)) return null;
+  if (host !== '' && !portField(host)) return null;
+  return { host, container, protocol };
 }
 
 export const HEADER = '# Generated by houston. Do not edit by hand -- re-run `houston up`.\n';

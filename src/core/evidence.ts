@@ -27,7 +27,13 @@ import * as path from 'node:path';
 import * as YAML from 'yaml';
 
 import { renderMarkdown as renderBundleMarkdown } from '../lib/capture-render';
-import { hasEffectiveRegToken, imageRef, isRocketChatServiceName } from '../lib/compose';
+import {
+  type ComposeDoc,
+  imageRef,
+  isRocketChatServiceName,
+  readEnvFileStates,
+  suppliesRegToken,
+} from '../lib/compose';
 import * as config from '../lib/config';
 import { ValidationError } from '../lib/errors';
 import { isTruthy, quotedText, toText } from '../lib/format';
@@ -289,12 +295,12 @@ async function tokenInCompose(meta: Metadata): Promise<boolean | null> {
   } catch {
     return null;
   }
-  for (const [name, service] of Object.entries(bag(doc.services))) {
-    if (isRocketChatServiceName(name) && hasEffectiveRegToken(bag(service).environment)) {
-      return true;
-    }
-  }
-  return false;
+  // Only Rocket.Chat's own services count: a sidecar's token was never handed to Rocket.Chat.
+  const compose = { ...doc, services: bag(doc.services) } as ComposeDoc;
+  const names = Object.keys(compose.services).filter(isRocketChatServiceName);
+  const projectDirectory = paths.workspace(meta.name);
+  const { fileTokens } = await readEnvFileStates(compose, names, projectDirectory);
+  return suppliesRegToken(compose, names, projectDirectory, fileTokens);
 }
 
 /**

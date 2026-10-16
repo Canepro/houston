@@ -88,12 +88,26 @@ const ROOT = path.resolve(__dirname, '..');
 // The final re-verification's fixes: up resolving a name the actor may act on, a rebuild's
 // monitoring, pin and port, the operator password off every argv, the operator's memory and
 // PodMonitor, serve's shutdown, and the usage and wording answers it found untrue.
+// Bind enforcement covers protocol preservation, ephemeral long ports and invalid addresses.
+// Compose interpolation brackets an IPv6 bind before variable port fields, and monitoring reads
+// that bind back from both short and long syntax.
+// Whole-value interpolation refusals: 11 cases; IPv6 and long-syntax regressions: 2; total 4525.
+// Seven licence-warning cases, the licensed-user microservices regression, and two
+// end-to-end registration-token normalization regressions add ten exercised Jest cases above
+// the bind-enforcement base. One chart-consumer regression covers the winning Kubernetes token,
+// and one covers final Kubernetes licence precedence and warning presence.
+// R5 adds one workspace-owner credential promotion regression; collection measures 4538.
+// R6 adds one mixed-replica credential lifecycle regression; collection measures 4539.
+// R7 adds one equivalent-file regression and two interrupted-create cleanup cases; total 4542.
+// R8 adds two interrupted-install controls and one workspace-identity control; total 4545.
+// CI on 21aa5b3 measured 4550. This commit adds one created-namespace rollback regression.
 // Evidence-closeout regressions cover bundle help, Kubernetes ownership proof,
 // runtime-correct artifact selection, registration-token provenance, normalized presets,
 // public URL plus byte-preserved cleanup rendering, artifact URL and scalar redaction,
 // metadata-only Docker records, legacy catalogue uncertainty in both licence-output paths,
-// provisional licensing, Compose-list token propagation and legacy sidecar attribution.
-const FLOOR = 4545;
+// provisional licensing, Compose-list and env-file token presence, legacy sidecar
+// attribution, and a preset-only Kubernetes token: 46 cases over 4551, total 4597.
+const FLOOR = 4597;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

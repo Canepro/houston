@@ -300,7 +300,11 @@ describe('the record', () => {
     const examples: Array<{
       name: string;
       extra?: Record<string, unknown>;
-      services: Record<string, { environment: Record<string, unknown> | string[] }>;
+      services: Record<
+        string,
+        { environment?: Record<string, unknown> | string[]; env_file?: string[] }
+      >;
+      files?: Record<string, string>;
       supplied: boolean;
     }> = [
       {
@@ -325,9 +329,24 @@ describe('the record', () => {
         services: { rocketchat: { environment: ['REG_TOKEN=  \t'] } },
         supplied: false,
       },
+      {
+        name: 'e3-legacy-interpolated',
+        services: { rocketchat: { environment: ['REG_TOKEN=${HOST_REG_TOKEN}'] } },
+        supplied: false,
+      },
+      {
+        name: 'e3-legacy-env-file',
+        services: { rocketchat: { env_file: ['token.env'] } },
+        files: { 'token.env': 'REG_TOKEN=file-token\n' },
+        supplied: true,
+      },
     ];
 
     for (const example of examples) {
+      for (const [file, text] of Object.entries(example.files ?? {})) {
+        fs.mkdirSync(workspace(example.name), { recursive: true });
+        fs.writeFileSync(path.join(workspace(example.name), file), text);
+      }
       await workspaceNamed(
         example.name,
         example.extra,

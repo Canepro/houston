@@ -7,7 +7,7 @@
  */
 import * as crypto from 'node:crypto';
 
-import { MissingRecordError, PreflightError } from '../../lib/errors';
+import { ConflictError, MissingRecordError, PreflightError } from '../../lib/errors';
 import { info, nullEmit, warn, type Emit } from '../../lib/events';
 import { presetsLabel } from '../../lib/presets/composite';
 import { publicPathsOf } from '../../lib/presets/public';
@@ -24,9 +24,9 @@ import {
 } from './certmanager';
 import { deleteCluster, ensureKubeconfig } from './cluster';
 import { planCluster, type ClusterPlan } from './context';
-import { ensureRepo, resolveChartVersion, valuesFor } from './chart';
+import { credentialInputs, ensureRepo, resolveChartVersion, valuesFor } from './chart';
 import { Interrupted, cleanup } from '../../seams/exec';
-import { updateMeta } from '../runner/record';
+import { updateMeta, type Metadata } from '../runner/record';
 import { forwardAlive, portForward, scenarioUiForwards } from './forward';
 import { ingressValues, toolsIngressManifest } from './ingress';
 import {
@@ -292,6 +292,9 @@ interface ChartInstall {
   readonly preset: Preset | null;
   readonly envOverrides: Record<string, string | null>;
   readonly licensed: boolean;
+  /** This run's licence text. Empty when the release only references a Secret already kept. */
+  readonly license: string;
+  readonly receipt: NamespaceReceipt;
   readonly issuer: IssuerSpec | null;
   readonly ingressClass: string;
   readonly namespace: string;
@@ -340,6 +343,13 @@ async function installChart(options: ChartInstall): Promise<Record<string, unkno
     { phase: 'boot', pct: 60 },
   );
   await install({ namespace, context, values, chartVersion, emit });
+  // An adopted namespace is not deleted when later work fails, so the licence Helm just
+  // accepted has to be recorded before the tools Ingress can throw. A namespace this run
+  // created is deleted by that failure, Secret included, so its marker waits until the
+  // Ingress has succeeded and is still written before this function returns.
+  if (options.license !== '' && options.receipt.createdUid === '') {
+    await noteInstalledLicense(name, namespace, context, options.receipt);
+  }
   // The preset's own UIs at paths of the same name (Mailpit, Keycloak, the demo page).
   const tools = options.preset === null ? [] : publicPathsOf(options.preset.extra);
   if (tlsHost !== '' && tools.length > 0) {
@@ -355,6 +365,9 @@ async function installChart(options: ChartInstall): Promise<Record<string, unkno
       }),
       { namespace, context },
     );
+  }
+  if (options.license !== '' && options.receipt.createdUid !== '') {
+    await noteInstalledLicense(name, namespace, context, options.receipt);
   }
   return values;
 }
@@ -439,6 +452,53 @@ async function noteNamespace(name: string, receipt: NamespaceReceipt): Promise<v
   }
 }
 
+function recordsThisInstall(
+  meta: Metadata,
+  name: string,
+  namespace: string,
+  context: string,
+  receipt: NamespaceReceipt,
+): boolean {
+  return (
+    meta.name === name &&
+    meta.project === namespace &&
+    meta.extra.namespace === namespace &&
+    meta.extra.context === context &&
+    meta.extra.runtime === 'kubernetes' &&
+    meta.extra.namespace_uid === receipt.uid &&
+    meta.extra.namespace_owner === receipt.owner &&
+    receipt.uid !== ''
+  );
+}
+
+/**
+ * Helm has accepted a release that references this run's licence Secret.
+ * Inspect reads `effective_license` and ignores `incomplete`, so that boolean becomes
+ * true here, together with `retained_license`, and not when the Secret alone exists.
+ */
+async function noteInstalledLicense(
+  name: string,
+  namespace: string,
+  context: string,
+  receipt: NamespaceReceipt,
+): Promise<void> {
+  try {
+    await updateMeta(name, (meta) => {
+      if (!recordsThisInstall(meta, name, namespace, context, receipt)) {
+        throw new ConflictError(
+          'workspace identity changed before licence installation could be recorded',
+        );
+      }
+      meta.extra.licensed = true;
+      meta.extra.retained_license = true;
+      meta.extra.effective_license = true;
+    });
+  } catch (error) {
+    // Direct workspace callers can operate without a lifecycle write-ahead record.
+    if (!(error instanceof MissingRecordError)) throw error;
+  }
+}
+
 /** Wait for TLS, establish the forwards, persist the manifests, and return the metadata. */
 async function connectWorkspace(options: ConnectOptions): Promise<Record<string, unknown>> {
   const { name, namespace, context, hostPort, bindHost, tlsHost, emit } = options;
@@ -511,7 +571,7 @@ export interface CreateWorkspaceOptions {
   readonly envOverrides?: Record<string, string | null>;
   /** This run's licence text, installed as a Secret; '' installs none. */
   readonly license?: string;
-  /** Whether the release references the licence Secret: this run's, or one already there. */
+  /** An existing licence Secret established by a completed create, not provisional intent. */
   readonly licensed?: boolean;
   readonly plan?: ClusterPlan | null;
   readonly tlsHost?: string;
@@ -550,7 +610,7 @@ export async function createWorkspace({
   preset = null,
   envOverrides = {},
   license = '',
-  licensed = false,
+  licensed: retainedLicense = false,
   plan = null,
   tlsHost = '',
   ingressClass = '',
@@ -561,6 +621,18 @@ export async function createWorkspace({
   emit = nullEmit,
   sleep = realSleep,
 }: CreateWorkspaceOptions): Promise<Record<string, unknown>> {
+  // Resolve at this API boundary too so callers cannot bypass the Secret path.
+  // Preset credentials must be settled before either manifests or chart values are built.
+  const credentials = credentialInputs(
+    preset?.env,
+    regToken,
+    license,
+    retainedLicense,
+    envOverrides,
+  );
+  regToken = credentials.regToken;
+  license = credentials.license;
+  const licensed = credentials.licensed;
   const prepared = await prepareCluster(plan, resolved, emit);
   const { context, hadCluster, chartVersion } = prepared;
 
@@ -603,6 +675,8 @@ export async function createWorkspace({
       preset,
       envOverrides,
       licensed,
+      license,
+      receipt,
       issuer,
       ingressClass,
       namespace,
