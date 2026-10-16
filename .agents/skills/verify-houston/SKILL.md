@@ -46,6 +46,9 @@ proxy variables, or Houston overrides. Do not broaden that environment to make a
 check pass.
 
 Each CLI process has a 60-second timeout and completes before the next command.
+The runner retains at most 4 MiB from each of stdout and stderr. Output beyond
+either limit fails the command and triggers cleanup; discarded output cannot
+produce a passing receipt.
 Readiness means version and capability envelopes match `package.json`, followed
 by the expected missing-workspace refusal. There is no listener to bind and no
 persistent process or container to stop. Parallel runs require different evidence
@@ -103,8 +106,8 @@ strings or branch names, when choosing applicability.
 
 `commands.json` records actual argv and exit codes. Each command has separate
 stdout and stderr files. The helper scans each pair at the command-output boundary,
-including refusals and timeouts, then repeats the scan over every retained command
-receipt before it can report `PASS_SCOPED` or write `sha256.json`. `summary.json`
+including refusals and timeouts, then requires both regular files for every expected command label and repeats
+the scan over every retained command receipt before it can report `PASS_SCOPED` or write `sha256.json`. `summary.json`
 binds results to the revision, records the fixture immutability check, and names
 pending coverage. The helper reads retained files back after cleanup. Evidence bundles,
 when applicable, also survive under the evidence directory.

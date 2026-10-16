@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 
@@ -207,6 +208,7 @@ GROUP_CLEANUP_SECONDS = 5
 PIPE_DRAIN_SECONDS = 5
 POLL_SECONDS = 0.05
 PIPE_READ_BYTES = 64 * 1024
+COMMAND_OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024
 AUXILIARY_TIMEOUT_SECONDS = COMMAND_TIMEOUT_SECONDS
 
 
@@ -226,6 +228,8 @@ def wait_for_exit_unreaped(process, timeout_seconds, drain=None):
     require_unreaped_group_wait()
     deadline = time.monotonic() + timeout_seconds
     while True:
+        if drain is not None and drain.output_limit_exceeded:
+            raise RuntimeError('Command output exceeded its retained byte limit')
         try:
             result = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
         except ChildProcessError as error:
@@ -250,38 +254,37 @@ def linux_group_has_live_members(pgid, deadline):
     """Inspect only Linux process state and group IDs; never retain a process listing."""
     require_process_group_deadline(deadline)
     try:
-        entries = iter(Path('/proc').iterdir())
+        # scandir stays lazy on every supported Python version.
+        with os.scandir('/proc') as entries:
+            while True:
+                require_process_group_deadline(deadline)
+                try:
+                    entry = next(entries)
+                except StopIteration:
+                    require_process_group_deadline(deadline)
+                    return False
+                require_process_group_deadline(deadline)
+                if not entry.name.isdecimal():
+                    continue
+                require_process_group_deadline(deadline)
+                try:
+                    status = (Path(entry.path) / 'stat').read_bytes()
+                except FileNotFoundError:
+                    require_process_group_deadline(deadline)
+                    continue
+                require_process_group_deadline(deadline)
+                close = status.rfind(b')')
+                fields = status[close + 1:].split() if close >= 0 else []
+                if close < 0 or len(fields) < 3 or len(fields[0]) != 1:
+                    raise RuntimeError('Could not parse Linux process status')
+                try:
+                    member_pgid = int(fields[2])
+                except ValueError as error:
+                    raise RuntimeError('Could not parse Linux process group') from error
+                if member_pgid == pgid and fields[0] != b'Z':
+                    return True
     except OSError as error:
         raise RuntimeError('Could not inspect Linux process status') from error
-    while True:
-        require_process_group_deadline(deadline)
-        try:
-            entry = next(entries)
-        except StopIteration:
-            return False
-        except OSError as error:
-            raise RuntimeError('Could not inspect Linux process status') from error
-        require_process_group_deadline(deadline)
-        if not entry.name.isdecimal():
-            continue
-        require_process_group_deadline(deadline)
-        try:
-            status = (entry / 'stat').read_bytes()
-        except FileNotFoundError:
-            continue
-        except OSError as error:
-            raise RuntimeError('Could not inspect Linux process status') from error
-        require_process_group_deadline(deadline)
-        close = status.rfind(b')')
-        fields = status[close + 1:].split() if close >= 0 else []
-        if close < 0 or len(fields) < 3 or len(fields[0]) != 1:
-            raise RuntimeError('Could not parse Linux process status')
-        try:
-            member_pgid = int(fields[2])
-        except ValueError as error:
-            raise RuntimeError('Could not parse Linux process group') from error
-        if member_pgid == pgid and fields[0] != b'Z':
-            return True
 
 
 def group_has_live_members(pgid, leader_exited, deadline):
@@ -324,7 +327,7 @@ def force_and_confirm_process_group(process, pgid, leader_exited, drain):
     while True:
         try:
             if not leader_exited:
-                leader_exited = wait_for_exit_unreaped(process, 0, drain)
+                leader_exited = wait_for_exit_unreaped(process, 0)
             if leader_exited and not group_has_live_members(pgid, leader_exited, deadline):
                 return leader_exited, errors
         except Exception as error:
@@ -346,6 +349,7 @@ class PipeDrain:
     def __init__(self, process):
         self.values = {'stdout': bytearray(), 'stderr': bytearray()}
         self.errors = []
+        self.output_limit_exceeded = False
         self.selector = selectors.DefaultSelector()
         self.streams = [('stdout', process.stdout), ('stderr', process.stderr)]
         self.open_fds = set()
@@ -385,7 +389,12 @@ class PipeDrain:
                 self.unregister(key.fd)
                 continue
             if chunk:
-                self.values[key.data].extend(chunk)
+                remaining = COMMAND_OUTPUT_LIMIT_BYTES - len(self.values[key.data])
+                self.values[key.data].extend(chunk[:remaining])
+                if len(chunk) > remaining:
+                    if not self.output_limit_exceeded:
+                        self.errors.append('Command output exceeded its retained byte limit')
+                    self.output_limit_exceeded = True
             else:
                 self.unregister(key.fd)
 
@@ -532,23 +541,74 @@ def run_nonposix_command(command, cwd, env, stdin, timeout_seconds, term_grace_s
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    timed_out = False
+    values = {'stdout': bytearray(), 'stderr': bytearray()}
     cleanup_errors = []
-    try:
-        stdout, stderr = process.communicate(input=stdin, timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        process.terminate()
+    overflow = threading.Event()
+
+    def collect(name, stream):
         try:
-            stdout, stderr = process.communicate(timeout=term_grace_seconds)
-        except subprocess.TimeoutExpired:
+            while True:
+                chunk = os.read(stream.fileno(), PIPE_READ_BYTES)
+                if not chunk:
+                    return
+                remaining = COMMAND_OUTPUT_LIMIT_BYTES - len(values[name])
+                values[name].extend(chunk[:remaining])
+                if len(chunk) > remaining:
+                    overflow.set()
+        except Exception:
+            cleanup_errors.append(f'Could not read command {name}')
+
+    def feed():
+        try:
+            process.stdin.write(bytes_from(stdin))
+            process.stdin.flush()
+        except BrokenPipeError:
+            pass
+        except Exception:
+            cleanup_errors.append('Could not write command stdin')
+        finally:
+            close_stdin(process.stdin, cleanup_errors)
+
+    readers = [threading.Thread(target=collect, args=(name, stream), daemon=True)
+               for name, stream in (('stdout', process.stdout), ('stderr', process.stderr))]
+    workers = readers + ([threading.Thread(target=feed, daemon=True)] if stdin is not None else [])
+    for worker in workers:
+        worker.start()
+    deadline = time.monotonic() + timeout_seconds
+    timed_out = False
+    try:
+        while process.poll() is None:
+            remaining = deadline - time.monotonic()
+            if overflow.is_set() or remaining <= 0:
+                timed_out = remaining <= 0
+                process.terminate()
+                try:
+                    process.wait(timeout=term_grace_seconds)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=GROUP_CLEANUP_SECONDS)
+                break
+            overflow.wait(min(POLL_SECONDS, remaining))
+    except Exception:
+        cleanup_errors.append('Could not stop non-POSIX command')
+        try:
             process.kill()
-            try:
-                stdout, stderr = process.communicate(timeout=GROUP_CLEANUP_SECONDS)
-            except subprocess.TimeoutExpired as error:
-                cleanup_errors.append(f'Could not stop non-POSIX command: {error}')
-                stdout, stderr = b'', b''
-    return {'stdout': bytes_from(stdout), 'stderr': bytes_from(stderr),
+            process.wait(timeout=GROUP_CLEANUP_SECONDS)
+        except Exception:
+            cleanup_errors.append('Could not reap non-POSIX command')
+    drain_deadline = time.monotonic() + PIPE_DRAIN_SECONDS
+    for worker in workers:
+        worker.join(max(0, drain_deadline - time.monotonic()))
+    for worker, stream in zip(readers, (process.stdout, process.stderr)):
+        if worker.is_alive():
+            cleanup_errors.append('Command output pipes did not close after direct-child cleanup')
+        else:
+            stream.close()
+    if any(worker.is_alive() for worker in workers[len(readers):]):
+        cleanup_errors.append('Command stdin did not close after direct-child cleanup')
+    if overflow.is_set():
+        cleanup_errors.append('Command output exceeded its retained byte limit')
+    return {'stdout': bytes(values['stdout']), 'stderr': bytes(values['stderr']),
             'exit': process.returncode, 'timed_out': timed_out,
             'timeout_seconds': timeout_seconds, 'cleanup_errors': cleanup_errors}
 
@@ -606,6 +666,7 @@ def main():
     fixture_root = None
     fixture_before = None
     retained_bundle_files = []
+    expected_receipt_labels = []
     failure = None
     completed = False
     cleanup_errors = []
@@ -693,12 +754,13 @@ def main():
         def run(label, argv, expected=0, schema=None, ok=True, overrides=None, stdin=None):
             command = [str(root / 'bin' / 'houston'), *argv]
             child_env = dict(env, **(overrides or {}))
+            expected_receipt_labels.append(label)
             result = run_command(command, root, child_env, stdin=stdin)
             stdout = result['stdout']
             stderr = result['stderr']
             (out / f'{label}.stdout').write_bytes(stdout)
             (out / f'{label}.stderr').write_bytes(stderr)
-            receipt = {'argv': ['bin/houston', *argv], 'exit': result['exit']}
+            receipt = {'label': label, 'argv': ['bin/houston', *argv], 'exit': result['exit']}
             scan_error = None
             try:
                 scan_command_receipts(sentinel, out, label)
@@ -830,6 +892,8 @@ def main():
                     'Bundle response listed an incomplete or stale file set')
             require(Path(bundle_payload['bundle']['path']).resolve() == bundle.resolve(),
                     'Bundle response named another destination')
+            require(stat.S_ISDIR(bundle.lstat().st_mode),
+                    'Bundle root must be a real directory, not a symlink')
             require(set(tree_manifest(bundle)) == {'.', *expected_bundle_files},
                     'Bundle must be a self-contained three-file attachment')
             require(not no_special_entries(bundle), 'Bundle contains a symlink or special entry')
@@ -993,6 +1057,9 @@ def main():
         if 'onboard' not in commands:
             summary['features']['onboarding'] = 'PENDING: onboard command absent'
         else:
+            require(commands['onboard']['json'] is True
+                    and commands['onboard'].get('schema') == 'houston.onboard.v1',
+                    'Advertised onboard lacks the required JSON/schema contract')
             # These answers belong only to this run's disposable home. Nothing here
             # grants authority in the operator's home or invokes an engine action.
             config_file = Path(env['HOUSTON_HOME']) / 'config.yaml'
@@ -1185,6 +1252,12 @@ def main():
         summary['scratch_removed'] = not scratch.exists()
         if not summary['scratch_removed']:
             cleanup_errors.append('Verifier scratch remains after cleanup')
+        if retained_bundle_files:
+            try:
+                require(stat.S_ISDIR(bundle.lstat().st_mode),
+                        'Retained bundle root must remain a real directory')
+            except Exception as error:
+                cleanup_errors.append(str(error))
         for file, digest in retained_bundle_files:
             try:
                 require_regular_file(file, f'Retained bundle attachment is not a regular file: {file.name}')
@@ -1193,6 +1266,8 @@ def main():
             except Exception as error:
                 cleanup_errors.append(str(error))
         try:
+            require(expected_receipt_labels, 'No command receipts were expected')
+            scan_command_receipts(sentinel, out, *expected_receipt_labels)
             scanned_receipts = scan_command_receipts(sentinel, out)
             summary['receipt_scan'] = {
                 'result': 'PASS',

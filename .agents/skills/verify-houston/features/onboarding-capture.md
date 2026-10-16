@@ -1,6 +1,7 @@
 # Onboarding and capture
 
-When `onboard` is advertised, the helper creates synthetic legacy configuration
+When `onboard` is advertised, require `json: true` and schema
+`houston.onboard.v1` in capabilities before driving it. The helper creates synthetic legacy configuration
 inside its disposable home. It runs `onboard --json`, refuses an unknown grant
 without changing that file, then drives `onboard grant owned-cluster --json`
 and `onboard revoke owned-cluster --json`. A separate status process must read
