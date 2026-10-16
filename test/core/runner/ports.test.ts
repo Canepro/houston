@@ -42,6 +42,13 @@ describe('which ports a workspace has claimed', () => {
   it('counts the instance block and every recorded side-service port', async () => {
     await record('plain', 3000);
     await record('multi', 4000, { instances: 3 });
+    await record('kube', 4500, {
+      runtime: 'kubernetes',
+      deployment: 'microservices',
+      instances: 3,
+      sidecar_ports: [8025],
+      monitoring_ports: [9090],
+    });
     await record('sided', 5000, {
       sidecar_ports: [8082, '8083'],
       monitoring_ports: [9090, 5050],
@@ -53,6 +60,10 @@ describe('which ports a workspace has claimed', () => {
     // A multi-instance repro publishes the load balancer plus one port per instance.
     expect([4000, 4001, 4002, 4003].every((port) => claimed.has(port))).toBe(true);
     expect(claimed.has(4004)).toBe(false);
+    // Chart replicas share one port-forward. Their count must not reserve Compose-only
+    // hostPort + N slots, while explicit side and monitoring publications remain claimed.
+    expect([4500, 8025, 9090].every((port) => claimed.has(port))).toBe(true);
+    expect([4501, 4502, 4503].every((port) => !claimed.has(port))).toBe(true);
     expect([5000, 8082, 8083, 9090, 5050, 443].every((port) => claimed.has(port))).toBe(true);
   });
 

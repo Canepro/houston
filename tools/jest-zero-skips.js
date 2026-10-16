@@ -93,7 +93,9 @@ const ROOT = path.resolve(__dirname, '..');
 // human consumers. The legacy IPv6 repair adds one direct assertion for each renderer.
 // Four SSH regressions cover unused JSON tunnel overrides, Compose instance forwards, and
 // Kubernetes replica counts that do not create more application forwards.
-const FLOOR = 4522;
+// Five R3 access regressions cover reused workspace binds, advertised origins, and Kubernetes
+// replica counts across the CLI, inspection, and recorded-port consumers.
+const FLOOR = 4527;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

@@ -132,6 +132,17 @@ describe('SSH access handoff', () => {
     expect(answer?.tunnel_command).toBe(
       'ssh -N -o ExitOnForwardFailure=yes -p 2222 -L 127.0.0.1:3123:127.0.0.1:3123 -- operator@203.0.113.8',
     );
+    const clientFallback = handoff(workspace(), {
+      // SSH_CONNECTION is present but its server port cannot be used. SSH_CLIENT still
+      // carries the port that accepted this session.
+      SSH_CONNECTION: '198.51.100.20 55100 203.0.113.8 70000',
+      SSH_CLIENT: '198.51.100.20 55100 2222',
+      HOUSTON_SSH_HOST: 'ssh-proof.invalid',
+      USER: 'operator',
+    });
+    expect(clientFallback?.tunnel_command).toBe(
+      'ssh -N -o ExitOnForwardFailure=yes -p 2222 -L 127.0.0.1:3123:127.0.0.1:3123 -- operator@ssh-proof.invalid',
+    );
     expect(() =>
       handoff(workspace(), { SSH_TTY: '/dev/ttys001', HOUSTON_SSH_PORT: '70000' }),
     ).toThrow('HOUSTON_SSH_PORT must be an integer between 1 and 65535');
@@ -241,6 +252,18 @@ describe('SSH access handoff', () => {
     expect(handoff(workspace({ publicUrl: 'https://rc.example.test' }), {})?.public_url).toBe(
       'https://rc.example.test',
     );
+  });
+
+  it('names an overridden advertised origin instead of inventing a loopback ROOT_URL', () => {
+    const answer = handoff(workspace({ extra: { advertised_url: 'https://chat.example.test' } }), {
+      SSH_CONNECTION: '198.51.100.20 55100 203.0.113.8 22',
+      USER: 'operator',
+      HOUSTON_SSH_LOCAL_PORT: '4311',
+    });
+    expect(answer?.browser_url).toBe('http://127.0.0.1:4311');
+    expect(answer?.note).toContain("Rocket.Chat's ROOT_URL is https://chat.example.test");
+    expect(answer?.note).toContain('absolute links');
+    expect(answer?.note).not.toContain('still names port 3123');
   });
 
   it('refuses a bad session override before a create, and ignores one outside SSH', () => {

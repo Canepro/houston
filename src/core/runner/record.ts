@@ -60,6 +60,22 @@ export interface Metadata {
 }
 
 /**
+ * Whether `extra.instances` describes Docker Compose's directly published instance ports.
+ *
+ * Kubernetes records the chart replica count under the same historical key, but its
+ * application reaches the host through one port-forward. An explicit runtime we do not
+ * recognize must not acquire Docker-only port claims from that ambiguous count. Docker's
+ * own count remains authoritative for older records, including the historical form that
+ * recorded a monolith deployment beside multi-instance data; missing topology is legacy
+ * Compose too.
+ */
+export function hasComposeInstancePorts(meta: Pick<Metadata, 'extra'>): boolean {
+  const runtime =
+    typeof meta.extra.runtime === 'string' ? meta.extra.runtime.trim().toLowerCase() : '';
+  return runtime === '' || runtime === 'docker';
+}
+
+/**
  * The record's fields in their established order, with the on-disk key beside the
  * property. ORDER IS PART OF THE FORMAT: a record is written in exactly this order, and a
  * file whose keys are shuffled is a needless diff against every record earlier releases

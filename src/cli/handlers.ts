@@ -40,6 +40,7 @@ import type * as NotesNS from '../core/lifecycle/notes';
 import type * as RcapiNS from '../core/rcapi';
 import type * as RunnerEngineNS from '../core/runner/engine';
 import type * as RunnerQueriesNS from '../core/runner/queries';
+import type * as RunnerPathsNS from '../core/runner/paths';
 import type * as LocksNS from '../core/runner/locks';
 import type * as RecordNS from '../core/runner/record';
 import type * as ScaleseedNS from '../core/scaleseed';
@@ -788,6 +789,41 @@ async function confirmDestruction(
   }
 }
 
+/**
+ * The bind relevant to a human `up` handoff preflight.
+ *
+ * Reusing a workspace keeps its recorded bind even when today's config or flags differ. The
+ * lookup mirrors create's typed-name ownership resolution, but it remains read-only and
+ * falls back to the requested/configured bind for a new, incomplete, forced, or fresh run.
+ */
+async function handoffBindForUp(o: Values): Promise<string> {
+  const requested =
+    text(o.bind) || toText((require('../lib/config') as typeof ConfigNS).loadConfig().bind_host);
+  if (bool(o.force) || bool(o.fresh)) return requested;
+
+  const audit = require('../core/audit') as typeof AuditNS;
+  const naming = require('../core/lifecycle/naming') as typeof NamingNS;
+  const ownership = require('../core/lifecycle/ownership') as typeof OwnershipNS;
+  const paths = require('../core/runner/paths') as typeof RunnerPathsNS;
+  const record = require('../core/runner/record') as typeof RecordNS;
+  const types = require('../core/lifecycle/types') as typeof LifecycleTypesNS;
+  const request = types.createReq({
+    version: text(o.version),
+    preset: strings(o.preset).length > 0 ? compositeName(strings(o.preset)) : '',
+    name: text(o.name),
+    actor: audit.actor(),
+  });
+  await ownership.claimTypedName(request);
+  const name = naming.deriveFor(request);
+  if (!name || !(await paths.exists(name))) return requested;
+  try {
+    const bind = (await record.readMeta(name)).extra.bind_host;
+    return typeof bind === 'string' && bind.trim() !== '' ? bind.trim() : requested;
+  } catch {
+    return requested;
+  }
+}
+
 /** Name every destructive target before asking once. */
 async function confirmPrune(
   io: CliIo,
@@ -849,12 +885,9 @@ async function dispatch(
       // Only human output consumes a handoff. Refuse invalid overrides before creating
       // its loopback workspace, but leave JSON automation independent of tunnel advice.
       if (!active()) {
-        const bindAsked =
-          text(o.bind) ||
-          toText((require('../lib/config') as typeof ConfigNS).loadConfig().bind_host);
         (require('../core/lifecycle/access') as typeof AccessNS).validateEnvironment(
           process.env,
-          bindAsked,
+          await handoffBindForUp(o),
         );
       }
       return await runUp(invocation, io);
@@ -2363,7 +2396,7 @@ function summaryPanel(
   rows.push(...extraRows);
   writePanel(io, meta.name, rows);
   const instances = meta.extra.instances;
-  if (isTruthy(instances)) {
+  if (record.hasComposeInstancePorts(meta) && isTruthy(instances)) {
     io.writeOut(`  instances (${toTextAny(instances)}, load-balanced by Traefik):\n`);
     const count = toInt(instances);
     for (let at = 1; at <= count; at += 1) {

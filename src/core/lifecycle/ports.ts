@@ -11,7 +11,7 @@ import { type Preset } from '../../lib/presets/types';
 import { reproLock } from '../runner/locks';
 import * as paths from '../runner/paths';
 import * as portSeam from '../runner/ports';
-import { type Metadata, listMeta, readMeta } from '../runner/record';
+import { hasComposeInstancePorts, type Metadata, listMeta, readMeta } from '../runner/record';
 
 import { INTERACTIVE_LOCK_WAIT } from './types';
 
@@ -44,7 +44,7 @@ function claimedPorts(meta: Metadata): Set<number> {
   const own = new Set<number>([meta.hostPort]);
   const extra = meta.extra;
   const n = extra.instances;
-  if (typeof n === 'number' && Number.isInteger(n) && n > 1) {
+  if (hasComposeInstancePorts(meta) && typeof n === 'number' && Number.isInteger(n) && n > 1) {
     for (let i = 1; i <= n; i += 1) own.add(meta.hostPort + i);
   }
   // tls_ports too, or `up --force --https` on an existing repro would not recognise its

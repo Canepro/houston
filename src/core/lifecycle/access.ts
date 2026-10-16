@@ -10,7 +10,7 @@
 import { hostname } from 'node:os';
 
 import { ValidationError } from '../../lib/errors';
-import type { Metadata } from '../runner/record';
+import { hasComposeInstancePorts, type Metadata } from '../runner/record';
 
 export interface AccessHandoff {
   readonly mode: 'local' | 'remote_ssh';
@@ -76,6 +76,12 @@ function connectionFields(env: AccessEnvironment): string[] {
   return fields.length === 4 ? fields : [];
 }
 
+/** `SSH_CLIENT` is "client-ip client-port server-port". */
+function clientFields(env: AccessEnvironment): string[] {
+  const fields = (env.SSH_CLIENT ?? '').trim().split(/\s+/u);
+  return fields.length === 3 ? fields : [];
+}
+
 function remoteHost(env: AccessEnvironment): string {
   return trimmed(
     env.HOUSTON_SSH_HOST,
@@ -92,12 +98,28 @@ function remoteUser(env: AccessEnvironment): string {
 
 /**
  * The port the SSH server answers on. `ssh` defaults to 22, so a session that came in on
- * another port would be told to reconnect on one that is not listening; the fourth field
- * of SSH_CONNECTION is where the server told us.
+ * another port would be told to reconnect on one that is not listening. Prefer an explicit
+ * override, then SSH_CONNECTION's fourth field, then SSH_CLIENT's third field before 22.
  */
 function remoteSshPort(env: AccessEnvironment): number {
-  const raw = trimmed(env.HOUSTON_SSH_PORT, connectionFields(env)[3]);
-  if (raw === '') return 22;
+  const override = trimmed(env.HOUSTON_SSH_PORT);
+  if (override !== '') return checkedSshPort(override);
+  for (const candidate of [connectionFields(env)[3], clientFields(env)[2]]) {
+    const port = usableSshPort(candidate);
+    if (port !== null) return port;
+  }
+  return 22;
+}
+
+function usableSshPort(raw: string | undefined): number | null {
+  const port = Number(raw);
+  if (!/^\d+$/u.test(raw ?? '') || !Number.isSafeInteger(port) || port < 1 || port > 65535) {
+    return null;
+  }
+  return port;
+}
+
+function checkedSshPort(raw: string): number {
   const port = Number(raw);
   if (!/^\d+$/u.test(raw) || !Number.isSafeInteger(port) || port < 1 || port > 65535) {
     throw new ValidationError('HOUSTON_SSH_PORT must be an integer between 1 and 65535');
@@ -169,16 +191,6 @@ function bindOf(meta: AccessRecord, resolvedBindHost: string): string {
   return text(extraOf(meta).bind_host).trim();
 }
 
-/** Whether this record has the Compose topology that publishes direct instance ports. */
-function composeMultiInstance(extra: Record<string, unknown>): boolean {
-  const runtime = text(extra.runtime).trim().toLowerCase();
-  // An absent runtime/deployment is a pre-topology Compose record. New records carry the
-  // canonical values. Unknown runtimes must not gain forwards from an ambiguous count.
-  if (runtime !== '' && runtime !== 'docker') return false;
-  const deployment = text(extra.deployment).trim().toLowerCase();
-  return deployment === '' || deployment === 'multi-instance';
-}
-
 /**
  * The workspace's recorded browser-facing side ports, as numbers: the preset's
  * (phpLDAPadmin, Keycloak, Mailpit), monitoring's (Prometheus, Grafana), and the
@@ -194,7 +206,7 @@ function sidePorts(meta: AccessRecord, remotePort: number): number[] {
   // the CLI summary. Kubernetes keeps requested chart replicas in `instances` too, but it
   // publishes one application port-forward, so only its explicitly recorded ports belong here.
   const instances = Number(extra.instances);
-  if (composeMultiInstance(extra) && Number.isSafeInteger(instances) && instances > 1) {
+  if (hasComposeInstancePorts(meta) && Number.isSafeInteger(instances) && instances > 1) {
     for (let at = 1; at <= instances && remotePort + at <= 65535; at += 1) {
       recorded.push(remotePort + at);
     }
@@ -217,6 +229,7 @@ export function handoff(
 
   const remotePort = Number(meta.hostPort);
   const publicUrl = text(meta.publicUrl).trim() || null;
+  const advertisedUrl = text(extraOf(meta).advertised_url).trim() || null;
   const sides = sidePorts(meta, remotePort);
   if (!sshSession(env)) {
     return {
@@ -245,6 +258,7 @@ export function handoff(
   const user = safeDestinationPart(remoteUser(env), 'HOUSTON_SSH_USER');
   const host = safeDestinationPart(remoteHost(env), 'HOUSTON_SSH_HOST');
   const target = forwardTarget(bind);
+  const browserUrl = `http://127.0.0.1:${String(selectedPort)}`;
   const destination = shellWord(`${user}@${host}`);
   // One -L per forward; side services keep their port numbers so the URLs a preset
   // prints and the redirects it configured (SAML, OIDC) stay right through the tunnel.
@@ -271,7 +285,12 @@ export function handoff(
         'so their printed URLs work through the tunnel.',
     );
   }
-  if (selectedPort !== remotePort) {
+  if (advertisedUrl !== null) {
+    notes.push(
+      `Rocket.Chat's ROOT_URL is ${advertisedUrl}: absolute links (invitations, password resets, ` +
+        `OAuth callbacks) use that origin rather than the tunnel's ${browserUrl}.`,
+    );
+  } else if (selectedPort !== remotePort) {
     notes.push(
       `Rocket.Chat's ROOT_URL still names port ${String(remotePort)}: absolute links it ` +
         '(invitations, password resets, OAuth callbacks) point at ' +
@@ -291,7 +310,7 @@ export function handoff(
     host_port: remotePort,
     local_port: selectedPort,
     side_ports: sides,
-    browser_url: `http://127.0.0.1:${String(selectedPort)}`,
+    browser_url: browserUrl,
     public_url: publicUrl,
     tunnel_command: command,
     note: notes.join(' '),

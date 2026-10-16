@@ -43,6 +43,31 @@ describe('picking a host port', () => {
   });
 });
 
+describe('recorded port claims', () => {
+  it('does not turn Kubernetes replicas into Compose host-port claims', async () => {
+    const record = require('../../../src/core/runner/record') as typeof RecordNS;
+    const ports = require('../../../src/core/lifecycle/ports') as typeof PortsNS;
+    await record.write(
+      'kube-ports',
+      'services: {}\n',
+      record.metadata({
+        name: 'kube-ports',
+        project: 'houston-kube-ports',
+        hostPort: 4200,
+        extra: {
+          runtime: 'kubernetes',
+          deployment: 'microservices',
+          instances: 3,
+          sidecar_ports: [18181],
+          monitoring_ports: [19190],
+        },
+      }),
+    );
+
+    expect(await ports.ownPorts('kube-ports')).toEqual(new Set([4200, 18181, 19190]));
+  });
+});
+
 describe("an explicit --port beside the presets' own ports", () => {
   it("refuses an instance port that lands on one of the workspace's side ports", async () => {
     jest.resetModules();

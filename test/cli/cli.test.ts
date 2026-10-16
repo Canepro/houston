@@ -293,9 +293,89 @@ describe("a multi-instance workspace's info", () => {
     expect(row).not.toContain('multi-instance');
     expect(out).toContain('instances (2');
   });
+
+  it('does not print fictional direct instance URLs for Kubernetes replicas', async () => {
+    const record = require('../../src/core/runner/record') as typeof RecordNS;
+    await record.writeRecord(
+      'kube-mi',
+      record.metadata({
+        name: 'kube-mi',
+        project: 'houston-kube-mi',
+        preset: 'default',
+        hostPort: 4300,
+        extra: { runtime: 'kubernetes', deployment: 'microservices', instances: 3 },
+      }),
+    );
+    let out = '';
+    const io = { writeOut: (text: string) => void (out += text), writeErr: () => undefined };
+    const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
+
+    expect(
+      await runCli(['info', '--name', 'kube-mi'], { io, execute: handlers.createExecutor(io) }),
+    ).toBe(0);
+    expect(out).not.toContain('instances (3');
+    expect(out).not.toContain('rocketchat-1: http://localhost:4301');
+  });
 });
 
 describe('SSH loopback guidance', () => {
+  it('uses an existing workspace bind before rejecting unused tunnel overrides', async () => {
+    const record = require('../../src/core/runner/record') as typeof RecordNS;
+    await record.writeRecord(
+      'ssh-public',
+      record.metadata({
+        name: 'ssh-public',
+        project: 'houston-ssh-public',
+        rcVersion: '8.5.1',
+        rcImage: 'i',
+        mongoTag: '8.0',
+        mongoFlavor: 'official',
+        preset: 'default',
+        rootUrl: 'http://localhost:3123',
+        hostPort: 3123,
+        versionSource: 'map',
+        extra: { bind_host: '0.0.0.0' },
+      }),
+    );
+    const keys = ['SSH_CONNECTION', 'SSH_CLIENT', 'SSH_TTY', 'HOUSTON_SSH_LOCAL_PORT'] as const;
+    const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    try {
+      delete process.env.SSH_CONNECTION;
+      delete process.env.SSH_CLIENT;
+      process.env.SSH_TTY = '/dev/ttys001';
+      process.env.HOUSTON_SSH_LOCAL_PORT = '80';
+      jest.resetModules();
+      jest.doMock('../../src/core/lifecycle/create-docker', () => ({
+        ...jest.requireActual<object>('../../src/core/lifecycle/create-docker'),
+        createRepro: async () => ({ name: 'ssh-public', waited: true, booted_s: 1 }),
+      }));
+      const app = require('../../src/cli/app') as typeof AppNS;
+      const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
+      let stdout = '';
+      let stderr = '';
+      const io = {
+        writeOut: (text: string) => void (stdout += text),
+        writeErr: (text: string) => void (stderr += text),
+      };
+
+      expect(
+        await app.runCli(['up', '--version', '8.5.1', '--name', 'ssh-public', '--offline'], {
+          execute: handlers.createExecutor(io),
+          io,
+        }),
+      ).toBe(0);
+      expect(stderr).toBe('');
+      expect(stdout).not.toContain('remote access');
+    } finally {
+      jest.dontMock('../../src/core/lifecycle/create-docker');
+      for (const key of keys) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
+      jest.resetModules();
+    }
+  });
+
   it('prints the tunnel only when human info verifies a loopback bind', async () => {
     const record = require('../../src/core/runner/record') as typeof RecordNS;
     await record.writeRecord(
