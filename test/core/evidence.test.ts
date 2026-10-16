@@ -1554,6 +1554,15 @@ describe('the bundle', () => {
         '  curllist:',
         '    image: example',
         '    command: [curl, -u, "admin:CurlListSentinel", https://x]',
+        '  embeddedlist:',
+        '    image: example',
+        `    environment: { SPEC: '{"command":["sh","-c","client --password EmbeddedListSentinel"]}' }`,
+        '  dash:',
+        '    image: example',
+        '    command: client --password -DashSentinel',
+        '  pwfile:',
+        '    image: example',
+        '    command: client --password-file=/run/secrets/db',
         '  login:',
         '    image: example',
         '    command: docker login --password-stdin registry.example.test',
@@ -1566,6 +1575,9 @@ describe('the bundle', () => {
         'x-copy: QuotedSentinel',
         'x-backtick-copy: BacktickSentinel',
         'x-registry: registry.example.test',
+        'x-dash-copy: -DashSentinel',
+        'x-embedded-copy: EmbeddedListSentinel',
+        'x-mount-path: /run/secrets/db',
         'x-port: 8080:80',
         'x-control: readable',
         '',
@@ -1586,6 +1598,8 @@ describe('the bundle', () => {
       'EmbeddedSentinel',
       'CurlUserSentinel',
       'CurlListSentinel',
+      'DashSentinel',
+      'EmbeddedListSentinel',
     ]) {
       expect(compose).not.toContain(sentinel);
     }
@@ -1596,6 +1610,8 @@ describe('the bundle', () => {
     // A mode switch takes no value: the registry stays readable outside the withheld command.
     expect(pick(parsed, 'services', 'login', 'command')).toBe('********');
     expect(parsed['x-registry']).toBe('registry.example.test');
+    // A mode switch in `--flag=value` form names a path, not a secret.
+    expect(parsed['x-mount-path']).toBe('/run/secrets/db');
     // A port or an option after -p is the next argument; newlines are never masked.
     // A user flag beside -p withholds the command line, since a short -p value can be either a
     // port or a password; the port spelling elsewhere stays readable.

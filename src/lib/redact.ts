@@ -267,9 +267,21 @@ export function discoverTextSecrets(
         if (secret) add(decoded);
         // A command string with a credential flag is attached whole: its spelling as decoded
         // text and as the JSON-escaped text the artifact holds.
-        if (argv && commandCarriesCredential(decoded)) {
+        if (argv && /\s/u.test(decoded) && commandCarriesCredential(decoded)) {
           add(decoded);
           add(token.slice(1, -1));
+          // Best effort for copies elsewhere: the word after a value-taking credential flag.
+          const words = decoded.split(/[\s'"`;&|()<>]+/u).filter((word) => word !== '');
+          words.forEach((word, index) => {
+            const next = words[index + 1] ?? '';
+            if (
+              valueTakingCredentialFlag(word) &&
+              next !== '' &&
+              !/^--[A-Za-z][\w-]*$/u.test(next)
+            ) {
+              add(next);
+            }
+          });
         }
         discoverTextSecrets(decoded, add, level + 1);
         return at + token.length;
@@ -306,7 +318,8 @@ export function discoverTextSecrets(
           i += jsonToken(JSON_SPACE, text, i).length;
         }
         const itemAt = i;
-        i = walk(i, member, level + 1, list);
+        // The items of an argument array are argument strings too: `["sh", "-c", "..."]`.
+        i = walk(i, member, level + 1, open === '[' ? argv : list);
         if (argv && open === '[') {
           afterFlag =
             text[itemAt] === '"' &&
@@ -321,7 +334,10 @@ export function discoverTextSecrets(
   const equals = text.indexOf('=');
   if (equals > 0 && !text.slice(0, equals).includes('://')) {
     const value = text.slice(equals + 1);
-    if (credentialKey(text.slice(0, equals))) add(value);
+    // `--password-file=/run/secrets/x` names where a secret is, not the secret.
+    const lastWord = text.slice(0, equals).split(/\s+/u).pop() ?? '';
+    const modeSwitch = credentialFlag(lastWord) && !valueTakingCredentialFlag(lastWord);
+    if (credentialKey(text.slice(0, equals)) && !modeSwitch) add(value);
     discoverTextSecrets(value, add, depth + 1);
     return;
   }

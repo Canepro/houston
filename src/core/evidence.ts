@@ -40,7 +40,6 @@ import { pathExpandUser } from '../lib/home';
 import {
   ARGUMENT_LIST_KEYS,
   commandCarriesCredential,
-  credentialFlag,
   credentialFlagWord,
   httpUserPassword,
   valueTakingCredentialFlag,
@@ -730,7 +729,8 @@ function userArgument(word: string): boolean {
  * Elsewhere `-p` is a port or `mkdir -p`, and masking those would erase evidence.
  */
 function credentialArgument(flag: string, value: string, userGiven: boolean): boolean {
-  if (valueTakingCredentialFlag(flag)) return value !== '' && !value.startsWith('-');
+  // A value may start with `-`; only a bare long option is the next argument instead.
+  if (valueTakingCredentialFlag(flag)) return value !== '' && !/^--[A-Za-z][\w-]*$/u.test(value);
   // A following option or a port is the next argument, not a password `-p` was asked for.
   return (
     flag === '-p' && userGiven && value !== '' && !value.startsWith('-') && !portSpelling(value)
@@ -830,7 +830,7 @@ function discoverCommandText(text: string, add: (value: string) => void, depth =
       const word = command[index] as ShellWord;
       // `--password=value` carries its own value.
       const equals = word.text.indexOf('=');
-      if (equals > 0 && credentialFlag(word.text.slice(0, equals))) {
+      if (equals > 0 && valueTakingCredentialFlag(word.text.slice(0, equals))) {
         add(word.text.slice(equals + 1));
       }
       const next = command[index + 1];
