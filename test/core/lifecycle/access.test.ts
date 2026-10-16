@@ -107,6 +107,24 @@ describe('SSH access handoff', () => {
     }
   });
 
+  it('passes a bracketed IPv6 SSH host to OpenSSH bare', () => {
+    const destination = (host: string) =>
+      handoff(workspace(), {
+        SSH_TTY: '/dev/ttys001',
+        USER: 'operator',
+        HOUSTON_SSH_HOST: host,
+      })?.tunnel_command?.split(' -- ')[1];
+    expect(
+      ['[2001:db8::1]', '2001:db8::1', '[fe80::1%en0]', '[not-ip]', 'server'].map(destination),
+    ).toEqual([
+      'operator@2001:db8::1',
+      'operator@2001:db8::1',
+      'operator@fe80::1%en0',
+      "'operator@[not-ip]'",
+      'operator@server',
+    ]);
+  });
+
   it('keeps option-shaped overrides after the SSH option terminator', () => {
     expect(
       handoff(workspace(), {

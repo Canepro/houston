@@ -86,13 +86,22 @@ function clientFields(env: AccessEnvironment): string[] {
 }
 
 function remoteHost(env: AccessEnvironment): string {
-  return trimmed(
-    env.HOUSTON_SSH_HOST,
-    connectionFields(env)[2],
-    env.HOSTNAME,
-    hostname(),
-    'remote-host',
+  // OpenSSH reads `user@[::1]` as a hostname with brackets in it; an IPv6 destination is bare.
+  return unbracketed(
+    trimmed(
+      env.HOUSTON_SSH_HOST,
+      connectionFields(env)[2],
+      env.HOSTNAME,
+      hostname(),
+      'remote-host',
+    ),
   );
+}
+
+/** `[2001:db8::1]` as `2001:db8::1`; any other host unchanged. */
+function unbracketed(host: string): string {
+  const inner = /^\[([0-9A-Fa-f:.]+(?:%[^\]]+)?)\]$/u.exec(host)?.[1];
+  return inner !== undefined && inner.includes(':') ? inner : host;
 }
 
 function remoteUser(env: AccessEnvironment): string {
