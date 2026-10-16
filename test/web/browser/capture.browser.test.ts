@@ -541,6 +541,79 @@ describe('scripted capture in a real browser', () => {
   );
 
   test.each([
+    ['replaced control', 'replace', 'input[name=token]'],
+    [
+      'replaced control found through a Playwright selector',
+      'replace',
+      'xpath=//input[@name="token"]',
+    ],
+    ['control on a later page', 'navigate', 'input[name=token]'],
+  ])('keeps the mask on a %s for the rest of the capture', async (_label, mode, selector) => {
+    const control =
+      '<input name="token" style="width:600px;height:70px;font:40px monospace;color:rgb(0,160,0);background:white">';
+    server = createServer((request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      if (request.url === '/second') {
+        response.end(
+          `<!doctype html><body style="margin:0">${control.replace('<input', '<input value="prefilled-clear-text"')}<p id="second-ready">Second page</p></body>`,
+        );
+        return;
+      }
+      response.end(`<!doctype html><body style="margin:0">
+      <div id="slot">${control}</div>
+      <button id="replace">Replace control</button><a id="next" href="/second">Next page</a>
+      <p id="done" hidden>Replaced</p>
+      <script>
+        document.getElementById('replace').onclick = () => {
+          const old = document.querySelector('#slot input');
+          if (!old.value) throw new Error('replacement must follow fill');
+          const copy = document.createElement('input');
+          copy.name = 'token';
+          copy.style.cssText = 'width:600px;height:70px;font:40px monospace;color:rgb(0,160,0);background:white';
+          copy.value = old.value;
+          old.replaceWith(copy);
+          document.getElementById('done').hidden = false;
+        };
+      </script></body>`);
+    });
+    await listen(server);
+    const address = server.address() as AddressInfo;
+    expect(address.address).toBe('127.0.0.1');
+    const origin = `http://127.0.0.1:${String(address.port)}`;
+    dest = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-capture-replaced-'));
+    const driver = await browserDriver(origin, dest, [ADMIN_PASSWORD]);
+    const manifest = await run(
+      parseWorkload(
+        [
+          'steps:',
+          '  - goto: /',
+          `  - fill: ${JSON.stringify(selector)}`,
+          '    value: "{{admin_pass}}"',
+          mode === 'replace' ? '  - click: "#replace"' : '  - click: "#next"',
+          '    settle_ms: 1000',
+          mode === 'replace' ? '  - wait_for: "#done"' : '  - wait_for: "#second-ready"',
+          '  - shot: after-replacement',
+        ].join('\n'),
+        'replaced control fixture',
+      ),
+      driver,
+      dest,
+      { root_url: origin, admin_pass: ADMIN_PASSWORD },
+    );
+    expect(manifest.status).toBe('ok');
+    expect(manifest.privacy.masked_input_selectors).toEqual([selector]);
+    const decoded = await inspectVideo(dest);
+    expect(decoded.frames).toBeGreaterThan(20);
+    expect(decoded.green).toBe(0);
+    const image = pngPixels(fs.readFileSync(path.join(dest, 'shots/shot-01.png')));
+    let green = 0;
+    for (let at = 0; at < image.data.length; at += image.channels) {
+      if (image.data[at]! < 80 && image.data[at + 1]! > 90 && image.data[at + 2]! < 80) green += 1;
+    }
+    expect(green).toBe(0);
+  });
+
+  test.each([
     'canonical',
     'mismatched-base',
     'mismatched-failed',

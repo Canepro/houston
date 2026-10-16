@@ -78,6 +78,9 @@ const PLACEHOLDER = /\{\{[^}]*\}\}/gu;
 
 const DEFAULT_TIMEOUT_MS = 15000;
 
+/** Where Playwright writes its raw recording under the capture directory. Never publishable. */
+const RAW_VIDEO_DIR = '_video';
+
 /**
  * Pacing that makes the video reviewable by a person. `slowMo` spaces the actions out;
  * settle holds the frame after an action long enough for its RESULT to be on screen
@@ -412,13 +415,34 @@ export async function listWorkloads(): Promise<WorkloadRow[]> {
   return [...found.keys()].sort().map((key) => found.get(key) as WorkloadRow);
 }
 
-/** Substitute `{{key}}` placeholders. Used for the browser, never for the record. */
+/**
+ * Substitute `{{key}}` placeholders in one pass. Used for the browser, never for the record.
+ * A placeholder nothing defines is an authoring error: typing or navigating the literal
+ * `{{...}}` text could finish "successfully" while entering the wrong thing. A substituted
+ * value is data and is never scanned again, so a password containing `{{x}}` stays intact.
+ */
 function resolve(text: string, context: Context): string {
-  let out = text;
-  for (const [key, value] of Object.entries(context)) {
-    out = out.replaceAll(`{{${key}}}`, value);
+  return text.replace(/\{\{([^}]*)\}\}/gu, (token: string, key: string) => {
+    if (!Object.prototype.hasOwnProperty.call(context, key)) {
+      throw new ValidationError(`unresolved placeholder ${token}`);
+    }
+    return context[key] as string;
+  });
+}
+
+/** Every goto target and fill value must resolve before a browser opens or a step runs. */
+function assertResolvable(workload: Workload, context: Context): void {
+  for (const [index, step] of workload.steps.entries()) {
+    if (step.action !== 'goto' && step.action !== 'fill') continue;
+    try {
+      resolve(step.action === 'goto' ? step.target : step.value, context);
+    } catch (error) {
+      if (!(error instanceof ValidationError)) throw error;
+      throw new ValidationError(
+        `workload step ${String(index)} (${step.action}): ${error.message}`,
+      );
+    }
   }
-  return out;
 }
 
 /** Browser captures use an origin only: metadata paths, queries and userinfo are not evidence. */
@@ -462,12 +486,16 @@ function recordedTarget(step: Step, root: string): string {
     // percent-encoded nested URLs. This does not inspect selectors or expand placeholders.
     let decoded = display;
     for (let depth = 0; depth < 4; depth += 1) {
-      // Check before decoding: an encoded slash, space, ?, # or backslash can be
-      // part of userinfo and must not become an authority terminator before this test.
-      // Recognize encoded URL punctuation too, since it can be escaped independently.
+      // Check before decoding: an encoded slash, space, ?, # or backslash can be part of
+      // userinfo and must not become an authority terminator before this test. Recognize
+      // encoded URL punctuation too, since it can be escaped independently.
+      // Only a raw `/` ends the run before the `@`. Whitespace, `\`, `?` and `#` do not:
+      // WHATWG parsing keeps whitespace in userinfo, a non-special scheme keeps `\`, and a
+      // lenient consumer may treat the others the same way. Over-masking a query value is
+      // acceptable, leaking a password is not.
       const normalized = decoded.replaceAll('\t', '').replaceAll('\r', '').replaceAll('\n', '');
       if (
-        /(?:[a-z][a-z0-9+.-]*(?::|%3a)(?:[/\\]|%2f|%5c)*|(?:[/\\]|%2f|%5c){2})[^/\\?\s#]*(?:@|%40)/iu.test(
+        /(?:[a-z][a-z0-9+.-]*(?::|%3a)(?:[/\\]|%2f|%5c)*|(?:[/\\]|%2f|%5c){2})[^/]*(?:@|%40)/iu.test(
           normalized,
         )
       )
@@ -613,6 +641,16 @@ async function sizeOf(file: string): Promise<number | null> {
   }
 }
 
+/** True for anything at `file`, a dangling symlink included. */
+async function pathExists(file: string): Promise<boolean> {
+  try {
+    await fs.lstat(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function validateArtifacts(
   dest: string,
   manifest: Omit<Manifest, 'validation'>,
@@ -684,6 +722,18 @@ export async function validateArtifacts(
     await check(manifest.video, 'video', MIN_VIDEO_BYTES);
   }
   if (manifest.trace !== null) await check(manifest.trace, 'trace', 1);
+  // Playwright's raw recording is unmasked by design. If the driver could not remove it, the
+  // capture is not attachable, whatever else it holds.
+  if (await pathExists(path.join(dest, RAW_VIDEO_DIR))) {
+    rows.push({
+      check: 'raw-recording',
+      artifact: RAW_VIDEO_DIR,
+      status: 'fail',
+      detail:
+        `${RAW_VIDEO_DIR} still holds Playwright's raw browser recording, which was not ` +
+        'removed; it is withheld from the bundle',
+    });
+  }
   await clean('manifest.json', JSON.stringify(manifest));
   return rows;
 }
@@ -718,6 +768,8 @@ export async function run(
   let artifacts!: Artifacts;
 
   try {
+    // The driver is already live here, so a refusal still closes it in the `finally` below.
+    assertResolvable(workload, context);
     await fs.mkdir(stepsDir, { recursive: true });
     root = navigationOrigin(context.root_url ?? '');
     try {
@@ -1019,12 +1071,56 @@ function reportStage(error: unknown, stage: string): never {
   );
 }
 
+/** What the browser needs beyond the origin. Never written to any artifact. */
+export interface DriverOptions {
+  /** HTTP basic-auth credentials taken from the workspace URL's userinfo, decoded. */
+  httpCredentials?: { username: string; password: string };
+}
+
 /** Builds the browser for a run: the real one by default, a fake in tests. */
 export type DriverFactory = (
   rootUrl: string,
   dest: string,
   secrets: readonly string[],
+  options?: DriverOptions,
 ) => Promise<Driver>;
+
+function decoded(text: string): string {
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return text;
+  }
+}
+
+/**
+ * Userinfo in the workspace URL is HTTP basic auth for the browser, not evidence. `URL.origin`
+ * drops it, so it is taken here, decoded for Playwright, and both spellings of the password
+ * go to the redaction set in case a log line or error repeats the URL.
+ */
+function workspaceCredentials(rootUrl: string): { options: DriverOptions; secrets: string[] } {
+  if (rootUrl === '') return { options: {}, secrets: [] };
+  const { username, password } = new URL(rootUrl);
+  if (username === '' && password === '') return { options: {}, secrets: [] };
+  return {
+    options: { httpCredentials: { username: decoded(username), password: decoded(password) } },
+    secrets: [...new Set([decoded(password), password].filter((value) => value !== ''))],
+  };
+}
+
+/**
+ * Raw browser output must never travel with a capture. Remove it; if that fails, move it
+ * out of the capture directory so the rename that publishes the capture cannot carry it.
+ */
+async function withholdRawRecording(captureDir: string, stage: string): Promise<void> {
+  const raw = path.join(captureDir, RAW_VIDEO_DIR);
+  if (!(await pathExists(raw))) return;
+  try {
+    await fs.rm(raw, { recursive: true, force: true });
+  } catch {
+    await fs.rename(raw, path.join(stage, 'withheld-raw-recording'));
+  }
+}
 
 /**
  * Run a workload against a workspace and write the complete attachable bundle: the
@@ -1058,16 +1154,25 @@ export async function captureBundle(
     // Validate `--force` before opening a browser, but leave a prior bundle intact until that
     // browser has completed its optional-dependency and Chromium preflight.
     await checkedBundleRoot(out, force);
+    const workspaceUrl = externalUrl(meta);
     const context: Context = {
-      root_url: navigationOrigin(externalUrl(meta)),
+      root_url: navigationOrigin(workspaceUrl),
       admin_user: config.ADMIN_USERNAME,
       admin_pass: adminPass(meta),
     };
+    // An unresolved placeholder is an authoring error: refuse before any browser or output.
+    assertResolvable(workload, context);
+    const credentials = workspaceCredentials(workspaceUrl);
     const stage = await captureStage(out);
     const captureDir = path.join(stage, 'capture');
     let driver: Driver;
     try {
-      driver = await driverFactory(context.root_url ?? '', captureDir, secretValues(context));
+      driver = await driverFactory(
+        context.root_url ?? '',
+        captureDir,
+        [...secretValues(context), ...credentials.secrets],
+        credentials.options,
+      );
     } catch (error) {
       // A driver that never started has no useful evidence. Delete its private staging directory
       // so a failed optional-dependency preflight cannot leave raw browser output behind.
@@ -1106,6 +1211,7 @@ export async function captureBundle(
       reportStage(error, stage);
     }
     try {
+      await withholdRawRecording(captureDir, stage);
       const captured = await filesBelow(captureDir, 'capture');
       await fs.rename(captureDir, path.join(out, 'capture'));
       bundle.files = [...new Set([...bundle.files, ...captured])].sort();
@@ -1145,6 +1251,7 @@ interface PwPage {
   screenshot(options: { path: string; fullPage: boolean }): Promise<unknown>;
   waitForTimeout(ms: number): Promise<void>;
   evaluate(expression: string): Promise<unknown>;
+  addInitScript(script: { content: string }): Promise<void>;
   video(): PwVideo | null;
   close(): Promise<void>;
 }
@@ -1153,9 +1260,9 @@ interface PwLocator {
 }
 interface PwElement {
   evaluate(
-    callback: (target: MaskTarget, color: string) => boolean,
-    color: string,
-  ): Promise<boolean>;
+    callback: (target: MaskTarget | null, options: MaskOptions) => string[] | null,
+    options: MaskOptions,
+  ): Promise<string[] | null>;
   waitForElementState(state: 'visible', options: { timeout: number }): Promise<void>;
   fill(value: string, options: { timeout: number }): Promise<void>;
   dispose(): Promise<void>;
@@ -1231,9 +1338,14 @@ function bannerScript(text: string): string {
  * Hide the resolved control itself and install a visible cover before Playwright fills it.
  * The intrinsic hiding survives later top-layer moves and cover removal. Its style observer
  * restores page edits in the mutation microtask, before paint, rather than detecting a leak
- * after a screenshot or after video frames have already been recorded.
+ * after a screenshot or after video frames have already been recorded. The selector stays
+ * tracked for the rest of the capture, so a control the page replaces is hidden and covered
+ * the moment it appears, not only the node that was filled.
  * Returning false refuses the fill before the secret reaches a control we cannot protect.
  */
+interface MaskRoot {
+  querySelectorAll(selector: string): ArrayLike<MaskTarget>;
+}
 interface MaskTarget {
   style: {
     setProperty(name: string, value: string, priority: string): void;
@@ -1241,8 +1353,11 @@ interface MaskTarget {
     getPropertyPriority(name: string): string;
   };
   isConnected: boolean;
+  tagName: string;
   assignedSlot: MaskTarget | null;
   parentElement: MaskTarget | null;
+  shadowRoot: MaskRoot | null;
+  getAttribute(name: string): string | null;
   getRootNode(): { host?: MaskTarget };
   matches(selector: string): boolean;
   scrollIntoView(options: { block: string; inline: string }): void;
@@ -1260,20 +1375,48 @@ interface MaskCover {
     pointerEvents: string;
   };
 }
+interface MaskOptions {
+  color: string;
+  /** CSS selectors to protect for the rest of the document, whatever node they resolve to. */
+  selectors: string[];
+}
+interface MaskObserver {
+  observe(
+    target: MaskTarget | MaskRoot,
+    options: {
+      attributes?: boolean;
+      attributeFilter?: string[];
+      childList?: boolean;
+      subtree?: boolean;
+    },
+  ): void;
+}
 interface MaskState {
-  entries: { target: MaskTarget; cover: MaskCover }[];
+  entries: { target: MaskTarget; cover: MaskCover; watched: boolean }[];
+  selectors: string[];
+  roots: MaskRoot[];
+  sweeper: MaskObserver | null;
   running: boolean;
 }
 
-/** Executed in the browser realm, with no module closures. */
-function installSecretMask(target: MaskTarget, color: string): boolean {
+/**
+ * Executed in the browser realm, with no module closures. It is also injected as an init
+ * script with a null target, so a later navigation keeps protecting the same selectors.
+ *
+ * With a target it returns the CSS selector now tracked, or null to refuse the fill. The
+ * authored selector is tracked when native CSS resolves it to the target. A Playwright-only
+ * selector (`xpath=`, `>>`, `text=`) cannot be re-resolved here, so the control's own
+ * attributes become the tracked selector. A control with none to go on is refused, because
+ * tracking its handle alone would leave a replacement uncovered.
+ */
+function installSecretMask(target: MaskTarget | null, options: MaskOptions): string[] | null {
   const browser = globalThis as unknown as {
     __houstonSecretMasks__?: MaskState;
     innerHeight: number;
     innerWidth: number;
-    document: {
+    document: MaskRoot & {
       createElement(tag: string): MaskCover;
-      documentElement: { appendChild(cover: MaskCover): void };
+      documentElement: { appendChild(cover: MaskCover): void } | null;
       elementFromPoint(left: number, top: number): MaskCover | null;
       fullscreenElement: MaskTarget | null;
     };
@@ -1283,16 +1426,37 @@ function installSecretMask(target: MaskTarget, color: string): boolean {
       transitionProperty: string;
       animationName: string;
     };
-    MutationObserver: new (callback: () => void) => {
-      observe(
-        target: MaskTarget,
-        options: { attributes: boolean; attributeFilter: string[] },
-      ): void;
-    };
+    MutationObserver: new (callback: () => void) => MaskObserver;
   };
-  const maskingUnproved = (): boolean => {
-    if (!target.isConnected) return true;
-    let current: MaskTarget | null = target;
+  const state = (browser.__houstonSecretMasks__ ??= {
+    entries: [],
+    selectors: [],
+    roots: [],
+    sweeper: null,
+    running: false,
+  });
+  // Every match for a selector, including inside open shadow roots, which a document-level
+  // query does not reach. Each root found is observed so a replacement there is seen too.
+  const query = (selector: string): MaskTarget[] => {
+    const found: MaskTarget[] = [];
+    const visit = (root: MaskRoot): void => {
+      found.push(...Array.from(root.querySelectorAll(selector)));
+      for (const host of Array.from(root.querySelectorAll('*'))) {
+        const inner = host.shadowRoot;
+        if (inner === null) continue;
+        if (!state.roots.includes(inner)) {
+          state.roots.push(inner);
+          state.sweeper?.observe(inner, { childList: true, subtree: true });
+        }
+        visit(inner);
+      }
+    };
+    visit(browser.document);
+    return found;
+  };
+  const maskingUnproved = (node: MaskTarget): boolean => {
+    if (!node.isConnected) return true;
+    let current: MaskTarget | null = node;
     while (current !== null) {
       try {
         if (
@@ -1311,21 +1475,20 @@ function installSecretMask(target: MaskTarget, color: string): boolean {
     }
     return false;
   };
-  if (maskingUnproved()) return false;
-  target.scrollIntoView({ block: 'center', inline: 'center' });
-  if (maskingUnproved()) return false;
-  const state = (browser.__houstonSecretMasks__ ??= { entries: [], running: false });
-  let entry = state.entries.find((item) => item.target === target);
-  if (entry === undefined) {
-    const cover = browser.document.createElement('div');
-    cover.setAttribute('aria-hidden', 'true');
-    cover.style.cssText =
-      'position:fixed;z-index:2147483647;pointer-events:none;' +
-      `background:${color};opacity:1;display:none;`;
-    browser.document.documentElement.appendChild(cover);
-    entry = { target, cover };
-    state.entries.push(entry);
-  }
+  const cover = (node: MaskTarget): MaskState['entries'][number] => {
+    let entry = state.entries.find((item) => item.target === node);
+    if (entry === undefined) {
+      const element = browser.document.createElement('div');
+      element.setAttribute('aria-hidden', 'true');
+      element.style.cssText =
+        'position:fixed;z-index:2147483647;pointer-events:none;' +
+        `background:${options.color};opacity:1;display:none;`;
+      browser.document.documentElement?.appendChild(element);
+      entry = { target: node, cover: element, watched: false };
+      state.entries.push(entry);
+    }
+    return entry;
+  };
   const position = (): void => {
     for (const item of state.entries) {
       if (!item.target.isConnected) {
@@ -1344,19 +1507,6 @@ function installSecretMask(target: MaskTarget, color: string): boolean {
       item.cover.style.height = `${String(rect.height)}px`;
     }
   };
-  position();
-  if (entry.cover.style.display !== 'block') return false;
-  const rect = target.getBoundingClientRect();
-  const left = rect.left + rect.width / 2;
-  const top = rect.top + rect.height / 2;
-  if (left < 0 || top < 0 || left >= browser.innerWidth || top >= browser.innerHeight) return false;
-  const previousPointerEvents = entry.cover.style.pointerEvents;
-  entry.cover.style.pointerEvents = 'auto';
-  try {
-    if (browser.document.elementFromPoint(left, top) !== entry.cover) return false;
-  } finally {
-    entry.cover.style.pointerEvents = previousPointerEvents;
-  }
   // Opacity hides the whole native control, including its text, caret and internal shadow
   // content, without changing its value, focusability or Playwright's visibility predicate.
   // Inline !important defeats author CSS and animation; disabling transitions prevents a
@@ -1366,34 +1516,102 @@ function installSecretMask(target: MaskTarget, color: string): boolean {
     ['animation', 'none'],
     ['opacity', '0'],
   ] as const;
-  const hide = (): void => {
+  const hide = (node: MaskTarget): void => {
     for (const [name, value] of properties) {
       if (
-        target.style.getPropertyValue(name) !== value ||
-        target.style.getPropertyPriority(name) !== 'important'
+        node.style.getPropertyValue(name) !== value ||
+        node.style.getPropertyPriority(name) !== 'important'
       )
-        target.style.setProperty(name, value, 'important');
+        node.style.setProperty(name, value, 'important');
     }
   };
-  hide();
-  const computed = browser.getComputedStyle(target);
-  if (
-    computed.opacity !== '0' ||
-    computed.transitionProperty !== 'none' ||
-    computed.animationName !== 'none'
-  )
-    return false;
-  const observer = new browser.MutationObserver(hide);
-  observer.observe(target, { attributes: true, attributeFilter: ['style'] });
+  // Hide the control itself and keep it hidden: the style observer restores page edits in
+  // the mutation microtask, before paint, rather than after frames have been recorded.
+  const protect = (entry: MaskState['entries'][number]): void => {
+    if (entry.watched) return;
+    entry.watched = true;
+    hide(entry.target);
+    new browser.MutationObserver(() => {
+      hide(entry.target);
+    }).observe(entry.target, { attributes: true, attributeFilter: ['style'] });
+  };
+  // Re-resolve every tracked selector and protect each new match. This is what keeps a
+  // replacement control, whose value may have been copied from the filled one, covered.
+  const sweep = (): void => {
+    for (const selector of state.selectors) {
+      try {
+        for (const node of query(selector)) protect(cover(node));
+      } catch {
+        // The selector was valid when it was accepted; never let a page break the sweep.
+      }
+    }
+    position();
+  };
+
+  const resolves = (selector: string, node: MaskTarget): boolean => {
+    try {
+      return selector !== '' && query(selector).includes(node);
+    } catch {
+      return false;
+    }
+  };
+  let tracked = options.selectors;
+  if (target !== null) {
+    if (maskingUnproved(target)) return null;
+    const authored = options.selectors[0] ?? '';
+    let selector = resolves(authored, target) ? authored : '';
+    if (selector === '') {
+      const identity = ['name', 'type', 'id', 'autocomplete', 'formcontrolname', 'data-testid']
+        .filter((attribute) => target.getAttribute(attribute) !== null)
+        .map((attribute) => `[${attribute}=${JSON.stringify(target.getAttribute(attribute))}]`);
+      selector = identity.length === 0 ? '' : `${target.tagName.toLowerCase()}${identity.join('')}`;
+    }
+    if (!resolves(selector, target)) return null;
+    tracked = [selector];
+    target.scrollIntoView({ block: 'center', inline: 'center' });
+    if (maskingUnproved(target)) return null;
+    const entry = cover(target);
+    position();
+    if (entry.cover.style.display !== 'block') return null;
+    const rect = target.getBoundingClientRect();
+    const left = rect.left + rect.width / 2;
+    const top = rect.top + rect.height / 2;
+    if (left < 0 || top < 0 || left >= browser.innerWidth || top >= browser.innerHeight)
+      return null;
+    const previousPointerEvents = entry.cover.style.pointerEvents;
+    entry.cover.style.pointerEvents = 'auto';
+    try {
+      if (browser.document.elementFromPoint(left, top) !== entry.cover) return null;
+    } finally {
+      entry.cover.style.pointerEvents = previousPointerEvents;
+    }
+    hide(target);
+    const computed = browser.getComputedStyle(target);
+    if (
+      computed.opacity !== '0' ||
+      computed.transitionProperty !== 'none' ||
+      computed.animationName !== 'none'
+    )
+      return null;
+    protect(entry);
+  }
+  for (const selector of tracked) {
+    if (!state.selectors.includes(selector)) state.selectors.push(selector);
+  }
+  if (state.sweeper === null) {
+    state.sweeper = new browser.MutationObserver(sweep);
+    state.sweeper.observe(browser.document, { childList: true, subtree: true });
+  }
   if (!state.running) {
     state.running = true;
     const tick = (): void => {
-      position();
+      sweep();
       browser.requestAnimationFrame(tick);
     };
     browser.requestAnimationFrame(tick);
   }
-  return true;
+  sweep();
+  return tracked;
 }
 
 /**
@@ -1404,6 +1622,7 @@ function installSecretMask(target: MaskTarget, color: string): boolean {
  */
 class PlaywrightDriver implements Driver {
   private readonly secretTargets = new Set<string>();
+  private readonly initScripts = new Set<string>();
   private readonly runtimeSecrets: Set<string>;
 
   private constructor(
@@ -1421,6 +1640,7 @@ class PlaywrightDriver implements Driver {
     rootUrl: string,
     dest: string,
     secrets: readonly string[] = [],
+    credentials?: { username: string; password: string },
   ): Promise<PlaywrightDriver> {
     await fs.mkdir(dest, { recursive: true });
     let browser: PwBrowser;
@@ -1440,9 +1660,19 @@ class PlaywrightDriver implements Driver {
     try {
       context = await browser.newContext({
         viewport: { ...VIEWPORT },
-        recordVideo: { dir: path.join(dest, '_video'), size: { ...VIEWPORT } },
+        recordVideo: { dir: path.join(dest, RAW_VIDEO_DIR), size: { ...VIEWPORT } },
         reducedMotion: 'reduce',
         ...(rootUrl === '' ? {} : { baseURL: rootUrl }),
+        // Limited to the workspace origin so an identity provider or any other site a
+        // workload visits never receives the workspace's basic-auth login.
+        ...(credentials === undefined
+          ? {}
+          : {
+              httpCredentials: {
+                ...credentials,
+                ...(rootUrl === '' ? {} : { origin: rootUrl }),
+              },
+            }),
       });
       const page = await context.newPage();
       return new PlaywrightDriver(
@@ -1450,7 +1680,7 @@ class PlaywrightDriver implements Driver {
         browser,
         context,
         page,
-        secrets.filter((value) => value !== ''),
+        [...secrets, credentials?.password ?? ''].filter((value) => value !== ''),
       );
     } catch (error) {
       try {
@@ -1497,8 +1727,18 @@ class PlaywrightDriver implements Driver {
         };
         element = await this.page.locator(selector).elementHandle({ timeout: remaining() });
         await element.waitForElementState('visible', { timeout: remaining() });
-        if (!(await element.evaluate(installSecretMask, SECRET_MASK_COLOR))) {
-          throw new Error('visual mask unavailable');
+        const tracked = await element.evaluate(installSecretMask, {
+          color: SECRET_MASK_COLOR,
+          selectors: [selector],
+        });
+        if (tracked === null) throw new Error('visual mask unavailable');
+        // A later navigation starts a new document with no mask state. Track the selector
+        // there from the first moment too, not only in the document that was filled.
+        const options = { color: SECRET_MASK_COLOR, selectors: tracked };
+        const script = `(${installSecretMask.toString()})(null, ${JSON.stringify(options)});`;
+        if (!this.initScripts.has(script)) {
+          await this.page.addInitScript({ content: script });
+          this.initScripts.add(script);
         }
         this.secretTargets.add(selector);
         await element.fill(value, { timeout: remaining() });
@@ -1583,10 +1823,11 @@ class PlaywrightDriver implements Driver {
     } catch {
       // Nothing left to flush.
     }
-    // This directory belongs to the driver. If saveAs failed it holds an unlisted raw video,
-    // which must not travel with an otherwise attachable capture.
+    // This directory belongs to the driver. If saveAs failed it holds an unlisted raw video.
+    // A removal failure is not swallowed into success: validation fails the capture while the
+    // directory exists, and publication moves it out of the bundle.
     await fs
-      .rm(path.join(this.dest, '_video'), { recursive: true, force: true })
+      .rm(path.join(this.dest, RAW_VIDEO_DIR), { recursive: true, force: true })
       .catch(() => undefined);
     return out;
   }
@@ -1597,6 +1838,13 @@ export async function browserDriver(
   rootUrl: string,
   dest: string,
   secrets: readonly string[] = [],
+  options: DriverOptions & { playwright?: PwModule } = {},
 ): Promise<Driver> {
-  return await PlaywrightDriver.open(loadPlaywright(), rootUrl, dest, secrets);
+  return await PlaywrightDriver.open(
+    options.playwright ?? loadPlaywright(),
+    rootUrl,
+    dest,
+    secrets,
+    options.httpCredentials,
+  );
 }

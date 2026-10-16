@@ -12,6 +12,7 @@ jest.mock('../../src/core/runner/record', () => {
 
 import * as evidence from '../../src/core/evidence';
 import {
+  browserDriver,
   captureBundle,
   listWorkloads,
   loadWorkload,
@@ -309,6 +310,34 @@ describe('scripted browser capture', () => {
         }
       }
     }
+    // Mixed depth: the password's delimiter is raw (or one layer encoded) while the `@` is
+    // encoded one or two layers deeper, so no single decoded layer shows both at once.
+    const encodeTimes = (text: string, times: number): string => {
+      let encoded = text;
+      for (let layer = 0; layer < times; layer += 1) encoded = encodeURIComponent(encoded);
+      return encoded;
+    };
+    const mixed: string[] = [
+      '/?next=https://user:pa ss@idp.example.test/cb',
+      '/?next=https://user:pa%20ss%2540idp.example.test/cb',
+      '/?next=postgres://user:pa\\ss@db.example.test/x',
+      '/?next=postgres%3A%2F%2Fuser%3Apa%5Css%2540db.example.test',
+    ];
+    for (const delimiter of [' ', '%20', '\\', '%5C', ' ', '\u000b']) {
+      for (const scheme of ['https', 'postgres']) {
+        for (const atDepth of [0, 1, 2]) {
+          for (const wrap of [0, 1]) {
+            const nested = `${scheme}://user:pa${delimiter}ss${encodeTimes('@', atDepth)}idp.example.test/cb`;
+            mixed.push(`/?next=${encodeTimes(nested, wrap)}`);
+          }
+        }
+      }
+    }
+    for (const root of ['http://workspace.test', 'https://workspace.test', '']) {
+      for (const target of mixed) {
+        cases.push([root, target, REDACTED, root === '' ? target : new URL(target, root).href]);
+      }
+    }
     for (const target of [
       '/?next=https://idp.example.test/callback%2Fsafe',
       '/path/person@example.test',
@@ -348,7 +377,9 @@ describe('scripted browser capture', () => {
     const dest = path.join(config.home(), 'missing-frame');
     const driver = new FakeDriver(dest);
     jest.spyOn(driver, 'screenshot').mockResolvedValue(undefined);
-    await expect(run(workload(), driver, dest)).rejects.toThrow(CaptureFailedError);
+    await expect(run(workload(), driver, dest, { admin_pass: 'unit-pass' })).rejects.toThrow(
+      CaptureFailedError,
+    );
     const manifest = JSON.parse(
       fs.readFileSync(path.join(dest, 'manifest.json'), 'utf8'),
     ) as Record<string, unknown>;
@@ -696,5 +727,185 @@ describe('scripted browser capture', () => {
     expect(stage).toContain('.failed-evidence.stage-');
     expect(fs.existsSync(path.join(stage, 'capture', 'manifest.json'))).toBe(true);
     expect(fs.existsSync(out)).toBe(false);
+  });
+
+  test('refuses an unresolved workload placeholder before it is typed, navigated or launched', async () => {
+    const context = { root_url: 'http://127.0.0.1:3000', admin_user: 'admin', admin_pass: 'x1' };
+    for (const text of [
+      'steps:\n  - goto: "/{{admin_usr}}"\n',
+      'steps:\n  - goto: /\n  - fill: "#email"\n    value: "{{admin_usr}}"\n',
+      'steps:\n  - goto: /\n  - fill: "#email"\n    value: "{{admin_user}} {{nope}}"\n',
+    ]) {
+      const dest = path.join(config.home(), `unresolved-${String(text.length)}`);
+      const driver = new FakeDriver(dest);
+      await expect(run(parseWorkload(text, 'fixture'), driver, dest, context)).rejects.toThrow(
+        /unresolved placeholder \{\{(?:admin_usr|nope)\}\}/u,
+      );
+      expect(driver.calls).toEqual([]);
+      expect(driver.fills).toEqual([]);
+    }
+    // A resolved value that happens to contain placeholder syntax is data, not a placeholder.
+    const dest = path.join(config.home(), 'braced-secret');
+    const driver = new FakeDriver(dest);
+    await run(workload(), driver, dest, { ...context, admin_pass: 'p{{x}}ss' });
+    expect(driver.fills).toEqual(['p{{x}}ss']);
+
+    writeWorkload('typo', 'steps:\n  - goto: /\n  - fill: "#email"\n    value: "{{admin_usr}}"\n');
+    const driverFactory = jest.fn<ReturnType<DriverFactory>, Parameters<DriverFactory>>();
+    await expect(
+      captureBundle('ticket-1234', 'typo', path.join(config.home(), 'typo-bundle'), {
+        driverFactory,
+      }),
+    ).rejects.toThrow(ValidationError);
+    expect(driverFactory).not.toHaveBeenCalled();
+  });
+
+  test('fails the capture when the driver leaves the raw recording directory behind', async () => {
+    class LeakyDriver extends FakeDriver {
+      constructor(private readonly where: string) {
+        super(where);
+      }
+      override async finish(): Promise<Artifacts> {
+        fs.mkdirSync(path.join(this.where, '_video'), { recursive: true });
+        fs.writeFileSync(path.join(this.where, '_video', 'raw.webm'), Buffer.alloc(17000, 0x63));
+        return await super.finish();
+      }
+    }
+    const dest = path.join(config.home(), 'leaky-run');
+    await expect(
+      run(parseWorkload('steps:\n  - goto: /\n', 'fixture'), new LeakyDriver(dest), dest),
+    ).rejects.toThrow(/raw browser recording/u);
+    const manifest = JSON.parse(fs.readFileSync(path.join(dest, 'manifest.json'), 'utf8')) as {
+      status: string;
+      failure_kind: string;
+      validation: { check: string; status: string }[];
+    };
+    expect(manifest.status).toBe('failed');
+    expect(manifest.failure_kind).toBe('artifact');
+    expect(manifest.validation).toContainEqual(
+      expect.objectContaining({ check: 'raw-recording', status: 'fail' }),
+    );
+  });
+
+  test.each(['removable', 'locked'])(
+    'never publishes a %s raw recording directory with the capture bundle',
+    async (mode) => {
+      writeWorkload('leaky', 'name: leaky\nsteps:\n  - goto: /\n');
+      const out = path.join(config.home(), `leaky-bundle-${mode}`);
+      mockWriteBundle.mockImplementation(async (_name, dest) => {
+        fs.mkdirSync(dest);
+        fs.writeFileSync(path.join(dest, 'README.md'), '# evidence');
+        return { path: dest, files: ['README.md'] };
+      });
+      let locked = '';
+      const driverFactory: DriverFactory = async (_root, dest) => {
+        const driver = new FakeDriver(dest);
+        const finish = driver.finish.bind(driver);
+        driver.finish = async () => {
+          const raw = path.join(dest, '_video');
+          fs.mkdirSync(path.join(raw, 'inner'), { recursive: true });
+          fs.writeFileSync(path.join(raw, 'inner', 'raw.webm'), Buffer.alloc(17000, 0x63));
+          if (mode === 'locked') {
+            locked = path.join(raw, 'inner');
+            fs.chmodSync(locked, 0o500);
+          }
+          return await finish();
+        };
+        return driver;
+      };
+      let caught: unknown;
+      try {
+        await captureBundle('ticket-1234', 'leaky', out, { driverFactory });
+      } catch (error) {
+        caught = error;
+      }
+      try {
+        expect(caught).toBeInstanceOf(Error);
+        expect(fs.existsSync(path.join(out, 'capture', '_video'))).toBe(false);
+        const published = fs.readdirSync(path.join(out, 'capture'), { recursive: true });
+        expect(published.map(String).filter((entry) => entry.includes('raw.webm'))).toEqual([]);
+      } finally {
+        // The unremovable directory is moved aside, so restore access wherever it now is.
+        const moved = fs
+          .readdirSync(path.dirname(out), { recursive: true })
+          .map(String)
+          .filter((entry) => entry.endsWith(path.join('withheld-raw-recording', 'inner')));
+        for (const entry of [...moved.map((item) => path.join(path.dirname(out), item)), locked]) {
+          if (entry !== '' && fs.existsSync(entry)) fs.chmodSync(entry, 0o700);
+        }
+      }
+    },
+  );
+
+  test('gives workspace userinfo to the browser as HTTP credentials and to no artifact', async () => {
+    writeWorkload('basic-auth', 'name: basic-auth\nsteps:\n  - goto: /\n  - shot: landing\n');
+    mockReadMeta.mockResolvedValue(
+      metadata({
+        name: 'ticket-1234',
+        rootUrl: 'http://basic%20user:p%40ss%3Aword@127.0.0.1:3000',
+        adminPassword: ADMIN_PASSWORD,
+      }),
+    );
+    mockWriteBundle.mockImplementation(async (_name, dest) => {
+      fs.mkdirSync(dest);
+      fs.writeFileSync(path.join(dest, 'README.md'), '# evidence');
+      return { path: dest, files: ['README.md'] };
+    });
+    const seen: { root: string; secrets: readonly string[]; options: unknown }[] = [];
+    const driverFactory: DriverFactory = async (root, dest, secrets, options) => {
+      seen.push({ root, secrets, options });
+      return new FakeDriver(dest);
+    };
+    const out = path.join(config.home(), 'basic-auth-bundle');
+    await captureBundle('ticket-1234', 'basic-auth', out, { driverFactory });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.root).toBe('http://127.0.0.1:3000');
+    expect(seen[0]!.options).toEqual({
+      httpCredentials: { username: 'basic user', password: 'p@ss:word' },
+    });
+    // The encoded spelling is what a URL-shaped log line would carry, so it is redacted too.
+    expect(seen[0]!.secrets).toEqual(
+      expect.arrayContaining([ADMIN_PASSWORD, 'p@ss:word', 'p%40ss%3Aword']),
+    );
+    const files = fs.readdirSync(out, { recursive: true, withFileTypes: true });
+    for (const entry of files.filter((item) => item.isFile())) {
+      const text = fs.readFileSync(path.join(entry.parentPath, entry.name)).toString('latin1');
+      expect(text).not.toMatch(/p%40ss|p@ss|basic(?:%20| )user/u);
+    }
+  });
+
+  test('opens the browser context with the workspace HTTP credentials limited to its origin', async () => {
+    const dest = path.join(config.home(), 'pw-credentials');
+    const page = {
+      video: () => null,
+      close: async () => undefined,
+      evaluate: async () => null,
+    };
+    const context = {
+      newPage: async () => page,
+      cookies: async () => [],
+      close: async () => undefined,
+    };
+    const newContext = jest.fn(async () => context);
+    const driver = await browserDriver('http://127.0.0.1:3000', dest, ['s3cret-pass'], {
+      httpCredentials: { username: 'basic', password: 'p@ss' },
+      playwright: {
+        chromium: { launch: async () => ({ newContext, close: async () => undefined }) },
+      } as never,
+    });
+    expect(newContext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseURL: 'http://127.0.0.1:3000',
+        httpCredentials: {
+          username: 'basic',
+          password: 'p@ss',
+          origin: 'http://127.0.0.1:3000',
+        },
+      }),
+    );
+    expect((await driver.finish()).secrets).toEqual(
+      expect.arrayContaining(['s3cret-pass', 'p@ss']),
+    );
   });
 });

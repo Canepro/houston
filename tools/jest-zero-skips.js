@@ -136,7 +136,9 @@ const ROOT = path.resolve(__dirname, '..');
 // and one recorded-target matrix (scheme semantics, nested userinfo, placeholders) bring its
 // collection-only measured total to 4,573 over the branch's own base. A full Jest run of the
 // merged tree (capture on the PR 61 base) measured 4861 tests.
-const FLOOR = 4861;
+// Round 7 adds six cases (unresolved placeholders, a leftover raw recording, its publication
+// in two modes, workspace HTTP credentials and the browser context options): 4867.
+const FLOOR = 4867;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

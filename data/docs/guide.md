@@ -108,12 +108,21 @@ actions, outcomes and timings. Houston never collects a raw Playwright network t
 it cannot certify confidentiality of transient sessions, rotated tokens or other origins.
 Houston masks known secret values and any nonempty fill into a credential-shaped field before
 typing it. The control stays hidden if it later enters a modal dialog or the page removes its
-visible cover. Goto targets in the manifest and step banner omit URL userinfo; navigation
+visible cover. Houston keeps matching that field for the rest of the capture, so a control the
+page replaces, or one on a later page, is hidden and covered when it appears. It matches the
+selector you wrote when plain CSS resolves it to the field, and otherwise the field's own
+`name`, `type`, `id`, `autocomplete`, `formcontrolname` and `data-testid`; a field with none of
+those is refused. Goto targets in the manifest and step banner omit URL userinfo; navigation
 still uses the original authored target. Targets containing nested URL credentials are
-redacted as a whole, including encoded nested URLs and encoded delimiters inside their
-userinfo. Ambiguous encodings can redact a harmless target too. Placeholder values are
-expanded only for navigation. Inspect the visible PNG files and video before you
-attach the bundle because a page can echo a value outside the masked input.
+redacted as a whole, including encoded nested URLs, encoded delimiters inside their userinfo,
+and userinfo that contains whitespace or a backslash. Ambiguous encodings can redact a
+harmless target too. Userinfo in the workspace URL (`http://user:pass@host`) is used as HTTP
+basic auth for that origin only and appears in no artifact. Placeholder values are expanded
+only for navigation, and a `{{placeholder}}` that nothing defines stops the capture before a
+browser opens. Houston saves the video and then removes Playwright's raw copy. If it cannot
+remove it, the capture fails and the raw directory stays out of the bundle. Inspect the visible
+PNG files and video before you attach the bundle because a page can echo a value outside the
+masked input.
 
 Exit 9 means a step failed or an artifact did not hold up. Houston keeps the partial bundle so
 you can see where the workload stopped, but that bundle is not proof of the reported behaviour.
