@@ -702,7 +702,10 @@ describe('SSH loopback guidance', () => {
         ['8081', ['--preset', 'saml']],
         ['9090', ['--monitor']],
         ['4402', ['--port', '4400', '--deployment', 'multi-instance', '--replicas', '3']],
+        ['4401', ['--port', '4400', '--deployment', 'multi-instance']],
         ['8082', ['--preset', 'saml']],
+        ['9090', ['--runtime', 'kubernetes', '--monitor']],
+        ['4402', ['--runtime', 'kubernetes', '--port', '4400', '--replicas', '3']],
       ] as const) {
         await paths.remove(name);
         for (const key of keys) delete process.env[key];
@@ -749,7 +752,11 @@ describe('SSH loopback guidance', () => {
       ['8081', 2, 0, true],
       ['9090', 2, 0, true],
       ['4402', 2, 0, true],
+      ['4401', 2, 0, true],
       ['8082', 0, 1, false],
+      // Kubernetes forwards Grafana only and publishes no replica ports.
+      ['9090', 0, 1, false],
+      ['4402', 0, 1, false],
     ]);
   });
 

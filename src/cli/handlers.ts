@@ -803,18 +803,35 @@ async function confirmDestruction(
 function portsKnownBeforeUp(o: Values): number[] {
   const presets = require('../lib/presets') as typeof PresetsNS;
   const config = require('../lib/config') as typeof ConfigNS;
+  const topology = require('../core/topology') as typeof TopologyNS;
+  // Where it runs, as create infers it: a named runtime, else a context means Kubernetes,
+  // else Docker. Kubernetes forwards Grafana only and publishes no per-replica ports.
+  const named = text(o.runtime).trim();
+  const normalized = (value: string): string => {
+    try {
+      return topology.normalize(value);
+    } catch {
+      return value; // An invalid name is the create's refusal to make.
+    }
+  };
+  const runtime = normalized(named || (text(o.context).trim() ? topology.KUBERNETES : ''));
+  const docker = runtime !== topology.KUBERNETES;
+  const names = strings(o.preset);
   const ports: number[] = [];
-  for (const name of strings(o.preset)) {
+  for (const name of names) {
     try {
       ports.push(...presets.load(name).ports);
     } catch {
       // An unknown preset is the create's refusal to make, with its own message.
     }
   }
-  if (bool(o.monitor)) ports.push(...config.MONITOR_PORTS);
+  if (bool(o.monitor)) ports.push(...(docker ? config.MONITOR_PORTS : [config.MONITOR_PORTS[1]]));
   const port = number(o.port);
-  const replicas = number(o.replicas);
-  if (port > 0 && replicas > 1) {
+  const multi =
+    normalized(text(o.deployment)) === topology.MULTI_INSTANCE || names.includes('multi-instance');
+  // A multi-instance deployment without --replicas runs its default of two.
+  const replicas = number(o.replicas) || (multi ? 2 : 0);
+  if (docker && port > 0 && replicas > 1) {
     for (let at = 1; at <= replicas; at += 1) ports.push(port + at);
   }
   return ports.filter((value) => Number.isSafeInteger(value) && value > 0);
