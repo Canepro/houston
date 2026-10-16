@@ -31,7 +31,7 @@ const knownInventory: KubernetesInventory = {
   services: [
     {
       name: 'rocketchat',
-      type: 'ClusterIP',
+      type: 'NodePort',
       cluster_ip: '10.96.0.12',
       external_ips: [],
       ports: [{ name: 'web', protocol: 'TCP', port: 3000, target_port: 'http', node_port: 32000 }],
