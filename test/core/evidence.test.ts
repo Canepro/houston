@@ -1659,8 +1659,16 @@ describe('the bundle', () => {
         '  printfheredoc:',
         '    image: example',
         `    command: ["sh", "-c", "printf '%s' sh <<EOF\\nclient --password PrintfHeredocData\\nEOF"]`,
+        '  sudoheredoc:',
+        '    image: example',
+        '    command: ["sh", "-c", "sudo -n sh <<EOF\\nclient --password SudoHeredocSentinel\\nEOF"]',
+        '  timeheredoc:',
+        '    image: example',
+        '    command: ["sh", "-c", "timeout 5 bash <<EOF\\nclient --password TimeoutHeredocSentinel\\nEOF"]',
         'x-copy: QuotedSentinel',
         'x-split-copy: SplitSentinel',
+        'x-dup-sudo-heredoc: SudoHeredocSentinel',
+        'x-dup-timeout-heredoc: TimeoutHeredocSentinel',
         'x-dup-json-shell: JsonShellSentinel',
         'x-dup-upper: UpperSentinel',
         'x-dup-number: 987654321',
@@ -1732,6 +1740,8 @@ describe('the bundle', () => {
       'JsonShellSentinel',
       'UpperSentinel',
       '987654321',
+      'SudoHeredocSentinel',
+      'TimeoutHeredocSentinel',
     ]) {
       expect(compose).not.toContain(sentinel);
     }

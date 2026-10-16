@@ -748,23 +748,19 @@ interface ShellWord {
 }
 
 /**
- * The program a command runs, past `env`, `sudo`, `exec`, `nohup`, `command`, `time`, `nice`
- * and `doas`, their options and `NAME=value` assignments: `env sh <<EOF` runs `sh`, while
- * `printf '%s' sh <<EOF` runs `printf`. An option that takes a value (`sudo -u alice`) skips it.
+ * Whether a command reads its heredoc as a shell program. Its program decides: a shell does,
+ * `cat` or `printf` does not. A wrapper (`env`, `sudo -n`, `timeout 5`) hands it on, and its
+ * options vary by wrapper, so then any shell word among its arguments counts.
  */
-function heredocProgram(command: readonly ShellWord[]): string {
-  for (let index = 0; index < command.length; index += 1) {
-    const word = (command[index] as ShellWord).text;
-    const name = word.split('/').pop() ?? '';
-    if (/^-[ugCDhpnrt]$/u.test(word)) index += 1;
-    else if (
-      !/^(?:env|sudo|exec|nohup|command|time|nice|doas)$/u.test(name) &&
-      !word.startsWith('-') &&
-      !/^[A-Za-z_]\w*=/u.test(word)
-    )
-      return name;
-  }
-  return '';
+function heredocRunsShell(command: readonly ShellWord[]): boolean {
+  const name = (word: ShellWord | undefined): string => (word?.text ?? '').split('/').pop() ?? '';
+  const shell = (word: ShellWord): boolean => /^(?:sh|bash|zsh|dash|ash|ksh)$/u.test(name(word));
+  const first = command.find((word) => !/^[A-Za-z_]\w*=/u.test(word.text));
+  if (first === undefined) return false;
+  if (shell(first)) return true;
+  const wrapper =
+    /^(?:env|sudo|doas|exec|nohup|command|time|nice|ionice|timeout|setsid|stdbuf|chroot|su|runuser|flock|xargs|unbuffer|chpst|setpriv|nsenter|unshare)$/u;
+  return wrapper.test(name(first)) && command.some(shell);
 }
 
 /** Bash's single-character ANSI-C escapes; any other escaped character stands for itself. */
@@ -842,7 +838,7 @@ function shellCommands(text: string): ShellWord[][] {
       } else index += 1;
     } else if (char === '\n' && heredocs.length > 0) {
       // A shell reading the heredoc runs it, so its lines stay commands then.
-      const shell = /^(?:sh|bash|zsh|dash|ash|ksh)$/u.test(heredocProgram(command));
+      const shell = heredocRunsShell(command);
       endCommand(index);
       let line = index + 1;
       for (const heredoc of heredocs) {
