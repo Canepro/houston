@@ -125,7 +125,8 @@ const ROOT = path.resolve(__dirname, '..');
 // Seven bundle regressions cover duplicate YAML names and six numeric-text discovery routes.
 // Three more cover authorization copies, a failed licence write and an external kill during
 // that write. Existing complete-licence and Compose-kill cases are extended, not recounted.
-const FLOOR = 4627;
+// Inspect adds twenty cases on top of the evidence base: total 4647.
+const FLOOR = 4647;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

@@ -55,9 +55,9 @@ const PLANTS = [
   },
   {
     id: 'conditional-firing',
-    what: 'a platform guard that fires on this machine',
+    what: 'a platform guard that fires on every supported Unix-like machine',
     body:
-      `${SOUND}\n\n(process.platform === 'linux' ? describe.skip : describe)('a guard', () => {\n` +
+      `${SOUND}\n\n(process.platform !== 'win32' ? describe.skip : describe)('a guard', () => {\n` +
       "  it('never runs here', () => {\n    expect(true).toBe(true);\n  });\n});",
     says: ['pending:', 'authored skip construct with no written reason', PROBE_RELATIVE],
   },
