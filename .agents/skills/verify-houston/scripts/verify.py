@@ -122,33 +122,74 @@ def scan_command_receipts(secret, out, *labels):
     return paths
 
 
-def source_manifest(root):
-    paths = bounded_output(
+def git_evidence_context(root):
+    """Bind read-only Git evidence to the requested checkout, not caller state."""
+    root = root.resolve()
+    executable = shutil.which('git')
+    require(executable is not None, 'Missing prerequisite: git')
+    git = Path(executable).resolve()
+    require(git.is_file(), 'Git executable could not be resolved')
+    environment = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+    environment.update({
+        # Do not let a caller pick another repository, config or diff driver.
+        'GIT_CONFIG_GLOBAL': os.devnull,
+        'GIT_CONFIG_NOSYSTEM': '1',
+        'GIT_OPTIONAL_LOCKS': '0',
+        'GIT_TERMINAL_PROMPT': '0',
+    })
+    context = {'root': root, 'git': str(git), 'env': environment}
+    top_level_output = git_evidence_output(
+        context,
+        'candidate checkout lookup',
+        ['rev-parse', '--show-toplevel'],
+        text=True,
+    )
+    require(top_level_output.endswith('\n'), 'Git did not report a candidate repository root')
+    top_level = top_level_output[:-1]
+    require(Path(top_level).resolve() == root,
+            'Git repository root does not match the requested candidate checkout')
+    return context
+
+
+def git_evidence_output(context, label, arguments, text=False):
+    return bounded_output(
+        label,
+        [context['git'], '--no-pager', '-C', str(context['root']), *arguments],
+        cwd=context['root'],
+        env=context['env'],
+        text=text,
+    )
+
+
+def source_manifest(context):
+    root = context['root']
+    paths = git_evidence_output(
+        context,
         'candidate source manifest',
-        ['git', 'ls-files', '--cached', '--others', '--exclude-standard', '-z', '--',
+        ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--',
          'src', 'bin', 'tools', 'data', 'package.json', 'yarn.lock', '.yarnrc.yml'],
-        cwd=root,
     )
     return {name: path_fingerprint(root / name)
             for name in sorted(set(paths.decode().split('\0'))) if name}
 
 
 def candidate_fingerprint(root):
+    context = git_evidence_context(root)
     return {
-        'head': bounded_output(
+        'head': git_evidence_output(
+            context,
             'candidate revision lookup',
-            ['git', 'rev-parse', 'HEAD'],
-            cwd=root,
+            ['rev-parse', '--verify', 'HEAD'],
             text=True,
         ).strip(),
         'diff_sha256': hashlib.sha256(
-            bounded_output(
+            git_evidence_output(
+                context,
                 'candidate diff lookup',
-                ['git', 'diff', 'HEAD'],
-                cwd=root,
+                ['diff', '--no-ext-diff', '--no-textconv', '--no-color', 'HEAD'],
             ),
         ).hexdigest(),
-        'source': source_manifest(root),
+        'source': source_manifest(context),
     }
 
 
@@ -200,35 +241,51 @@ def wait_for_exit_unreaped(process, timeout_seconds, drain=None):
             drain.read_for(min(POLL_SECONDS, remaining))
 
 
-def linux_group_has_live_members(pgid):
+def require_process_group_deadline(deadline):
+    if time.monotonic() >= deadline:
+        raise RuntimeError('Command process-group confirmation exceeded its cleanup deadline')
+
+
+def linux_group_has_live_members(pgid, deadline):
     """Inspect only Linux process state and group IDs; never retain a process listing."""
+    require_process_group_deadline(deadline)
     try:
-        entries = list(Path('/proc').iterdir())
+        entries = iter(Path('/proc').iterdir())
     except OSError as error:
         raise RuntimeError('Could not inspect Linux process status') from error
-    for entry in entries:
+    while True:
+        require_process_group_deadline(deadline)
+        try:
+            entry = next(entries)
+        except StopIteration:
+            return False
+        except OSError as error:
+            raise RuntimeError('Could not inspect Linux process status') from error
+        require_process_group_deadline(deadline)
         if not entry.name.isdecimal():
             continue
+        require_process_group_deadline(deadline)
         try:
-            status = (entry / 'stat').read_text()
+            status = (entry / 'stat').read_bytes()
         except FileNotFoundError:
             continue
         except OSError as error:
             raise RuntimeError('Could not inspect Linux process status') from error
-        close = status.rfind(')')
-        fields = status[close + 2:].split() if close >= 0 else []
+        require_process_group_deadline(deadline)
+        close = status.rfind(b')')
+        fields = status[close + 1:].split() if close >= 0 else []
         if close < 0 or len(fields) < 3 or len(fields[0]) != 1:
             raise RuntimeError('Could not parse Linux process status')
         try:
             member_pgid = int(fields[2])
         except ValueError as error:
             raise RuntimeError('Could not parse Linux process group') from error
-        if member_pgid == pgid and fields[0] != 'Z':
+        if member_pgid == pgid and fields[0] != b'Z':
             return True
-    return False
 
 
-def group_has_live_members(pgid, leader_exited):
+def group_has_live_members(pgid, leader_exited, deadline):
+    require_process_group_deadline(deadline)
     try:
         os.killpg(pgid, 0)
     except ProcessLookupError:
@@ -241,7 +298,7 @@ def group_has_live_members(pgid, leader_exited):
             return False
         raise RuntimeError('Process group became unsignalable before its leader exited') from error
     if leader_exited and sys.platform.startswith('linux'):
-        return linux_group_has_live_members(pgid)
+        return linux_group_has_live_members(pgid, deadline)
     return True
 
 
@@ -268,7 +325,7 @@ def force_and_confirm_process_group(process, pgid, leader_exited, drain):
         try:
             if not leader_exited:
                 leader_exited = wait_for_exit_unreaped(process, 0, drain)
-            if leader_exited and not group_has_live_members(pgid, leader_exited):
+            if leader_exited and not group_has_live_members(pgid, leader_exited, deadline):
                 return leader_exited, errors
         except Exception as error:
             errors.append(f'Could not confirm command process-group cleanup: {error}')
@@ -1052,7 +1109,7 @@ def main():
                     and '--version' in first_run_tokens and '--name' in first_run_tokens
                     and '--wait' in first_run_tokens
                     and not any(flag in first_run_tokens for flag in
-                                ('--runtime', '--deployment', '--preset', '--seed', '--seed-profile')),
+                                ('--runtime', '--context', '--deployment', '--preset', '--seed', '--seed-profile')),
                     'Setup first-run command must use saved topology without explicit axes or seed flags')
             after = config_file.read_bytes()
             repeated = run('setup-readback', ['onboard', '--show', '--json'],

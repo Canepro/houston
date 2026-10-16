@@ -28,8 +28,10 @@ python3 .agents/skills/verify-houston/scripts/verify.py --evidence-dir /absolute
 To drive another feature checkout without copying this skill into it, add
 `--checkout /absolute/candidate/checkout`. Install dependencies in that candidate
 first and keep its source fixed during the run. The receipt records the candidate
-path, head and tracked diff digest, plus this verifier script's digest. Store
-evidence outside both checkouts.
+path, head and tracked diff digest, plus this verifier script's digest. Fingerprint
+lookups use a resolved Git executable with a scrubbed Git environment, an explicit
+candidate checkout, and a verified Git top level. Store evidence outside both
+checkouts.
 
 The helper requires Python 3.9+, Node, `dirname`, and `readlink`. On POSIX it also
 requires `waitid` with `WNOWAIT`, and refuses before launching a command if that
@@ -117,9 +119,11 @@ plants a synthetic secret to detect leaks.
 
 The helper removes only the scratch directory it created, including the fixture,
 in a `finally` block on success or ordinary failure. On POSIX, it keeps the CLI
-leader unreaped while it force-kills and boundedly confirms the command group has
-no live member, then reaps the leader. Linux confirms that state from `/proc` while
-the leader reserves its group ID. Pipe closure does not complete that cleanup. The
+leader unreaped while it force-kills the command group and confirms it has no live
+member before reaping the leader. Linux checks the cleanup deadline before and
+after each `/proc` entry iteration and status read; an OS call already in progress
+cannot be preempted, so a later expired-deadline check fails the command rather
+than treating the scan as empty. Pipe closure does not complete that cleanup. The
 non-POSIX path has only direct-child cleanup. The onboarding path runs two guarded synthetic
 `down --name verify-owned-kube-fixture --yes --json` probes. Its isolated home
 and `kubectl` trap require the missing-onboarding and denied-grant gates to stop
