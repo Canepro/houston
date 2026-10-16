@@ -786,6 +786,36 @@ export const COMMAND_SPECS = [
     },
   }),
   defineCommand({
+    id: 'inspect',
+    path: 'inspect',
+    description:
+      'Show what a repro runs on and what is reachable: its nodes, services and pods on Kubernetes, its containers with their published ports, networks and volumes on Docker. Secret-safe: no login, no environment.',
+    arguments: [],
+    options: [
+      {
+        key: 'name',
+        long: '--name',
+        short: '-n',
+        value: 'string',
+        required: false,
+        repeatable: false,
+        defaultValue: '',
+        description: '',
+        hidden: false,
+        negatablePair: false,
+      },
+    ],
+    json: {
+      mode: 'flag',
+      schema: 'houston.inspect.v1',
+      streams: false,
+      option: {
+        index: 1,
+        description: 'print the result as one JSON envelope on stdout; prose moves to stderr',
+      },
+    },
+  }),
+  defineCommand({
     id: 'users',
     path: 'users',
     description:

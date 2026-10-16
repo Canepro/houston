@@ -168,7 +168,7 @@ function problemWith(words: string[]): string | null {
 
 describe('a printed instruction names a command that exists', () => {
   it('has a registry to check against at all', () => {
-    expect(COMMAND_SPECS).toHaveLength(41);
+    expect(COMMAND_SPECS).toHaveLength(42);
     expect(knownVerbs().size).toBeGreaterThan(30);
   });
 

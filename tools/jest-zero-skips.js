@@ -130,7 +130,9 @@ const ROOT = path.resolve(__dirname, '..');
 // table cases, an equals-form and neighbour control, embedded JSON arrays, an alias and numeric
 // arguments).
 // One more masks a credential flag inside a command string: total 4647.
-const FLOOR = 4647;
+// Inspect adds twenty cases on top of the evidence base: total 4647.
+// Credential arguments (19) and command strings (1) add twenty over 4647: total 4667.
+const FLOOR = 4667;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [
