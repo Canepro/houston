@@ -795,6 +795,31 @@ async function confirmDestruction(
  * resolves its bind afresh on every up. Unknown reused binds cannot produce a handoff.
  * Resolve typed-name ownership just as create does before reading the existing record.
  */
+/**
+ * The side ports an `up` is known to publish before it runs: its presets' services,
+ * monitoring when asked for, and an explicit `--port`'s replica ports. A port allocated
+ * during the create is checked by the handoff afterwards.
+ */
+function portsKnownBeforeUp(o: Values): number[] {
+  const presets = require('../lib/presets') as typeof PresetsNS;
+  const config = require('../lib/config') as typeof ConfigNS;
+  const ports: number[] = [];
+  for (const name of strings(o.preset)) {
+    try {
+      ports.push(...presets.load(name).ports);
+    } catch {
+      // An unknown preset is the create's refusal to make, with its own message.
+    }
+  }
+  if (bool(o.monitor)) ports.push(...config.MONITOR_PORTS);
+  const port = number(o.port);
+  const replicas = number(o.replicas);
+  if (port > 0 && replicas > 1) {
+    for (let at = 1; at <= replicas; at += 1) ports.push(port + at);
+  }
+  return ports.filter((value) => Number.isSafeInteger(value) && value > 0);
+}
+
 async function handoffBindForUp(o: Values): Promise<string | null> {
   const types = require('../core/lifecycle/types') as typeof LifecycleTypesNS;
   const request = require('../core/lifecycle/request') as typeof RequestNS;
@@ -901,6 +926,7 @@ async function dispatch(
           (require('../core/lifecycle/access') as typeof AccessNS).validateEnvironment(
             process.env,
             bind,
+            portsKnownBeforeUp(o),
           );
         }
       }

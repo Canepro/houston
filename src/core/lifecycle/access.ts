@@ -197,12 +197,25 @@ function localPort(remotePort: number, env: AccessEnvironment): number {
  * `up` prints the handoff after the workspace exists; failing there reported a failure
  * over a create that had completed, and skipped the seed `up --seed` had been asked for.
  */
-export function validateEnvironment(env: AccessEnvironment = process.env, bind = ''): void {
+export function validateEnvironment(
+  env: AccessEnvironment = process.env,
+  bind = '',
+  sidePortsKnown: readonly number[] = [],
+): void {
   // Only a loopback workspace ever gets a handoff, so a workspace bound elsewhere must not
   // be refused over a tunnel override it will never read. An empty bind is the default,
   // which is loopback.
   if (!sshSession(env) || (bind !== '' && !loopback(bind))) return;
-  localPort(1024, env);
+  const selected = localPort(0, env);
+  // The ports a create is known to publish before it runs: a later handoff would refuse
+  // the same clash, after the workspace exists and with no tunnel to show for it.
+  if (selected !== 0 && sidePortsKnown.includes(selected)) {
+    const sides = [...new Set(sidePortsKnown)].sort((left, right) => left - right);
+    throw new ValidationError(
+      `HOUSTON_SSH_LOCAL_PORT ${String(selected)} is one of this workspace's side ports ` +
+        `(${sides.join(', ')}), which the tunnel forwards on their own numbers; choose another`,
+    );
+  }
   remoteSshPort(env);
 }
 

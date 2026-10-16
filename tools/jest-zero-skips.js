@@ -128,7 +128,8 @@ const ROOT = path.resolve(__dirname, '..');
 // Inspect adds twenty cases on top of the evidence base: total 4647.
 // SSH access adds ninety-eight cases over the inspect base: total 4745.
 // One more passes a bracketed IPv6 SSH host bare: total 4746.
-const FLOOR = 4746;
+// One more refuses a tunnel port a preset or monitoring will publish, before create: 4747.
+const FLOOR = 4747;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

@@ -684,6 +684,75 @@ describe('SSH loopback guidance', () => {
     }
   });
 
+  it('refuses a local tunnel port a preset or monitoring will publish, before creating', async () => {
+    const paths = require('../../src/core/runner/paths') as typeof PathsNS;
+    const name = 'ssh-side-port';
+    const keys = [
+      'SSH_CONNECTION',
+      'SSH_CLIENT',
+      'SSH_TTY',
+      'HOUSTON_SSH_LOCAL_PORT',
+      'HOUSTON_SSH_PORT',
+      'HOUSTON_BIND_HOST',
+    ] as const;
+    const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    const observed: unknown[] = [];
+    try {
+      for (const [local, flags] of [
+        ['8081', ['--preset', 'saml']],
+        ['9090', ['--monitor']],
+        ['4402', ['--port', '4400', '--deployment', 'multi-instance', '--replicas', '3']],
+        ['8082', ['--preset', 'saml']],
+      ] as const) {
+        await paths.remove(name);
+        for (const key of keys) delete process.env[key];
+        process.env.SSH_TTY = '/dev/ttys001';
+        process.env.HOUSTON_BIND_HOST = '127.0.0.1';
+        process.env.HOUSTON_SSH_LOCAL_PORT = local;
+        jest.resetModules();
+        const record = require('../../src/core/runner/record') as typeof RecordNS;
+        const create = jest.fn(async () => {
+          await record.writeRecord(
+            name,
+            record.metadata({
+              name,
+              hostPort: 3123,
+              rootUrl: 'http://localhost:3123',
+              extra: { bind_host: '127.0.0.1' },
+            }),
+          );
+          return { name, waited: true, booted_s: 1 };
+        });
+        jest.doMock('../../src/core/lifecycle/create-docker', () => ({
+          ...jest.requireActual<object>('../../src/core/lifecycle/create-docker'),
+          createRepro: create,
+        }));
+        const app = require('../../src/cli/app') as typeof AppNS;
+        const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
+        let stderr = '';
+        const io = { writeOut: () => undefined, writeErr: (text: string) => void (stderr += text) };
+        const code = await app.runCli(
+          ['up', '--version', '8.5.1', '--name', name, '--offline', ...flags],
+          { execute: handlers.createExecutor(io), io },
+        );
+        observed.push([local, code, create.mock.calls.length, stderr.includes('side ports')]);
+      }
+    } finally {
+      jest.dontMock('../../src/core/lifecycle/create-docker');
+      for (const key of keys) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
+      jest.resetModules();
+    }
+    expect(observed).toEqual([
+      ['8081', 2, 0, true],
+      ['9090', 2, 0, true],
+      ['4402', 2, 0, true],
+      ['8082', 0, 1, false],
+    ]);
+  });
+
   it.each([
     { bind: '127.0.0.2', advertised: '', local: '3123' },
     { bind: '127.0.0.2', advertised: 'https://chat.example.test', local: '3123' },
