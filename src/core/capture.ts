@@ -17,12 +17,13 @@
  *
  * - KNOWN SECRETS HAVE A NARROW, CHECKED PATH. The manifest records the workload as
  *   authored, so a step filling `{{admin_pass}}` keeps the placeholder; a literal
- *   credential is `REDACTED`; and the trace is rewritten after known values, session
- *   cookies and login tokens are collected. Before a browser receives a known secret or a
+ *   credential is `REDACTED`; and only an allowlisted action summary is traced. Raw
+ *   Playwright network data is never collected because transient session credentials cannot
+ *   be certified safe. Before a browser receives a known secret or a
  *   literal in a credential-shaped field, its target gets a persistent visual mask which
  *   covers it in screenshots and video.
  *   If that mask cannot be installed, the fill refuses before the value reaches the page.
- *   The trace records no screenshots or DOM snapshots. A page can still echo a credential
+ *   The trace records no browser content, screenshots or DOM snapshots. A page can echo a credential
  *   elsewhere, so the README requires a human visual review before attachment rather than
  *   claiming an automated pixel scan that does not exist.
  *
@@ -37,7 +38,6 @@
  */
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import * as zlib from 'node:zlib';
 
 import * as config from '../lib/config';
 import {
@@ -52,6 +52,7 @@ import { joinPath, pathExpandUser } from '../lib/home';
 import { type Bundle, record as evidenceRecord, writeBundle } from './evidence';
 import * as naming from './lifecycle/naming';
 import { adminPass, externalUrl, readMeta } from './runner/record';
+import { reproLock } from './runner/locks';
 
 /**
  * What a workload step may do. Deliberately small: each maps to a single browser call, so
@@ -144,7 +145,7 @@ export interface WorkloadRow {
  * may ever be the reason a step fails.
  */
 export interface Driver {
-  goto(url: string): Promise<void>;
+  goto(url: string, timeoutMs: number): Promise<void>;
   click(selector: string, timeoutMs: number): Promise<void>;
   fill(selector: string, value: string, timeoutMs: number): Promise<void>;
   press(key: string): Promise<void>;
@@ -159,15 +160,12 @@ export interface Driver {
 /**
  * What a driver leaves behind. `video` is its file name under the capture directory, or
  * null when nothing was recorded. `secrets` are the credentials the browser minted during
- * the run -- session cookies, the login token -- which the runner removes from every
- * artifact it writes after the browser closes.
+ * the run, such as session cookies and login tokens, which the runner removes from its
+ * textual manifest after the browser closes.
+ * This is best-effort discovery, not a proof that transient session values are known.
  */
 export interface Artifacts {
   video: string | null;
-  /** A Playwright trace that has been parsed and scrubbed, or null when it could not be made safe. */
-  trace: string | null;
-  /** Secret values replaced while rewriting the Playwright trace. */
-  traceHits: number;
   secrets: string[];
   /** Input selectors masked in every retained PNG after a known secret was entered. */
   maskedSelectors: string[];
@@ -200,6 +198,7 @@ export interface Manifest {
   workload: string;
   description: string;
   status: 'ok' | 'failed';
+  failure_kind: 'step' | 'artifact' | null;
   started_at: string;
   finished_at: string;
   duration_ms: number;
@@ -214,6 +213,7 @@ export interface Manifest {
   redaction: { placeholders: number; fields: number; secrets: number; trace_hits: number };
   /** The exact automatic privacy boundaries a reviewer needs to know before attaching this. */
   privacy: {
+    trace_policy: 'action-summary-only';
     known_secret_values: number;
     masked_input_selectors: string[];
     trace_screenshots: false;
@@ -317,8 +317,11 @@ export function parseWorkload(text: string, source: string): Workload {
 async function readIfFile(file: string): Promise<string | null> {
   try {
     return await fs.readFile(file, 'utf8');
-  } catch {
-    return null;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw new ValidationError(
+      `cannot read workload ${file}: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
@@ -458,7 +461,7 @@ async function apply(
   const timeout = step.timeoutMs || DEFAULT_TIMEOUT_MS;
   switch (step.action) {
     case 'goto':
-      await driver.goto(root + resolve(step.target, context));
+      await driver.goto(root + resolve(step.target, context), timeout);
       return null;
     case 'click':
       await driver.click(step.target, timeout);
@@ -499,14 +502,12 @@ async function finishQuietly(driver: Driver): Promise<Artifacts> {
     const out = await driver.finish();
     return {
       video: out.video,
-      trace: out.trace,
-      traceHits: out.traceHits,
       secrets: out.secrets.filter((s) => s !== ''),
       maskedSelectors: out.maskedSelectors,
     };
   } catch {
     // A close failure must not mask the step failure, and must not lose the manifest.
-    return { video: null, trace: null, traceHits: 0, secrets: [], maskedSelectors: [] };
+    return { video: null, secrets: [], maskedSelectors: [] };
   }
 }
 
@@ -519,221 +520,6 @@ async function sizeOf(file: string): Promise<number | null> {
   }
 }
 
-/** The small, standard ZIP subset Playwright traces use: local entries and a central directory. */
-const ZIP_LOCAL = 0x04034b50;
-const ZIP_CENTRAL = 0x02014b50;
-const ZIP_END = 0x06054b50;
-const ZIP_UTF8 = 0x0800;
-const ZIP_DATA_DESCRIPTOR = 0x0008;
-const ZIP_ALLOWED_FLAGS = ZIP_UTF8 | ZIP_DATA_DESCRIPTOR;
-
-interface TraceZipEntry {
-  name: Buffer;
-  flags: number;
-  modifiedTime: number;
-  modifiedDate: number;
-  data: Buffer;
-}
-
-function zipFailure(message: string): Error {
-  return new Error(`Playwright trace ZIP is not safe to rewrite: ${message}`);
-}
-
-function zipSlice(bytes: Buffer, offset: number, size: number, what: string): Buffer {
-  if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(size) || offset < 0 || size < 0)
-    throw zipFailure(`${what} has an invalid range`);
-  const end = offset + size;
-  if (end > bytes.length || end < offset) throw zipFailure(`${what} ends outside the archive`);
-  return bytes.subarray(offset, end);
-}
-
-function zipEnd(bytes: Buffer): number {
-  const first = Math.max(0, bytes.length - 0x10016);
-  for (let at = bytes.length - 22; at >= first; at -= 1) {
-    if (bytes.readUInt32LE(at) !== ZIP_END) continue;
-    const comment = bytes.readUInt16LE(at + 20);
-    if (at + 22 + comment === bytes.length) return at;
-  }
-  throw zipFailure('it has no complete end record');
-}
-
-function readTraceZip(bytes: Buffer): TraceZipEntry[] {
-  if (bytes.length < 22) throw zipFailure('it is shorter than an empty archive');
-  const end = zipEnd(bytes);
-  const disk = bytes.readUInt16LE(end + 4);
-  const centralDisk = bytes.readUInt16LE(end + 6);
-  const entriesHere = bytes.readUInt16LE(end + 8);
-  const entries = bytes.readUInt16LE(end + 10);
-  const centralSize = bytes.readUInt32LE(end + 12);
-  const centralOffset = bytes.readUInt32LE(end + 16);
-  if (disk !== 0 || centralDisk !== 0 || entriesHere !== entries)
-    throw zipFailure('it spans multiple disks');
-  if (entries === 0xffff || centralSize === 0xffffffff || centralOffset === 0xffffffff)
-    throw zipFailure('ZIP64 is not supported');
-  const central = zipSlice(bytes, centralOffset, centralSize, 'central directory');
-  let at = 0;
-  const result: TraceZipEntry[] = [];
-  for (let index = 0; index < entries; index += 1) {
-    if (at + 46 > central.length || central.readUInt32LE(at) !== ZIP_CENTRAL)
-      throw zipFailure(`central entry ${String(index)} is invalid`);
-    const flags = central.readUInt16LE(at + 8);
-    const method = central.readUInt16LE(at + 10);
-    const modifiedTime = central.readUInt16LE(at + 12);
-    const modifiedDate = central.readUInt16LE(at + 14);
-    const checksum = central.readUInt32LE(at + 16);
-    const compressedSize = central.readUInt32LE(at + 20);
-    const uncompressedSize = central.readUInt32LE(at + 24);
-    const nameLength = central.readUInt16LE(at + 28);
-    const extraLength = central.readUInt16LE(at + 30);
-    const commentLength = central.readUInt16LE(at + 32);
-    const entryDisk = central.readUInt16LE(at + 34);
-    const localOffset = central.readUInt32LE(at + 42);
-    const length = 46 + nameLength + extraLength + commentLength;
-    if (at + length > central.length)
-      throw zipFailure(`central entry ${String(index)} is truncated`);
-    if (entryDisk !== 0 || localOffset === 0xffffffff || compressedSize === 0xffffffff)
-      throw zipFailure(`central entry ${String(index)} needs ZIP64 or another disk`);
-    if ((flags & ~ZIP_ALLOWED_FLAGS) !== 0 || (method !== 0 && method !== 8))
-      throw zipFailure(`central entry ${String(index)} uses an unsupported encoding`);
-    const name = Buffer.from(central.subarray(at + 46, at + 46 + nameLength));
-    const local = zipSlice(bytes, localOffset, 30, `local entry ${String(index)}`);
-    if (local.readUInt32LE(0) !== ZIP_LOCAL)
-      throw zipFailure(`local entry ${String(index)} is invalid`);
-    if (local.readUInt16LE(6) !== flags || local.readUInt16LE(8) !== method)
-      throw zipFailure(`local entry ${String(index)} disagrees with its directory`);
-    const localNameLength = local.readUInt16LE(26);
-    const localExtraLength = local.readUInt16LE(28);
-    const dataOffset = localOffset + 30 + localNameLength + localExtraLength;
-    const encoded = zipSlice(bytes, dataOffset, compressedSize, `data for entry ${String(index)}`);
-    let data: Buffer;
-    try {
-      data = method === 0 ? Buffer.from(encoded) : zlib.inflateRawSync(encoded);
-    } catch {
-      throw zipFailure(`data for entry ${String(index)} cannot be inflated`);
-    }
-    if (data.length !== uncompressedSize || zlib.crc32(data) >>> 0 !== checksum)
-      throw zipFailure(`data for entry ${String(index)} does not match its checksum`);
-    result.push({ name, flags, modifiedTime, modifiedDate, data });
-    at += length;
-  }
-  if (at !== central.length) throw zipFailure('the central directory has trailing bytes');
-  return result;
-}
-
-/**
- * A text secret can be serialized more than one way in a Playwright trace. The raw value
- * covers normal command records; the JSON form covers a quoted or backslash-containing fill;
- * and the form encoding covers a request body. Scrub every representation before retaining it.
- */
-function secretEncodings(value: string): string[] {
-  if (value === '') return [];
-  const escaped = JSON.stringify(value);
-  const jsonString = escaped.slice(1, -1);
-  const formValue = new URLSearchParams({ value }).toString().slice('value='.length);
-  return [...new Set([value, jsonString, encodeURIComponent(value), formValue])];
-}
-
-function redactBytes(data: Buffer, values: readonly string[]): { data: Buffer; hits: number } {
-  let out = data;
-  let hits = 0;
-  const encodings = values.flatMap(secretEncodings);
-  for (const value of [...new Set(encodings)].sort(
-    (left, right) => Buffer.byteLength(right) - Buffer.byteLength(left),
-  )) {
-    const needle = Buffer.from(value, 'utf8');
-    if (needle.length === 0) continue;
-    const parts: Buffer[] = [];
-    let from = 0;
-    let found = out.indexOf(needle, from);
-    while (found !== -1) {
-      parts.push(out.subarray(from, found), Buffer.from(REDACTED, 'utf8'));
-      from = found + needle.length;
-      hits += 1;
-      found = out.indexOf(needle, from);
-    }
-    if (parts.length > 0) {
-      parts.push(out.subarray(from));
-      out = Buffer.concat(parts);
-    }
-  }
-  return { data: out, hits };
-}
-
-function writeTraceZip(entries: readonly TraceZipEntry[]): Buffer {
-  if (entries.length > 0xffff) throw zipFailure('it has too many entries');
-  const locals: Buffer[] = [];
-  const central: Buffer[] = [];
-  let offset = 0;
-  for (const entry of entries) {
-    if (entry.name.length > 0xffff || entry.data.length > 0xffffffff)
-      throw zipFailure('an entry is too large');
-    const encoded = zlib.deflateRawSync(entry.data);
-    if (encoded.length > 0xffffffff) throw zipFailure('an entry compresses beyond ZIP limits');
-    const checksum = zlib.crc32(entry.data) >>> 0;
-    const flags = entry.flags & ZIP_UTF8;
-    const local = Buffer.alloc(30);
-    local.writeUInt32LE(ZIP_LOCAL, 0);
-    local.writeUInt16LE(20, 4);
-    local.writeUInt16LE(flags, 6);
-    local.writeUInt16LE(8, 8);
-    local.writeUInt16LE(entry.modifiedTime, 10);
-    local.writeUInt16LE(entry.modifiedDate, 12);
-    local.writeUInt32LE(checksum, 14);
-    local.writeUInt32LE(encoded.length, 18);
-    local.writeUInt32LE(entry.data.length, 22);
-    local.writeUInt16LE(entry.name.length, 26);
-    locals.push(local, entry.name, encoded);
-
-    const directory = Buffer.alloc(46);
-    directory.writeUInt32LE(ZIP_CENTRAL, 0);
-    directory.writeUInt16LE(20, 4);
-    directory.writeUInt16LE(20, 6);
-    directory.writeUInt16LE(flags, 8);
-    directory.writeUInt16LE(8, 10);
-    directory.writeUInt16LE(entry.modifiedTime, 12);
-    directory.writeUInt16LE(entry.modifiedDate, 14);
-    directory.writeUInt32LE(checksum, 16);
-    directory.writeUInt32LE(encoded.length, 20);
-    directory.writeUInt32LE(entry.data.length, 24);
-    directory.writeUInt16LE(entry.name.length, 28);
-    directory.writeUInt32LE(offset, 42);
-    central.push(directory, entry.name);
-    offset += local.length + entry.name.length + encoded.length;
-  }
-  const directory = Buffer.concat(central);
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(ZIP_END, 0);
-  end.writeUInt16LE(entries.length, 8);
-  end.writeUInt16LE(entries.length, 10);
-  end.writeUInt32LE(directory.length, 12);
-  end.writeUInt32LE(offset, 16);
-  return Buffer.concat([...locals, directory, end]);
-}
-
-/** Rewrite a trace as a fresh, ordinary ZIP after replacing every known secret in every entry. */
-function redactTraceZip(
-  bytes: Buffer,
-  secrets: readonly string[],
-): { bytes: Buffer; hits: number } {
-  let hits = 0;
-  const entries = readTraceZip(bytes).map((entry) => {
-    const redacted = redactBytes(entry.data, secrets);
-    hits += redacted.hits;
-    return { ...entry, data: redacted.data };
-  });
-  return { bytes: writeTraceZip(entries), hits };
-}
-
-/**
- * Whether every artifact the manifest claims holds up on disk, and whether any secret
- * reached the two artifacts this module writes as text.
- *
- * `fail` means the bundle lies about what it contains, or carries a credential: the run
- * is failed. `suspect` means an artifact exists but is implausibly small, or no video was
- * recorded -- a blank frame that still LOOKS like evidence is the failure mode that burned
- * a review. Suspect artifacts never raise; they are named in the manifest and the README
- * so a reviewer checks them first.
- */
 export async function validateArtifacts(
   dest: string,
   manifest: Omit<Manifest, 'validation'>,
@@ -931,21 +717,40 @@ export async function run(
     if (rec.error !== undefined) rec.error = redactText(rec.error, secrets).text;
   }
 
+  // Never start Playwright tracing: it records transient credentials in network bodies,
+  // headers and WebSockets, including sessions gone before shutdown. This allowlist records
+  // execution only, with no browser strings, URLs, selectors, values, DOM or network data.
+  const trace = 'trace.json';
+  await fs.writeFile(
+    path.join(out, trace),
+    `${JSON.stringify(
+      {
+        schema: 'houston.capture-actions.v1',
+        steps: steps.map(({ index, action, outcome, ms }) => ({ index, action, outcome, ms })),
+      },
+      null,
+      2,
+    )}\n`,
+    'utf8',
+  );
+
   const partial: Omit<Manifest, 'validation'> = {
     workload: redactText(workload.name, secrets).text,
     description: redactText(workload.description, secrets).text,
     status: failed === null ? 'ok' : 'failed',
+    failure_kind: failed === null ? null : 'step',
     started_at: startedAt,
     finished_at: finishedAt,
     duration_ms: Date.now() - startedMs,
     steps,
     shots,
     video: artifacts.video,
-    trace: artifacts.trace,
+    trace,
     failed_step: failed,
     failure_frame: failureFrame,
-    redaction: { placeholders, fields, secrets: secrets.length, trace_hits: artifacts.traceHits },
+    redaction: { placeholders, fields, secrets: secrets.length, trace_hits: 0 },
     privacy: {
+      trace_policy: 'action-summary-only',
       known_secret_values: secrets.length,
       masked_input_selectors: artifacts.maskedSelectors.map(
         (selector) => redactText(selector, secrets).text,
@@ -963,6 +768,7 @@ export async function run(
   const manifest: Manifest = {
     ...partial,
     status: failed === null && missing.length === 0 ? 'ok' : 'failed',
+    failure_kind: failed !== null ? 'step' : missing.length > 0 ? 'artifact' : null,
     validation,
   };
   const manifestFile = path.join(out, 'manifest.json');
@@ -1141,66 +947,70 @@ export async function captureBundle(
 ): Promise<Record<string, unknown>> {
   const workload = await loadWorkload(workloadName);
   const target = await naming.resolveName(name);
-  const meta = await readMeta(target);
-  const out =
-    dest === '' ? joinPath(config.reportsDir(), target, workloadName) : pathExpandUser(dest);
-  await prepareBundleRoot(out, force);
-  const context: Context = {
-    root_url: externalUrl(meta),
-    admin_user: config.ADMIN_USERNAME,
-    admin_pass: adminPass(meta),
-  };
-  const stage = await captureStage(out);
-  const captureDir = path.join(stage, 'capture');
-  let driver: Driver;
-  try {
-    driver = await driverFactory(context.root_url ?? '', captureDir, secretValues(context));
-  } catch (error) {
-    // A driver that never started has no useful evidence. Delete its private staging directory
-    // so a failed optional-dependency preflight cannot leave raw browser output behind.
-    await fs.rm(stage, { recursive: true, force: true }).catch(() => undefined);
-    throw error;
-  }
+  // The evidence owner takes this same async-reentrant lock. Keep it across browser
+  // activity and publication so a waiting upgrade cannot relabel an older recording.
+  return await reproLock(target, async () => {
+    const meta = await readMeta(target);
+    const out =
+      dest === '' ? joinPath(config.reportsDir(), target, workloadName) : pathExpandUser(dest);
+    await prepareBundleRoot(out, force);
+    const context: Context = {
+      root_url: externalUrl(meta),
+      admin_user: config.ADMIN_USERNAME,
+      admin_pass: adminPass(meta),
+    };
+    const stage = await captureStage(out);
+    const captureDir = path.join(stage, 'capture');
+    let driver: Driver;
+    try {
+      driver = await driverFactory(context.root_url ?? '', captureDir, secretValues(context));
+    } catch (error) {
+      // A driver that never started has no useful evidence. Delete its private staging directory
+      // so a failed optional-dependency preflight cannot leave raw browser output behind.
+      await fs.rm(stage, { recursive: true, force: true }).catch(() => undefined);
+      throw error;
+    }
 
-  let failure: CaptureFailedError | null = null;
-  let manifest: Manifest | null;
-  try {
-    manifest = await run(workload, driver, captureDir, context);
-  } catch (error) {
-    if (!(error instanceof CaptureFailedError)) reportStage(error, stage);
-    failure = error;
-    manifest = await manifestFrom(captureDir);
-  }
-  const capture = manifest ?? (await manifestFrom(captureDir));
-  let payload: Record<string, unknown>;
-  try {
-    payload = await evidenceRecord(target);
-  } catch (error) {
-    reportStage(error, stage);
-  }
-  let bundle: Bundle;
-  try {
-    bundle = await writeBundle(target, out, payload, capture ?? undefined);
-  } catch (error) {
-    reportStage(error, stage);
-  }
-  try {
-    const captured = await filesBelow(captureDir, 'capture');
-    await fs.rename(captureDir, path.join(out, 'capture'));
-    bundle.files = [...new Set([...bundle.files, ...captured])].sort();
-    await fs.rm(stage, { recursive: true, force: true });
-  } catch (error) {
-    reportStage(error, stage);
-  }
-  payload.bundle = bundle;
-  if (failure !== null) {
-    failure.details.bundle = bundle.path;
-    if (capture !== null)
-      failure.details.manifest = path.join(bundle.path, 'capture', 'manifest.json');
-    throw failure;
-  }
-  payload.capture = manifest;
-  return payload;
+    let failure: CaptureFailedError | null = null;
+    let manifest: Manifest | null;
+    try {
+      manifest = await run(workload, driver, captureDir, context);
+    } catch (error) {
+      if (!(error instanceof CaptureFailedError)) reportStage(error, stage);
+      failure = error;
+      manifest = await manifestFrom(captureDir);
+    }
+    const capture = manifest ?? (await manifestFrom(captureDir));
+    let payload: Record<string, unknown>;
+    try {
+      payload = await evidenceRecord(target);
+    } catch (error) {
+      reportStage(error, stage);
+    }
+    let bundle: Bundle;
+    try {
+      bundle = await writeBundle(target, out, payload, capture ?? undefined);
+    } catch (error) {
+      reportStage(error, stage);
+    }
+    try {
+      const captured = await filesBelow(captureDir, 'capture');
+      await fs.rename(captureDir, path.join(out, 'capture'));
+      bundle.files = [...new Set([...bundle.files, ...captured])].sort();
+      await fs.rm(stage, { recursive: true, force: true });
+    } catch (error) {
+      reportStage(error, stage);
+    }
+    payload.bundle = bundle;
+    if (failure !== null) {
+      failure.details.bundle = bundle.path;
+      if (capture !== null)
+        failure.details.manifest = path.join(bundle.path, 'capture', 'manifest.json');
+      throw failure;
+    }
+    payload.capture = manifest;
+    return payload;
+  });
 }
 
 /*
@@ -1213,9 +1023,10 @@ interface PwVideo {
   delete(): Promise<void>;
 }
 interface PwPage {
-  goto(url: string, options: { waitUntil: 'domcontentloaded' }): Promise<unknown>;
+  goto(url: string, options: { waitUntil: 'domcontentloaded'; timeout: number }): Promise<unknown>;
   click(selector: string, options: { timeout: number }): Promise<void>;
   fill(selector: string, value: string, options: { timeout: number }): Promise<void>;
+  locator(selector: string): PwLocator;
   keyboard: { press(key: string): Promise<void> };
   waitForSelector(selector: string, options: { timeout: number }): Promise<unknown>;
   screenshot(options: { path: string; fullPage: boolean }): Promise<unknown>;
@@ -1224,14 +1035,20 @@ interface PwPage {
   video(): PwVideo | null;
   close(): Promise<void>;
 }
-interface PwTracing {
-  start(options: { screenshots: boolean; snapshots: boolean }): Promise<void>;
-  stop(options: { path: string }): Promise<void>;
+interface PwLocator {
+  elementHandle(options: { timeout: number }): Promise<PwElement>;
+}
+interface PwElement {
+  evaluate(
+    callback: (target: MaskTarget, color: string) => boolean,
+    color: string,
+  ): Promise<boolean>;
+  fill(value: string, options: { timeout: number }): Promise<void>;
+  dispose(): Promise<void>;
 }
 interface PwContext {
   newPage(): Promise<PwPage>;
   cookies(): Promise<{ name: string; value: string }[]>;
-  tracing: PwTracing;
   close(): Promise<void>;
 }
 interface PwBrowser {
@@ -1303,46 +1120,79 @@ function bannerScript(text: string): string {
  * browser video as well as a later PNG. `pointer-events: none` leaves the control usable.
  * Returning false refuses the fill before the secret reaches a page we cannot mask.
  */
-function secretMaskScript(selector: string): string {
-  return `(() => {
-    const selector = ${JSON.stringify(selector)};
-    let target;
-    try { target = document.querySelector(selector); } catch { return false; }
-    if (!(target instanceof Element)) return false;
-    target.scrollIntoView({ block: 'center', inline: 'center' });
-    const stateKey = '__houstonSecretMasks__';
-    const state = window[stateKey] || (window[stateKey] = { entries: [], running: false });
-    let entry = state.entries.find((item) => item.selector === selector && item.target === target);
-    if (!entry) {
-      const cover = document.createElement('div');
-      cover.setAttribute('aria-hidden', 'true');
-      cover.style.cssText = 'position:fixed;z-index:2147483647;pointer-events:none;'
-        + 'background:${SECRET_MASK_COLOR};opacity:1;display:none;';
-      document.documentElement.appendChild(cover);
-      entry = { selector, target, cover };
-      state.entries.push(entry);
-    }
-    const position = () => {
-      for (const item of state.entries) {
-        if (!item.target.isConnected) { item.cover.style.display = 'none'; continue; }
-        const rect = item.target.getBoundingClientRect();
-        if (rect.width <= 0 || rect.height <= 0) { item.cover.style.display = 'none'; continue; }
-        item.cover.style.display = 'block';
-        item.cover.style.left = rect.left + 'px';
-        item.cover.style.top = rect.top + 'px';
-        item.cover.style.width = rect.width + 'px';
-        item.cover.style.height = rect.height + 'px';
-      }
+interface MaskTarget {
+  isConnected: boolean;
+  scrollIntoView(options: { block: string; inline: string }): void;
+  getBoundingClientRect(): { left: number; top: number; width: number; height: number };
+}
+interface MaskCover {
+  setAttribute(name: string, value: string): void;
+  style: {
+    cssText: string;
+    display: string;
+    left: string;
+    top: string;
+    width: string;
+    height: string;
+  };
+}
+interface MaskState {
+  entries: { target: MaskTarget; cover: MaskCover }[];
+  running: boolean;
+}
+
+/** Executed in the browser realm, with no module closures. */
+function installSecretMask(target: MaskTarget, color: string): boolean {
+  const browser = globalThis as unknown as {
+    __houstonSecretMasks__?: MaskState;
+    document: {
+      createElement(tag: string): MaskCover;
+      documentElement: { appendChild(cover: MaskCover): void };
     };
-    position();
-    if (entry.cover.style.display !== 'block') return false;
-    if (!state.running) {
-      state.running = true;
-      const tick = () => { position(); requestAnimationFrame(tick); };
-      requestAnimationFrame(tick);
+    requestAnimationFrame(callback: () => void): void;
+  };
+  target.scrollIntoView({ block: 'center', inline: 'center' });
+  const state = (browser.__houstonSecretMasks__ ??= { entries: [], running: false });
+  let entry = state.entries.find((item) => item.target === target);
+  if (entry === undefined) {
+    const cover = browser.document.createElement('div');
+    cover.setAttribute('aria-hidden', 'true');
+    cover.style.cssText =
+      'position:fixed;z-index:2147483647;pointer-events:none;' +
+      `background:${color};opacity:1;display:none;`;
+    browser.document.documentElement.appendChild(cover);
+    entry = { target, cover };
+    state.entries.push(entry);
+  }
+  const position = (): void => {
+    for (const item of state.entries) {
+      if (!item.target.isConnected) {
+        item.cover.style.display = 'none';
+        continue;
+      }
+      const rect = item.target.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) {
+        item.cover.style.display = 'none';
+        continue;
+      }
+      item.cover.style.display = 'block';
+      item.cover.style.left = `${String(rect.left)}px`;
+      item.cover.style.top = `${String(rect.top)}px`;
+      item.cover.style.width = `${String(rect.width)}px`;
+      item.cover.style.height = `${String(rect.height)}px`;
     }
-    return true;
-  })()`;
+  };
+  position();
+  if (entry.cover.style.display !== 'block') return false;
+  if (!state.running) {
+    state.running = true;
+    const tick = (): void => {
+      position();
+      browser.requestAnimationFrame(tick);
+    };
+    browser.requestAnimationFrame(tick);
+  }
+  return true;
 }
 
 /**
@@ -1393,9 +1243,6 @@ class PlaywrightDriver implements Driver {
         reducedMotion: 'reduce',
         ...(rootUrl === '' ? {} : { baseURL: rootUrl }),
       });
-      // Trace action and network data are useful after byte-level redaction. Screenshots and
-      // snapshots are not: their pixels and DOM state cannot be certified by that redaction.
-      await context.tracing.start({ screenshots: false, snapshots: false });
       const page = await context.newPage();
       return new PlaywrightDriver(
         dest,
@@ -1419,8 +1266,8 @@ class PlaywrightDriver implements Driver {
     }
   }
 
-  async goto(url: string): Promise<void> {
-    await this.page.goto(url, { waitUntil: 'domcontentloaded' });
+  async goto(url: string, timeoutMs: number): Promise<void> {
+    await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
   }
 
   async click(selector: string, timeoutMs: number): Promise<void> {
@@ -1435,20 +1282,26 @@ class PlaywrightDriver implements Driver {
     if (credentialValue || knownValue) {
       // A workload can carry a credential literal which is not in the workspace record. It
       // deserves the same treatment as the recorded admin password: mask it before filling
-      // and retain it only in the in-memory set that rewrites the final trace and manifest.
+      // and retain it only in the in-memory set that redacts the final manifest.
       if (credentialValue) this.runtimeSecrets.add(value);
-      let installed: unknown;
+      // Keep the resolved element through the fill. Re-resolving a changing selector
+      // could put the value in a replacement input that has never received a cover.
+      let element: PwElement | undefined;
       try {
-        installed = await this.page.evaluate(secretMaskScript(selector));
+        element = await this.page.locator(selector).elementHandle({ timeout: timeoutMs });
+        if (!(await element.evaluate(installSecretMask, SECRET_MASK_COLOR))) {
+          throw new Error('visual mask unavailable');
+        }
+        this.secretTargets.add(selector);
+        await element.fill(value, { timeout: timeoutMs });
       } catch {
-        installed = false;
-      }
-      if (installed !== true) {
         throw new PreflightError(
-          `capture will not fill a known secret into '${selector}' because its visual mask could not be installed`,
+          `capture will not fill a known secret into '${selector}' because its visual mask or masked fill could not be completed`,
         );
+      } finally {
+        await element?.dispose().catch(() => undefined);
       }
-      this.secretTargets.add(selector);
+      return;
     }
     await this.page.fill(selector, value, { timeout: timeoutMs });
   }
@@ -1494,24 +1347,10 @@ class PlaywrightDriver implements Driver {
     const secrets = [...new Set([...this.runtimeSecrets, ...(await this.sessionSecrets())])];
     const out: Artifacts = {
       video: null,
-      trace: null,
-      traceHits: 0,
       secrets,
       maskedSelectors: [...this.secretTargets].sort(),
     };
     const video = this.page.video();
-    const trace = path.join(this.dest, 'trace.zip');
-    try {
-      await this.context.tracing.stop({ path: trace });
-      const redacted = redactTraceZip(await fs.readFile(trace), secrets);
-      await fs.writeFile(trace, redacted.bytes);
-      out.trace = 'trace.zip';
-      out.traceHits = redacted.hits;
-    } catch {
-      // A trace whose central directory cannot be rebuilt, or whose replacement cannot be
-      // written, is not certifiably secret-safe. Keep the rest of the capture, never it.
-      await fs.rm(trace, { force: true }).catch(() => undefined);
-    }
     try {
       await this.page.close();
     } catch {

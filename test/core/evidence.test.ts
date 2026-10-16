@@ -21,7 +21,6 @@ jest.mock('../../src/core/kube/namespace', () => {
 import * as lifecyclePayload from '../../src/core/lifecycle/payload';
 import * as kubeNamespace from '../../src/core/kube/namespace';
 import * as config from '../../src/lib/config';
-import { renderMarkdown } from '../../src/lib/capture-render';
 import { ValidationError } from '../../src/lib/errors';
 import { Interrupted } from '../../src/seams/exec';
 import {

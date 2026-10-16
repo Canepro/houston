@@ -13,6 +13,7 @@ jest.mock('../../src/core/runner/record', () => {
 import * as evidence from '../../src/core/evidence';
 import {
   captureBundle,
+  loadWorkload,
   parseWorkload,
   prepareBundleRoot,
   REDACTED,
@@ -22,6 +23,8 @@ import {
   type DriverFactory,
 } from '../../src/core/capture';
 import * as naming from '../../src/core/lifecycle/naming';
+import { reproLock } from '../../src/core/runner/locks';
+import { renderCaptureSection } from '../../src/lib/capture-render';
 import { metadata, readMeta } from '../../src/core/runner/record';
 import * as config from '../../src/lib/config';
 import { CaptureFailedError, ConflictError, ValidationError } from '../../src/lib/errors';
@@ -71,11 +74,8 @@ class FakeDriver implements Driver {
   async finish(): Promise<Artifacts> {
     this.finished = true;
     fs.writeFileSync(path.join(this.dest, 'video.webm'), Buffer.alloc(17000, 0x62));
-    fs.writeFileSync(path.join(this.dest, 'trace.zip'), Buffer.from('scrubbed trace'));
     return {
       video: 'video.webm',
-      trace: 'trace.zip',
-      traceHits: 1,
       secrets: [this.runtimeSecret],
       maskedSelectors: [...this.maskedSelectors],
     };
@@ -122,6 +122,103 @@ beforeEach(() => {
 });
 
 describe('scripted browser capture', () => {
+  test('refuses an unreadable user override instead of running the built-in smoke workload', async () => {
+    fs.mkdirSync(path.join(config.workloadDir(), 'smoke.yaml'), { recursive: true });
+    await expect(loadWorkload('smoke')).rejects.toThrow(/cannot read workload.*EISDIR/u);
+  });
+
+  test('passes the requested and default navigation deadlines to the driver', async () => {
+    const dest = path.join(config.home(), 'navigation-timeouts');
+    const driver = new FakeDriver(dest);
+    const goto = jest.spyOn(driver, 'goto');
+    await run(
+      parseWorkload(
+        'steps:\n  - goto: /slow\n    timeout_ms: 61000\n  - goto: /default\n',
+        'fixture',
+      ),
+      driver,
+      dest,
+    );
+    expect(goto.mock.calls).toEqual([
+      ['/slow', 61000],
+      ['/default', 15000],
+    ]);
+  });
+
+  test('renders artifact-only failure with its actual cause and no invented failed step', async () => {
+    const dest = path.join(config.home(), 'missing-frame');
+    const driver = new FakeDriver(dest);
+    jest.spyOn(driver, 'screenshot').mockResolvedValue(undefined);
+    await expect(run(workload(), driver, dest)).rejects.toThrow(CaptureFailedError);
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(dest, 'manifest.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    const readme = renderCaptureSection(manifest).join('\n');
+    expect(manifest.failed_step).toBeNull();
+    expect(readme).toContain('Artifact validation failed');
+    expect(readme).toContain('is listed in the manifest but missing');
+    expect(readme).not.toContain('stopped at step');
+    expect(readme).not.toContain('selectors');
+    const failedDest = path.join(config.home(), 'step-zero-failed');
+    await expect(
+      run(
+        parseWorkload('steps:\n  - click: "#submit"\n', 'fixture'),
+        new FakeDriver(failedDest, 'click'),
+        failedDest,
+      ),
+    ).rejects.toThrow(CaptureFailedError);
+    const failedManifest = JSON.parse(
+      fs.readFileSync(path.join(failedDest, 'manifest.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(renderCaptureSection(failedManifest).join('\n')).toContain(
+      'stopped at step 0 (click #submit)',
+    );
+  });
+
+  test('keeps the browser generation and evidence snapshot together while a mutation waits', async () => {
+    writeWorkload('race', 'steps:\n  - goto: /\n');
+    const out = path.join(config.home(), 'race-bundle');
+    let version = 'old';
+    let browserVersion = '';
+    let enter!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mockRecord.mockImplementation(
+      async () => await reproLock('ticket-1234', async () => ({ repro: { rc_version: version } })),
+    );
+    mockWriteBundle.mockImplementation(
+      async (_name, dest) =>
+        await reproLock('ticket-1234', async () => {
+          fs.mkdirSync(dest);
+          return { path: dest, files: [] };
+        }),
+    );
+    const capturing = captureBundle('ticket-1234', 'race', out, {
+      driverFactory: async (_url, dest) => {
+        browserVersion = version;
+        enter();
+        await released;
+        return new FakeDriver(dest);
+      },
+    });
+    await entered;
+    const mutation = reproLock('ticket-1234', () => {
+      version = 'new';
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    release();
+    const payload = await capturing;
+    await mutation;
+    expect(browserVersion).toBe('old');
+    expect(payload.repro).toEqual({ rc_version: browserVersion });
+    expect(version).toBe('new');
+  });
+
   test('rejects an invalid workload before starting a browser or creating an output root', async () => {
     writeWorkload('invalid', 'name: invalid\nsteps:\n  - misspelled_action: "#go"\n');
     const out = path.join(config.home(), 'invalid-output');
@@ -161,6 +258,7 @@ describe('scripted browser capture', () => {
     const onDisk = fs.readFileSync(path.join(dest, 'manifest.json'), 'utf8');
     expect(onDisk).not.toContain(ADMIN_PASSWORD);
     expect(manifest.privacy).toEqual({
+      trace_policy: 'action-summary-only',
       known_secret_values: 2,
       masked_input_selectors: ['#password'],
       trace_screenshots: false,

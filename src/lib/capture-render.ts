@@ -14,7 +14,7 @@ function bag(value: unknown): Record<string, unknown> {
 }
 
 function markdownText(value: unknown): string {
-  return toText(value)
+  return (value === 0 ? '0' : toText(value))
     .replace(/[\r\n]+/gu, ' ')
     .replaceAll('\\', '\\\\')
     .replaceAll('|', '\\|');
@@ -52,7 +52,7 @@ export function renderCaptureSection(value: unknown): string[] {
   const manifest = bag(value);
   const lines: string[] = [];
   const failed = bag(manifest.failed_step);
-  if (toText(manifest.status) === 'failed') {
+  if (toText(manifest.status) === 'failed' && Object.keys(failed).length > 0) {
     const index = markdownText(failed.index) || '?';
     const action = markdownCode(failed.action) || '?';
     const target = markdownCode(failed.target) || '?';
@@ -60,6 +60,13 @@ export function renderCaptureSection(value: unknown): string[] {
       `> **This capture did not complete.** It stopped at step ${index} (${action} ${target}). ` +
         'Treat the artifacts below as partial, not as proof of the behaviour. A workload ' +
         'written for another Rocket.Chat version is the usual cause.',
+      '',
+    );
+  }
+
+  if (toText(manifest.status) === 'failed' && Object.keys(failed).length === 0) {
+    lines.push(
+      '> **Artifact validation failed.** The browser steps completed, but the retained artifacts do not hold up. See the actual validation failures below. Do not attach this bundle as proof.',
       '',
     );
   }
@@ -100,7 +107,9 @@ export function renderCaptureSection(value: unknown): string[] {
     );
   }
   lines.push(
-    'The trace has no screenshots or DOM snapshots. Byte-level redaction checks known secret values in text artifacts, but it cannot prove that the page did not echo a value somewhere else.',
+    privacy.trace_policy === 'action-summary-only'
+      ? 'The trace is an action summary containing only step index, action, outcome and timing. Houston does not collect a Playwright trace, network bodies, headers, WebSockets, DOM snapshots or screenshots in it. It cannot diagnose network or session behavior.'
+      : 'This legacy capture does not establish confidentiality of its trace. Omit the trace before attaching the bundle.',
     '',
   );
 

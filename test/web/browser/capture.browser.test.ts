@@ -30,43 +30,6 @@ function close(server: Server): Promise<void> {
   });
 }
 
-/** Read regular ZIP entries from Playwright's trace so the test sees its actual contents. */
-function zipEntries(bytes: Buffer): Buffer[] {
-  let end = -1;
-  for (let at = bytes.length - 22; at >= Math.max(0, bytes.length - 0x10016); at -= 1) {
-    if (
-      bytes.readUInt32LE(at) === 0x06054b50 &&
-      at + 22 + bytes.readUInt16LE(at + 20) === bytes.length
-    ) {
-      end = at;
-      break;
-    }
-  }
-  if (end < 0) throw new Error('trace has no ZIP end record');
-  const count = bytes.readUInt16LE(end + 10);
-  const centralEnd = bytes.readUInt32LE(end + 16) + bytes.readUInt32LE(end + 12);
-  let at = bytes.readUInt32LE(end + 16);
-  const entries: Buffer[] = [];
-  for (let index = 0; index < count; index += 1) {
-    if (at + 46 > centralEnd || bytes.readUInt32LE(at) !== 0x02014b50)
-      throw new Error(`trace central entry ${String(index)} is invalid`);
-    const method = bytes.readUInt16LE(at + 10);
-    const compressed = bytes.readUInt32LE(at + 20);
-    const nameLength = bytes.readUInt16LE(at + 28);
-    const extraLength = bytes.readUInt16LE(at + 30);
-    const commentLength = bytes.readUInt16LE(at + 32);
-    const localAt = bytes.readUInt32LE(at + 42);
-    if (bytes.readUInt32LE(localAt) !== 0x04034b50)
-      throw new Error(`trace local entry ${String(index)} is invalid`);
-    const dataAt =
-      localAt + 30 + bytes.readUInt16LE(localAt + 26) + bytes.readUInt16LE(localAt + 28);
-    const data = bytes.subarray(dataAt, dataAt + compressed);
-    entries.push(method === 0 ? data : zlib.inflateRawSync(data));
-    at += 46 + nameLength + extraLength + commentLength;
-  }
-  return entries;
-}
-
 /** Decode the simple non-interlaced 8-bit PNG Playwright writes, including its row filters. */
 function pngPixels(bytes: Buffer): { channels: number; data: Buffer } {
   if (!bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE))
@@ -145,6 +108,7 @@ function countMaskPixels(bytes: Buffer): number {
 
 describe('scripted capture in a real browser', () => {
   let server: Server | null = null;
+  let other: Server | null = null;
   let dest = '';
 
   afterEach(async () => {
@@ -153,12 +117,38 @@ describe('scripted capture in a real browser', () => {
       expect(server.listening).toBe(false);
       server = null;
     }
+    if (other !== null) {
+      await close(other);
+      expect(other.listening).toBe(false);
+      other = null;
+    }
+    const proof = process.env.CAPTURE_PROOF_DIR;
+    if (dest !== '' && proof !== undefined) {
+      fs.mkdirSync(proof, { recursive: true, mode: 0o700 });
+      fs.cpSync(dest, path.join(proof, path.basename(dest)), { recursive: true });
+    }
     if (dest !== '') fs.rmSync(dest, { recursive: true, force: true });
     dest = '';
   });
 
   test('masks a literal credential value selected by a password field before recording browser artifacts', async () => {
+    other = createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end('<p id=other-origin>Other origin, signed out</p>');
+    });
+    await listen(other);
+    const otherAddress = other.address() as AddressInfo;
+    expect(otherAddress.address).toBe('127.0.0.1');
+    const otherOrigin = `http://127.0.0.1:${String(otherAddress.port)}`;
     server = createServer((request, response) => {
+      if (request.url === '/session') {
+        response.writeHead(200, {
+          'content-type': 'application/json',
+          'set-cookie': 'session=transient-cookie-secret-123; Path=/',
+        });
+        response.end(JSON.stringify({ token: 'transient-response-secret-456' }));
+        return;
+      }
       if (request.url === '/video.webm') {
         const video = path.join(dest, 'video.webm');
         if (!fs.existsSync(video)) {
@@ -185,9 +175,18 @@ describe('scripted capture in a real browser', () => {
     <button id="submit" type="submit">Sign in</button>
   </form>
   <p id="signed-in" hidden>Signed in</p>
+  <div id="shadow-host"></div>
+  <a id="logout" href="${otherOrigin}">Leave origin</a>
   <script>
-    document.getElementById('sign-in').addEventListener('submit', (event) => {
+    document.getElementById('shadow-host').attachShadow({mode: 'open'}).innerHTML = '<input name=password>';
+    document.getElementById('sign-in').addEventListener('submit', async (event) => {
       event.preventDefault();
+      const session = await (await fetch('/session')).json();
+      localStorage.setItem('Meteor.loginToken', session.token);
+      await fetch('/session', { headers: { Authorization: session.token } });
+      localStorage.setItem('Meteor.loginToken', 'rotated-storage-secret-789');
+      localStorage.clear();
+      document.cookie = 'session=; Max-Age=0; Path=/';
       document.getElementById('signed-in').hidden = false;
     });
   </script>
@@ -204,11 +203,15 @@ describe('scripted capture in a real browser', () => {
         'steps:',
         '  - goto: "/"',
         '  - wait_for: "#credential"',
-        '  - fill: input[name=password]',
+        '  - fill: xpath=//input[@name="password"]',
+        `    value: ${JSON.stringify(LITERAL_PASSWORD)}`,
+        '  - fill: "#shadow-host >> input[name=password]"',
         `    value: ${JSON.stringify(LITERAL_PASSWORD)}`,
         '  - click: "#submit"',
         '  - wait_for: "#signed-in"',
         '  - shot: signed-in',
+        '  - click: "#logout"',
+        '  - wait_for: "#other-origin"',
       ].join('\n'),
       'loopback fixture',
     );
@@ -222,10 +225,14 @@ describe('scripted capture in a real browser', () => {
     expect(manifest.status).toBe('ok');
     expect(manifest.shots).toEqual(['shots/shot-01.png']);
     expect(manifest.video).toBe('video.webm');
-    expect(manifest.trace).toBe('trace.zip');
+    expect(manifest.trace).toBe('trace.json');
     expect(manifest.privacy).toEqual({
+      trace_policy: 'action-summary-only',
       known_secret_values: 2,
-      masked_input_selectors: ['input[name=password]'],
+      masked_input_selectors: [
+        '#shadow-host >> input[name=password]',
+        'xpath=//input[@name="password"]',
+      ],
       trace_screenshots: false,
       trace_snapshots: false,
       visual_review_required: true,
@@ -247,7 +254,7 @@ describe('scripted capture in a real browser', () => {
       await page.evaluate(async () => {
         const video = document.querySelector('video');
         if (!(video instanceof HTMLVideoElement)) throw new Error('capture video is missing');
-        const at = Math.max(0, Math.min(video.duration / 2, video.duration - 0.1));
+        const at = Math.max(0, Math.min(3, video.duration - 0.1));
         await video.play();
         await new Promise<void>((resolve, reject) => {
           const deadline = Date.now() + 5000;
@@ -268,29 +275,66 @@ describe('scripted capture in a real browser', () => {
       await page.waitForTimeout(200);
       const reviewFrame = await page.screenshot({ fullPage: true });
       expect(countMaskPixels(reviewFrame)).toBeGreaterThan(500);
+      fs.writeFileSync(path.join(dest, 'decoded-video-frame.png'), reviewFrame);
     } finally {
       await reviewer.close();
     }
 
-    const trace = zipEntries(fs.readFileSync(path.join(dest, 'trace.zip')));
-    expect(trace.some((entry) => entry.includes(Buffer.from(ADMIN_PASSWORD)))).toBe(false);
-    const escapedPassword = JSON.stringify(LITERAL_PASSWORD).slice(1, -1);
-    const formPassword = new URLSearchParams({ value: LITERAL_PASSWORD })
-      .toString()
-      .slice('value='.length);
-    for (const secret of [ADMIN_PASSWORD, LITERAL_PASSWORD, escapedPassword, formPassword]) {
-      expect(trace.some((entry) => entry.includes(Buffer.from(secret)))).toBe(false);
+    const trace = fs.readFileSync(path.join(dest, 'trace.json'), 'utf8');
+    expect(fs.existsSync(path.join(dest, 'trace.zip'))).toBe(false);
+    for (const secret of [
+      ADMIN_PASSWORD,
+      LITERAL_PASSWORD,
+      'transient-cookie-secret-123',
+      'transient-response-secret-456',
+      'rotated-storage-secret-789',
+    ]) {
+      expect(trace).not.toContain(secret);
     }
-    expect(
-      trace.some(
-        (entry) =>
-          entry.includes(PNG_SIGNATURE) ||
-          entry.includes(Buffer.from([0xff, 0xd8, 0xff])) ||
-          entry.includes(Buffer.from('RIFF')),
-      ),
-    ).toBe(false);
+    const summary = JSON.parse(trace) as { schema: string; steps: Record<string, unknown>[] };
+    expect(summary.schema).toBe('houston.capture-actions.v1');
+    expect(summary.steps.map((step) => step.action)).toEqual([
+      'goto',
+      'wait_for',
+      'fill',
+      'fill',
+      'click',
+      'wait_for',
+      'shot',
+      'click',
+      'wait_for',
+    ]);
+    for (const step of summary.steps)
+      expect(Object.keys(step).sort()).toEqual(['action', 'index', 'ms', 'outcome']);
     const manifestText = fs.readFileSync(path.join(dest, 'manifest.json'), 'utf8');
     expect(manifestText).not.toContain(ADMIN_PASSWORD);
     expect(manifestText).not.toContain(LITERAL_PASSWORD);
+  });
+  test('honors a goto deadline and retains its honest failed capture', async () => {
+    server = createServer((_request, response) => {
+      setTimeout(() => {
+        response.writeHead(200, { 'content-type': 'text/html' });
+        response.end('<p>slow response</p>');
+      }, 400);
+    });
+    await listen(server);
+    const address = server.address() as AddressInfo;
+    expect(address.address).toBe('127.0.0.1');
+    const origin = `http://127.0.0.1:${String(address.port)}`;
+    dest = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-capture-timeout-'));
+    const driver = await browserDriver(origin, dest);
+    await expect(
+      run(parseWorkload('steps:\n  - goto: /slow\n    timeout_ms: 50\n', 'fixture'), driver, dest, {
+        root_url: origin,
+      }),
+    ).rejects.toThrow(/Timeout 50ms exceeded/u);
+    const manifest = JSON.parse(fs.readFileSync(path.join(dest, 'manifest.json'), 'utf8')) as {
+      status: string;
+      failure_kind: string;
+      failed_step: { action: string };
+    };
+    expect(manifest.status).toBe('failed');
+    expect(manifest.failure_kind).toBe('step');
+    expect(manifest.failed_step.action).toBe('goto');
   });
 });

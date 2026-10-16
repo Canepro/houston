@@ -102,9 +102,11 @@ npx playwright install chromium
 ```
 
 The bundle contains the evidence record, a capture manifest, checkpoint PNG files, one frame
-per action, a video, and a Playwright trace. Houston masks known secret values and any nonempty
-fill into a credential-shaped field before typing it, then removes trace screenshots and DOM
-snapshots. Inspect the visible PNG files and video before you attach the bundle because a page
+per action, a video, and an action-summary JSON trace. The trace contains only step indexes,
+actions, outcomes and timings. Houston never collects a raw Playwright network trace because
+it cannot certify confidentiality of transient sessions, rotated tokens or other origins.
+Houston masks known secret values and any nonempty fill into a credential-shaped field before
+typing it. Inspect the visible PNG files and video before you attach the bundle because a page
 can echo a value outside the masked input.
 
 Exit 9 means a step failed or an artifact did not hold up. Houston keeps the partial bundle so

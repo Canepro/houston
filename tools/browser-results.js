@@ -7,7 +7,8 @@
 // Five retained-job History behaviors extend the 205 baseline.
 // Five seed GUI behaviors, twenty-two re-verification regressions, and one loopback capture
 // proof extend the 178 baseline.
-const EXPECTED = 217;
+// Navigation deadline regression extends the 217 baseline.
+const EXPECTED = 218;
 
 module.exports = (results) => {
   const wanted = process.env.BROWSER_GATE_PROBE === 'count' ? EXPECTED + 1 : EXPECTED;
