@@ -10,7 +10,9 @@ import { logPath, resetForTest } from '../../src/core/eventlog';
 import { loadtestTarget } from '../../src/core/loadtest';
 import { NotFoundError } from '../../src/lib/errors';
 
+import type * as PathsNS from '../../src/core/runner/paths';
 import type * as RecordNS from '../../src/core/runner/record';
+import type * as UsersNS from '../../src/core/users';
 
 import type * as AppNS from '../../src/cli/app';
 import { runCli } from '../../src/cli/app';
@@ -291,5 +293,707 @@ describe("a multi-instance workspace's info", () => {
     expect(row).toContain('email');
     expect(row).not.toContain('multi-instance');
     expect(out).toContain('instances (2');
+  });
+
+  it('does not print fictional direct instance URLs for Kubernetes replicas', async () => {
+    const record = require('../../src/core/runner/record') as typeof RecordNS;
+    await record.writeRecord(
+      'kube-mi',
+      record.metadata({
+        name: 'kube-mi',
+        project: 'houston-kube-mi',
+        preset: 'default',
+        hostPort: 4300,
+        extra: { runtime: 'kubernetes', deployment: 'microservices', instances: 3 },
+      }),
+    );
+    let out = '';
+    const io = { writeOut: (text: string) => void (out += text), writeErr: () => undefined };
+    const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
+
+    expect(
+      await runCli(['info', '--name', 'kube-mi'], { io, execute: handlers.createExecutor(io) }),
+    ).toBe(0);
+    expect(out).not.toContain('instances (3');
+    expect(out).not.toContain('rocketchat-1: http://localhost:4301');
+  });
+});
+
+describe('SSH loopback guidance', () => {
+  it('renders human info for malformed extra bags without rewriting the stored record', async () => {
+    const record = require('../../src/core/runner/record') as typeof RecordNS;
+    const paths = require('../../src/core/runner/paths') as typeof PathsNS;
+    const keys = [
+      'SSH_CONNECTION',
+      'SSH_CLIENT',
+      'SSH_TTY',
+      'HOUSTON_SSH_LOCAL_PORT',
+      'HOUSTON_SSH_PORT',
+    ] as const;
+    const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    try {
+      for (const extra of [null, []]) {
+        const name = extra === null ? 'null-extra' : 'array-extra';
+        await record.writeRecord(
+          name,
+          record.metadata({
+            name,
+            rcVersion: '8.5.1',
+            rootUrl: 'http://localhost:3123',
+            hostPort: 3123,
+            publicUrl: 'https://chat.example.test',
+          }),
+        );
+        const filename = `${paths.workspace(name)}/repro.json`;
+        const data = JSON.parse(fs.readFileSync(filename, 'utf8')) as Record<string, unknown>;
+        data.extra = extra;
+        const bytes = JSON.stringify(data);
+        fs.writeFileSync(filename, bytes);
+        fs.writeFileSync(
+          `${paths.workspace(name)}/docker-compose.yml`,
+          'services:\n  rocketchat:\n    ports: ["127.0.0.1:3123:3000"]\n',
+        );
+        for (const remote of [false, true]) {
+          for (const key of keys) delete process.env[key];
+          if (remote) process.env.SSH_CLIENT = '198.51.100.20 55100 2222';
+          let stdout = '';
+          let stderr = '';
+          const io = {
+            writeOut: (text: string) => void (stdout += text),
+            writeErr: (text: string) => void (stderr += text),
+          };
+          const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
+          expect(
+            await runCli(['info', '--name', name], { execute: handlers.createExecutor(io), io }),
+          ).toBe(0);
+          expect(stderr).toBe('');
+          expect(stdout).toContain('Rocket.Chat');
+          expect(stdout).toContain('enabled');
+          expect(stdout.includes('tunnel :')).toBe(remote);
+          expect(fs.readFileSync(filename, 'utf8')).toBe(bytes);
+        }
+      }
+    } finally {
+      for (const key of keys) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
+    }
+  });
+
+  it.each([
+    { label: 'recorded wildcard', recorded: '0.0.0.0', configured: '127.0.0.1', fail: false },
+    {
+      label: 'owned typed name',
+      actor: 'operator',
+      owner: 'operator',
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: false,
+    },
+    {
+      label: 'foreign typed name resolves a new owned name',
+      actor: 'operator',
+      owner: 'other',
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: true,
+    },
+    {
+      label: 'reuse ignores a new bind flag',
+      flags: ['--bind', '127.0.0.1'],
+      mapping: '0.0.0.0:3123:3000',
+      configured: '127.0.0.1',
+      fail: false,
+    },
+    {
+      label: 'Kubernetes bind flag wins',
+      flags: ['--bind', '127.0.0.1'],
+      runtime: 'kubernetes',
+      recorded: '0.0.0.0',
+      configured: '0.0.0.0',
+      fail: true,
+    },
+    {
+      label: 'legacy wildcard',
+      mapping: '0.0.0.0:3123:3000',
+      configured: '127.0.0.1',
+      fail: false,
+    },
+    {
+      label: 'context selects Kubernetes before recorded Docker',
+      flags: ['--context', 'fixture-cluster'],
+      runtime: 'docker',
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: true,
+    },
+    {
+      label: 'context selects a new wildcard Kubernetes bind',
+      flags: ['--context', 'fixture-cluster'],
+      runtime: 'docker',
+      recorded: '127.0.0.1',
+      configured: '0.0.0.0',
+      fail: false,
+    },
+    {
+      label: 'explicit Docker wins over context',
+      flags: ['--runtime', 'docker', '--context', 'fixture-cluster'],
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: false,
+    },
+    {
+      label: 'explicit Compose alias wins over context',
+      flags: ['--runtime', 'compose', '--context', 'fixture-cluster'],
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: false,
+    },
+    {
+      label: 'recorded Compose alias without context keeps its bind',
+      runtime: 'docker-compose',
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: false,
+    },
+    {
+      label: 'recorded Kubernetes alias without explicit context uses requested bind',
+      runtime: 'k8s',
+      context: 'stored-cluster',
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: true,
+    },
+    {
+      label: 'carried context selects Kubernetes before recorded Docker',
+      runtime: 'docker',
+      context: 'stored-cluster',
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: true,
+    },
+    {
+      label: 'carried context selects a new wildcard Kubernetes bind',
+      runtime: 'docker',
+      context: 'stored-cluster',
+      recorded: '127.0.0.1',
+      configured: '0.0.0.0',
+      fail: false,
+    },
+    { label: 'legacy loopback', mapping: '127.0.0.2:3123:3000', configured: '0.0.0.0', fail: true },
+    {
+      label: 'legacy bracketed IPv6',
+      mapping: '[::1]:3123:3000',
+      configured: '0.0.0.0',
+      fail: true,
+    },
+    { label: 'legacy bare IPv6', mapping: '::1:3123:3000', configured: '0.0.0.0', fail: true },
+    { label: 'unknown legacy bind', configured: '127.0.0.1', fail: false },
+    {
+      label: 'invalid legacy bind',
+      mapping: '[::1:3123:3000',
+      configured: '127.0.0.1',
+      fail: false,
+    },
+    {
+      label: 'interpolated legacy bind',
+      mapping: '${BIND}:3123:3000',
+      configured: '127.0.0.1',
+      fail: false,
+    },
+    {
+      label: 'Kubernetes now wildcard',
+      runtime: 'kubernetes',
+      recorded: '127.0.0.1',
+      configured: '0.0.0.0',
+      fail: false,
+    },
+    {
+      label: 'Kubernetes now loopback',
+      runtime: 'kubernetes',
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: true,
+    },
+    {
+      label: 'explicit Kubernetes',
+      flags: ['--runtime', 'kubernetes'],
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: true,
+    },
+    {
+      label: 'explicit Docker reuse',
+      flags: ['--runtime', 'docker'],
+      runtime: 'kubernetes',
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: false,
+    },
+    {
+      label: 'force now wildcard',
+      flags: ['--force'],
+      recorded: '127.0.0.1',
+      configured: '0.0.0.0',
+      fail: false,
+    },
+    {
+      label: 'force now loopback',
+      flags: ['--force'],
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: true,
+    },
+    {
+      label: 'fresh now wildcard',
+      flags: ['--fresh'],
+      recorded: '127.0.0.1',
+      configured: '0.0.0.0',
+      fail: false,
+    },
+    {
+      label: 'fresh now loopback',
+      flags: ['--fresh'],
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: true,
+    },
+    { label: 'new wildcard', missing: true, configured: '0.0.0.0', fail: false },
+    { label: 'new loopback', missing: true, configured: '127.0.0.1', fail: true },
+    {
+      label: 'explicit bind wins',
+      flags: ['--force', '--bind', '0.0.0.0'],
+      recorded: '127.0.0.1',
+      configured: '127.0.0.1',
+      fail: false,
+    },
+  ])('preflights the bind the runtime will use: $label', async (scenario) => {
+    const record = require('../../src/core/runner/record') as typeof RecordNS;
+    const paths = require('../../src/core/runner/paths') as typeof PathsNS;
+    const name = 'ssh-preflight';
+    await paths.remove(name);
+    if (!('missing' in scenario)) {
+      const meta = record.metadata({
+        name,
+        rootUrl: 'http://localhost:3123',
+        hostPort: 3123,
+        extra: {
+          ...('runtime' in scenario ? { runtime: scenario.runtime } : {}),
+          ...('context' in scenario ? { context: scenario.context } : {}),
+          ...('owner' in scenario ? { owner: scenario.owner } : {}),
+          ...('recorded' in scenario ? { bind_host: scenario.recorded } : {}),
+        },
+      });
+      await record.writeRecord(name, meta);
+      if ('mapping' in scenario) {
+        fs.writeFileSync(
+          `${paths.workspace(name)}/docker-compose.yml`,
+          `services:\n  rocketchat:\n    ports: [${JSON.stringify(scenario.mapping)}]\n`,
+        );
+      }
+    }
+    const filename = `${paths.workspace(name)}/repro.json`;
+    const before = fs.existsSync(filename) ? fs.readFileSync(filename, 'utf8') : null;
+    const keys = [
+      'SSH_CONNECTION',
+      'SSH_CLIENT',
+      'SSH_TTY',
+      'HOUSTON_SSH_LOCAL_PORT',
+      'HOUSTON_SSH_PORT',
+      'HOUSTON_BIND_HOST',
+      'HOUSTON_USER',
+    ] as const;
+    const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    const users = require('../../src/core/users') as typeof UsersNS;
+    const priorUsers = users.readAll();
+    if ('actor' in scenario) {
+      users.writeAll(new Map([['operator', ['synthetic-unused-hash', '2026-01-01', 'member']]]));
+    }
+    try {
+      for (const key of keys) delete process.env[key];
+      process.env.SSH_TTY = '/dev/ttys001';
+      process.env.HOUSTON_BIND_HOST = scenario.configured;
+      if ('actor' in scenario) process.env.HOUSTON_USER = scenario.actor;
+      jest.resetModules();
+      // The create boundary is stopped here. Preflight, parser, state reads and human
+      // dispatch are real; no engine is reached and a refusal must precede this call.
+      const create = jest.fn(async () => {
+        if ('missing' in scenario) {
+          await record.writeRecord(
+            name,
+            record.metadata({
+              name,
+              hostPort: 3123,
+              rootUrl: 'http://localhost:3123',
+              extra: { bind_host: scenario.configured },
+            }),
+          );
+        }
+        return { name, waited: true, booted_s: 1 };
+      });
+      jest.doMock('../../src/core/lifecycle/create-docker', () => ({
+        ...jest.requireActual<object>('../../src/core/lifecycle/create-docker'),
+        createRepro: create,
+      }));
+      const app = require('../../src/cli/app') as typeof AppNS;
+      const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
+      for (const [key, value] of [
+        ['HOUSTON_SSH_LOCAL_PORT', '80'],
+        ['HOUSTON_SSH_PORT', '70000'],
+      ] as const) {
+        delete process.env.HOUSTON_SSH_LOCAL_PORT;
+        delete process.env.HOUSTON_SSH_PORT;
+        process.env[key] = value;
+        create.mockClear();
+        let stdout = '';
+        let stderr = '';
+        const io = {
+          writeOut: (text: string) => void (stdout += text),
+          writeErr: (text: string) => void (stderr += text),
+        };
+        const code = await app.runCli(
+          [
+            'up',
+            '--version',
+            '8.5.1',
+            '--name',
+            name,
+            '--offline',
+            ...('flags' in scenario ? scenario.flags : []),
+          ],
+          { execute: handlers.createExecutor(io), io },
+        );
+        expect({ key, code, creates: create.mock.calls.length }).toEqual({
+          key,
+          code: scenario.fail ? 2 : 0,
+          creates: scenario.fail ? 0 : 1,
+        });
+        if (scenario.fail) expect(stderr).toContain(`${key} must be an integer`);
+        expect(stdout).not.toContain('tunnel :');
+        if (before !== null) expect(fs.readFileSync(filename, 'utf8')).toBe(before);
+      }
+    } finally {
+      users.writeAll(priorUsers);
+      jest.dontMock('../../src/core/lifecycle/create-docker');
+      for (const key of keys) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
+      jest.resetModules();
+    }
+  });
+
+  it('refuses a local tunnel port a preset or monitoring will publish, before creating', async () => {
+    const paths = require('../../src/core/runner/paths') as typeof PathsNS;
+    const name = 'ssh-side-port';
+    const keys = [
+      'SSH_CONNECTION',
+      'SSH_CLIENT',
+      'SSH_TTY',
+      'HOUSTON_SSH_LOCAL_PORT',
+      'HOUSTON_SSH_PORT',
+      'HOUSTON_BIND_HOST',
+    ] as const;
+    const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    const observed: unknown[] = [];
+    try {
+      for (const [local, flags] of [
+        ['8081', ['--preset', 'saml']],
+        ['9090', ['--monitor']],
+        ['4402', ['--port', '4400', '--deployment', 'multi-instance', '--replicas', '3']],
+        ['4401', ['--port', '4400', '--deployment', 'multi-instance']],
+        ['8082', ['--preset', 'saml']],
+        ['9090', ['--runtime', 'kubernetes', '--monitor']],
+        ['4402', ['--runtime', 'kubernetes', '--port', '4400', '--replicas', '3']],
+        ['9090', ['--deployment', 'microservices', '--monitor']],
+        ['9090', ['--deployment', 'Micro', '--monitor']],
+        // A re-up: the workspace the previous row created is kept, and its record decides.
+        ['9090', ['--monitor', 're-up']],
+      ] as const) {
+        const reUp = (flags as readonly string[]).includes('re-up');
+        if (!reUp) await paths.remove(name);
+        for (const key of keys) delete process.env[key];
+        process.env.SSH_TTY = '/dev/ttys001';
+        process.env.HOUSTON_BIND_HOST = '127.0.0.1';
+        process.env.HOUSTON_SSH_LOCAL_PORT = local;
+        jest.resetModules();
+        const record = require('../../src/core/runner/record') as typeof RecordNS;
+        const create = jest.fn(async () => {
+          await record.writeRecord(
+            name,
+            record.metadata({
+              name,
+              hostPort: 3123,
+              rootUrl: 'http://localhost:3123',
+              extra: { bind_host: '127.0.0.1' },
+            }),
+          );
+          return { name, waited: true, booted_s: 1 };
+        });
+        jest.doMock('../../src/core/lifecycle/create-docker', () => ({
+          ...jest.requireActual<object>('../../src/core/lifecycle/create-docker'),
+          createRepro: create,
+        }));
+        const app = require('../../src/cli/app') as typeof AppNS;
+        const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
+        let stderr = '';
+        const io = { writeOut: () => undefined, writeErr: (text: string) => void (stderr += text) };
+        const code = await app.runCli(
+          [
+            'up',
+            '--version',
+            '8.5.1',
+            '--name',
+            name,
+            '--offline',
+            ...(flags as readonly string[]).filter((flag) => flag !== 're-up'),
+          ],
+          { execute: handlers.createExecutor(io), io },
+        );
+        observed.push([local, code, create.mock.calls.length, stderr.includes('side ports')]);
+      }
+    } finally {
+      jest.dontMock('../../src/core/lifecycle/create-docker');
+      for (const key of keys) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
+      jest.resetModules();
+    }
+    expect(observed).toEqual([
+      ['8081', 2, 0, true],
+      ['9090', 2, 0, true],
+      ['4402', 2, 0, true],
+      ['4401', 2, 0, true],
+      ['8082', 0, 1, false],
+      // Kubernetes forwards Grafana only and publishes no replica ports.
+      ['9090', 0, 1, false],
+      ['4402', 0, 1, false],
+      ['9090', 0, 1, false],
+      ['9090', 0, 1, false],
+      ['9090', 0, 1, false],
+    ]);
+  });
+
+  it.each([
+    { bind: '127.0.0.2', advertised: '', local: '3123' },
+    { bind: '127.0.0.2', advertised: 'https://chat.example.test', local: '3123' },
+    { bind: '127.0.0.2', advertised: 'http://127.0.0.1:3123', local: '3123' },
+    { bind: '::1', advertised: '', local: '4311' },
+  ])(
+    'warns about unforwarded loopback URLs in human info: %j',
+    async ({ bind, advertised, local }) => {
+      const record = require('../../src/core/runner/record') as typeof RecordNS;
+      await record.writeRecord(
+        'ssh-origin',
+        record.metadata({
+          name: 'ssh-origin',
+          rootUrl: `http://${bind === '::1' ? '[::1]' : bind}:3123`,
+          hostPort: 3123,
+          preset: 'email',
+          extra: { bind_host: bind, sidecar_ports: [8025], advertised_url: advertised },
+        }),
+      );
+      const keys = [
+        'SSH_CONNECTION',
+        'SSH_CLIENT',
+        'SSH_TTY',
+        'HOUSTON_SSH_LOCAL_PORT',
+        'HOUSTON_SSH_PORT',
+        'HOUSTON_SSH_HOST',
+        'HOUSTON_SSH_USER',
+      ] as const;
+      const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+      try {
+        for (const key of keys) delete process.env[key];
+        process.env.SSH_TTY = '/dev/ttys001';
+        process.env.HOUSTON_SSH_LOCAL_PORT = local;
+        process.env.HOUSTON_SSH_HOST = 'ssh-proof.invalid';
+        process.env.HOUSTON_SSH_USER = 'operator';
+        let stdout = '';
+        let stderr = '';
+        const io = {
+          writeOut: (text: string) => void (stdout += text),
+          writeErr: (text: string) => void (stderr += text),
+        };
+        const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
+        expect(
+          await runCli(['info', '--name', 'ssh-origin'], {
+            execute: handlers.createExecutor(io),
+            io,
+          }),
+        ).toBe(0);
+        expect(stderr).toBe('');
+        const target = bind === '::1' ? '[::1]' : bind;
+        expect(stdout).toContain(`127.0.0.1:${local}:${target}:3123`);
+        expect(stdout).toContain(`127.0.0.1:8025:${target}:8025`);
+        expect(stdout).toContain(`browser: http://127.0.0.1:${local}`);
+        expect(stdout).toContain('callbacks');
+        expect(stdout).toContain('printed side-service URLs');
+        expect(stdout).toContain(`using ${bind} cannot use this handoff`);
+        expect(stdout).not.toContain('so their printed URLs work through the tunnel');
+        if (advertised === 'https://chat.example.test') {
+          expect(stdout).toContain('ROOT_URL is https://chat.example.test');
+          expect(stdout).not.toContain('still names port');
+        }
+        if (advertised === 'http://127.0.0.1:3123')
+          expect(stdout).not.toContain('rather than the tunnel');
+      } finally {
+        for (const key of keys) {
+          if (saved[key] === undefined) delete process.env[key];
+          else process.env[key] = saved[key];
+        }
+      }
+    },
+  );
+
+  it('prints the tunnel only when human info verifies a loopback bind', async () => {
+    const record = require('../../src/core/runner/record') as typeof RecordNS;
+    await record.writeRecord(
+      'ssh-ready',
+      record.metadata({
+        name: 'ssh-ready',
+        project: 'houston-ssh-ready',
+        rcVersion: '8.5.1',
+        rcImage: 'i',
+        mongoTag: '8.0',
+        mongoFlavor: 'official',
+        preset: 'default',
+        rootUrl: 'http://localhost:3123',
+        hostPort: 3123,
+        versionSource: 'map',
+        extra: { bind_host: '127.0.0.1' },
+      }),
+    );
+    const keys = [
+      'SSH_CONNECTION',
+      'USER',
+      'HOUSTON_SSH_HOST',
+      'HOUSTON_SSH_USER',
+      'HOUSTON_SSH_LOCAL_PORT',
+    ] as const;
+    const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    try {
+      process.env.SSH_CONNECTION = '198.51.100.20 55100 203.0.113.8 22';
+      process.env.USER = 'operator';
+      delete process.env.HOUSTON_SSH_HOST;
+      delete process.env.HOUSTON_SSH_USER;
+      delete process.env.HOUSTON_SSH_LOCAL_PORT;
+      jest.resetModules();
+      jest.doMock('../../src/core/lifecycle/create-docker', () => ({
+        ...jest.requireActual<object>('../../src/core/lifecycle/create-docker'),
+        createRepro: async () => ({ name: 'ssh-ready', waited: true, booted_s: 1 }),
+      }));
+      const app = require('../../src/cli/app') as typeof AppNS;
+      const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
+      let stdout = '';
+      let stderr = '';
+      const io = {
+        writeOut: (text: string) => void (stdout += text),
+        writeErr: (text: string) => void (stderr += text),
+      };
+      const execute = handlers.createExecutor(io);
+      const up = await app.runCli(
+        ['up', '--version', '8.5.1', '--name', 'ssh-ready', '--offline', '--wait'],
+        { execute, io },
+      );
+      const info = await app.runCli(['info', '--name', 'ssh-ready'], { execute, io });
+      expect([up, info, stderr]).toEqual([0, 0, '']);
+      expect(
+        stdout.match(
+          /tunnel : ssh -N -o ExitOnForwardFailure=yes -L 127\.0\.0\.1:3123:127\.0\.0\.1:3123 -- operator@203\.0\.113\.8/g,
+        ),
+      ).toHaveLength(2);
+      expect(stdout.match(/browser: http:\/\/127\.0\.0\.1:3123/g)).toHaveLength(2);
+      // Old records can omit bind_host while Compose proves a wildcard publish.
+      const old = await record.readMeta('ssh-ready');
+      delete old.extra.bind_host;
+      await record.writeRecord('ssh-ready', old);
+      const paths = require('../../src/core/runner/paths') as typeof PathsNS;
+      fs.writeFileSync(
+        `${paths.workspace('ssh-ready')}/docker-compose.yml`,
+        'services:\n  rocketchat:\n    ports: ["0.0.0.0:3123:3000"]\n',
+      );
+      stdout = '';
+      expect(await app.runCli(['info', '--name', 'ssh-ready'], { execute, io })).toBe(0);
+      expect(stdout).not.toContain('tunnel :');
+      expect(stdout).not.toContain('Credentials stay private');
+      // rootUrl is where Houston itself calls the workspace. With neither the current
+      // metadata nor its legacy Compose file proving the bind, do not infer loopback from it.
+      fs.unlinkSync(`${paths.workspace('ssh-ready')}/docker-compose.yml`);
+      stdout = '';
+      expect(await app.runCli(['info', '--name', 'ssh-ready'], { execute, io })).toBe(0);
+      expect(stdout).not.toContain('tunnel :');
+      expect(stdout).not.toContain('Credentials stay private');
+    } finally {
+      jest.dontMock('../../src/core/lifecycle/create-docker');
+      for (const key of keys) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
+      jest.resetModules();
+    }
+  });
+
+  it('recovers a legacy IPv6 Compose bind for human info guidance', async () => {
+    const record = require('../../src/core/runner/record') as typeof RecordNS;
+    const paths = require('../../src/core/runner/paths') as typeof PathsNS;
+    await record.writeRecord(
+      'ssh-legacy-ipv6',
+      record.metadata({
+        name: 'ssh-legacy-ipv6',
+        project: 'houston-ssh-legacy-ipv6',
+        rcVersion: '8.5.1',
+        rcImage: 'i',
+        mongoTag: '8.0',
+        mongoFlavor: 'official',
+        preset: 'default',
+        rootUrl: 'http://localhost:3123',
+        hostPort: 3123,
+        versionSource: 'map',
+      }),
+    );
+    fs.writeFileSync(
+      `${paths.workspace('ssh-legacy-ipv6')}/docker-compose.yml`,
+      'services:\n  rocketchat:\n    ports: ["[::1]:3123:3000"]\n',
+    );
+    const keys = [
+      'SSH_CONNECTION',
+      'USER',
+      'HOUSTON_SSH_HOST',
+      'HOUSTON_SSH_USER',
+      'HOUSTON_SSH_LOCAL_PORT',
+    ] as const;
+    const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    try {
+      process.env.SSH_CONNECTION = '198.51.100.20 55100 203.0.113.8 22';
+      process.env.USER = 'operator';
+      delete process.env.HOUSTON_SSH_HOST;
+      delete process.env.HOUSTON_SSH_USER;
+      delete process.env.HOUSTON_SSH_LOCAL_PORT;
+      const app = require('../../src/cli/app') as typeof AppNS;
+      const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
+      let stdout = '';
+      let stderr = '';
+      const io = {
+        writeOut: (text: string) => void (stdout += text),
+        writeErr: (text: string) => void (stderr += text),
+      };
+      const code = await app.runCli(['info', '--name', 'ssh-legacy-ipv6'], {
+        execute: handlers.createExecutor(io),
+        io,
+      });
+      expect([code, stderr]).toEqual([0, '']);
+      expect(stdout).toContain(
+        "tunnel : ssh -N -o ExitOnForwardFailure=yes -L '127.0.0.1:3123:[::1]:3123' -- operator@203.0.113.8",
+      );
+      expect(stdout).toContain('browser: http://127.0.0.1:3123');
+    } finally {
+      for (const key of keys) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
+    }
   });
 });

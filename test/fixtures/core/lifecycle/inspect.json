@@ -147,6 +147,15 @@
     "runtime": "docker",
     "deployment": "monolith",
     "bind_host": "127.0.0.1",
+    "access": {
+      "mode": "local",
+      "bind": "loopback",
+      "host_port": 3001,
+      "local_port": 3001,
+      "browser_url": "http://localhost:3001",
+      "tunnel_command": null,
+      "note": null
+    },
     "seed": null,
     "pinned": false,
     "namespace": "",

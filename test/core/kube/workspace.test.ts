@@ -7,6 +7,11 @@
  * touches a cluster is replaced; every pure function stays real, so a manifest asserted on
  * here is the manifest that would be applied.
  */
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import * as YAML from 'yaml';
+import * as config from '../../../src/lib/config';
+
 import { CreateFailedError, PreflightError } from '../../../src/lib/errors';
 import { Interrupted, sleep, stoppable } from '../../../src/seams/exec';
 import type { Event } from '../../../src/lib/events';
@@ -33,6 +38,39 @@ import type * as presetTypes from '../../../src/lib/presets/types';
 import { createWorkspace, type CreateWorkspaceOptions } from '../../../src/core/kube/workspace';
 import { metadata, readMeta, writeRecord } from '../../../src/core/runner/record';
 import * as paths from '../../../src/core/runner/paths';
+import { createKubernetes } from '../../../src/core/lifecycle/create-k8s';
+import { createReq } from '../../../src/core/lifecycle/types';
+import * as lifecyclePorts from '../../../src/core/lifecycle/ports';
+import * as sizing from '../../../src/core/lifecycle/sizing';
+import * as tlsplan from '../../../src/core/lifecycle/tlsplan';
+import * as reachability from '../../../src/core/kube/reachability';
+
+jest.mock('../../../src/core/lifecycle/sizing', () => ({
+  ...jest.requireActual('../../../src/core/lifecycle/sizing'),
+  checkCapacity: jest.fn(),
+}));
+jest.mock('../../../src/core/lifecycle/ports', () => ({
+  ...jest.requireActual('../../../src/core/lifecycle/ports'),
+  pickHostPort: jest.fn(),
+  checkSidecarPorts: jest.fn(),
+}));
+jest.mock('../../../src/core/lifecycle/tlsplan', () => {
+  const actual = jest.requireActual('../../../src/core/lifecycle/tlsplan') as typeof tlsplan;
+  return {
+    ...actual,
+    resolveTls: jest.fn(),
+    kubernetesTlsPlan: jest.fn((...args: unknown[]) =>
+      actual.kubernetesTlsPlan(...(args as Parameters<typeof actual.kubernetesTlsPlan>)),
+    ),
+    routeKubernetesName: jest.fn((...args: unknown[]) =>
+      actual.routeKubernetesName(...(args as Parameters<typeof actual.routeKubernetesName>)),
+    ),
+  };
+});
+jest.mock('../../../src/core/kube/reachability', () => ({
+  ...jest.requireActual('../../../src/core/kube/reachability'),
+  helmReachable: jest.fn(),
+}));
 
 // Only the calls that reach a cluster are replaced. `mongoRbacManifest`, `mongoManifest`,
 // `operatorMongoUrl`, `valuesFor` and `mongoImage` all stay real.
@@ -57,6 +95,7 @@ jest.mock('../../../src/core/kube/capabilities', () => ({
 jest.mock('../../../src/core/kube/namespace', () => ({
   ...jest.requireActual('../../../src/core/kube/namespace'),
   namespaceFor: jest.fn(),
+  assertNamespaceAvailable: jest.fn(),
   ensureNamespace: jest.fn(),
 }));
 jest.mock('../../../src/core/kube/probe', () => ({
@@ -508,6 +547,741 @@ describe('what the record says', () => {
 describe('the values the release is installed with', () => {
   const valuesOf = () =>
     (mocked(release.install).mock.calls[0]?.[0] as { values: Record<string, unknown> }).values;
+
+  it('promotes effective preset credentials through Secrets before installing and recording values', async () => {
+    const cases = [
+      { label: 'preset', overrides: {}, token: 'preset-token', license: 'preset-license' },
+      {
+        label: 'override',
+        overrides: { REG_TOKEN: '  override-token  ', ROCKETCHAT_LICENSE: '  override-license  ' },
+        token: 'override-token',
+        license: 'override-license',
+      },
+      {
+        label: 'blank',
+        overrides: { REG_TOKEN: '  ', ROCKETCHAT_LICENSE: ' \t ' },
+        token: '',
+        license: '',
+      },
+      {
+        label: 'remove',
+        overrides: { REG_TOKEN: null, ROCKETCHAT_LICENSE: null },
+        token: '',
+        license: '',
+      },
+      {
+        label: 'dedicated',
+        overrides: { REG_TOKEN: null, ROCKETCHAT_LICENSE: null },
+        directToken: '  direct-token  ',
+        directLicense: '  direct-license  ',
+        token: 'direct-token',
+        license: 'direct-license',
+      },
+      {
+        label: 'retained Secret',
+        overrides: {},
+        retained: true,
+        token: 'preset-token',
+        license: '',
+      },
+    ];
+    const observed: unknown[] = [];
+    for (const one of cases) {
+      await paths.remove('tk');
+      harness();
+      mocked(manifests.recordRendered).mockImplementation(
+        (jest.requireActual('../../../src/core/kube/manifests') as typeof manifests).recordRendered,
+      );
+      const events: Event[] = [];
+      const record = await create({
+        preset: {
+          ...(
+            jest.requireActual('../../../src/lib/presets/types') as typeof presetTypes
+          ).emptyPreset('credentials'),
+          env: {
+            REG_TOKEN: '  preset-token  ',
+            ROCKETCHAT_LICENSE: '  preset-license  ',
+            UNRELATED: 'kept',
+          },
+        },
+        envOverrides: one.overrides,
+        regToken: one.directToken ?? '',
+        license: one.directLicense ?? '',
+        licensed: one.retained ?? false,
+        emit: (event) => events.push(event),
+      });
+      const docs = applied();
+      const token = docs.find((doc) => doc.includes('name: houston-reg-token'));
+      const license = docs.find((doc) => doc.includes('name: houston-license'));
+      observed.push([
+        one.label,
+        token === undefined
+          ? ''
+          : (YAML.parse(token) as { stringData: { token: string } }).stringData.token,
+        license === undefined
+          ? ''
+          : (YAML.parse(license) as { stringData: { license: string } }).stringData.license,
+      ]);
+      await expect(readMeta('tk')).rejects.toThrow('no repro.json');
+      const env = valuesOf().extraEnv as chart.ChartEnvEntry[];
+      for (const [key, secret, present] of [
+        ['REG_TOKEN', 'houston-reg-token', one.token !== ''],
+        ['ROCKETCHAT_LICENSE', 'houston-license', one.license !== '' || one.retained === true],
+      ] as const) {
+        expect(env.filter((entry) => entry.name === key)).toEqual(
+          present
+            ? [
+                {
+                  name: key,
+                  valueFrom: {
+                    secretKeyRef: { name: secret, key: key === 'REG_TOKEN' ? 'token' : 'license' },
+                  },
+                },
+              ]
+            : [],
+        );
+      }
+      expect(env).toContainEqual({ name: 'UNRELATED', value: 'kept' });
+      const writtenValues = await fs.readFile(
+        path.join(config.reprosDir(), 'tk', 'kubernetes', 'values.yaml'),
+        'utf8',
+      );
+      const persisted = JSON.stringify([
+        writtenValues,
+        valuesOf(),
+        mocked(manifests.recordRendered).mock.calls,
+        record,
+        events,
+        ran,
+      ]);
+      for (const raw of [
+        'preset-token',
+        'preset-license',
+        'override-token',
+        'override-license',
+        'direct-token',
+        'direct-license',
+      ]) {
+        expect(persisted).not.toContain(raw);
+      }
+    }
+    expect(observed).toEqual(cases.map((one) => [one.label, one.token, one.license]));
+  });
+
+  it.each([
+    'unknown namespace',
+    'failed namespace cleanup',
+    'post-install connection',
+    'failed licence apply',
+  ])(
+    'retries real provisional preset credentials after %s and retains only completed Secrets',
+    async (failure) => {
+      const presetPath = path.join(config.presetDir(), 'retry-credentials.yaml');
+      const license = 'synthetic-retry-preset-license';
+      const token = 'synthetic-retry-preset-token';
+      const changedLicense = 'synthetic-new-preset-license';
+      const events: Event[] = [];
+      const inputs: { argv: string[]; input: string }[] = [];
+      let initial = true;
+      const postInstall = failure === 'post-install connection';
+      const req = () =>
+        createReq({
+          license: initial && postInstall ? license : '',
+          version: '8.5.1',
+          name: 'tk',
+          preset: 'retry-credentials',
+          runtime: 'kubernetes',
+          offline: true,
+          wait: false,
+        });
+      const prepare = (held: string[]) => {
+        harness({ held });
+        mocked(sizing.checkCapacity).mockResolvedValue(undefined);
+        mocked(lifecyclePorts.pickHostPort).mockResolvedValue(3000);
+        mocked(lifecyclePorts.checkSidecarPorts).mockResolvedValue(undefined);
+        mocked(tlsplan.resolveTls).mockResolvedValue(null);
+        mocked(reachability.helmReachable).mockResolvedValue('');
+        mocked(namespace.assertNamespaceAvailable).mockResolvedValue(undefined);
+        const actualTools = jest.requireActual<typeof tools>('../../../src/core/kube/tools');
+        mocked(probe.preflight).mockResolvedValue({
+          ...actualTools.preflight({
+            tools: {
+              kubectl: actualTools.makeTool({
+                name: 'kubectl',
+                path: '/stated/kubectl',
+                version: [1, 36],
+              }),
+              helm: actualTools.makeTool({ name: 'helm', path: '/stated/helm', version: [3, 15] }),
+            },
+          }),
+          context: 'prod',
+          clusterReachable: true,
+          defaultStorageClass: 'local-path',
+          architectures: ['amd64'],
+          unreadable: [],
+        });
+        mocked(manifests.recordRendered).mockImplementation(
+          (jest.requireActual('../../../src/core/kube/manifests') as typeof manifests)
+            .recordRendered,
+        );
+        // Keep Secret application real through its stdin boundary; only transport is stated.
+        mocked(release.apply).mockImplementation(
+          (jest.requireActual('../../../src/core/kube/release') as typeof release).apply,
+        );
+        mocked(release.install).mockImplementation(
+          (jest.requireActual('../../../src/core/kube/release') as typeof release).install,
+        );
+        const run = kube.run;
+        kube.run = (argv, options) => {
+          if (options?.input !== undefined) inputs.push({ argv: [...argv], input: options.input });
+          return run(argv, options);
+        };
+      };
+      const writePreset = async (value: string) => {
+        await fs.writeFile(
+          presetPath,
+          YAML.stringify({
+            name: 'retry-credentials',
+            requires_license: true,
+            env: postInstall
+              ? {}
+              : { ROCKETCHAT_LICENSE: `  ${value}  `, REG_TOKEN: `  ${token}  ` },
+          }),
+        );
+      };
+      const appliedLicense = () =>
+        inputs.filter((call) => {
+          return YAML.parseAllDocuments(call.input).some((document) => {
+            const doc = document.toJSON() as { kind?: string; metadata?: { name?: string } };
+            return doc.kind === 'Secret' && doc.metadata?.name === 'houston-license';
+          });
+        });
+      const assertPrivate = async (result: unknown) => {
+        const written = await fs.readFile(path.join(paths.workspace('tk'), 'repro.json'), 'utf8');
+        const values = await fs
+          .readFile(path.join(paths.workspace('tk'), 'kubernetes', 'values.yaml'), 'utf8')
+          .catch(() => '');
+        const visible = JSON.stringify([
+          written,
+          values,
+          result,
+          events,
+          ran,
+          mocked(manifests.recordRendered).mock.calls,
+        ]);
+        for (const raw of [license, token, changedLicense]) expect(visible).not.toContain(raw);
+        for (const call of inputs) {
+          if (call.argv[0] === 'helm')
+            for (const raw of [license, token, changedLicense])
+              expect(call.input).not.toContain(raw);
+          expect(call.argv).not.toEqual(expect.arrayContaining([expect.stringContaining(license)]));
+          expect(call.argv).not.toEqual(expect.arrayContaining([expect.stringContaining(token)]));
+        }
+      };
+      config.updateConfig((cfg) => {
+        delete cfg.reg_token;
+      });
+      await paths.remove('tk');
+      await fs.mkdir(config.presetDir(), { recursive: true });
+      try {
+        await writePreset(license);
+        prepare(
+          failure === 'unknown namespace' || failure === 'failed licence apply'
+            ? ['houston-tk']
+            : [],
+        );
+        const run = kube.run;
+        kube.run = (argv, options) => {
+          if (
+            (failure === 'unknown namespace' &&
+              argv.includes('get') &&
+              argv.includes('namespace')) ||
+            (failure === 'failed namespace cleanup' && argv.includes('delete')) ||
+            (failure === 'failed licence apply' &&
+              options?.input?.includes('name: houston-license'))
+          ) {
+            ran.push([...argv]);
+            if (options?.input !== undefined)
+              inputs.push({ argv: [...argv], input: options.input });
+            return Promise.resolve({
+              argv,
+              returncode: 1,
+              stdout: '',
+              stderr: 'stated transport failure',
+            });
+          }
+          return run(argv, options);
+        };
+        if (postInstall) mocked(forward.portForward).mockRejectedValueOnce(new Interrupted());
+        else if (failure !== 'failed licence apply')
+          mocked(replicaset.initReplicaSet).mockRejectedValueOnce(new Interrupted());
+        const attempt = createKubernetes(req(), (event) => events.push(event));
+        if (failure === 'failed licence apply')
+          await expect(attempt).rejects.toThrow('kubectl apply failed: stated transport failure');
+        else await expect(attempt).rejects.toBeInstanceOf(Interrupted);
+        initial = false;
+        const provisional = await readMeta('tk');
+        expect(provisional.extra.incomplete).toBe(true);
+        expect(provisional.extra.licensed).toBe(true);
+        expect(appliedLicense()).toHaveLength(
+          postInstall || failure === 'failed licence apply' ? 1 : 0,
+        );
+        expect(mocked(release.install).mock.calls.length).toBe(postInstall ? 1 : 0);
+        if (postInstall) {
+          expect(
+            (YAML.parse(appliedLicense()[0]?.input ?? '') as { stringData: { license: string } })
+              .stringData.license,
+          ).toBe(license);
+          const helm = inputs.filter(
+            (call) => call.argv[0] === 'helm' && call.argv.includes('upgrade'),
+          );
+          expect(helm).toHaveLength(1);
+          expect(
+            (JSON.parse(helm[0]?.input ?? '') as { extraEnv: unknown[] }).extraEnv,
+          ).toContainEqual({
+            name: 'ROCKETCHAT_LICENSE',
+            valueFrom: { secretKeyRef: { name: 'houston-license', key: 'license' } },
+          });
+        }
+        if (failure === 'failed namespace cleanup')
+          expect(ran.some((argv) => argv.includes('delete'))).toBe(true);
+        await assertPrivate(null);
+
+        inputs.length = 0;
+        prepare(['houston-tk']);
+        const result = await createKubernetes(req(), (event) => events.push(event));
+        expect(
+          appliedLicense().map(
+            (call) =>
+              (YAML.parse(call.input) as { stringData: { license: string } }).stringData.license,
+          ),
+        ).toEqual(postInstall ? [] : [license]);
+        const tokenDoc = inputs
+          .flatMap((call) =>
+            YAML.parseAllDocuments(call.input).map(
+              (document) =>
+                document.toJSON() as {
+                  metadata?: { name?: string };
+                  stringData?: { token?: string };
+                },
+            ),
+          )
+          .find((doc) => doc.metadata?.name === 'houston-reg-token');
+        expect(tokenDoc?.stringData?.token).toBe(postInstall ? undefined : token);
+        const values = mocked(release.install).mock.calls[0]?.[0].values as Record<string, unknown>;
+        expect(values.license).toBeUndefined();
+        expect(values.extraEnv).toEqual(
+          expect.arrayContaining([
+            {
+              name: 'ROCKETCHAT_LICENSE',
+              valueFrom: { secretKeyRef: { name: 'houston-license', key: 'license' } },
+            },
+            ...(postInstall
+              ? []
+              : [
+                  {
+                    name: 'REG_TOKEN',
+                    valueFrom: { secretKeyRef: { name: 'houston-reg-token', key: 'token' } },
+                  },
+                ]),
+          ]),
+        );
+        expect(provisional.extra.retained_license).toBe(postInstall);
+        for (const call of appliedLicense())
+          expect(call.argv.slice(-3)).toEqual(['apply', '-f', '-']);
+        expect((await readMeta('tk')).extra.incomplete).toBeUndefined();
+        expect((await readMeta('tk')).extra.effective_license).toBe(true);
+        await assertPrivate(result);
+
+        // A completed Secret wins over a changed preset, including a later interrupted re-up.
+        await writePreset(changedLicense);
+        inputs.length = 0;
+        prepare(['houston-tk']);
+        await createKubernetes(req(), (event) => events.push(event));
+        expect(appliedLicense()).toHaveLength(0);
+        expect((await readMeta('tk')).extra.licensed).toBe(true);
+        await assertPrivate(null);
+        mocked(replicaset.initReplicaSet).mockRejectedValueOnce(new Interrupted());
+        await expect(createKubernetes(req(), (event) => events.push(event))).rejects.toBeInstanceOf(
+          Interrupted,
+        );
+        expect((await readMeta('tk')).extra.incomplete).toBe(true);
+        inputs.length = 0;
+        prepare(['houston-tk']);
+        await createKubernetes(req(), (event) => events.push(event));
+        expect(appliedLicense()).toHaveLength(0);
+        expect((await readMeta('tk')).extra.effective_license).toBe(true);
+        await assertPrivate(null);
+        // An explicit new payload still replaces the retained Secret on either API path.
+        inputs.length = 0;
+        prepare(['houston-tk']);
+        await createKubernetes({ ...req(), license: `  ${changedLicense}  ` }, (event) =>
+          events.push(event),
+        );
+        expect(
+          appliedLicense().map(
+            (call) =>
+              (YAML.parse(call.input) as { stringData: { license: string } }).stringData.license,
+          ),
+        ).toEqual([changedLicense]);
+        await assertPrivate(null);
+      } finally {
+        await fs.rm(presetPath, { force: true });
+        await paths.remove('tk');
+      }
+    },
+  );
+
+  it('does not retain a licence against a different workspace identity', async () => {
+    harness({ held: ['houston-tk'] });
+    const meta = metadata({ name: 'tk', project: 'houston-tk' });
+    Object.assign(meta.extra, {
+      runtime: 'kubernetes',
+      namespace: 'houston-tk',
+      context: 'another-cluster',
+      incomplete: true,
+      licensed: true,
+      retained_license: false,
+    });
+    await writeRecord('tk', meta);
+    try {
+      await expect(create({ license: 'synthetic-foreign-record' })).rejects.toThrow(
+        'workspace identity changed',
+      );
+      expect(mocked(release.install)).toHaveBeenCalledTimes(1);
+      expect((await readMeta('tk')).extra.retained_license).toBe(false);
+    } finally {
+      await paths.remove('tk');
+    }
+  });
+
+  it('records the token Helm accepted when the tools Ingress fails on a re-up', async () => {
+    // The write-ahead record states the release still running. Once Helm accepts this run's
+    // release, the marker has to follow it even if the create stops before its final record.
+    const TOKEN = 'synthetic-reup-token';
+    let failHelm = false;
+    let failTools = false;
+    let useTls = false;
+    const req = (regToken: string) =>
+      createReq({
+        version: '8.5.1',
+        name: 'tk',
+        preset: 'email',
+        runtime: 'kubernetes',
+        offline: true,
+        wait: false,
+        regToken,
+      });
+    harness({ held: ['houston-tk'] });
+    mocked(sizing.checkCapacity).mockResolvedValue(undefined);
+    mocked(lifecyclePorts.pickHostPort).mockResolvedValue(3000);
+    mocked(lifecyclePorts.checkSidecarPorts).mockResolvedValue(undefined);
+    mocked(tlsplan.resolveTls).mockImplementation(() =>
+      Promise.resolve(useTls ? ({ mode: 'local', host: 'rc.example.test' } as never) : null),
+    );
+    mocked(tlsplan.kubernetesTlsPlan).mockResolvedValue({
+      host: 'rc.example.test',
+      ingressClass: 'traefik',
+      endpoint: { address: '127.0.0.1', port: 443, source: 'stated' },
+      context: 'prod',
+      issuer: { mode: 'local' },
+      clusterOwns443: true,
+    } as never);
+    mocked(tlsplan.routeKubernetesName).mockResolvedValue(undefined);
+    mocked(release.apply).mockImplementation((body: unknown) =>
+      failTools && String(body).includes('houston-tools')
+        ? Promise.reject(new CreateFailedError('kubectl apply failed: tools ingress refused'))
+        : Promise.resolve(),
+    );
+    mocked(release.install).mockImplementation(() =>
+      failHelm
+        ? Promise.reject(new CreateFailedError('helm install failed: refused'))
+        : Promise.resolve(),
+    );
+    const observed: unknown[] = [];
+    const marker = async (label: string) => {
+      const meta = await readMeta('tk');
+      expect(JSON.stringify(meta)).not.toContain(TOKEN);
+      observed.push([label, meta.extra.incomplete === true, meta.extra.reg_token_supplied]);
+    };
+    try {
+      await paths.remove('tk');
+      await createKubernetes(req(''));
+      await marker('tokenless create');
+
+      failHelm = true;
+      await expect(createKubernetes(req(TOKEN))).rejects.toThrow('helm install failed: refused');
+      await marker('Helm refused the token');
+
+      failHelm = false;
+      failTools = true;
+      useTls = true;
+      await expect(createKubernetes(req(TOKEN))).rejects.toThrow(
+        'kubectl apply failed: tools ingress refused',
+      );
+      await marker('Helm accepted the token, tools Ingress failed');
+
+      await expect(createKubernetes(req(''))).rejects.toThrow(
+        'kubectl apply failed: tools ingress refused',
+      );
+      await marker('Helm accepted no token, tools Ingress failed');
+    } finally {
+      await paths.remove('tk');
+    }
+    expect(observed).toEqual([
+      ['tokenless create', false, false],
+      ['Helm refused the token', true, false],
+      ['Helm accepted the token, tools Ingress failed', true, true],
+      ['Helm accepted no token, tools Ingress failed', true, false],
+    ]);
+  });
+
+  it('keeps the licence Helm accepted when the tools Ingress fails on a re-up', async () => {
+    // Helm had accepted values that reference houston-license, then the tools Ingress apply
+    // threw before noteInstalledLicense. Rollback left the adopted namespace and its Secret,
+    // and the record stayed retained_license false, so the next empty payload installed a
+    // release with no Secret reference.
+    const LICENSE = 'synthetic-reup-license';
+    const licenseRef = {
+      name: 'ROCKETCHAT_LICENSE',
+      valueFrom: { secretKeyRef: { name: 'houston-license', key: 'license' } },
+    };
+    const events: string[] = [];
+    const helmValues: Record<string, unknown>[] = [];
+    let failHelm = false;
+    let failTools = false;
+    let useTls = false;
+    const req = (license: string) =>
+      createReq({
+        version: '8.5.1',
+        name: 'tk',
+        preset: 'email',
+        runtime: 'kubernetes',
+        offline: true,
+        wait: false,
+        license,
+      });
+    const since = (at: number) => events.slice(at);
+    const refOf = (values: Record<string, unknown> | undefined) =>
+      (values?.extraEnv as unknown[] | undefined) ?? [];
+    harness({ held: ['houston-tk'] });
+    mocked(sizing.checkCapacity).mockResolvedValue(undefined);
+    mocked(lifecyclePorts.pickHostPort).mockResolvedValue(3000);
+    mocked(lifecyclePorts.checkSidecarPorts).mockResolvedValue(undefined);
+    mocked(tlsplan.resolveTls).mockImplementation(() =>
+      Promise.resolve(useTls ? ({ mode: 'local', host: 'rc.example.test' } as never) : null),
+    );
+    mocked(tlsplan.kubernetesTlsPlan).mockResolvedValue({
+      host: 'rc.example.test',
+      ingressClass: 'traefik',
+      endpoint: { address: '127.0.0.1', port: 443, source: 'stated' },
+      context: 'prod',
+      issuer: { mode: 'local' },
+      clusterOwns443: true,
+    } as never);
+    mocked(tlsplan.routeKubernetesName).mockResolvedValue(undefined);
+    mocked(release.apply).mockImplementation((body: unknown) => {
+      const text = String(body);
+      if (text.includes('name: houston-license')) events.push('secret');
+      if (text.includes('houston-tools')) {
+        events.push('tools');
+        if (failTools) {
+          return Promise.reject(
+            new CreateFailedError('kubectl apply failed: tools ingress refused'),
+          );
+        }
+      }
+      return Promise.resolve();
+    });
+    mocked(release.install).mockImplementation((options: { values: Record<string, unknown> }) => {
+      events.push('helm');
+      helmValues.push(options.values);
+      if (failHelm) return Promise.reject(new CreateFailedError('helm install failed: refused'));
+      return Promise.resolve();
+    });
+    try {
+      await paths.remove('tk');
+      await createKubernetes(req(''));
+
+      failHelm = true;
+      const helmAt = events.length;
+      await expect(createKubernetes(req(LICENSE))).rejects.toThrow('helm install failed: refused');
+      expect(since(helmAt)).toContain('secret');
+      expect(since(helmAt)).toContain('helm');
+      expect(since(helmAt)).not.toContain('tools');
+      const refused = await readMeta('tk');
+      expect(refused.extra.retained_license).toBe(false);
+      expect(refused.extra.effective_license).toBe(false);
+      expect(JSON.stringify(refused)).not.toContain(LICENSE);
+      expect(ran.some((argv) => argv.includes('delete'))).toBe(false);
+
+      failHelm = false;
+      failTools = true;
+      useTls = true;
+      const toolsAt = events.length;
+      await expect(createKubernetes(req(LICENSE))).rejects.toThrow(
+        'kubectl apply failed: tools ingress refused',
+      );
+      const toolsPhase = since(toolsAt);
+      expect(toolsPhase.indexOf('secret')).toBeGreaterThanOrEqual(0);
+      expect(toolsPhase.indexOf('secret')).toBeLessThan(toolsPhase.indexOf('helm'));
+      expect(toolsPhase.indexOf('helm')).toBeLessThan(toolsPhase.indexOf('tools'));
+      const accepted = helmValues.at(-1);
+      expect(refOf(accepted)).toContainEqual(licenseRef);
+      expect(JSON.stringify(accepted)).not.toContain(LICENSE);
+      expect(ran.some((argv) => argv.includes('delete'))).toBe(false);
+      const stuck = await readMeta('tk');
+      expect(stuck.extra.incomplete).toBe(true);
+      expect(stuck.extra.retained_license).toBe(true);
+      expect(stuck.extra.effective_license).toBe(true);
+      expect(JSON.stringify(stuck)).not.toContain(LICENSE);
+
+      // The Secret and release from the accepted install are still the ones Rocket.Chat
+      // uses. A later Helm refusal must not make that workspace look unlicensed.
+      failHelm = true;
+      failTools = false;
+      useTls = false;
+      await expect(createKubernetes(req(''))).rejects.toThrow('helm install failed: refused');
+      const retained = await readMeta('tk');
+      expect(retained.extra.retained_license).toBe(true);
+      expect(retained.extra.effective_license).toBe(true);
+      expect(JSON.stringify(retained)).not.toContain(LICENSE);
+      expect(ran.some((argv) => argv.includes('delete'))).toBe(false);
+
+      failHelm = false;
+      await createKubernetes(req(''));
+      const retry = helmValues.at(-1);
+      expect(refOf(retry)).toContainEqual(licenseRef);
+      expect(JSON.stringify(retry)).not.toContain(LICENSE);
+      const kept = await readMeta('tk');
+      expect(kept.extra.incomplete).toBeUndefined();
+      expect(kept.extra.effective_license).toBe(true);
+      expect(JSON.stringify(kept)).not.toContain(LICENSE);
+    } finally {
+      await paths.remove('tk');
+    }
+  });
+
+  it('records what Helm accepted in a namespace it created until a rollback removes it', async () => {
+    // Helm accepted the release, then the tools Ingress failed. The namespace was one
+    // this run created, so rollback deleted it and the Secret. The markers had already
+    // been written, the record survived, and the next empty payload referenced a Secret
+    // that was gone. A create killed between Helm and the Ingress has no rollback at all, so
+    // the record already says what the live release carries.
+    const LICENSE = 'synthetic-created-namespace-license';
+    const TOKEN = 'synthetic-created-namespace-token';
+    const markers = (extra: Record<string, unknown>) => ({
+      retained_license: extra.retained_license,
+      effective_license: extra.effective_license,
+      reg_token_supplied: extra.reg_token_supplied,
+    });
+    const accepted = { retained_license: true, effective_license: true, reg_token_supplied: true };
+    let beforeTools: unknown = null;
+    let replaceNamespace = false;
+    const licenseRef = {
+      name: 'ROCKETCHAT_LICENSE',
+      valueFrom: { secretKeyRef: { name: 'houston-license', key: 'license' } },
+    };
+    const events: string[] = [];
+    const helmValues: Record<string, unknown>[] = [];
+    let failTools = false;
+    let useTls = false;
+    const req = (license: string, regToken = '') =>
+      createReq({
+        version: '8.5.1',
+        name: 'tk',
+        preset: 'email',
+        runtime: 'kubernetes',
+        offline: true,
+        wait: false,
+        license,
+        regToken,
+      });
+    const refOf = (values: Record<string, unknown> | undefined) =>
+      (values?.extraEnv as unknown[] | undefined) ?? [];
+    harness();
+    mocked(sizing.checkCapacity).mockResolvedValue(undefined);
+    mocked(lifecyclePorts.pickHostPort).mockResolvedValue(3000);
+    mocked(lifecyclePorts.checkSidecarPorts).mockResolvedValue(undefined);
+    mocked(tlsplan.resolveTls).mockImplementation(() =>
+      Promise.resolve(useTls ? ({ mode: 'local', host: 'rc.example.test' } as never) : null),
+    );
+    mocked(tlsplan.kubernetesTlsPlan).mockResolvedValue({
+      host: 'rc.example.test',
+      ingressClass: 'traefik',
+      endpoint: { address: '127.0.0.1', port: 443, source: 'stated' },
+      context: 'prod',
+      issuer: { mode: 'local' },
+      clusterOwns443: true,
+    } as never);
+    mocked(tlsplan.routeKubernetesName).mockResolvedValue(undefined);
+    mocked(release.apply).mockImplementation(async (body: unknown) => {
+      const text = String(body);
+      if (text.includes('name: houston-license')) events.push('secret');
+      if (text.includes('houston-tools')) {
+        events.push('tools');
+        // What a create killed here would leave.
+        beforeTools = markers((await readMeta('tk')).extra);
+        // Another namespace now holds the name, so the rollback's delete is refused.
+        if (replaceNamespace) {
+          namespaceUid = 'namespace-tk-replacement';
+          namespacePresent = true;
+        }
+        if (failTools) throw new CreateFailedError('kubectl apply failed: tools ingress refused');
+      }
+    });
+    mocked(release.install).mockImplementation((options: { values: Record<string, unknown> }) => {
+      events.push('helm');
+      helmValues.push(options.values);
+      return Promise.resolve();
+    });
+    try {
+      await paths.remove('tk');
+      await createKubernetes(req(''));
+
+      failTools = true;
+      useTls = true;
+      const toolsAt = events.length;
+      await expect(createKubernetes(req(LICENSE, TOKEN))).rejects.toThrow(
+        'kubectl apply failed: tools ingress refused',
+      );
+      const toolsPhase = events.slice(toolsAt);
+      expect(toolsPhase.indexOf('secret')).toBeGreaterThanOrEqual(0);
+      expect(toolsPhase.indexOf('secret')).toBeLessThan(toolsPhase.indexOf('helm'));
+      expect(toolsPhase.indexOf('helm')).toBeLessThan(toolsPhase.indexOf('tools'));
+      expect(beforeTools).toEqual(accepted);
+      const removed = await readMeta('tk');
+      expect(markers(removed.extra)).toEqual({
+        retained_license: false,
+        effective_license: false,
+        reg_token_supplied: false,
+      });
+      expect(removed.extra.incomplete).toBe(true);
+      expect(JSON.stringify(removed)).not.toContain(LICENSE);
+      expect(JSON.stringify(removed)).not.toContain(TOKEN);
+      expect(ran.some((argv) => argv.includes('delete'))).toBe(true);
+
+      failTools = false;
+      useTls = false;
+      await createKubernetes(req(''));
+      expect(refOf(helmValues.at(-1))).not.toContainEqual(licenseRef);
+      expect(JSON.stringify(helmValues.at(-1))).not.toContain(LICENSE);
+
+      // A rollback that could not remove the namespace leaves the release Helm accepted, and
+      // the record goes on saying what it carries.
+      failTools = true;
+      useTls = true;
+      replaceNamespace = true;
+      await expect(createKubernetes(req(LICENSE, TOKEN))).rejects.toThrow(
+        'kubectl apply failed: tools ingress refused',
+      );
+      // The harness clears this on a delete that succeeds.
+      expect(namespacePresent).toBe(true);
+      expect(markers((await readMeta('tk')).extra)).toEqual(accepted);
+    } finally {
+      await paths.remove('tk');
+    }
+  });
 
   it('gives the chart a host OR a root_url, never both', async () => {
     // Two entries for ROOT_URL is a server-side-apply conflict, not an override -- so a

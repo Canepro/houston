@@ -264,22 +264,52 @@ describe('the detail panel', () => {
     expect((await payload.detail('old')).bind_host).toBe('0.0.0.0');
   });
 
-  it('reads a record whose extra is null as having no recorded env, as earlier releases do', async () => {
-    // Earlier releases read the recorded env only out of an extra that is an object, where
-    // `meta.extra.env` read through the null and `info --json` was a TypeError stack.
-    await write(
-      'bare',
-      'services:\n  rocketchat:\n    image: i\n    environment:\n      ROOT_URL: x\n',
-      sampleMeta('bare'),
-    );
-    const file = path.join(config.reprosDir(), 'bare', 'repro.json');
-    const blob = JSON.parse(fs.readFileSync(file, 'utf8')) as object;
-    fs.writeFileSync(file, JSON.stringify({ ...blob, extra: null }));
-    // What earlier releases' detail showed as the env of that record, docker down, recorded.
-    const recorded = [{ key: 'ROOT_URL', value: 'x', override: false }];
+  it('recovers a complete legacy IPv6 bind and leaves malformed or non-IP port maps unknown', async () => {
+    const compose = (port: string) =>
+      'services:\n  rocketchat:\n    image: i\n    ports:\n' +
+      `    - '${port}'\n` +
+      '    environment:\n      ROOT_URL: x\n';
+    const bracketed = sampleMeta('bracketed', { hostPort: 3001 });
+    const malformed = sampleMeta('malformed', { hostPort: 3002 });
+    const recorded = sampleMeta('recorded', {
+      hostPort: 3003,
+      extra: { bind_host: '127.0.0.1' },
+    });
+    const invalid = sampleMeta('invalid', { hostPort: 3004 });
+    const unresolved = sampleMeta('unresolved', { hostPort: 3005 });
+    await write('bracketed', compose('[::1]:3001:3000'), bracketed);
+    await write('malformed', compose('[::1:3002:3000'), malformed);
+    await write('recorded', compose('[::1:3003:3000'), recorded);
+    await write('invalid', compose('[not-an-ip]:3004:3000'), invalid);
+    await write('unresolved', compose('${BIND_ADDR}:3005:3000'), unresolved);
+
     const { payload } = load(false);
-    expect((await payload.detail('bare')).env).toEqual(recorded);
+    await expect(payload.bindHostOf(bracketed)).resolves.toBe('::1');
+    await expect(payload.bindHostOf(malformed)).resolves.toBe('');
+    await expect(payload.bindHostOf(recorded)).resolves.toBe('127.0.0.1');
+    await expect(payload.bindHostOf(invalid)).resolves.toBe('');
+    await expect(payload.bindHostOf(unresolved)).resolves.toBe('');
   });
+
+  it.each([null, []])(
+    'reads malformed extra %j as having no recorded env, as earlier releases do',
+    async (extra) => {
+      // Earlier releases read the recorded env only out of an extra that is an object, where
+      // `meta.extra.env` read through the null and `info --json` was a TypeError stack.
+      await write(
+        'bare',
+        'services:\n  rocketchat:\n    image: i\n    environment:\n      ROOT_URL: x\n',
+        sampleMeta('bare'),
+      );
+      const file = path.join(config.reprosDir(), 'bare', 'repro.json');
+      const blob = JSON.parse(fs.readFileSync(file, 'utf8')) as object;
+      fs.writeFileSync(file, JSON.stringify({ ...blob, extra }));
+      // What earlier releases' detail showed as the env of that record, docker down, recorded.
+      const recorded = [{ key: 'ROOT_URL', value: 'x', override: false }];
+      const { payload } = load(false);
+      expect((await payload.detail('bare')).env).toEqual(recorded);
+    },
+  );
 
   it('carries the HTTPS fields the panel keys its row and its check off', async () => {
     // The list carried public_url/tls and the detail did not, so the whole feature was

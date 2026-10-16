@@ -64,7 +64,7 @@ const RANKS = [
   // (rank 0) for absolute paths and on `format` (rank 1) for the quoting of its refusal, and only
   // `core/` calls it.
   [
-    '^src/lib/(config|ui|eventlog|journal|tempdir)\\.ts$',
+    '^src/lib/(config|ui|eventlog|journal|tempdir|capture-render)\\.ts$',
     '^src/lib/presets/types\\.ts$',
     '^src/lib/seed-profiles\\.ts$',
   ],
@@ -100,7 +100,7 @@ const RANKS = [
   ['^src/seams/(?!exec\\.ts$)'],
   ['^src/core/runner/(paths|locks)\\.ts$'],
   ['^src/core/runner/(engine|record)\\.ts$'],
-  ['^src/core/runner/(cache|host|ports|queries)\\.ts$'],
+  ['^src/core/runner/(cache|host|inventory|ports|queries)\\.ts$'],
   // The database lookup mongoprof, scaleseed and backup all need. Hoisted out of
   // `backup` so the two lower modules reach it DOWNWARD; see its docstring.
   ['^src/core/database-of\\.ts$'],
@@ -122,6 +122,8 @@ const RANKS = [
   ['^src/core/kube/context\\.ts$'],
   ['^src/core/kube/(cluster|endpoints|namespace)\\.ts$'],
   ['^src/core/kube/(manifests|probe|scale|status|transfer)\\.ts$'],
+  // Inspection reuses the canonical pod row mapper, so it belongs one tier above status.
+  ['^src/core/kube/inventory\\.ts$'],
   ['^src/core/kube/release\\.ts$'],
   ['^src/core/kube/operator\\.ts$'],
   ['^src/core/kube/(chart|monitoring)\\.ts$'],
@@ -210,9 +212,10 @@ const RANKS = [
   // nearly all of it. Collapsing any two adjacent tiers would permit exactly the
   // sideways edge the tiers forbid.
   //
-  // `admin`, `notes` and `types` have no lifecycle imports at all; they share the bottom
-  // rank with the modules whose only edges are to `types`.
+  // `access`, `admin`, `notes` and `types` have no lifecycle imports at all; they share the
+  // bottom rank with modules whose dependencies are strictly lower layers.
   [
+    '^src/core/lifecycle/access\\.ts$',
     '^src/core/lifecycle/types\\.ts$',
     '^src/core/lifecycle/notes\\.ts$',
     '^src/core/lifecycle/admin\\.ts$',
@@ -220,6 +223,10 @@ const RANKS = [
   ['^src/core/lifecycle/(naming|request|ports|tlsplan)\\.ts$'],
   ['^src/core/lifecycle/(sizing|seeding|ownership|inspect)\\.ts$'],
   ['^src/core/lifecycle/(preconditions|payload|ready)\\.ts$'],
+  // `evidence` is the attachable record of a workspace: it reads the same detail `payload`
+  // builds and keeps only what is safe to attach, so it sits one rank above payload and
+  // below the command handlers that print it.
+  ['^src/core/evidence\\.ts$'],
   ['^src/core/lifecycle/state\\.ts$'],
   ['^src/core/lifecycle/(destroy|pruning)\\.ts$'],
   ['^src/core/lifecycle/create-k8s\\.ts$'],
@@ -297,7 +304,7 @@ const RANKS = [
   // the handler registry, importing nothing sideways.
   ['^src/cli/(index|entry)\\.ts$'],
   [
-    '^src/core/(?!runner/|kube/|edge/|tls-local\\.ts$|tls\\.ts$|rcapi\\.ts$|eks\\.ts$|eks-docs\\.ts$|audit\\.ts$|sessions\\.ts$|sso-identities\\.ts$|users\\.ts$|firstrun\\.ts$|skill\\.ts$|sso\\.ts$|diagnose\\.ts$|topology\\.ts$|journal\\.ts$|eventlog\\.ts$|postready\\.ts$|scaleseed\\.ts$|configimport\\.ts$|cluster\\.ts$|migrate\\.ts$|promote\\.ts$|lifecycle/|envvars\\.ts$|monitor\\.ts$|data\\.ts$|loadtest\\.ts$|backup\\.ts$|backup-compat\\.ts$|database-of\\.ts$|seed-db\\.ts$|recovery\\.ts$|upgrade\\.ts$|doctor\\.ts$)',
+    '^src/core/(?!runner/|kube/|edge/|tls-local\\.ts$|tls\\.ts$|rcapi\\.ts$|eks\\.ts$|eks-docs\\.ts$|audit\\.ts$|sessions\\.ts$|sso-identities\\.ts$|users\\.ts$|firstrun\\.ts$|skill\\.ts$|sso\\.ts$|diagnose\\.ts$|topology\\.ts$|journal\\.ts$|eventlog\\.ts$|postready\\.ts$|scaleseed\\.ts$|configimport\\.ts$|cluster\\.ts$|migrate\\.ts$|promote\\.ts$|lifecycle/|evidence\\.ts$|envvars\\.ts$|monitor\\.ts$|data\\.ts$|loadtest\\.ts$|backup\\.ts$|backup-compat\\.ts$|database-of\\.ts$|seed-db\\.ts$|recovery\\.ts$|upgrade\\.ts$|doctor\\.ts$)',
     '^src/web/(?!(jobs|signin|security|route-deps|route-table|app)\\.ts$|routes/)',
   ],
 ];

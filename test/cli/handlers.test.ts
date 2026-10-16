@@ -38,6 +38,17 @@ async function real(argv: string[]): Promise<{ code: number; stdout: string; std
 }
 
 describe('real handler dispatch through Commander', () => {
+  test('evidence help names the files a secret-safe bundle actually writes', async () => {
+    const help = await real(['evidence', '--help']);
+
+    expect(help.code).toBe(0);
+    expect(help.stdout).toMatch(
+      /manifest, README, and any available redacted deployment\s+artifact to this directory/u,
+    );
+    expect(help.stdout).toContain('Raw logs stay in the workspace');
+    expect(help.stdout).not.toContain('also write the logs');
+  });
+
   test('list JSON includes the count field of earlier releases and exactly one final envelope', async () => {
     const result = await real(['list', '--json']);
     expect(result.code).toBe(0);

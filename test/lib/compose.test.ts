@@ -296,9 +296,84 @@ describe('binding', () => {
     expect(bound(['8025:8025'])).toEqual(['127.0.0.1:8025:8025']);
   });
 
-  it('leaves an already IP-qualified mapping alone', () => {
-    // Prefixing again would produce a double-IP mapping.
+  it('replaces an interpolated address while preserving interpolated ports', () => {
+    expect(
+      bound([
+        '${BIND_IP}:8080:80',
+        '${BIND_IP:-127.0.0.1}:${HOST_PORT:-8080}:${CONTAINER_PORT:-80}',
+        '${BIND_IP?set it}:${HOST_PORT?set it}:${CONTAINER_PORT?set it}/UDP',
+        '${BIND_IP:+127.0.0.1}:${HOST_PORT:+8080}:${CONTAINER_PORT:+80}',
+        '${BIND_IP+127.0.0.1}:${HOST_PORT+8080}:${CONTAINER_PORT+80}/TCP',
+        ':${CONTAINER_PORT:-80}',
+      ]),
+    ).toEqual([
+      '127.0.0.1:8080:80',
+      '127.0.0.1:${HOST_PORT:-8080}:${CONTAINER_PORT:-80}',
+      '127.0.0.1:${HOST_PORT?set it}:${CONTAINER_PORT?set it}/udp',
+      '127.0.0.1:${HOST_PORT:+8080}:${CONTAINER_PORT:+80}',
+      '127.0.0.1:${HOST_PORT+8080}:${CONTAINER_PORT+80}/tcp',
+      '127.0.0.1::${CONTAINER_PORT:-80}',
+    ]);
+  });
+
+  it('keeps an IPv6 bind separate from interpolated port fields', () => {
+    expect(
+      bound(
+        [
+          '${HOST_PORT:-2:8080}:80',
+          '8080:${CONTAINER_PORT:-2:80}',
+          '${HOST_PORT:-8080}:${CONTAINER_PORT:-80}/UDP',
+        ],
+        '::1',
+      ),
+    ).toEqual([
+      '[::1]:${HOST_PORT:-2:8080}:80',
+      '[::1]:8080:${CONTAINER_PORT:-2:80}',
+      '[::1]:${HOST_PORT:-8080}:${CONTAINER_PORT:-80}/udp',
+    ]);
+    expect(bound(['${HOST_PORT:-8080}:${CONTAINER_PORT:-80}'], '2001:db8::1')).toEqual([
+      '[2001:db8::1]:${HOST_PORT:-8080}:${CONTAINER_PORT:-80}',
+    ]);
+  });
+
+  it.each([
+    '${PORT_MAPPING:-8080:80}',
+    '${PORT_MAPPING-8080:80}',
+    '${PORT_MAPPING:+8080:80}',
+    '${PORT_MAPPING+8080:80}',
+    '${PORT_MAPPING?set a mapping}',
+    '${PORT_MAPPING:?set a mapping}',
+    '${PORT_MAPPING}',
+    '$PORT_MAPPING',
+    '${PORT_MAPPING:-0.0.0.0:8080:80}/UDP',
+    '${PORT_MAPPING:-${FALLBACK:-8080:80}}',
+    '${CONTAINER_PORT:-80}',
+  ])('refuses an unresolved whole-value port mapping without bypassing the bind: %s', (port) => {
+    expect(() => bound([port])).toThrow(ValidationError);
+    expect(() => bound([port])).toThrow(/whole-value Compose interpolation.*service "s"/);
+    expect(() => bound([port])).toThrow(/long syntax with separate target and published fields/);
+  });
+
+  it('REPLACES a host address the entry already names, rather than keeping it', () => {
+    // The bind host is the one posture `info` reports and `detectBind` reads back. A
+    // custom preset writing `0.0.0.0:9000:9000` published that sidecar on every interface
+    // of a remote sandbox while the workspace said it was loopback-bound.
+    expect(bound(['0.0.0.0:9000:9000'])).toEqual(['127.0.0.1:9000:9000']);
     expect(bound(['127.0.0.1:8025:8025'])).toEqual(['127.0.0.1:8025:8025']);
+    expect(bound(['[::1]:8025:8025'])).toEqual(['127.0.0.1:8025:8025']);
+    // The Compose specification's own unbracketed IPv6 example.
+    expect(bound(['::1:6000:6000'])).toEqual(['127.0.0.1:6000:6000']);
+    expect(bound(['::1::6000'])).toEqual(['127.0.0.1::6000']);
+    // And the other way: an explicit `--bind 0.0.0.0` reaches a loopback-pinned entry too.
+    expect(bound(['127.0.0.1:8025:8025'], '0.0.0.0')).toEqual(['0.0.0.0:8025:8025']);
+  });
+
+  it('keeps the protocol suffix and the ephemeral host port through a rebind', () => {
+    expect(bound(['9090/udp'])).toEqual(['127.0.0.1::9090/udp']);
+    expect(bound(['9001:9001/tcp'])).toEqual(['127.0.0.1:9001:9001/tcp']);
+    expect(bound(['0.0.0.0::9090/udp'])).toEqual(['127.0.0.1::9090/udp']);
+    // Docker lowercases the protocol before it validates it.
+    expect(bound(['8080:80/UDP'])).toEqual(['127.0.0.1:8080:80/udp']);
   });
 
   it('uses the IP::CONTAINER form for a bare container port', () => {
@@ -325,10 +400,22 @@ describe('binding', () => {
     ]);
   });
 
-  it('leaves long syntax that already names a host_ip alone', () => {
+  it('rebinds long syntax that already names a host_ip', () => {
     expect(bound([{ target: 80, published: 8080, host_ip: '10.0.0.1' }])).toEqual([
-      { target: 80, published: 8080, host_ip: '10.0.0.1' },
+      { target: 80, published: 8080, host_ip: '127.0.0.1' },
     ]);
+  });
+
+  it.each([
+    { target: 80 },
+    { target: 81, host_ip: '0.0.0.0' },
+    { target: 82, protocol: 'udp', mode: 'host', name: 'metrics', app_protocol: 'http' },
+  ])('binds an ephemeral long-syntax publication: %j', (port) => {
+    const doc = build(
+      official({ preset: preset({ services: { sidecar: { image: 'nginx', ports: [port] } } }) }),
+    );
+    expect(doc.services.sidecar?.ports).toEqual([{ ...port, host_ip: '127.0.0.1' }]);
+    expect((doc.services.sidecar?.ports as unknown[])[0]).not.toHaveProperty('published');
   });
 
   it('REFUSES a shape it does not understand, rather than publishing it everywhere', () => {
@@ -338,6 +425,14 @@ describe('binding', () => {
     expect(() => bound(['weird-shape'])).toThrow(ValidationError);
     expect(() => bound(['weird-shape'])).toThrow(/houston cannot bind to 127\.0\.0\.1/);
   });
+
+  it.each(['::1:80', '2001:db8::80', '[::1:80:80', 'host:80:80', 'fe80::1%lo0:80:80'])(
+    'refuses an invalid leftover address instead of inventing a host port: %s',
+    (port) => {
+      expect(() => bound([port])).toThrow(ValidationError);
+      expect(() => bound([port])).toThrow(/service "s"/);
+    },
+  );
 
   it('names the service, so a preset author can see what to change', () => {
     expect(() => bound(['weird-shape'])).toThrow(/service "s"/);
@@ -727,7 +822,7 @@ describe('what a workspace compose document never carries', () => {
 });
 
 describe('every published port shape', () => {
-  it('is bound, an unpublished target is left alone, and an unknown shape is refused', () => {
+  it('is bound, including ephemeral long syntax, and an unknown shape is refused', () => {
     // A fixed RANGE was appended unchanged and published on every interface while `info`
     // reported loopback; a one-sided range became IP:RANGE, which compose refuses; long
     // syntax was stringified into its own text. Reachable through custom presets.
@@ -741,7 +836,7 @@ describe('every published port shape', () => {
         plain: { ports: ['9000:9000'] },
         bare: { ports: ['8025'] },
         already: { ports: ['127.0.0.1:1:1'] },
-        unpublished: { ports: [{ target: 80 }] },
+        long_ephemeral: { ports: [{ target: 80 }] },
       },
     };
     bindPorts(doc, '127.0.0.1');
@@ -752,8 +847,7 @@ describe('every published port shape', () => {
       plain: ['127.0.0.1:9000:9000'],
       bare: ['127.0.0.1::8025'],
       already: ['127.0.0.1:1:1'],
-      // A target with no `published` is not on the host, so there is nothing to bind.
-      unpublished: [{ target: 80 }],
+      long_ephemeral: [{ target: 80, host_ip: '127.0.0.1' }],
     });
     // "Unbound" must never be the fallback for "I did not understand this".
     const weird: ComposeDoc = {
