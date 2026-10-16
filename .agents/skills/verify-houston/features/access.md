@@ -29,7 +29,12 @@ Human `info` prints the same tunnel and browser URL. The helper probes the clean
 Docker fixture `verify-docker-access-fixture` and the Kubernetes fixture
 `verify-access-fixture`. Each payload `data` value must be an object, or the run fails. When both objects omit `data.access`, this port stays
 pending. When either object has `data.access`, require the local, human, and
-SSH contract on both loopback runtimes. It uses only synthetic SSH_CONNECTION,
+SSH contract on both loopback runtimes. Require `data.name` and `data.runtime`
+to match each requested fixture before accepting its access values. These are
+existing fields from `lifecycle/payload.detail` through `lifecycle/inspect.summary`,
+not fields added to the `access` object. Check them again on every successful SSH
+JSON response, the IPv6 response, and the wildcard response. Identical access
+values cannot establish that both runtimes were exercised. It uses only synthetic SSH_CONNECTION,
 SSH_CLIENT, SSH_TTY, HOUSTON_SSH_HOST, HOUSTON_SSH_USER, and
 HOUSTON_SSH_LOCAL_PORT values.
 

@@ -122,9 +122,63 @@ if args[0] == 'onboard':
     emit('houston.onboard.v1', dict(completed=completed, completed_at=config['onboarding'].get('completed_at'), grants=dict(owned_cluster=config['grants'].get('owned_cluster', False)), answered_grants=dict(owned_cluster=completed), clusters=config['grants']['clusters'], rc_repro_version='9.9.9'))
 if args[0] != 'info':
     raise RuntimeError(args)
+if attack.startswith('access-'):
+    import shlex
+    name = args[args.index('--name') + 1]
+    record = json.loads((home / 'repros' / name / 'repro.json').read_text())
+    runtime = record['extra']['runtime']
+    remote = any(os.environ.get(key) for key in ('SSH_CONNECTION', 'SSH_CLIENT', 'SSH_TTY'))
+    sides = sorted(record['extra'].get('sidecar_ports', []) + record['extra'].get('monitoring_ports', []))
+    port_text = os.environ.get('HOUSTON_SSH_LOCAL_PORT', '39999')
+    try:
+        port = int(port_text)
+        assert 1024 <= port <= 65535 and port not in sides
+    except (ValueError, AssertionError):
+        emit('houston.error.v1', error=dict(code='VALIDATION_FAILED'), code=2)
+    access = None
+    if record['extra']['bind_host'] != '0.0.0.0':
+        command = None
+        if remote:
+            target = '[::1]' if record['extra']['bind_host'] == '::1' else '127.0.0.1'
+            forwards = ['-L', f'127.0.0.1:{port}:{target}:39999']
+            for side in sides:
+                forwards += ['-L', f'127.0.0.1:{side}:{target}:{side}']
+            command = shlex.join(['ssh', '-N', '-o', 'ExitOnForwardFailure=yes', *forwards, '--', os.environ['HOUSTON_SSH_USER'] + '@' + os.environ['HOUSTON_SSH_HOST']])
+        access = dict(mode='remote_ssh' if remote else 'local', bind='loopback', host_port=39999,
+                      local_port=port if remote else 39999, browser_url=f'http://127.0.0.1:{port}' if remote else record['root_url'],
+                      tunnel_command=command, side_ports=sides, note='synthetic remote guidance' if remote else None)
+    if '--json' not in args:
+        print(' '.join(str(access[key] or '') for key in ('browser_url', 'tunnel_command')) if access else 'public')
+        sys.exit(0)
+    data = dict(name=name, runtime=runtime, access=access)
+    if attack != 'access-clean':
+        _, stage, selected_runtime, field = attack.split(':')
+        actual_stage = 'public' if name == 'verify-public-fixture' else 'remote' if remote else 'discovery'
+        if stage == actual_stage and runtime == selected_runtime:
+            data[field] = 'another-workspace' if field == 'name' else 'docker' if runtime == 'kubernetes' else 'kubernetes'
+    emit('houston.info.v1', data)
 if 'verify-kube-fixture' not in args and 'verify-fixture' not in args:
     if 'verify-access-fixture' in args:
-        if attack.startswith('receipt:'):
+        if attack.startswith('work-'):
+            where = attack.split(':')[1]
+            target = {'temp': Path(os.environ['TMPDIR']), 'fixture': home / 'repros/verify-fixture',
+                      'retained': out, 'time': out, 'growing': out, 'inventory': out,
+                      'aggregate': out, 'final-total': out, 'entries': out}.get(where)
+            if target is not None:
+                count = 6 if where == 'aggregate' else 2 if where == 'final-total' else 1
+                for index in range(count):
+                    with (target / f'budget-{index}.bin').open('wb') as stream:
+                        stream.truncate(96 * 1024 if where in ('aggregate', 'final-total') else 64 * 1024 if where == 'growing' else 16 if where in ('time', 'inventory', 'entries') else 256 * 1024)
+        elif attack.startswith('untracked-'):
+            root = Path.cwd()
+            if attack == 'untracked-new':
+                (root / 'evidence.tmp').write_text('candidate root artifact\n')
+            elif attack == 'untracked-existing':
+                (root / 'extension.ts').write_text('candidate changed existing source\n')
+            elif attack == 'untracked-ignored':
+                (root / 'ignored-build').mkdir(exist_ok=True)
+                (root / 'ignored-build/generated.txt').write_text('ignored generated artifact\n')
+        elif attack.startswith('receipt:'):
             _, name, kind = attack.split(':')
             target = out / name
             if target.exists():
@@ -188,6 +242,63 @@ def load(path):
 
 def worker(path, checkout, out, attack):
     module = load(path)
+    if attack.startswith('work-'):
+        # Small limits exercise the production budget against real files and reads.
+        module.FILE_WORK_LIMIT_BYTES = 128 * 1024
+        module.TOTAL_WORK_LIMIT_BYTES = 512 * 1024
+        if attack.endswith(':entries'):
+            module.FILE_WORK_ENTRIES = 256
+        if attack == 'work-before:aggregate':
+            module.FILE_WORK_LIMIT_BYTES = 256 * 1024
+        if attack in ('work-after:time', 'work-after:growing'):
+            original_open = module.open_regular_file
+            real_clock = module.time.monotonic
+            offset = 0
+            growth_reads = 0
+
+            class ObservedRead:
+                def __init__(self, handle, target):
+                    self.handle, self.target = handle, target
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return self.handle.__exit__(*args)
+
+                def __getattr__(self, name):
+                    return getattr(self.handle, name)
+
+                def read(self, size=-1):
+                    nonlocal offset, growth_reads
+                    if self.target.name == 'budget-0.bin':
+                        if attack.endswith(':growing') and growth_reads < 3:
+                            with self.target.open('ab') as writer:
+                                writer.write(b'A' * (64 * 1024))
+                            growth_reads += 1
+                        block = self.handle.read(size)
+                        if attack.endswith(':time'):
+                            offset += 31
+                        return block
+                    return self.handle.read(size)
+
+            module.open_regular_file = lambda target: ObservedRead(original_open(target), target)
+            module.time.monotonic = lambda: real_clock() + offset
+        if attack in ('work-after:inventory', 'work-after:entries'):
+            # Exhaust the final inventory's actual traversal/read work, after the
+            # independent scans. Faults change input/limits, never its result.
+            original_receipts = module.write_verification_receipts
+
+            def inventory_input(out, summary):
+                if attack.endswith(':inventory'):
+                    with (out / 'budget-0.bin').open('ab') as stream:
+                        stream.truncate(256 * 1024)
+                else:
+                    for index in range(200):
+                        (out / f'entry-{index}').write_bytes(b'')
+                return original_receipts(out, summary)
+
+            module.write_verification_receipts = inventory_input
     if attack in ('outer-failure', 'manifest-decoy-outer'):
         # Fail at real inventory readback, after summary and inventory exist.
         original = module.require_regular_file
@@ -245,7 +356,7 @@ def worker(path, checkout, out, attack):
     module.main()
 
 
-def run_main_case(path, attack):
+def run_main_case(path, attack, proof_dir=None):
     with tempfile.TemporaryDirectory(prefix='hv9-') as directory:
         base = Path(directory).resolve()
         candidate = base / 'candidate'
@@ -269,6 +380,19 @@ def run_main_case(path, attack):
         yaml = candidate / 'node_modules/yaml'
         yaml.mkdir(parents=True)
         (yaml / 'index.js').write_text('exports.parse=JSON.parse;')
+        (candidate / '.gitignore').write_text('node_modules/\nignored-build/\n')
+        (candidate / 'notes.tmp').write_bytes(b'unrelated dirty file\n')
+        if attack.startswith('untracked-'):
+            (candidate / 'extension.ts').write_text('existing untracked source\n')
+        if attack == 'untracked-symlink':
+            (candidate / 'candidate-link').symlink_to(outside)
+        if attack == 'untracked-fifo':
+            os.mkfifo(candidate / 'candidate-pipe')
+        if attack.startswith('work-before:'):
+            count = 160 if attack.endswith(':entries') else 6 if attack.endswith(':aggregate') else 1
+            for index in range(count):
+                with (candidate / f'budget-{index}.bin').open('wb') as stream:
+                    stream.truncate(0 if attack.endswith(':entries') else 96 * 1024 if count > 1 else 256 * 1024)
         environment = {
             'PATH': os.environ.get('PATH', os.defpath), 'HOME': str(base),
             'LANG': 'C.UTF-8', 'GIT_CONFIG_NOSYSTEM': '1',
@@ -276,13 +400,17 @@ def run_main_case(path, attack):
         }
         for command in (
             ['git', 'init', '-q', str(candidate)],
-            ['git', '-C', str(candidate), 'add', 'bin', 'package.json'],
+            ['git', '-C', str(candidate), 'add', 'bin', 'package.json', '.gitignore'],
             ['git', '-C', str(candidate), '-c', 'user.name=Verifier test',
              '-c', 'user.email=verifier@invalid', '-c', 'commit.gpgsign=false',
              '-c', f'core.hooksPath={os.devnull}', 'commit', '-qm', 'fixture'],
         ):
             subprocess.run(command, check=True, env=environment,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if attack.startswith('work-before:'):
+            (candidate / 'src').mkdir()
+            for item in candidate.glob('budget-*.bin'):
+                item.rename(candidate / 'src' / item.name)
         command = [sys.executable, '-I', '-B', str(Path(__file__).resolve()),
                    '--worker', str(path.resolve()), str(candidate), str(out), attack]
         try:
@@ -290,6 +418,24 @@ def run_main_case(path, attack):
                                     env=environment, timeout=12)
         except subprocess.TimeoutExpired as error:
             raise AssertionError(f'actual main timed out after 12s: {attack}') from error
+        if proof_dir is not None:
+            retained = proof_dir / attack.replace(':', '_')
+            retained.mkdir(parents=True, exist_ok=False)
+            (retained / 'worker.stdout').write_text(result.stdout)
+            (retained / 'worker.stderr').write_text(result.stderr)
+            (retained / 'invocation.json').write_text(json.dumps(dict(
+                command=command, exit=result.returncode, attack=attack,
+                verifier_sha256=hashlib.sha256(path.read_bytes()).hexdigest()), indent=2) + '\n')
+            for name in (*PROVENANCE, 'candidate-fingerprint-after.json', 'fixture-manifest-after.json'):
+                target = out / name
+                if target.is_file() and not target.is_symlink() and target.stat().st_size <= 1024 * 1024:
+                    (retained / name).write_bytes(target.read_bytes())
+            printed = result.stdout.splitlines()
+            if printed:
+                target = Path(printed[-1])
+                if target.is_file() and not target.is_symlink() and target.stat().st_size <= 1024 * 1024:
+                    (retained / 'printed-summary.json').write_bytes(target.read_bytes())
+        assert (candidate / 'notes.tmp').read_bytes() == b'unrelated dirty file\n', 'unrelated dirty file changed'
         assert outside.read_bytes() == b'outside source unchanged\n', 'outside source bytes overwritten'
         if attack == 'no-summary':
             assert result.returncode == 1, result.returncode
@@ -315,7 +461,7 @@ def run_main_case(path, attack):
         assert lines, f'main did not print summary: {result.stderr[-1200:]}'
         summary_path = Path(lines[-1])
         summary = json.loads(summary_path.read_text())
-        should_pass = (attack in ('clean', 'feature-clean', 'stdout-hardlink')
+        should_pass = (attack in ('clean', 'feature-clean', 'stdout-hardlink', 'access-clean', 'untracked-clean', 'untracked-ignored')
                        or attack.endswith(':hardlink'))
         assert (result.returncode == 0) == should_pass, f'exit={result.returncode}: {summary}'
         assert summary['result'] == ('PASS_SCOPED' if should_pass else 'FAIL'), summary
@@ -327,7 +473,45 @@ def run_main_case(path, attack):
             'fixture_unchanged': summary['fixture_unchanged'], 'outside_source_unchanged': True,
         }
         error = str(summary.get('cleanup_errors', '')) + str(summary.get('error', ''))
-        if attack.startswith(('delete:', 'symlink:')):
+        if attack.startswith('work-'):
+            assert 'File work budget exceeded' in error, error
+            reason = ('total byte' if attack.endswith((':aggregate', ':final-total')) else
+                      'entry' if attack.endswith(':entries') else
+                      'time' if attack.endswith(':time') else 'file byte')
+            assert '(' + reason in error, error
+            if attack.startswith('work-before:'):
+                assert summary.get('candidate_unchanged') is None and summary.get('fixture_unchanged') is None, summary
+            else:
+                assert summary['candidate_unchanged'] is True, summary
+                assert summary['fixture_unchanged'] is (None if attack.endswith(':fixture') else True), summary
+            if attack.endswith((':inventory', ':entries', ':final-total')) and attack.startswith('work-after:'):
+                assert summary['receipt_scan']['result'] == 'PASS', summary
+                assert 'Could not retain or re-read verification evidence' in error, error
+            if 'inventory' not in summary:
+                assert not [p for p in out.glob('sha256.json*') if p.is_file()], 'obsolete inventory retained'
+                return dict(observed, error=error, inventory=None, budget_refused=True)
+        elif attack.startswith('access-') and attack != 'access-clean':
+            assert 'Access response chose another workspace/runtime' in error, error
+        elif attack.startswith('untracked-'):
+            if attack in ('untracked-symlink', 'untracked-fifo'):
+                assert 'Untracked candidate entry is not a regular file' in error, error
+                assert summary.get('candidate_unchanged') is None, summary
+            else:
+                before = json.loads((out / 'candidate-source.json').read_text())
+                after = json.loads((out / 'candidate-fingerprint-after.json').read_text())['source']
+                assert 'notes.tmp' in before and before['notes.tmp'] == after['notes.tmp'], (before, after)
+                assert 'extension.ts' in before, before
+                if attack == 'untracked-new':
+                    assert (candidate / 'evidence.tmp').read_text() == 'candidate root artifact\n'
+                if attack in ('untracked-new', 'untracked-existing'):
+                    assert summary['candidate_unchanged'] is False and summary['source_unchanged'] is False, summary
+                    name = 'evidence.tmp' if attack == 'untracked-new' else 'extension.ts'
+                    assert before.get(name) != after[name], (before, after)
+                    assert 'Candidate fingerprint changed' in error, error
+                else:
+                    assert summary['candidate_unchanged'] is True, summary
+                assert (candidate / 'extension.ts').read_text() == ('candidate changed existing source\n' if attack == 'untracked-existing' else 'existing untracked source\n')
+        elif attack.startswith(('delete:', 'symlink:')):
             assert 'Mandatory provenance artifact' in error, error
         elif attack.startswith(('forge:', 'feature-delete:', 'feature-forge:', 'command-forge:')) or attack == 'failed-command-forge':
             assert 'receipt integrity failed' in error, error
@@ -494,13 +678,22 @@ def atomic_writer_case(path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--verify-source', type=Path, default=SCRIPT)
+    parser.add_argument('--proof-dir', type=Path, help='Retain worker output and bounded provenance outside temporary fixtures')
     parser.add_argument('--case', action='append', help='Run an exact named scenario')
     parser.add_argument('--exclude-case', action='append', default=[],
                         help='Explicitly exclude an API unavailable on a historical revision')
     args = parser.parse_args()
     path = args.verify_source
     attacks = (
-        'clean', 'root-symlink', 'summary-planted', 'no-summary',
+        'clean', 'access-clean',
+        *('access-identity:' + stage + ':' + runtime + ':' + field
+          for stage, runtime in (('discovery', 'docker'), ('discovery', 'kubernetes'),
+                                 ('remote', 'docker'), ('public', 'kubernetes'))
+          for field in ('name', 'runtime')),
+        *('untracked-' + kind for kind in ('new', 'existing', 'clean', 'ignored', 'symlink', 'fifo')),
+        'work-before:file', 'work-before:aggregate', 'work-before:entries',
+        *('work-after:' + where for where in ('temp', 'fixture', 'retained', 'aggregate', 'final-total', 'time', 'growing', 'inventory', 'entries')),
+        'root-symlink', 'summary-planted', 'no-summary',
         'manifest-decoy', 'manifest-decoy-outer', 'failed-command-forge',
         *('command-forge:' + name for name in ('version.stdout', 'capabilities.stdout',
            'version.stderr', 'missing-workspace.stdout', 'missing-workspace.stderr')),
@@ -513,7 +706,7 @@ def main():
         'admin-null', 'admin-map', 'admin-list', 'admin-int', 'outer-failure', 'feature-clean',
         *('feature-' + kind + ':' + name for name in FEATURE_RECEIPTS for kind in ('delete', 'forge')),
     )
-    cases = [('main ' + attack, lambda attack=attack: run_main_case(path, attack))
+    cases = [('main ' + attack, lambda attack=attack: run_main_case(path, attack, args.proof_dir))
              for attack in attacks]
     cases += [('bounded ' + op, lambda op=op: allocation_case(path, op))
               for op in ('scan', 'temp', 'hash')]

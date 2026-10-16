@@ -34,6 +34,9 @@ synthetic sentinel and fails on any occurrence. Raw artifact copying that leaks 
 sentinel is a product failure. The manifest, README and parsed Compose input
 each have a 1 MiB descriptor read cap; oversized candidate output fails before
 parsing. Hash and sentinel scans remain chunked independently of that cap.
+The shared [file work limits](../SKILL.md#cleanup) also cap each scanned or hashed
+file, aggregate bytes, traversal work and elapsed time, including final inventory
+readback. Exhaustion is a failed, incomplete check with cleanup and failure facts.
 
 Command stdout and stderr must also match the expected digests retained at
 emission, including empty streams and failed commands. Use the printed summary

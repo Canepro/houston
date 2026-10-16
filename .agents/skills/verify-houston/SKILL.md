@@ -76,8 +76,14 @@ fixed `run-001/summary.json` can follow a candidate-controlled symlink.
 Require `result: PASS_SCOPED`, `scratch_removed: true`, and
 `fixture_unchanged: true`, plus `source_unchanged: true`. Check `head` against the intended candidate and inspect
 `diff_sha256` when verifying uncommitted tracked changes. This fingerprints tracked
-diffs only. `candidate-source.json` additionally hashes tracked and untracked
-nonignored CLI source, entry points, tools, packaged data and dependency manifests.
+diffs only. `candidate-source.json` additionally hashes tracked CLI source,
+entry points, tools, packaged data and dependency manifests, plus every nonignored
+untracked candidate file, including root files outside those paths. Existing
+untracked files are fingerprinted and left in place. Changes to their bytes or
+the addition or removal of a nonignored file fail the run. A bounded filesystem
+walk applies Git's ignore rules and refuses untracked symlinks, FIFOs, sockets,
+and other special files. Git's untracked listing alone omits some special files.
+Git metadata and ignored dependency or build paths stay outside this manifest.
 The helper refuses a run if that manifest changes during verification. Commit
 verifier changes before final acceptance and record the exact
 head in the delivery receipt. Version alone cannot distinguish two same-version
@@ -180,7 +186,25 @@ receipt destinations still fail the run.
 Candidate package, bundle manifest, README, Compose and onboarding/setup config
 parse or comparison reads are capped at 1 MiB on the opened descriptor. Oversized
 inputs fail with the file name in the summary. Hashing and sentinel scans use
-bounded chunks, with sentinel overlap across chunk boundaries.
+chunks of at most 1 MiB, with sentinel overlap across chunk boundaries. They also
+refuse files above 64 MiB, including a file that grows beyond the limit while read.
+Nested file operations share a 512 MiB byte budget, a 50,000-entry work budget,
+and a 30-second elapsed deadline. The budgets cover each before-state fingerprint,
+fixture or bundle traversal, command receipt scan, and the entire finalizer,
+including after-state fingerprints, temp and retained scans, inventory hashing
+and readback. Repeated reads and traversal work count again. The command output
+cap and 60-second subprocess timeout remain separate.
+
+Checks run before and after each bounded read and during lazy directory walks.
+An OS call already in progress cannot be preempted. Expiry fails the run with
+`File work budget exceeded`, its reason and path; excess bytes are never skipped
+to produce a pass. Scratch removal still runs after a scan failure. An incomplete
+fingerprint leaves its unchanged facts null, rather than claiming stability.
+If inventory work fails, the failure path attempts bounded inventory invalidation
+and writes a FAIL summary without an inventory locator. Any invalidation failure
+is reported. Initial fingerprint failures also produce a failure summary even
+when no fixture or scratch directory was created. `summary.file_work_limits`
+records the limits used by that invocation.
 Keep the evidence directory for the parent or reviewer. End the verification report with the exact
 branch/head, this skill's name, demonstrated CLI paths, and remaining pending or
 live-runtime coverage.

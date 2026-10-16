@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Drive Houston's real checkout CLI; retain receipts outside disposable state."""
 import argparse
+from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import wraps
 import hashlib
 import json
 import math
@@ -22,6 +25,11 @@ import uuid
 
 SCAN_CHUNK_BYTES = 1024 * 1024
 PARSE_LIMIT_BYTES = 1024 * 1024
+FILE_WORK_LIMIT_BYTES = 64 * 1024 * 1024
+TOTAL_WORK_LIMIT_BYTES = 512 * 1024 * 1024
+FILE_WORK_SECONDS = 30
+FILE_WORK_ENTRIES = 50000
+CURRENT_FILE_WORK = ContextVar('houston_file_work', default=None)
 RECEIPT_REFUSAL = 'Refused pre-existing non-regular receipt path'
 EVIDENCE_DIRECTORY_MESSAGE = 'Evidence directory must be a real directory'
 PROVENANCE_MESSAGE = 'Mandatory provenance artifact is not a regular file'
@@ -38,7 +46,98 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
+class FileWorkBudget:
+    """Bound actual bytes, traversal and elapsed work across nested file callers."""
+
+    def __init__(self, label):
+        self.label = label
+        self.deadline = time.monotonic() + FILE_WORK_SECONDS
+        self.bytes_left = TOTAL_WORK_LIMIT_BYTES
+        self.entries_left = FILE_WORK_ENTRIES
+
+    def check(self, path, size=0, entries=0):
+        self.bytes_left -= size
+        self.entries_left -= entries
+        reason = ('time' if time.monotonic() >= self.deadline else
+                  'total byte' if self.bytes_left < 0 else
+                  'entry' if self.entries_left < 0 else None)
+        require(reason is None,
+                f'File work budget exceeded ({reason}, {self.label}): {path}')
+
+
+@contextmanager
+def file_work_scope(label, fresh=False):
+    token = None
+    if fresh or CURRENT_FILE_WORK.get() is None:
+        token = CURRENT_FILE_WORK.set(FileWorkBudget(label))
+    try:
+        yield CURRENT_FILE_WORK.get()
+    finally:
+        if token is not None:
+            CURRENT_FILE_WORK.reset(token)
+
+
+def bounded_file_work(function):
+    @wraps(function)
+    def bounded(*args, **kwargs):
+        with file_work_scope(function.__name__):
+            CURRENT_FILE_WORK.get().check(function.__name__)
+            result = function(*args, **kwargs)
+            CURRENT_FILE_WORK.get().check(function.__name__)
+            return result
+    return bounded
+
+
+def walk_entries(root, skipped=()):
+    """Walk lazily so directory enumeration cannot outrun the shared budget."""
+    budget = CURRENT_FILE_WORK.get()
+    skipped = set(skipped)
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        budget.check(current)
+        with os.scandir(current) as entries:
+            while True:
+                budget.check(current)
+                try:
+                    entry = next(entries)
+                except StopIteration:
+                    break
+                path = current / entry.name
+                budget.check(path, entries=1)
+                if path in skipped:
+                    continue
+                mode = path.lstat().st_mode
+                budget.check(path)
+                yield path, mode
+                if stat.S_ISDIR(mode):
+                    stack.append(path)
+
+
+def file_blocks(handle, path, chunk_size):
+    budget = CURRENT_FILE_WORK.get()
+    budget.check(path)
+    require(os.fstat(handle.fileno()).st_size <= FILE_WORK_LIMIT_BYTES,
+            f'File work budget exceeded (file byte): {path}')
+    consumed = 0
+    while True:
+        budget.check(path)
+        # Read one extra byte at either boundary to distinguish EOF from excess.
+        size = min(chunk_size, FILE_WORK_LIMIT_BYTES - consumed + 1,
+                   budget.bytes_left + 1)
+        block = handle.read(size)
+        consumed += len(block)
+        budget.check(path, size=len(block))
+        require(consumed <= FILE_WORK_LIMIT_BYTES,
+                f'File work budget exceeded (file byte): {path}')
+        if not block:
+            return
+        yield block
+
+
+@bounded_file_work
 def path_fingerprint(path):
+    CURRENT_FILE_WORK.get().check(path, entries=1)
     try:
         mode = path.lstat().st_mode
     except FileNotFoundError:
@@ -52,10 +151,11 @@ def path_fingerprint(path):
     return f'special:{stat.S_IFMT(mode):o}'
 
 
+@bounded_file_work
 def tree_manifest(root):
     return {'.': path_fingerprint(root), **{
         str(path.relative_to(root)): path_fingerprint(path)
-        for path in sorted(root.rglob('*'), key=lambda item: str(item))
+        for path, _mode in sorted(walk_entries(root), key=lambda item: str(item[0]))
     }}
 
 
@@ -100,27 +200,30 @@ def open_regular_file(path):
         raise
 
 
+@bounded_file_work
 def read_bounded_file(path, limit=PARSE_LIMIT_BYTES):
     """Cap candidate-controlled input on the opened descriptor, including growth."""
+    budget = CURRENT_FILE_WORK.get()
+    budget.check(path, entries=1)
     with open_regular_file(path) as handle:
         require(os.fstat(handle.fileno()).st_size <= limit,
                 f'Candidate file exceeds parse limit: {path.name}')
         payload = handle.read(limit + 1)
+        budget.check(path, size=len(payload))
     require(len(payload) <= limit, f'Candidate file exceeds parse limit: {path.name}')
     return payload
 
 
+@bounded_file_work
 def hash_file(path, chunk_size=SCAN_CHUNK_BYTES):
     digest = hashlib.sha256()
     with open_regular_file(path) as handle:
-        while True:
-            block = handle.read(chunk_size)
-            if not block:
-                break
+        for block in file_blocks(handle, path, chunk_size):
             digest.update(block)
     return digest.hexdigest()
 
 
+@bounded_file_work
 def file_contains_secret(path, secret, chunk_size=SCAN_CHUNK_BYTES):
     needle = secret.encode()
     if not needle:
@@ -129,40 +232,43 @@ def file_contains_secret(path, secret, chunk_size=SCAN_CHUNK_BYTES):
     size = chunk_size if chunk_size > overlap else overlap + 1
     with open_regular_file(path) as handle:
         carry = b''
-        while True:
-            block = handle.read(size)
-            if not block:
-                return False
+        for block in file_blocks(handle, path, size):
             window = carry + block
             if needle in window:
                 return True
             carry = window[-overlap:] if overlap else b''
+    return False
 
 
+@bounded_file_work
 def no_special_entries(root):
     entries = []
-    for path in root.rglob('*'):
-        mode = path.lstat().st_mode
+    for path, mode in walk_entries(root):
         if not stat.S_ISDIR(mode) and not stat.S_ISREG(mode):
             entries.append(path)
     return entries
 
 
+@bounded_file_work
 def no_synthetic_secret(secret, paths):
     for path in paths:
+        CURRENT_FILE_WORK.get().check(path, entries=1)
         require_regular_file(path, f'Expected retained regular file: {path}')
         require(not file_contains_secret(path, secret), f'Synthetic secret leaked: {path.name}')
 
 
+@bounded_file_work
 def retained_regular_files(root):
-    paths = sorted(root.rglob('*'), key=lambda item: str(item.relative_to(root)))
-    return [path for path in paths if regular_file(path)]
+    return sorted((path for path, mode in walk_entries(root) if stat.S_ISREG(mode)),
+                  key=lambda item: str(item.relative_to(root)))
 
 
+@bounded_file_work
 def scan_retained_regular_files(secret, root):
     no_synthetic_secret(secret, retained_regular_files(root))
 
 
+@bounded_file_work
 def require_no_special_retained_entries(root):
     entries = no_special_entries(root)
     suffix = f': {entries[0].relative_to(root)}' if entries else ''
@@ -180,6 +286,7 @@ def bind_candidate_temp(env, scratch):
     return bound
 
 
+@bounded_file_work
 def scan_candidate_temp(secret, temp):
     require(stat.S_ISDIR(temp.lstat().st_mode),
             f'Candidate temp directory is missing: {temp}')
@@ -194,10 +301,12 @@ def require_real_evidence_directory(path):
     require(stat.S_ISDIR(mode), EVIDENCE_DIRECTORY_MESSAGE)
 
 
+@bounded_file_work
 def require_provenance_receipts(out, expected_hashes=None, names=PROVENANCE_RECEIPTS):
     irregular = [name for name in names if not regular_file(out / name)]
     require(not irregular, PROVENANCE_MESSAGE + ': ' + ', '.join(irregular))
     for name, digest in (expected_hashes or {}).items():
+        CURRENT_FILE_WORK.get().check(out / name, entries=1)
         require(regular_file(out / name) and hash_file(out / name) == digest,
                 f'Verifier receipt integrity failed: {name}')
 
@@ -272,21 +381,10 @@ def record_receipt_refusal(summary, refusals):
     summary['cleanup_errors'] = cleanup
 
 
+@bounded_file_work
 def inventory_regular_files(root, skipped):
-    skipped = set(skipped)
-    found = []
-    stack = [root]
-    while stack:
-        current = stack.pop()
-        for child in sorted(current.iterdir(), key=lambda item: item.name):
-            if child in skipped:
-                continue
-            kind = receipt_entry_kind(child)
-            if kind == 'directory':
-                stack.append(child)
-            elif kind == 'file':
-                found.append(child)
-    return found
+    return sorted((path for path, mode in walk_entries(root, skipped) if stat.S_ISREG(mode)),
+                  key=lambda item: str(item.relative_to(root)))
 
 
 def atomic_receipt_bytes(path, payload):
@@ -340,6 +438,7 @@ def write_evidence_text(out, name, text):
     return write_evidence_bytes(out, name, text.encode())
 
 
+@bounded_file_work
 def write_verification_receipts(out, summary):
     if receipt_entry_kind(out) != 'directory':
         record_receipt_refusal(summary, [EVIDENCE_DIRECTORY_MESSAGE])
@@ -371,12 +470,25 @@ def write_verification_receipts(out, summary):
     return summary_path
 
 
+@bounded_file_work
 def invalidate_inventory(out):
     if receipt_entry_kind(out) != 'directory':
         return
-    for path in [out / 'sha256.json', *out.glob('sha256.json.refused.*')]:
-        if receipt_entry_kind(path) not in ('absent', 'directory'):
-            path.unlink()
+    canonical = out / 'sha256.json'
+    if receipt_entry_kind(canonical) not in ('absent', 'directory'):
+        canonical.unlink()
+    with os.scandir(out) as entries:
+        while True:
+            CURRENT_FILE_WORK.get().check(out)
+            try:
+                entry = next(entries)
+            except StopIteration:
+                break
+            path = out / entry.name
+            CURRENT_FILE_WORK.get().check(path, entries=1)
+            if entry.name.startswith('sha256.json.refused.'):
+                if receipt_entry_kind(path) not in ('absent', 'directory'):
+                    path.unlink()
 
 
 def require_revoked_onboarding_persisted(persisted, completed_at, version, legacy):
@@ -408,6 +520,12 @@ def access_supported(payloads):
         return False
     require(not missing, 'Access payload is omitted for ' + ', '.join(missing))
     return True
+
+
+def require_access_identity(data, name, runtime):
+    require(isinstance(data, dict) and data.get('name') == name
+            and data.get('runtime') == runtime,
+            f'Access response chose another workspace/runtime: expected {name}/{runtime}')
 
 
 def require_unknown_panels(human, panels):
@@ -541,11 +659,21 @@ def receipt_paths(out, *labels):
     )]
 
 
+@bounded_file_work
 def scan_command_receipts(secret, out, *labels):
-    paths = receipt_paths(out, *labels) if labels else sorted(
-        (path for path in out.iterdir() if path.name.endswith(('.stdout', '.stderr'))),
-        key=lambda path: path.name,
-    )
+    paths = receipt_paths(out, *labels)
+    if not labels:
+        with os.scandir(out) as entries:
+            while True:
+                CURRENT_FILE_WORK.get().check(out)
+                try:
+                    entry = next(entries)
+                except StopIteration:
+                    break
+                CURRENT_FILE_WORK.get().check(out / entry.name, entries=1)
+                if entry.name.endswith(('.stdout', '.stderr')):
+                    paths.append(out / entry.name)
+        paths.sort(key=lambda path: path.name)
     require(paths, 'No command stdout/stderr receipts were retained')
     no_synthetic_secret(secret, paths)
     return paths
@@ -580,16 +708,67 @@ def git_evidence_context(root):
     return context
 
 
-def git_evidence_output(context, label, arguments, text=False):
-    return bounded_output(
+@bounded_file_work
+def git_evidence_output(context, label, arguments, text=False, stdin=None, accepted_exits=(0,)):
+    result = bounded_output(
         label,
         [context['git'], '--no-pager', '-C', str(context['root']), *arguments],
         cwd=context['root'],
         env=context['env'],
         text=text,
+        stdin=stdin,
+        accepted_exits=accepted_exits,
     )
+    CURRENT_FILE_WORK.get().check(label, size=len(result.encode() if text else result))
+    return result
 
 
+@bounded_file_work
+def untracked_candidate_files(context):
+    root = context['root']
+    tracked = set(git_evidence_output(
+        context, 'candidate tracked paths', ['ls-files', '--cached', '-z'],
+    ).decode().split('\0'))
+    found = set()
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        children = []
+        with os.scandir(current) as entries:
+            while True:
+                CURRENT_FILE_WORK.get().check(current)
+                try:
+                    entry = next(entries)
+                except StopIteration:
+                    break
+                path = current / entry.name
+                CURRENT_FILE_WORK.get().check(path, entries=1)
+                if path != root / '.git':
+                    children.append(path)
+        if not children:
+            continue
+        relative = {str(path.relative_to(root)): path for path in children}
+        ignored = set(git_evidence_output(
+            context, 'candidate ignore rules', ['check-ignore', '--stdin', '-z'],
+            stdin=('\0'.join(relative) + '\0').encode(), accepted_exits=(0, 1),
+        ).decode().split('\0'))
+        for name, path in relative.items():
+            CURRENT_FILE_WORK.get().check(path)
+            if name in tracked or name in ignored:
+                continue
+            mode = path.lstat().st_mode
+            if stat.S_ISDIR(mode):
+                stack.append(path)
+            else:
+                # Git ls-files silently omits FIFOs and sockets. Inspect the
+                # nonignored tree ourselves without opening those entries.
+                require(stat.S_ISREG(mode),
+                        f'Untracked candidate entry is not a regular file: {name}')
+                found.add(name)
+    return found
+
+
+@bounded_file_work
 def source_manifest(context):
     root = context['root']
     paths = git_evidence_output(
@@ -598,10 +777,19 @@ def source_manifest(context):
         ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--',
          'src', 'bin', 'tools', 'data', 'package.json', 'yarn.lock', '.yarnrc.yml'],
     )
-    return {name: path_fingerprint(root / name)
-            for name in sorted(set(paths.decode().split('\0'))) if name}
+    names = {name for name in paths.decode().split('\0') if name}
+    untracked_names = untracked_candidate_files(context)
+    names.update(untracked_names)
+    manifest = {}
+    for name in sorted(names):
+        value = path_fingerprint(root / name)
+        require(name not in untracked_names or value.startswith('file:'),
+                f'Untracked candidate entry is not a regular file: {name}')
+        manifest[name] = value
+    return manifest
 
 
+@bounded_file_work
 def candidate_fingerprint(root):
     context = git_evidence_context(root)
     return {
@@ -1048,7 +1236,7 @@ def run_command(command, cwd, env, stdin=None, timeout_seconds=COMMAND_TIMEOUT_S
     return run_nonposix_command(command, cwd, env, stdin, timeout_seconds, term_grace_seconds)
 
 
-def bounded_output(label, command, cwd=None, env=None, text=False, stdin=None):
+def bounded_output(label, command, cwd=None, env=None, text=False, stdin=None, accepted_exits=(0,)):
     """Run a verifier auxiliary process under the same bounded cleanup contract as the CLI."""
     result = run_command(
         command,
@@ -1060,7 +1248,7 @@ def bounded_output(label, command, cwd=None, env=None, text=False, stdin=None):
     errors = []
     if result['timed_out']:
         errors.append(f"timed out after {result['timeout_seconds']} seconds")
-    if result['exit'] != 0:
+    if result['exit'] not in accepted_exits:
         errors.append(f"exited with status {result['exit']}")
     errors.extend(result['cleanup_errors'])
     if errors:
@@ -1081,8 +1269,8 @@ def main():
     require(not out.is_relative_to(root) and not out.is_relative_to(verifier_root),
             'Evidence must be outside candidate and verifier checkouts')
     out.mkdir(parents=True, exist_ok=False)
-    candidate_before = candidate_fingerprint(root)
-    source_before = candidate_before['source']
+    candidate_before = None
+    source_before = None
     expected_provenance = {}
     expected_command_hashes = {}
 
@@ -1090,15 +1278,14 @@ def main():
         write_evidence_text(out, name, text)
         expected_provenance[name] = hashlib.sha256(text.encode()).hexdigest()
 
-    retain_provenance('candidate-source.json', json.dumps(source_before, indent=2) + '\n')
-    retain_provenance('candidate-fingerprint-before.json',
-                      json.dumps(candidate_before, indent=2) + '\n')
-    summary = {'head': candidate_before['head'],
-               'diff_sha256': candidate_before['diff_sha256'],
-               'checkout': str(root),
-               'verifier_sha256': hash_file(Path(__file__)),
+    summary = {'head': None, 'diff_sha256': None, 'checkout': str(root),
+               'candidate_unchanged': None, 'source_unchanged': None,
+               'fixture_unchanged': None,
+               'file_work_limits': {'per_file_bytes': FILE_WORK_LIMIT_BYTES,
+                                    'aggregate_bytes': TOTAL_WORK_LIMIT_BYTES,
+                                    'seconds': FILE_WORK_SECONDS, 'entries': FILE_WORK_ENTRIES},
                'features': {}, 'boundary': 'Real checkout CLI; synthetic workspace; engine tools unavailable. No live runtime proof.'}
-    scratch = Path(tempfile.mkdtemp(prefix='verify-houston-'))
+    scratch = None
     fixture_root = None
     fixture_before = None
     retained_bundle_files = []
@@ -1109,6 +1296,14 @@ def main():
     candidate_temp = None
     sentinel = 'VERIFY_SYNTHETIC_SECRET_59c8'
     try:
+        candidate_before = candidate_fingerprint(root)
+        source_before = candidate_before['source']
+        summary.update(head=candidate_before['head'], diff_sha256=candidate_before['diff_sha256'],
+                       verifier_sha256=hash_file(Path(__file__)))
+        retain_provenance('candidate-source.json', json.dumps(source_before, indent=2) + '\n')
+        retain_provenance('candidate-fingerprint-before.json',
+                          json.dumps(candidate_before, indent=2) + '\n')
+        scratch = Path(tempfile.mkdtemp(prefix='verify-houston-'))
         # Only entry-point utilities can execute. No inherited credentials, engine socket,
         # kubeconfig, user home, proxy or ambient HOUSTON_* overrides reach the CLI.
         toolbin = scratch / 'bin'
@@ -1438,6 +1633,8 @@ def main():
             summary['features']['access'] = 'PENDING: info payload has no access consumer'
         else:
             discovered = dict(discovery)
+            for runtime, name, _target, _url in loopback_access:
+                require_access_identity(discovered[runtime], name, runtime)
             ssh_values = {
                 'SSH_CONNECTION': '198.51.100.20 55100 203.0.113.8 22',
                 'SSH_CLIENT': '198.51.100.20 55100 22',
@@ -1452,8 +1649,11 @@ def main():
                     'HOUSTON_SSH_HOST': 'ssh-proof.invalid',
                     **(changes or {}),
                 }
-                data = run('access-' + label, ['info', '--name', name, '--json'],
-                           schema='houston.info.v1', overrides=overrides)['data']['access']
+                detail = run('access-' + label, ['info', '--name', name, '--json'],
+                             schema='houston.info.v1', overrides=overrides)['data']
+                runtime = 'docker' if name == docker_access.name else 'kubernetes'
+                require_access_identity(detail, name, runtime)
+                data = detail['access']
                 require(data['mode'] == 'remote_ssh' and data['bind'] == 'loopback'
                         and data['host_port'] == 39999 and data['local_port'] == port
                         and data['browser_url'] == f'http://127.0.0.1:{port}'
@@ -1510,6 +1710,7 @@ def main():
                         f'A primary forward colliding with a {label} port must refuse')
             public = run('access-public', ['info', '--name', 'verify-public-fixture', '--json'],
                          schema='houston.info.v1', overrides=remote)['data']
+            require_access_identity(public, 'verify-public-fixture', 'kubernetes')
             require(public['access'] is None, 'Wildcard workspace must not claim loopback access')
             summary['features']['access'] = (
                 'PASS: Docker and Kubernetes loopback local and SSH-marker handoff, '
@@ -1681,114 +1882,121 @@ def main():
         failure = error
         summary['error'] = str(error)
     finally:
-        evidence_directory_ok = False
-        try:
-            require_real_evidence_directory(out)
-            evidence_directory_ok = True
-        except Exception as error:
-            cleanup_errors.append(str(error))
-        try:
-            candidate_after = candidate_fingerprint(root)
-            summary['candidate_unchanged'] = candidate_after == candidate_before
-            summary['source_unchanged'] = candidate_after['source'] == source_before
-            if candidate_after != candidate_before:
-                cleanup_errors.append('Candidate fingerprint changed during verification')
-            if evidence_directory_ok:
-                write_evidence_text(out, 'candidate-fingerprint-after.json',
-                                    json.dumps(candidate_after, indent=2) + '\n')
-        except Exception as error:
-            cleanup_errors.append(f'Could not record the final candidate fingerprint: {error}')
-        if fixture_root is not None and fixture_before is not None:
+        with file_work_scope('finalization', fresh=True):
+            evidence_directory_ok = False
             try:
-                fixture_after = tree_manifest(fixture_root)
-                summary['fixture_unchanged'] = fixture_after == fixture_before
-                if fixture_after != fixture_before:
-                    cleanup_errors.append('Synthetic fixture manifest changed during verification')
-                if evidence_directory_ok:
-                    write_evidence_text(out, 'fixture-manifest-after.json',
-                                        json.dumps(fixture_after, indent=2) + '\n')
-            except Exception as error:
-                cleanup_errors.append(f'Could not record the final fixture manifest: {error}')
-        else:
-            summary['fixture_unchanged'] = None
-        if candidate_temp is not None:
-            try:
-                # Scan before removal. This directory lives under scratch.
-                scan_candidate_temp(sentinel, candidate_temp)
-            except Exception as error:
-                cleanup_errors.append(f'Candidate temp scan failed: {error}')
-        try:
-            shutil.rmtree(scratch)
-        except Exception as error:
-            cleanup_errors.append(f'Could not remove verifier scratch: {error}')
-        summary['scratch_removed'] = not scratch.exists()
-        if not summary['scratch_removed']:
-            cleanup_errors.append('Verifier scratch remains after cleanup')
-        if evidence_directory_ok and retained_bundle_files:
-            try:
-                require(stat.S_ISDIR(bundle.lstat().st_mode),
-                        'Retained bundle root must remain a real directory')
+                require_real_evidence_directory(out)
+                evidence_directory_ok = True
             except Exception as error:
                 cleanup_errors.append(str(error))
-        if evidence_directory_ok:
-            for file, digest in retained_bundle_files:
+            try:
+                candidate_after = candidate_fingerprint(root)
+                if candidate_before is not None:
+                    summary['candidate_unchanged'] = candidate_after == candidate_before
+                    summary['source_unchanged'] = candidate_after['source'] == source_before
+                if candidate_before is not None and candidate_after != candidate_before:
+                    cleanup_errors.append('Candidate fingerprint changed during verification')
+                if evidence_directory_ok:
+                    write_evidence_text(out, 'candidate-fingerprint-after.json',
+                                        json.dumps(candidate_after, indent=2) + '\n')
+            except Exception as error:
+                cleanup_errors.append(f'Could not record the final candidate fingerprint: {error}')
+            if fixture_root is not None and fixture_before is not None:
                 try:
-                    require_regular_file(file, f'Retained bundle attachment is not a regular file: {file.name}')
-                    require(hash_file(file) == digest,
-                            f'Retained bundle attachment changed after cleanup: {file.name}')
+                    fixture_after = tree_manifest(fixture_root)
+                    summary['fixture_unchanged'] = fixture_after == fixture_before
+                    if fixture_after != fixture_before:
+                        cleanup_errors.append('Synthetic fixture manifest changed during verification')
+                    if evidence_directory_ok:
+                        write_evidence_text(out, 'fixture-manifest-after.json',
+                                            json.dumps(fixture_after, indent=2) + '\n')
+                except Exception as error:
+                    cleanup_errors.append(f'Could not record the final fixture manifest: {error}')
+            else:
+                summary['fixture_unchanged'] = None
+            if candidate_temp is not None:
+                try:
+                    # Scan before removal. This directory lives under scratch.
+                    scan_candidate_temp(sentinel, candidate_temp)
+                except Exception as error:
+                    cleanup_errors.append(f'Candidate temp scan failed: {error}')
+            try:
+                if scratch is not None:
+                    shutil.rmtree(scratch)
+            except Exception as error:
+                cleanup_errors.append(f'Could not remove verifier scratch: {error}')
+            summary['scratch_removed'] = scratch is None or not scratch.exists()
+            if not summary['scratch_removed']:
+                cleanup_errors.append('Verifier scratch remains after cleanup')
+            if evidence_directory_ok and retained_bundle_files:
+                try:
+                    require(stat.S_ISDIR(bundle.lstat().st_mode),
+                            'Retained bundle root must remain a real directory')
                 except Exception as error:
                     cleanup_errors.append(str(error))
-            try:
-                require_provenance_receipts(out, expected_provenance)
-            except Exception as error:
-                cleanup_errors.append(str(error))
-            try:
-                require_provenance_receipts(out, expected_command_hashes, names=())
-            except Exception as error:
-                cleanup_errors.append(str(error))
-            try:
-                require(expected_receipt_labels, 'No command receipts were expected')
-                scan_command_receipts(sentinel, out, *expected_receipt_labels)
-                scanned_receipts = scan_command_receipts(sentinel, out)
-                summary['receipt_scan'] = {
-                    'result': 'PASS',
-                    'files': len(scanned_receipts),
-                    'scope': 'all retained command stdout/stderr receipts',
-                }
-            except Exception as error:
-                cleanup_errors.append(f'Final command receipt scan failed: {error}')
-            try:
-                scan_retained_regular_files(sentinel, out)
-            except Exception as error:
-                cleanup_errors.append(f'Retained evidence scan failed: {error}')
-            try:
-                require_no_special_retained_entries(out)
-            except Exception as error:
-                cleanup_errors.append(f'Retained special-entry scan failed: {error}')
-        if cleanup_errors:
-            summary['cleanup_errors'] = cleanup_errors
-            if failure is None:
-                failure = RuntimeError('; '.join(cleanup_errors))
-            summary['error'] = str(failure)
-        summary['result'] = 'PASS_SCOPED' if failure is None and completed else 'FAIL'
-        summary_path = None
-        try:
-            summary_path = write_verification_receipts(out, summary)
-            if summary['result'] == 'FAIL' and failure is None:
-                failure = RuntimeError(summary.get('error', 'Receipt finalization failed'))
-        except Exception as error:
-            if failure is None:
-                failure = error
-            cleanup_errors.append(f'Could not retain or re-read verification evidence: {error}')
-            summary['result'] = 'FAIL'
-            summary['error'] = str(failure)
-            summary['cleanup_errors'] = cleanup_errors
-            try:
-                invalidate_inventory(out)
-                summary_path = write_failure_summary(out, summary)
-            except Exception as second:
-                cleanup_errors.append(f'Could not write a safe failure summary: {second}')
+            if evidence_directory_ok:
+                for file, digest in retained_bundle_files:
+                    try:
+                        require_regular_file(file, f'Retained bundle attachment is not a regular file: {file.name}')
+                        require(hash_file(file) == digest,
+                                f'Retained bundle attachment changed after cleanup: {file.name}')
+                    except Exception as error:
+                        cleanup_errors.append(str(error))
+                try:
+                    require_provenance_receipts(out, expected_provenance)
+                except Exception as error:
+                    cleanup_errors.append(str(error))
+                try:
+                    require_provenance_receipts(out, expected_command_hashes, names=())
+                except Exception as error:
+                    cleanup_errors.append(str(error))
+                try:
+                    require(expected_receipt_labels, 'No command receipts were expected')
+                    scan_command_receipts(sentinel, out, *expected_receipt_labels)
+                    scanned_receipts = scan_command_receipts(sentinel, out)
+                    summary['receipt_scan'] = {
+                        'result': 'PASS',
+                        'files': len(scanned_receipts),
+                        'scope': 'all retained command stdout/stderr receipts',
+                    }
+                except Exception as error:
+                    cleanup_errors.append(f'Final command receipt scan failed: {error}')
+                try:
+                    scan_retained_regular_files(sentinel, out)
+                except Exception as error:
+                    cleanup_errors.append(f'Retained evidence scan failed: {error}')
+                try:
+                    require_no_special_retained_entries(out)
+                except Exception as error:
+                    cleanup_errors.append(f'Retained special-entry scan failed: {error}')
+            if cleanup_errors:
                 summary['cleanup_errors'] = cleanup_errors
+                if failure is None:
+                    failure = RuntimeError('; '.join(cleanup_errors))
+                summary['error'] = str(failure)
+            summary['result'] = 'PASS_SCOPED' if failure is None and completed else 'FAIL'
+            summary_path = None
+            try:
+                summary_path = write_verification_receipts(out, summary)
+                if summary['result'] == 'FAIL' and failure is None:
+                    failure = RuntimeError(summary.get('error', 'Receipt finalization failed'))
+            except Exception as error:
+                if failure is None:
+                    failure = error
+                cleanup_errors.append(f'Could not retain or re-read verification evidence: {error}')
+                summary['result'] = 'FAIL'
+                summary['error'] = str(failure)
+                summary['cleanup_errors'] = cleanup_errors
+                try:
+                    with file_work_scope('failure inventory cleanup', fresh=True):
+                        invalidate_inventory(out)
+                except Exception as second:
+                    cleanup_errors.append(f'Could not invalidate obsolete inventory: {second}')
+                try:
+                    summary_path = write_failure_summary(out, summary)
+                except Exception as second:
+                    cleanup_errors.append(f'Could not write a safe failure summary: {second}')
+                    summary['cleanup_errors'] = cleanup_errors
         if summary_path is not None:
             print(summary_path)
         else:
