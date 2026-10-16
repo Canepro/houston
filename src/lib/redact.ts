@@ -39,26 +39,29 @@ const JOINED_KEY_HINTS: readonly string[] = ['privatekey', 'sshkey'];
 const HEADER_KEY = /^(?:(?:proxy|http)_)?(?:authorization(?:_?headers?)?|auth_?headers?)$/u;
 
 /**
- * Services whose own name prefixes `pass` in an option (`--dbpass`, `--rootpass`). A closed list,
- * because a word merely ending in `pass` is usually not a credential: `bypass`, `compass`.
+ * Words that end in `pass` and are not credentials. Any other word ending in `pass` or a
+ * password spelling is one: `--requirepass`, `-storepass`, `--sslpass`, `--password2`.
  */
-const PASS_PREFIX =
-  'db|admin|root|user|sql|mysql|pg|redis|mongo|ldap|smtp|ftp|ssh|vnc|bind|master|auth';
+const NOT_A_PASS = /^(?:by|com|encom|tres|over|under|sur|mis|im|out)pass$/u;
 
 /**
  * One word of an option name that names a credential:
- * - `pass` and its named forms: `-passin`, `-passout` (openssl), `--passcode`, `--passfile`,
- *   with an optional service prefix. `pass` counts only as a whole word or with those forms.
- * - A credential stem, alone or ending a joined name (`--accesstoken`, `--rootpassword`).
- * - A credential stem followed by `key`, `accesskey` or `file`: `--secretkey`,
- *   `--secretaccesskey`, `--passwordfile`.
+ * - a word ending in `pass`, `password`, `passwd` or `passphrase`, with optional digits and the
+ *   named forms `in`, `out`, `code`, `file`, `key` (`-passin`, `--passcode`), except NOT_A_PASS.
+ * - a credential stem, alone or ending a joined name (`--accesstoken`, `--rootpassword`).
+ * - a credential stem followed by `key`, `accesskey`, `file`, `value`, `data`, `string` or
+ *   `text`: `--secretkey`, `--secretaccesskey`, `--secretvalue`.
  */
 const CREDENTIAL_WORD = new RegExp(
-  `^(?:${PASS_PREFIX})?pass(?:in|out|code|file|key)?$|` +
-    '(?:password|passwd|passphrase|secret|token|apikey|credential|privatekey|sshkey|accesskey)s?$|' +
-    '^(?:password|passwd|passphrase|secret|token|credential)(?:key|accesskey|file)s?$',
+  '^[a-z]*pass(?:word|wd|phrase)?\\d*(?:in|out|code|file|key)?$|' +
+    '(?:secret|token|apikey|credential|privatekey|sshkey|accesskey)s?\\d*$|' +
+    '^(?:password|passwd|passphrase|secret|token|credential)(?:key|accesskey|file|value|data|string|text)s?$',
   'u',
 );
+
+function credentialWord(word: string): boolean {
+  return CREDENTIAL_WORD.test(word) && !NOT_A_PASS.test(word);
+}
 
 /**
  * Whether a key names a credential, for an artifact a person attaches. The hints are written in
@@ -130,7 +133,7 @@ export function credentialFlag(item: string): boolean {
     /(?:^|_)rocketchat_license(?:_|$)/u.test(words) ||
     words
       .split('_')
-      .some((word, index) => CREDENTIAL_WORD.test(word) || (index > 0 && /^keys?$/u.test(word)))
+      .some((word, index) => credentialWord(word) || (index > 0 && /^keys?$/u.test(word)))
   );
 }
 

@@ -7,6 +7,7 @@ import {
   SECRET_KEY_HINTS,
   URL_USERINFO,
   redactAllUserinfo,
+  credentialFlag,
   redactArgv,
   redactEnv,
 } from '../../src/lib/redact';
@@ -227,6 +228,32 @@ describe('redactAllUserinfo', () => {
       `OIDC={"url":"https://${REDACTED}@idp","admin":"ops@example.com"}`,
       `https://${REDACTED}@h`,
     ]);
+  });
+});
+
+describe('credentialFlag', () => {
+  it('names credential option words and leaves lookalikes readable', () => {
+    const flags = [
+      '--requirepass',
+      '-storepass',
+      '-keypass',
+      '--sslpass',
+      '--password1',
+      '--password2',
+      '--secretvalue',
+      '-passin',
+      '--secretkey',
+      '--dbpass',
+      '--passcode',
+      '--password',
+      '--bypass',
+      '--compass',
+      '--proxy-bypass-list',
+      '--port',
+      '--passive',
+      '--passthrough',
+    ];
+    expect(flags.filter(credentialFlag)).toEqual(flags.slice(0, 12));
   });
 });
 

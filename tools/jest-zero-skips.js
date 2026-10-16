@@ -141,7 +141,8 @@ const ROOT = path.resolve(__dirname, '..');
 // Onboarding grants add cluster-ownership, rollback, marker-publication and onboard-grant
 // boundary cases; a full collection of the merged tree measured 4831 tests.
 // Credential arguments add thirty-two over the grants base of 4831: total 4863.
-const FLOOR = 4863;
+// One more names credential option words ending in pass and leaves lookalikes readable: 4864.
+const FLOOR = 4864;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [
