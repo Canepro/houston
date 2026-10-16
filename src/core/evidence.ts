@@ -697,6 +697,28 @@ function redactArtifactValue(
   return out;
 }
 
+/**
+ * Whether `flag` takes `value` as a credential: a long credential flag (`--password`), or `-p`
+ * followed by something that is not a port number, as `mongosh -p` and `mysql -p` use it.
+ */
+function credentialArgument(flag: string, value: string): boolean {
+  if (credentialFlag(flag)) return true;
+  return flag === '-p' && value !== '' && !/^[0-9]+(?::[0-9]+)*$/u.test(value);
+}
+
+/** The values after credential flags in one command string, quotes removed. */
+function discoverCommandText(text: string, add: (value: string) => void): void {
+  const unquote = (token: string): string => token.replace(/^(['"])(.*)\1$/su, '$2');
+  const tokens = text
+    .split(/\s+/u)
+    .filter((token) => token !== '')
+    .map(unquote);
+  for (let index = 0; index + 1 < tokens.length; index += 1) {
+    const value = tokens[index + 1] ?? '';
+    if (credentialArgument(tokens[index] ?? '', value)) add(value);
+  }
+}
+
 /** Discover before `toJS` loses duplicate members and original numeric spellings. */
 function discoverArtifactSecrets(
   node: unknown,
@@ -740,12 +762,15 @@ function discoverArtifactSecrets(
   // The item after a credential flag is its value, as in `--flag=value`; neither item names
   // a credential on its own, so classify it here, before any scalar renders.
   const discoverArguments = (list: YAML.YAMLSeq): void => {
-    let afterFlag = false;
-    for (const item of list.items) {
-      if (afterFlag) visit(item, true);
-      const flag = YAML.isAlias(item) ? item.resolve(doc) : item;
-      afterFlag =
-        YAML.isScalar(flag) && typeof flag.value === 'string' && credentialFlag(flag.value);
+    const items = list.items.map((item) => (YAML.isAlias(item) ? item.resolve(doc) : item));
+    for (let index = 0; index < items.length; index += 1) {
+      const flag = items[index];
+      if (!YAML.isScalar(flag) || typeof flag.value !== 'string') continue;
+      // A shell string (`sh -c "client --password X"`, `CMD-SHELL`) holds its own arguments.
+      discoverCommandText(flag.value, add);
+      const next = items[index + 1];
+      const value = YAML.isScalar(next) ? String(next.value) : '';
+      if (credentialArgument(flag.value, value)) visit(list.items[index + 1], true);
     }
   };
   if (YAML.isAlias(node)) {
@@ -782,6 +807,9 @@ function discoverArtifactSecrets(
       visit(pair.value, secret || credentialKey(text) || (text === 'value' && named));
       const list = YAML.isAlias(pair.value) ? pair.value.resolve(doc) : pair.value;
       if (ARGUMENT_LIST_KEYS.includes(text) && YAML.isSeq(list)) discoverArguments(list);
+      if (ARGUMENT_LIST_KEYS.includes(text) && YAML.isScalar(list)) {
+        if (typeof list.value === 'string') discoverCommandText(list.value, add);
+      }
     }
   }
 }

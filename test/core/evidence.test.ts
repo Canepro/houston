@@ -1515,6 +1515,38 @@ describe('the bundle', () => {
     expect(parsed['x-control']).toBe('readable');
   });
 
+  it('discovers credential flags inside command strings, sparing a port after -p', async () => {
+    const { compose } = await bundledCompose(
+      'e7-argv-strings',
+      [
+        'services:',
+        '  rocketchat:',
+        '    image: example',
+        '    command: client --reg-token StringCommandSentinel --port 27017',
+        '    entrypoint: [sh, -c, "client --password \'ShellStringSentinel\' --verbose"]',
+        '    healthcheck:',
+        '      test: [CMD-SHELL, "mongosh -p ShortFlagSentinel --eval ping"]',
+        '  proxy:',
+        '    image: example',
+        '    command: proxy -p 8080',
+        'x-port: 8080',
+        'x-control: readable',
+        '',
+      ].join('\n'),
+    );
+    expect(compose).not.toContain('StringCommandSentinel');
+    expect(compose).not.toContain('ShellStringSentinel');
+    expect(compose).not.toContain('ShortFlagSentinel');
+    const parsed = YAML.parse(compose) as Record<string, unknown>;
+    expect(pick(parsed, 'services', 'rocketchat', 'command')).toBe(
+      'client --reg-token ******** --port 27017',
+    );
+    // A numeric value after -p is a port, not a password, and stays readable everywhere.
+    expect(pick(parsed, 'services', 'proxy', 'command')).toBe('proxy -p 8080');
+    expect(parsed['x-port']).toBe(8080);
+    expect(parsed['x-control']).toBe('readable');
+  });
+
   it('discovers credential arguments in embedded JSON argument arrays', async () => {
     const embedded =
       '{"command":["client","--password","JsonArgumentSentinel","--port","27017"],"entrypoint":["client","--reg-token","JsonRegArgumentSentinel"],"args":["client","--password","JsonArgsSentinel"],"healthcheck":{"test":["CMD","client","--password","JsonTestSentinel"]},"keep":1.50,"notes":["--password","NotCommandSentinel"]}';

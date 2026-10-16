@@ -129,7 +129,8 @@ const ROOT = path.resolve(__dirname, '..');
 // control) and credential arguments in command, entrypoint, args and healthcheck lists (eight
 // table cases, an equals-form and neighbour control, embedded JSON arrays, an alias and numeric
 // arguments).
-const FLOOR = 4646;
+// One more masks a credential flag inside a command string: total 4647.
+const FLOOR = 4647;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [
