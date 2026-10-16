@@ -39,6 +39,8 @@ export function describeCommands(
         result.schema = spec.json.schema as string;
         if (spec.json.variants !== undefined) {
           result.schemas = [...Object.values(spec.json.variants.byValue)].sort();
+        } else if (spec.json.payloadSchemas !== undefined) {
+          result.schemas = [spec.json.schema as string, ...spec.json.payloadSchemas].sort();
         }
         result.streams = spec.json.streams;
       }

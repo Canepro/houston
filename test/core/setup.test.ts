@@ -204,7 +204,13 @@ it('reports measured Podman capacity and the current MongoDB kernel boundary wit
     expect(blocked.compatibility.ready).toBe(false);
     expect(blocked.first_run_command).toBe('');
     engine.mockResolvedValue({ ...observed, kernel: '7.0.14' });
-    const fixed = await setup.snapshot();
+    const fixed = await setup.snapshot({
+      cfg: {
+        ...config.loadConfig(false),
+        onboarding: { completed_at: '2026-10-15T00:00:00Z' },
+        grants: { owned_cluster: true },
+      },
+    });
     expect(fixed.compatibility.ready).toBe(true);
     expect(fixed.environment.microservices_ready).toBe(false);
     expect(fixed.environment.kubernetes_provisioning_available).toBe(true);
@@ -334,6 +340,52 @@ it('distinguishes owned runtime readiness from provisioning and refuses an unusa
     mockKubernetesToolsAvailable = false;
     mockMissingTools = [];
     fs.rmSync(path.join(config.home(), 'clients'), { recursive: true, force: true });
+  }
+});
+
+it('offers no first run while onboarding or the owned-cluster grant still gates a Kubernetes create', async () => {
+  mockKubernetesToolsAvailable = true;
+  const completed = { completed_at: '2026-10-15T00:00:00Z' };
+  try {
+    const cases = [
+      { name: 'grant unanswered', onboarding: completed, grants: {}, gate: 'GATE_OWNED_CLUSTER' },
+      {
+        name: 'grant denied',
+        onboarding: completed,
+        grants: { owned_cluster: false },
+        gate: 'GATE_OWNED_CLUSTER',
+      },
+      {
+        name: 'onboarding incomplete',
+        onboarding: {},
+        grants: { owned_cluster: true },
+        gate: 'GATE_NOT_ONBOARDED',
+      },
+    ];
+    for (const evidence of cases) {
+      const view = await setup.snapshot({
+        cfg: {
+          default_deployment: 'microservices',
+          onboarding: evidence.onboarding,
+          grants: evidence.grants,
+        },
+      });
+      expect(view.environment.kubernetes_provisioning_available).toBe(true);
+      expect(view.gates.map((gate) => gate.code)).toContain(evidence.gate);
+      expect([evidence.name, view.first_run_command]).toEqual([evidence.name, '']);
+      expect(humanLines(view).join('\n')).toContain('first run   (blocked)');
+    }
+    const open = await setup.snapshot({
+      cfg: {
+        default_deployment: 'microservices',
+        onboarding: completed,
+        grants: { owned_cluster: true },
+      },
+    });
+    expect(open.gates).toEqual([]);
+    expect(open.first_run_command).toContain('houston up');
+  } finally {
+    mockKubernetesToolsAvailable = false;
   }
 });
 

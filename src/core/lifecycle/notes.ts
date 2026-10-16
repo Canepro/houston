@@ -516,6 +516,14 @@ export async function kubernetesNoteGroups(meta: Metadata): Promise<NoteGroup[]>
   const release = toText(extra.release) || RELEASE;
   const context = toText(extra[config.EXTRA_CONTEXT]) || KUBE_CONTEXT;
   const micro = String(topology.axesOfMeta(meta).deployment ?? '') === topology.MICROSERVICES;
+  // New records distinguish an effective licence from the legacy lifecycle flag.
+  // Null means unknown. Only an absent marker falls back to `licensed`.
+  const effectiveLicense =
+    extra.effective_license === null
+      ? false
+      : typeof extra.effective_license === 'boolean'
+        ? extra.effective_license
+        : extra.licensed === true;
   // What the chart and MongoDB run, which is all the record can count: five for a monolith
   // (NATS runs regardless), nine for microservices, one more per extra Rocket.Chat replica.
   // A preset's own services are not in it. "about 5" stood beside nine running pods.
@@ -541,7 +549,7 @@ export async function kubernetesNoteGroups(meta: Metadata): Promise<NoteGroup[]>
         ['Arrangement', micro ? 'microservices' : 'monolith'],
         ['Pods', `${String(pods)} for Rocket.Chat and MongoDB${presetPods}`],
         // Said, not refused: a license can be added after the workspace is up.
-        ...(micro && extra.licensed !== true
+        ...(micro && !effectiveLicense
           ? [
               [
                 'License',

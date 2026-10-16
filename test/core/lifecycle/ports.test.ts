@@ -1,12 +1,16 @@
 /**
  * `core/lifecycle/ports`: which host port a workspace gets, and what its record says it is.
  */
+import * as fs from 'node:fs';
+
+import { workspace } from '../../../src/core/runner/paths';
 import type * as ErrorsNS from '../../../src/lib/errors';
 import { nullEmit } from '../../../src/lib/events';
 import { emptyPreset } from '../../../src/lib/presets/types';
 
 import type * as CreateDockerNS from '../../../src/core/lifecycle/create-docker';
 import type * as PortsNS from '../../../src/core/lifecycle/ports';
+import type * as RunnerPortsNS from '../../../src/core/runner/ports';
 import type * as RecordNS from '../../../src/core/runner/record';
 import type * as TypesNS from '../../../src/core/lifecycle/types';
 import type * as VersionsNS from '../../../src/lib/versions';
@@ -40,6 +44,130 @@ describe('picking a host port', () => {
     await expect(ports.pickHostPort(8300, emptyPreset('default'), '')).rejects.toThrow(
       ConflictError,
     );
+  });
+});
+
+describe('recorded port claims', () => {
+  it.each([
+    ['', true],
+    ['docker', true],
+    ['compose', true],
+    ['docker-compose', true],
+    ['dockercompose', true],
+    [' CoMpOsE ', true],
+    [' DOCKER-COMPOSE ', true],
+    [' DockerCompose ', true],
+    ['kubernetes', false],
+    ['k8s', false],
+    ['kube', false],
+    [' K8S ', false],
+    ['nomad', false],
+  ] as const)('retains the supported runtime instance claims for %j', async (runtime, compose) => {
+    const probe = jest.fn(async () => {
+      throw new Error('unexpected live socket probe');
+    });
+    jest.doMock('../../../src/core/runner/ports', () => ({
+      ...jest.requireActual<object>('../../../src/core/runner/ports'),
+      portFree: probe,
+    }));
+    const record = require('../../../src/core/runner/record') as typeof RecordNS;
+    const ports = require('../../../src/core/lifecycle/ports') as typeof PortsNS;
+    const runner = require('../../../src/core/runner/ports') as typeof RunnerPortsNS;
+    const name = 'runtime-claims';
+    try {
+      await record.writeRecord(
+        name,
+        record.metadata({
+          name,
+          hostPort: 6400,
+          extra: {
+            runtime,
+            instances: 2,
+            sidecar_ports: [8025, '8082'],
+            monitoring_ports: [9090, '5050'],
+            tls_ports: [443, '8443'],
+          },
+        }),
+      );
+      const file = `${workspace(name)}/repro.json`;
+      const bytes = fs.readFileSync(file, 'utf8');
+      const expected = [6400, ...(compose ? [6401, 6402] : []), 8025, 8082, 9090, 5050, 443, 8443];
+      expect(await ports.ownPorts(name)).toEqual(new Set(expected));
+      const used = await runner.usedPorts();
+      expect([...used]).toEqual(expect.arrayContaining(expected));
+      expect([6401, 6402].map((port) => used.has(port))).toEqual([compose, compose]);
+      expect(await ports.sidecarHolder([6401])).toEqual(compose ? { name, ports: [6401] } : null);
+      if (compose) {
+        await expect(ports.pickHostPort(6401, emptyPreset('default'))).rejects.toThrow(
+          'already claimed by another repro',
+        );
+        expect(probe).not.toHaveBeenCalled();
+      }
+      expect(fs.readFileSync(file, 'utf8')).toBe(bytes);
+    } finally {
+      fs.rmSync(workspace(name), { recursive: true, force: true });
+    }
+  });
+
+  it.each([null, []])('keeps malformed extra %j in home-wide conflict checks', async (extra) => {
+    const record = require('../../../src/core/runner/record') as typeof RecordNS;
+    const ports = require('../../../src/core/lifecycle/ports') as typeof PortsNS;
+    try {
+      await record.writeRecord('malformed', record.metadata({ name: 'malformed', hostPort: 9090 }));
+      const file = `${workspace('malformed')}/repro.json`;
+      const doc = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+      fs.writeFileSync(file, JSON.stringify({ ...doc, extra }));
+      expect(await ports.ownPorts('malformed')).toEqual(new Set([9090]));
+      expect(await ports.sidecarHolder([9090])).toEqual({ name: 'malformed', ports: [9090] });
+      await expect(ports.checkMonitorPorts()).rejects.toThrow(
+        "already used by repro 'malformed' - delete it first",
+      );
+      await record.writeRecord(
+        'ordinary',
+        record.metadata({
+          name: 'ordinary',
+          hostPort: 6300,
+          extra: {
+            instances: 2,
+            sidecar_ports: [8025, '8082'],
+            monitoring_ports: [9090, '5050'],
+            tls_ports: [443, '8443'],
+          },
+        }),
+      );
+      expect(await ports.ownPorts('ordinary')).toEqual(
+        new Set([6300, 6301, 6302, 8025, 8082, 9090, 5050, 443, 8443]),
+      );
+      await expect(ports.pickHostPort(9090, emptyPreset('default'))).rejects.toThrow(
+        'already claimed by another repro',
+      );
+    } finally {
+      fs.rmSync(workspace('malformed'), { recursive: true, force: true });
+      fs.rmSync(workspace('ordinary'), { recursive: true, force: true });
+    }
+  });
+
+  it('does not turn Kubernetes replicas into Compose host-port claims', async () => {
+    const record = require('../../../src/core/runner/record') as typeof RecordNS;
+    const ports = require('../../../src/core/lifecycle/ports') as typeof PortsNS;
+    await record.write(
+      'kube-ports',
+      'services: {}\n',
+      record.metadata({
+        name: 'kube-ports',
+        project: 'houston-kube-ports',
+        hostPort: 4200,
+        extra: {
+          runtime: 'kubernetes',
+          deployment: 'microservices',
+          instances: 3,
+          sidecar_ports: [18181],
+          monitoring_ports: [19190],
+        },
+      }),
+    );
+
+    expect(await ports.ownPorts('kube-ports')).toEqual(new Set([4200, 18181, 19190]));
   });
 });
 

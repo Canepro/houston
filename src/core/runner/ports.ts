@@ -3,7 +3,7 @@
  */
 import * as net from 'node:net';
 
-import { listMeta } from './record';
+import { extraBag, hasComposeInstancePorts, listMeta } from './record';
 
 export const PORT_MAX = 65535;
 
@@ -13,18 +13,19 @@ const PROBE_TIMEOUT_MS = 200;
 export async function usedPorts(): Promise<Set<number>> {
   const ports = new Set<number>();
   for (const meta of await listMeta()) {
+    const extra = extraBag(meta);
     ports.add(meta.hostPort);
-    // A multi-instance repro also occupies hostPort+1..+N (direct instance access),
-    // so those are claimed too.
-    const instances = meta.extra.instances;
-    if (typeof instances === 'number' && instances > 1) {
+    // Only Docker Compose multi-instance records publish hostPort+1..+N. Kubernetes
+    // records chart replicas under the same key, but has one application port-forward.
+    const instances = extra.instances;
+    if (hasComposeInstancePorts(meta) && typeof instances === 'number' && instances > 1) {
       for (let offset = 1; offset <= instances; offset += 1) ports.add(meta.hostPort + offset);
     }
     // Preset side services (Keycloak/Mailpit/MinIO…) and the monitoring add-on
     // (Prometheus/Grafana) publish fixed host ports recorded at `up` — claimed too, so
     // RC port allocation avoids them.
     for (const key of ['sidecar_ports', 'monitoring_ports', 'tls_ports']) {
-      const claimed = meta.extra[key];
+      const claimed = extra[key];
       if (!Array.isArray(claimed)) continue;
       for (const entry of claimed) {
         if (typeof entry === 'number') ports.add(entry);

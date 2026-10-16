@@ -382,9 +382,13 @@ function commandName(spec: CommandSpec): string {
   return spec.path.split(' ').at(-1) as string;
 }
 
-function replyKind(invocation: Invocation): string {
+function replyKind(invocation: Invocation, data: unknown): string {
   const advertised = invocation.spec.json.schema;
   if (advertised === undefined) throw new Error(`${invocation.spec.path} has no JSON schema`);
+  const chosen =
+    typeof data === 'object' && data !== null ? (data as { schema?: unknown }).schema : undefined;
+  if (typeof chosen === 'string' && invocation.spec.json.payloadSchemas?.includes(chosen))
+    return schemaKind(chosen);
   const variants = invocation.spec.json.variants;
   if (variants === undefined) return schemaKind(advertised);
   const value = String(invocation.arguments[variants.argument]);
@@ -470,7 +474,7 @@ export function buildCli(options: BuildCliOptions): Command {
       if (active() && failure !== undefined) {
         emit(errorEnvelope(failure, { data: preserveFloatFields(data) }));
       } else if (active()) {
-        reply(replyKind(invocation), preserveFloatFields(data));
+        reply(replyKind(invocation, data), preserveFloatFields(data));
       }
       if (isCommandOutcome(result)) exitCodes.set(root, result.exitCode);
     });

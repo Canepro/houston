@@ -58,15 +58,17 @@ import { mayDestroy } from './lifecycle/ownership';
 import { requireEngine } from './lifecycle/preconditions';
 import { LAST_BACKUP_KEY, UPGRADE_FROM_KEY } from './lifecycle/types';
 import { releaseFetcher } from './lifecycle/request';
-import { waitAndFinalize } from './lifecycle/ready';
+import { recreateRocketChat, waitAndFinalize } from './lifecycle/ready';
 import { apiInfo } from './rcapi';
 import { composeLogsCapture, startServices, up } from './runner/engine';
 import { containerDetails, rcState, runningWriterServices } from './runner/queries';
 import {
   type Metadata,
+  markUnfinished,
   readCompose,
   readMeta,
   rcServices,
+  unfinishedBy,
   updateMeta,
   write,
 } from './runner/record';
@@ -74,6 +76,16 @@ import { workspace } from './runner/paths';
 import * as topology from './topology';
 
 type Bag = Record<string, unknown>;
+
+/**
+ * The release a rollback returns to, and whether the record it was read from was unfinished
+ * (`unfinishedBy`); the latter only when the upgrade read it.
+ */
+interface Previous {
+  rcVersion: string;
+  rcImage: string;
+  unfinished?: string | null;
+}
 
 export { LAST_BACKUP_KEY, UPGRADE_FROM_KEY };
 
@@ -460,7 +472,7 @@ export async function pullAndRecreate({
   kubeFlag: boolean;
   meta: Metadata;
   p: Bag;
-  previous: { rcVersion: string; rcImage: string };
+  previous: Previous;
   previousCompose: string;
   rollbackOnFailure: boolean;
   target: string;
@@ -476,7 +488,9 @@ export async function pullAndRecreate({
         m.rcImage = meta.rcImage;
         m.extra = meta.extra;
       });
-    } else if ((await up(target)) !== 0) {
+    } else if ((await recreateRocketChat(target, { pull: true })) !== 0) {
+      // Every Rocket.Chat service, by force, so the new image and an `env` change deferred
+      // before it both count as deployed only once each replica runs them.
       throw new DockerError('`docker compose up` failed applying the new image');
     }
     info(emit, 'waiting for Rocket.Chat to run its migrations', { phase: 'wait', pct: 60 });
@@ -562,7 +576,7 @@ export async function beforeTheUpgrade(
   bundle: string;
   kubeFlag: boolean;
   meta: Metadata;
-  previous: { rcVersion: string; rcImage: string };
+  previous: Previous;
   previousCompose: string;
 }> {
   const kubeFlag = (await topology.ofRepro(target)) === topology.KUBERNETES;
@@ -574,7 +588,13 @@ export async function beforeTheUpgrade(
   const previousCompose = kubeFlag
     ? ''
     : fs.readFileSync(joinPath(ws, 'docker-compose.yml'), 'utf8');
-  const previous = { rcVersion: meta.rcVersion, rcImage: meta.rcImage };
+  // Unfinished too, when an interrupted write left it so: putting the old file back must not
+  // finish a record that the old file never matched.
+  const previous = {
+    rcVersion: meta.rcVersion,
+    rcImage: meta.rcImage,
+    unfinished: unfinishedBy(meta),
+  };
 
   let bundle = '';
   if (noBackup) {
@@ -905,11 +925,43 @@ export async function migrationErrors(name: string, tail = 400): Promise<string[
   return hits.slice(0, 10);
 }
 
+/**
+ * Say so when the record is still unfinished after a rollback rewrote it: evidence withholds
+ * the Compose file of an unfinished record, and nothing else would tell the user why. A
+ * rebuild at the recorded version writes a new record and keeps the data.
+ */
+async function warnIfUnfinished(target: string, emit: Emit): Promise<void> {
+  const meta = await readMeta(target);
+  if (bagOf(meta.extra).incomplete !== true) return;
+  warn(
+    emit,
+    `the record of ${quotedText(target)} still names a change its Compose file never ` +
+      'received, so evidence leaves the Compose file out. To rebuild both, data kept: ' +
+      `\`houston up --name ${target} --version ${meta.rcVersion} --force\`, with --reg-token ` +
+      'again if the workspace was created with one',
+    { phase: 'upgrade' },
+  );
+}
+
+/**
+ * Rollback also supports stopped workspaces. Start the project, including MongoDB, then
+ * prove every Rocket.Chat container was replaced before restore quiesces its writers.
+ * A plain up alone cannot clear deferred credentials or prove the old image is running.
+ */
+async function startRollbackProject(target: string): Promise<void> {
+  if ((await up(target, { pull: true })) !== 0) {
+    throw new DockerError('`docker compose up` failed starting the project for rollback');
+  }
+  if ((await recreateRocketChat(target, { pull: false })) !== 0) {
+    throw new DockerError('`docker compose up` failed rolling back the image');
+  }
+}
+
 /** Put the workspace back: old compose, old metadata, pre-upgrade data. */
 export async function rollbackCompose(
   target: string,
   previousCompose: string,
-  previous: { rcVersion: string; rcImage: string },
+  previous: Previous,
   bundle: string,
   emit: Emit,
 ): Promise<void> {
@@ -917,8 +969,14 @@ export async function rollbackCompose(
   meta.rcVersion = previous.rcVersion;
   meta.rcImage = previous.rcImage;
   delete bagOf(meta.extra)[UPGRADE_FROM_KEY];
+  // `upgrade --force` to the recorded release finishes a record an interrupted upgrade left.
+  // Putting its old file back must leave that record unfinished again, not call it complete.
+  if (previous.unfinished !== undefined && previous.unfinished !== null) {
+    markUnfinished(meta, previous.unfinished);
+  }
   await write(target, previousCompose, meta);
-  await up(target);
+  await warnIfUnfinished(target, emit);
+  await startRollbackProject(target);
   await backup.restoreLocked(target, bundle, await backup.readManifest(bundle), emit, {
     allowUpgrade: false,
     force: true,
@@ -944,14 +1002,28 @@ export async function rollbackUnderLock(
       return { restored: true };
     }
     const doc = await readCompose(target);
+    // An upgrade killed between its record and its Compose file leaves the record at the new
+    // release beside the old file, unfinished. What that upgrade was writing is this file with
+    // every Rocket.Chat service at the recorded image, the oplog variable set either way. When
+    // that is the replacement the record names, the file differs from what the record
+    // describes only there, and this write puts the image back in both, so it finishes the
+    // record. Any other unfinished change stays unfinished.
+    const reverting = await Promise.all(
+      [true, false].map(async (oplog) => {
+        const upgraded = await readCompose(target);
+        applyImage(upgraded, meta.rcImage, meta.rcVersion, oplog);
+        return compose.toYaml(upgraded as unknown as compose.ComposeDoc);
+      }),
+    );
     applyImage(doc, previous.rcImage, previous.rcVersion, resolved.oplog);
     meta.rcVersion = previous.rcVersion;
     meta.rcImage = previous.rcImage;
     delete bagOf(meta.extra)[UPGRADE_FROM_KEY];
-    await write(target, compose.toYaml(doc as unknown as compose.ComposeDoc), meta);
-    if ((await up(target)) !== 0) {
-      throw new DockerError('`docker compose up` failed rolling back the image');
-    }
+    await write(target, compose.toYaml(doc as unknown as compose.ComposeDoc), meta, [], {
+      reverting,
+    });
+    await warnIfUnfinished(target, emit);
+    await startRollbackProject(target);
     return await backup.restoreLocked(target, bundle, manifest, emit, {
       allowUpgrade: false,
       force: true,

@@ -15,6 +15,7 @@ import {
 import { lockPath } from '../../../src/core/runner/locks';
 import { metadata, writeRecord } from '../../../src/core/runner/record';
 import { holdsFileLock } from '../../../src/seams/fs/lock';
+import type * as RequestNS from '../../../src/core/lifecycle/request';
 import type * as ContextNS from '../../../src/core/kube/context';
 import type * as ProbeNS from '../../../src/core/kube/probe';
 import type * as ReachabilityNS from '../../../src/core/kube/reachability';
@@ -25,6 +26,7 @@ let mockPlanCluster: ((context?: string) => Promise<ContextNS.ClusterPlan>) | nu
 let mockPreflight: (() => Promise<Preflight>) | null = null;
 let mockHelmReachable: ((context?: string) => Promise<string>) | null = null;
 let mockPortFree: ((port: number, host?: string) => Promise<boolean>) | null = null;
+let mockDomainFromZone: typeof RequestNS.defaultDomainFromZone | null = null;
 
 jest.mock('../../../src/core/kube/probe', () => {
   const actual = jest.requireActual<typeof ProbeNS>('../../../src/core/kube/probe');
@@ -52,6 +54,14 @@ jest.mock('../../../src/core/runner/ports', () => {
   return {
     ...actual,
     portFree: (port: number, host = '') => (mockPortFree ?? actual.portFree)(port, host),
+  };
+});
+jest.mock('../../../src/core/lifecycle/request', () => {
+  const actual = jest.requireActual<typeof RequestNS>('../../../src/core/lifecycle/request');
+  return {
+    ...actual,
+    defaultDomainFromZone: (...args: Parameters<typeof RequestNS.defaultDomainFromZone>) =>
+      (mockDomainFromZone ?? actual.defaultDomainFromZone)(...args),
   };
 });
 jest.mock('../../../src/core/lifecycle/create-k8s', () => ({
@@ -254,6 +264,54 @@ it('reuses a remote workspace that exists only under the saved scenario suffix o
     emailLock: true,
   });
   expect(fs.existsSync(path.join(config.home(), 'repros', 'rc8-6-1'))).toBe(false);
+  expect(openEntries()).toEqual([]);
+});
+
+it('still says a plain up goes to Docker when a saved default cluster exists', async () => {
+  removeRepro('rc8-6-1');
+  removeRepro('rc8-6-1-email');
+  config.saveConfig({ [config.KUBE_CONTEXT_KEY]: SAVED_REMOTE });
+  // The first event stops the create, so no Docker work can start whatever it says.
+  const stop = new Error('stopped at the first event');
+  const said: string[] = [];
+  await expect(
+    createRepro(createReq({ version: '8.6.1', offline: true }), (event) => {
+      said.push(event.message);
+      throw stop;
+    }),
+  ).rejects.toBe(stop);
+  expect(said).toHaveLength(1);
+  expect(said[0]).toContain('this workspace is going to Docker');
+  expect(openEntries()).toEqual([]);
+});
+
+it('reuses a workspace recorded under the saved deployment alias on its recorded replica count', async () => {
+  removeRepro('rc8-6-1');
+  removeRepro('rc8-6-1-email');
+  config.saveConfig({ default_deployment: 'multi-instance', default_scenarios: ['email'] });
+  const recorded = 'rc8-6-1-email--multi-instance';
+  await writeRecord(
+    recorded,
+    metadata({
+      name: recorded,
+      project: `houston-${recorded}`,
+      preset: 'email+multi-instance',
+      extra: { runtime: 'docker', deployment: 'multi-instance', instances: 3 },
+    }),
+  );
+  const stop = new Error('stopped before the runtime');
+  const seen: { name: string; req: Pick<CreateReq, 'deployment' | 'replicas'> }[] = [];
+  mockDomainFromZone = (req, name) => {
+    seen.push({ name, req: { deployment: req.deployment, replicas: req.replicas } });
+    return Promise.reject(stop);
+  };
+  try {
+    await expect(createRepro(flaglessUp())).rejects.toBe(stop);
+  } finally {
+    mockDomainFromZone = null;
+    removeRepro(recorded);
+  }
+  expect(seen).toEqual([{ name: recorded, req: { deployment: 'multi-instance', replicas: 3 } }]);
   expect(openEntries()).toEqual([]);
 });
 

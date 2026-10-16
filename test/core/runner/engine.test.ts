@@ -50,16 +50,24 @@ describe('a compose command for one workspace', () => {
     ]);
   });
 
-  it('recreates ONE service without taking its database down', async () => {
-    await engine.up('TICKET-1', { pull: false, forceRecreate: 'rocketchat' });
+  it.each([
+    ['one service', 'rocketchat', ['rocketchat']],
+    ['every replica named', ['rocketchat-1', 'rocketchat-2'], ['rocketchat-1', 'rocketchat-2']],
+  ])('recreates %s without taking its database down', async (_label, named, services) => {
+    await engine.up('TICKET-1', { pull: false, forceRecreate: named });
     expect(composeMock.mock.calls[0]?.[0]).toEqual([
       'up',
       '-d',
       '--remove-orphans',
       '--force-recreate',
       '--no-deps',
-      'rocketchat',
+      ...services,
     ]);
+  });
+
+  it('recreates nothing by force when no service is named', async () => {
+    await engine.up('TICKET-1', { pull: false, forceRecreate: [] });
+    expect(composeMock.mock.calls[0]?.[0]).toEqual(['up', '-d', '--remove-orphans']);
   });
 });
 

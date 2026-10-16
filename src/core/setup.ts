@@ -409,8 +409,11 @@ export async function snapshot(
   // changed those selectors yet, so it must not be presented as an executable first run.
   const runtimeUsable =
     environment.microservices_ready || environment.kubernetes_provisioning_available;
+  // The command reaches `requireOnboarded()` and `requireGrant('owned-cluster')` on a local
+  // Kubernetes create, so the gates below that a person must clear also block it here.
+  const authorized = state.completed && grants.owned_cluster === true;
   const firstRun =
-    conflict === '' && Object.keys(patch).length === 0 && (!kube || runtimeUsable)
+    conflict === '' && Object.keys(patch).length === 0 && (!kube || (runtimeUsable && authorized))
       ? commands.map(shell).join(' ')
       : '';
   const gates: { kind: string; code: string; message: string; approve_with: string }[] = [];

@@ -68,7 +68,7 @@ import * as naming from './naming';
 import * as ownership from './ownership';
 import * as ports from './ports';
 import * as preconditions from './preconditions';
-import { restoreRoute, upCompose, waitAndFinalize } from './ready';
+import { recreateRocketChat, restoreRoute, upCompose, waitAndFinalize } from './ready';
 import * as request from './request';
 import * as seeding from './seeding';
 import * as sizing from './sizing';
@@ -136,6 +136,11 @@ export interface CreatePlan {
   adminPassword: string;
   spec: compose.Spec | null;
   doc: compose.ComposeDoc | null;
+  /** `buildDocument`: the final Rocket.Chat environment or licence file supplies one. */
+  effectiveLicense: boolean;
+  /** Whether a final Rocket.Chat service gets a known REG_TOKEN. Set with `effectiveLicense`. */
+  regTokenSupplied: compose.CredentialPresence;
+  licensePresence: compose.CredentialPresence;
   /** `buildRecord` */
   meta: record.Metadata | null;
   /** The record a rebuild replaces, read by `buildDocument`; null on a first create. */
@@ -166,6 +171,9 @@ export function createPlan(
     adminPassword: '',
     spec: null,
     doc: null,
+    effectiveLicense: false,
+    regTokenSupplied: false,
+    licensePresence: false,
     meta: null,
     previousMeta: null,
     files: [],
@@ -400,6 +408,14 @@ export async function reuse(
     if ((await upCompose(name, { pull: false, emit, streamOutput })) !== 0) {
       throw new DockerError('`docker compose up` failed');
     }
+    // A credential change `env` wrote without a restart reaches Rocket.Chat here, and only
+    // a recreate of every replica proves it did: a stopped container that `up` merely starts
+    // keeps the environment it was created with. A running workspace is left alone above.
+    if (meta.extra[compose.CREDENTIALS_PENDING] === true) {
+      if ((await recreateRocketChat(name)) !== 0) {
+        throw new DockerError('`docker compose up` failed applying the changed environment');
+      }
+    }
   }
   // A reused workspace gets its https name back. This path never resolved TLS -- it reuses
   // the record as-is -- so after a `down`, `up` printed "URL https://…" from that record
@@ -454,18 +470,24 @@ export async function carryRecordedAxes(req: CreateReq, name: string): Promise<v
 }
 
 /**
- * A workspace this flagless request already has, once the saved scenario suffix is applied.
+ * A workspace this flagless request already has, once the saved selectors are applied.
  *
  * `up --version 8.6.1` derives `rc8-6-1` before saved selectors run. The record can exist
- * only as `rc8-6-1-email`. That is the same workspace, and its recorded axes win. Treating
- * the miss as a new workspace set `implicitOwnedLocal`, and `planClusterStep` then refused
- * the recorded remote context.
+ * only as `rc8-6-1-email`, or as `rc8-6-1-email--multi-instance` when the saved deployment
+ * is the multi-instance alias, which resolves into the preset. That is the same workspace,
+ * and its recorded axes win. Treating the miss as a new workspace set `implicitOwnedLocal`,
+ * and `planClusterStep` then refused the recorded remote context; a multi-instance miss
+ * rebuilt the workspace on the default replica count.
  */
 async function savedScenarioRecord(
   req: CreateReq,
   saved: ReturnType<typeof savedSelectors>,
 ): Promise<string> {
-  const derived = naming.deriveFor({ ...req, preset: compositeName(saved.scenarios) });
+  const axes = topology.resolveAxes({
+    deployment: saved.deployment,
+    preset: compositeName(saved.scenarios),
+  });
+  const derived = naming.deriveFor({ ...req, preset: axes.preset });
   if (!derived || derived === naming.deriveFor(req) || !(await paths.exists(derived))) return '';
   return derived;
 }
@@ -719,7 +741,7 @@ export async function claimPorts(plan: CreatePlan): Promise<void> {
   // ...on the address the port is published on, which is loopback unless one other
   // address was asked for (`request.callHost`).
   plan.root = `http://${request.callHost(plan.bindHost)}:${String(plan.hostPort)}`;
-  plan.token = plan.req.regToken || toText(plan.cfg.reg_token);
+  plan.token = (plan.req.regToken || toText(plan.cfg.reg_token)).trim();
   plan.tlsspec = await tlsplan.resolveTls(
     plan.req,
     plan.reproName,
@@ -976,25 +998,75 @@ export async function buildDocument(plan: CreatePlan): Promise<void> {
     envOverrides: plan.envOverrides,
   });
   plan.spec.adminPassword = plan.adminPassword;
-  const premium = request.premiumAuthWarning(
-    [(plan.pre as Preset).name],
-    resolved.rcVersion,
-    plan.spec.licensed,
-    plan.token,
-  );
-  if (premium !== '') warn(plan.emit, premium, { phase: 'create' });
-  const samlEmail = request.samlEmailWarning(
-    plan.pre as Preset,
-    resolved.rcVersion,
-    new Set(Object.keys(plan.envOverrides)),
-  );
-  if (samlEmail !== '') warn(plan.emit, samlEmail, { phase: 'create' });
   try {
     plan.doc = compose.build(plan.spec);
   } catch (error) {
     // e.g. a preset naming an entry_service it doesn't define.
     throw new ValidationError(error instanceof Error ? error.message : String(error));
   }
+  // The completed document is the source of truth: a preset's service and Rocket.Chat
+  // patches apply after the base environment, so an earlier token or licence is not enough.
+  const projectDirectory = paths.workspace(plan.reproName);
+  const rcNames = compose.rcServiceNames((plan.pre as Preset).instances);
+  // The preset's own files are written with the workspace, after this; an env file it
+  // generates is read from the preset, not from a disk that does not have it yet.
+  const { fileLicenses, fileTokens } = await compose.readEnvFileStates(
+    plan.doc,
+    rcNames,
+    projectDirectory,
+    [
+      ...(plan.pre as Preset).files,
+      ...(plan.req.license !== ''
+        ? [[compose.LICENSE_ENV_FILE, `ROCKETCHAT_LICENSE=${plan.req.license}\n`] as const]
+        : []),
+    ],
+  );
+  // Presence only, by the rule the warnings below use, so the record and the warnings agree.
+  plan.regTokenSupplied = compose.tokenPresence(plan.doc, rcNames, projectDirectory, fileTokens);
+  const effectiveCredential = compose.hasEffectiveCredential(
+    plan.doc,
+    (plan.pre as Preset).instances,
+    false,
+    projectDirectory,
+    fileLicenses,
+    fileTokens,
+  )
+    ? 'present'
+    : '';
+  plan.licensePresence = compose.licensePresence(
+    plan.doc,
+    rcNames,
+    projectDirectory,
+    fileLicenses,
+    false,
+  );
+  plan.effectiveLicense = plan.licensePresence === true;
+  const credentialUnknown =
+    plan.licensePresence === 'unknown' || plan.regTokenSupplied === 'unknown';
+  const premium = request.premiumAuthWarning(
+    [(plan.pre as Preset).name],
+    resolved.rcVersion,
+    plan.effectiveLicense,
+    effectiveCredential,
+    credentialUnknown,
+  );
+  if (premium !== '') warn(plan.emit, premium, { phase: 'create' });
+  const unlicensed = request.licenceAbsentWarning(
+    plan.pre as Preset,
+    false,
+    plan.effectiveLicense,
+    effectiveCredential,
+    credentialUnknown,
+  );
+  if (unlicensed !== '') {
+    warn(plan.emit, unlicensed, { phase: 'create', code: request.LICENSE_ABSENT_EE_PRESET });
+  }
+  const samlEmail = request.samlEmailWarning(
+    plan.pre as Preset,
+    resolved.rcVersion,
+    new Set(Object.keys(plan.envOverrides)),
+  );
+  if (samlEmail !== '') warn(plan.emit, samlEmail, { phase: 'create' });
 }
 
 /** `repro.json`: everything a later command needs that the compose file does not say. */
@@ -1041,7 +1113,17 @@ export function buildRecord(plan: CreatePlan): void {
   if (Object.keys(pre.extra).length > 0) Object.assign(plan.meta.extra, pre.extra);
   if (pre.ports.length > 0) plan.meta.extra.sidecar_ports = pre.ports;
   if (Object.keys(plan.envOverrides).length > 0) plan.meta.extra.env = plan.envOverrides;
-  if (spec.licensed) plan.meta.extra.licensed = true;
+  if (plan.effectiveLicense) plan.meta.extra.licensed = true;
+  // Stamp only the final Compose environment, env files included. Presets and explicit
+  // overrides can add, blank, or remove REG_TOKEN after the request token was normalized;
+  // the record keeps presence only.
+  plan.meta.extra.reg_token_supplied =
+    plan.regTokenSupplied === 'unknown' ? null : plan.regTokenSupplied;
+  plan.meta.extra.effective_license =
+    plan.licensePresence === 'unknown' ? null : plan.licensePresence;
+  // What the preset said at create time, so evidence does not re-ask a catalog that may
+  // have changed since.
+  plan.meta.extra.license_required = pre.requiresLicense === true;
   if (plan.req.actor) {
     // Who owns this. Shown by `list` and the GUI card.
     plan.meta.extra.created_by = plan.req.actor;
@@ -1152,27 +1234,20 @@ export async function replaceExisting(plan: CreatePlan): Promise<void> {
   }
 }
 
-/**
- * This run's licence into the workspace's env file, which the compose document names and never
- * holds. 0600 from the first byte, in the 0700 workspace; a dotfile, so `backup` leaves it out.
- */
-export async function writeLicense(plan: CreatePlan): Promise<void> {
-  if (plan.req.license === '') return;
-  const file = joinPath(paths.workspace(plan.reproName), compose.LICENSE_ENV_FILE);
-  await fs.writeFile(file, `ROCKETCHAT_LICENSE=${plan.req.license}\n`, { mode: 0o600 });
-  await fs.chmod(file, 0o600);
-}
-
 /** Publish the full allocation and generated files while the port lock is held. */
 export async function writeTheWorkspace(plan: CreatePlan): Promise<void> {
   const meta = plan.meta as record.Metadata;
+  // The licence is part of the same fingerprinted replacement as Compose. A failed or
+  // interrupted licence write must leave the record provisional, just like any other file.
+  const files: (readonly [string, string])[] = [...plan.files];
+  if (plan.req.license !== '')
+    files.push([compose.LICENSE_ENV_FILE, `ROCKETCHAT_LICENSE=${plan.req.license}\n`]);
   await record.write(
     plan.reproName,
     compose.toYaml(compose.forEngine(plan.doc as compose.ComposeDoc, await hostEngine())),
     meta,
-    plan.files,
+    files,
   );
-  await writeLicense(plan);
 }
 
 /** Bring up a published workspace, then attach the edge. */
