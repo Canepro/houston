@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import type * as DoctorNS from '../../src/core/doctor';
 import type * as CreateDockerNS from '../../src/core/lifecycle/create-docker';
 import type * as EksNS from '../../src/core/eks';
+import type * as ConfigNS from '../../src/lib/config';
 import type { Emit } from '../../src/lib/events';
 import type * as EventsNS from '../../src/lib/events';
 import type * as ErrorsNS from '../../src/lib/errors';
@@ -529,6 +530,106 @@ describe('the capabilities document', () => {
     const ran = await run(['capabilities']);
     expect(ran.code).toBe(0);
     expect((ran.envelope.data as Record<string, unknown>).houston_version).toBeTruthy();
+  });
+});
+
+describe('onboard --json', () => {
+  it('persists an explicit answer and exposes the same state through capabilities', async () => {
+    const untouched = await run(['onboard', '--json']);
+    expect(untouched.code).toBe(0);
+    expect(untouched.envelope.schema).toBe('houston.onboard.v1');
+    expect(untouched.envelope.data).toMatchObject({
+      action: 'status',
+      completed: false,
+      rc_repro_version: '',
+      grants: { owned_cluster: false },
+      answered_grants: { owned_cluster: false },
+      clusters: [],
+    });
+
+    const completed = await run(['onboard', 'complete', '--json']);
+    expect(completed.code).toBe(0);
+    expect(completed.envelope.data).toMatchObject({
+      action: 'complete',
+      completed: true,
+      rc_repro_version: expect.any(String),
+      grants: { owned_cluster: false },
+      answered_grants: { owned_cluster: false },
+      clusters: [],
+    });
+
+    const granted = await run(['onboard', 'grant', 'owned-cluster', '--json']);
+    expect(granted.code).toBe(0);
+    expect(granted.envelope.data).toMatchObject({
+      action: 'grant',
+      rc_repro_version: expect.any(String),
+      grants: { owned_cluster: true },
+      answered_grants: { owned_cluster: true },
+      clusters: ['houston-local'],
+    });
+
+    const caps = await run(['capabilities']);
+    expect(caps.code).toBe(0);
+    expect((caps.envelope.data as Record<string, unknown>).onboarding).toMatchObject({
+      completed: true,
+      rc_repro_version: expect.any(String),
+      grants: { owned_cluster: true },
+      answered_grants: { owned_cluster: true },
+      clusters: ['houston-local'],
+      grants_available: expect.arrayContaining([
+        expect.objectContaining({ id: 'owned-cluster', held: true }),
+      ]),
+    });
+
+    const revoked = await run(['onboard', 'revoke', 'owned-cluster', '--json']);
+    expect(revoked.code).toBe(0);
+    expect(revoked.envelope.data).toMatchObject({
+      action: 'revoke',
+      completed: true,
+      rc_repro_version: expect.any(String),
+      grants: { owned_cluster: false },
+      answered_grants: { owned_cluster: true },
+      clusters: [],
+    });
+  });
+
+  it.each(['status', 'complete'])(
+    'rejects an ignored ID for %s without writing config',
+    async (action) => {
+      const configPath = path.join(home, 'config.yaml');
+      const original = 'preferences:\n  retain_runs: false\n';
+      fs.writeFileSync(configPath, original);
+      for (const id of ['owned-cluster', 'unknown-grant']) {
+        const result = await run(['onboard', action, id, '--json']);
+        expect(result.code).toBe(2);
+        expect(fs.readFileSync(configPath, 'utf8')).toBe(original);
+      }
+    },
+  );
+
+  it('updates only its named grant in an existing config mapping', async () => {
+    fs.writeFileSync(
+      path.join(home, 'config.yaml'),
+      'grants:\n  future_decision: true\n  owned_cluster: false\nonboarding:\n  external_marker: keep\npreferences:\n  retain_runs: false\n',
+    );
+
+    const granted = await run(['onboard', 'grant', 'owned-cluster', '--json']);
+    expect(granted.code).toBe(0);
+    expect(granted.envelope.data).toMatchObject({
+      grants: { owned_cluster: true },
+      answered_grants: { owned_cluster: true },
+    });
+
+    const config = require('../../src/lib/config') as typeof ConfigNS;
+    expect(config.loadConfig(false)).toMatchObject({
+      grants: { future_decision: true, owned_cluster: true, clusters: ['houston-local'] },
+      onboarding: {
+        external_marker: 'keep',
+        completed_at: expect.any(String),
+        rc_repro_version: expect.any(String),
+      },
+      preferences: { retain_runs: false },
+    });
   });
 });
 

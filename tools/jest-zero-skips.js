@@ -138,7 +138,10 @@ const ROOT = path.resolve(__dirname, '..');
 // Credential arguments add twenty over the SSH access base of 4747: total 4767.
 // Six more cover the PR 64 round-two findings, one case each: total 4773.
 // Six more cover the PR 64 round-three findings, one case each: total 4779.
-const FLOOR = 4779;
+// Onboarding grants add cluster-ownership, rollback, marker-publication and onboard-grant
+// boundary cases; a full collection of the merged tree measured 4831 tests.
+// Credential arguments add thirty-two over the grants base of 4831: total 4863.
+const FLOOR = 4863;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

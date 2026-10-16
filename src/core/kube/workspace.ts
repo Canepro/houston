@@ -22,7 +22,7 @@ import {
   waitForCertificate,
   type IssuerSpec,
 } from './certmanager';
-import { deleteCluster, ensureKubeconfig } from './cluster';
+import { deleteCluster, ensureKubeconfig, type ClusterReceipt } from './cluster';
 import { planCluster, type ClusterPlan } from './context';
 import { credentialInputs, ensureRepo, resolveChartVersion, valuesFor } from './chart';
 import { Interrupted, cleanup } from '../../seams/exec';
@@ -44,7 +44,14 @@ import {
   isOurs,
   mongoImage,
 } from './names';
-import { deleteNamespace, ensureNamespace, labelsFor, type NamespaceReceipt } from './namespace';
+import {
+  deleteNamespace,
+  ensureNamespace,
+  labelsFor,
+  namespaceFor,
+  namespaceLabels,
+  type NamespaceReceipt,
+} from './namespace';
 import {
   MONGO_URL_SECRET,
   OPERATOR_MIN_MONGO,
@@ -93,14 +100,22 @@ async function prepareCluster(
   given: ClusterPlan | null,
   resolved: Resolved,
   emit: Emit,
+  priorReceipt: ClusterReceipt,
 ): Promise<{
   plan: ClusterPlan;
   context: string;
-  hadCluster: boolean;
+  createdHere: boolean;
   chartVersion: string;
 }> {
   const plan = given ?? (await planCluster());
-  const context = await ensureKubeconfig(plan, emit);
+  // Only the locked Kind result, not this earlier plan, can prove this call made the cluster.
+  const receipt: ClusterReceipt = { createdHere: false };
+  let context: string;
+  try {
+    context = await ensureKubeconfig(plan, emit, receipt);
+  } finally {
+    priorReceipt.createdHere ||= receipt.createdHere;
+  }
   if (!plan.create && !isOurs(context)) {
     info(
       emit,
@@ -109,8 +124,7 @@ async function prepareCluster(
       { phase: 'provision', pct: 5 },
     );
   }
-  const hadCluster = !plan.create;
-  if (!hadCluster || plan.distribution !== 'kind') {
+  if (plan.create || plan.distribution !== 'kind') {
     info(
       emit,
       `the ${plan.distribution} cluster has its own image store, separate from Docker's — ` +
@@ -126,21 +140,7 @@ async function prepareCluster(
   const blocked =
     storageBlocker(pre) || architectureBlocker(pre, resolved.rcVersion, resolved.rcImage);
   if (blocked !== '') throw new PreflightError(blocked);
-  return { plan, context, hadCluster, chartVersion };
-}
-
-/** Create or adopt the namespace, and remember whether rollback may remove it. */
-async function ensureWorkspaceNamespace(
-  name: string,
-  context: string,
-  owner: string,
-  emit: Emit,
-): Promise<{ namespace: string; receipt: NamespaceReceipt }> {
-  // Only this call's successful atomic CREATE proves rollback may remove a namespace.
-  // A separate list can miss an existing or concurrently-created namespace.
-  const receipt = { uid: '', owner: '', createdUid: '' };
-  const namespace = await ensureNamespace(name, { context, owner, emit, receipt });
-  return { namespace, receipt };
+  return { plan, context, createdHere: priorReceipt.createdHere, chartVersion };
 }
 
 /** Install an operator-managed MongoDB and return its connection metadata. */
@@ -376,7 +376,7 @@ async function rollbackCreate(
   namespace: string,
   context: string,
   receipt: NamespaceReceipt,
-  hadCluster: boolean,
+  createdHere: boolean,
   emit: Emit,
 ): Promise<void> {
   if (receipt.createdUid === '') {
@@ -395,7 +395,7 @@ async function rollbackCreate(
       emit,
     });
     if (gone) await forgetInstalledCredentials(name, namespace, context, receipt, emit);
-    if (gone && !hadCluster) await deleteCluster({ emit });
+    if (gone && createdHere) await deleteCluster({ emit });
   } catch {
     // The ORIGINAL failure is what matters; a rollback that fails must not replace it.
   }
@@ -613,6 +613,7 @@ export interface CreateWorkspaceOptions {
   /** An existing licence Secret established by a completed create, not provisional intent. */
   readonly licensed?: boolean;
   readonly plan?: ClusterPlan | null;
+  readonly clusterReceipt?: ClusterReceipt;
   readonly tlsHost?: string;
   readonly ingressClass?: string;
   readonly issuer?: IssuerSpec | null;
@@ -651,6 +652,7 @@ export async function createWorkspace({
   license = '',
   licensed: retainedLicense = false,
   plan = null,
+  clusterReceipt = { createdHere: false },
   tlsHost = '',
   ingressClass = '',
   issuer = null,
@@ -672,10 +674,47 @@ export async function createWorkspace({
   regToken = credentials.regToken;
   license = credentials.license;
   const licensed = credentials.licensed;
-  const prepared = await prepareCluster(plan, resolved, emit);
-  const { context, hadCluster, chartVersion } = prepared;
+  let prepared: Awaited<ReturnType<typeof prepareCluster>>;
+  try {
+    prepared = await prepareCluster(plan, resolved, emit, clusterReceipt);
+  } catch (error) {
+    // No namespace request has started. Only an actual successful creation receipt may
+    // request guarded deletion; unknown ownership or another workspace still refuses it.
+    if (clusterReceipt.createdHere) {
+      await cleanup(async () => {
+        try {
+          await deleteCluster({ emit });
+        } catch {
+          // Preserve unknown ownership and the original provisioning failure.
+        }
+      });
+    }
+    throw error;
+  }
+  const { context, createdHere, chartVersion } = prepared;
 
-  const { namespace, receipt } = await ensureWorkspaceNamespace(name, context, owner, emit);
+  const receipt: NamespaceReceipt = { uid: '', owner: '', createdUid: '' };
+  let namespace: string;
+  try {
+    namespace = await ensureNamespace(name, { context, owner, emit, receipt });
+  } catch (error) {
+    await cleanup(async () => {
+      try {
+        const target = await namespaceFor(name);
+        if (receipt.createdUid !== '') {
+          // A successful namespace CREATE can be followed by a failing progress listener.
+          await rollbackCreate(name, target, context, receipt, createdHere, emit);
+        } else if (createdHere && (await namespaceLabels(target, { context })) === null) {
+          // A failed request may have committed. Require confirmed absence before asking
+          // the cluster owner to recheck its marker, reachability and other workspaces.
+          await deleteCluster({ emit });
+        }
+      } catch {
+        // Existing, foreign or unreadable namespace state remains protected.
+      }
+    });
+    throw error;
+  }
   let database: Database;
   let values: Record<string, unknown>;
   try {
@@ -733,7 +772,7 @@ export async function createWorkspace({
     // when the failure IS a Ctrl-C or a stopped job: refused there, it left a namespace
     // no record pointed at.
     await cleanup(async () => {
-      await rollbackCreate(name, namespace, context, receipt, hadCluster, emit);
+      await rollbackCreate(name, namespace, context, receipt, createdHere, emit);
     });
     throw error;
   }

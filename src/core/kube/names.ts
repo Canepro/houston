@@ -5,26 +5,35 @@
  * here talks to a cluster, reads a file or spawns a process, so every other module in the
  * package may reach it and it may reach none of them.
  *
- * The label vocabulary is the load-bearing part. Selection is BY LABEL, never by name
- * prefix -- `isOurs` and `OWNER_SELECTOR` are the only two ways to ask "is this
- * houston's", and a name-prefix match was how a workspace called `houston-anything`
- * somebody else made once became eligible for teardown.
+ * Namespace selection uses OWNER_SELECTOR, never a name prefix. `isOurs` selects the
+ * fixed local context; it does not prove ownership. The cluster owner verifies its exact
+ * ConfigMap receipt before reuse or deletion, and namespace owners verify label and UID.
  */
 
 /**
- * The cluster houston creates and owns. One cluster with a namespace per workspace, not
- * a cluster per workspace: a control plane each would forbid concurrent repros on
- * laptop-scale hardware, which is behaviour houston already has on Compose.
+ * The fixed local Kind cluster Houston may manage. One cluster with a namespace per
+ * workspace, not a cluster per workspace: a control plane each would forbid concurrent
+ * repros on laptop-scale hardware, which is behaviour Houston already has on Compose.
  *
- * houston USES whatever cluster it is pointed at and creates this one only when there is
- * none. What survives from the earlier "always create" draft is the TEARDOWN asymmetry,
- * which is the part that matters: a cluster houston created it may delete; in one you
- * supplied it owns only the namespaces carrying its label.
+ * Houston uses whatever cluster it is pointed at and creates this one only when there is
+ * none. It may manage the selected local context after its ownership receipt is established
+ * by creation or the approved legacy migration; in a supplied context it owns only the
+ * namespaces carrying its label.
  */
 export const CLUSTER_NAME = 'houston-local';
 
 /** kind prefixes the kubeconfig context with `kind-`. */
 export const CONTEXT = `kind-${CLUSTER_NAME}`;
+
+/**
+ * The in-cluster ownership receipt for the selected local Kind context.
+ *
+ * Houston writes it after creation or the approved legacy migration. A name is not
+ * ownership: another operator can create `houston-local`. The marker lives in `kube-system`,
+ * carries the ordinary Houston ownership label, and records the one cluster name this build
+ * is ever allowed to manage.
+ */
+export const CLUSTER_OWNER_CONFIGMAP = 'houston-cluster-owner';
 
 /**
  * One namespace per workspace. The official guide creates a named namespace and says
@@ -144,15 +153,15 @@ export function tools(): Record<string, Floor> {
   return { ...CORE_TOOLS, ...provisionTools() };
 }
 
-/** How a cluster came to exist, which is what decides how far houston may go. */
-export const PROVIDER_KIND = 'kind'; // houston made it, so houston may delete it
+/** Provider labels for reporting. Local Kind mutations still require the context's receipt. */
+export const PROVIDER_KIND = 'kind';
 
-export const PROVIDER_EXTERNAL = 'external'; // you made it; houston owns its namespaces only
+export const PROVIDER_EXTERNAL = 'external';
 
 /** Seconds. Long enough for a loaded laptop, short enough that `doctor` answers. */
 export const PROBE_TIMEOUT = 8.0;
 
-/** Whether a context names the cluster houston created. */
+/** Whether a context selects Houston's fixed local Kind cluster. */
 export function isOurs(context: string): boolean {
   return context === CONTEXT;
 }

@@ -22,7 +22,7 @@ Every command also explains itself: `houston <command> --help`.
 | ------------------------- | ----------------------------------------------------------------------------------- |
 | lifecycle                 | `up` `start` `stop` `restart` `down` `prune`                                        |
 | inspect                   | `list` `info` `inspect` `logs` `ready` `stats` `evidence`                           |
-| settings                  | `use` `config` `env`                                                                |
+| settings                  | `use` `config` `onboard` `env`                                                      |
 | data                      | `seed` `config-import` `backup` `backups` `restore` `upgrade`                       |
 | performance (Docker only) | `loadtest` `capacity`                                                               |
 | REST                      | `token` `api` `pat`                                                                 |
