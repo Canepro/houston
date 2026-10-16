@@ -138,7 +138,8 @@ export interface CreatePlan {
   /** `buildDocument`: the final Rocket.Chat environment or licence file supplies one. */
   effectiveLicense: boolean;
   /** Whether a final Rocket.Chat service gets a known REG_TOKEN. Set with `effectiveLicense`. */
-  regTokenSupplied: boolean;
+  regTokenSupplied: compose.CredentialPresence;
+  licensePresence: compose.CredentialPresence;
   /** `buildRecord` */
   meta: record.Metadata | null;
   /** The record a rebuild replaces, read by `buildDocument`; null on a first create. */
@@ -171,6 +172,7 @@ export function createPlan(
     doc: null,
     effectiveLicense: false,
     regTokenSupplied: false,
+    licensePresence: false,
     meta: null,
     previousMeta: null,
     files: [],
@@ -966,34 +968,41 @@ export async function buildDocument(plan: CreatePlan): Promise<void> {
     plan.doc,
     rcNames,
     projectDirectory,
-    (plan.pre as Preset).files,
+    [
+      ...(plan.pre as Preset).files,
+      ...(plan.req.license !== ''
+        ? [[compose.LICENSE_ENV_FILE, `ROCKETCHAT_LICENSE=${plan.req.license}\n`] as const]
+        : []),
+    ],
   );
   // Presence only, by the rule the warnings below use, so the record and the warnings agree.
-  plan.regTokenSupplied = compose.suppliesRegToken(plan.doc, rcNames, projectDirectory, fileTokens);
-  // The file on disk is read above. This flag is only the licence this run will write.
-  const supplyingLicense = plan.req.license !== '';
+  plan.regTokenSupplied = compose.tokenPresence(plan.doc, rcNames, projectDirectory, fileTokens);
   const effectiveCredential = compose.hasEffectiveCredential(
     plan.doc,
     (plan.pre as Preset).instances,
-    supplyingLicense,
+    false,
     projectDirectory,
     fileLicenses,
     fileTokens,
   )
     ? 'present'
     : '';
-  plan.effectiveLicense = compose.hasEffectiveLicense(
+  plan.licensePresence = compose.licensePresence(
     plan.doc,
-    (plan.pre as Preset).instances,
-    supplyingLicense,
+    rcNames,
     projectDirectory,
     fileLicenses,
+    false,
   );
+  plan.effectiveLicense = plan.licensePresence === true;
+  const credentialUnknown =
+    plan.licensePresence === 'unknown' || plan.regTokenSupplied === 'unknown';
   const premium = request.premiumAuthWarning(
     [(plan.pre as Preset).name],
     resolved.rcVersion,
     plan.effectiveLicense,
     effectiveCredential,
+    credentialUnknown,
   );
   if (premium !== '') warn(plan.emit, premium, { phase: 'create' });
   const unlicensed = request.licenceAbsentWarning(
@@ -1001,6 +1010,7 @@ export async function buildDocument(plan: CreatePlan): Promise<void> {
     false,
     plan.effectiveLicense,
     effectiveCredential,
+    credentialUnknown,
   );
   if (unlicensed !== '') {
     warn(plan.emit, unlicensed, { phase: 'create', code: request.LICENSE_ABSENT_EE_PRESET });
@@ -1061,7 +1071,10 @@ export function buildRecord(plan: CreatePlan): void {
   // Stamp only the final Compose environment, env files included. Presets and explicit
   // overrides can add, blank, or remove REG_TOKEN after the request token was normalized;
   // the record keeps presence only.
-  plan.meta.extra.reg_token_supplied = plan.regTokenSupplied;
+  plan.meta.extra.reg_token_supplied =
+    plan.regTokenSupplied === 'unknown' ? null : plan.regTokenSupplied;
+  plan.meta.extra.effective_license =
+    plan.licensePresence === 'unknown' ? null : plan.licensePresence;
   // What the preset said at create time, so evidence does not re-ask a catalog that may
   // have changed since.
   plan.meta.extra.license_required = pre.requiresLicense === true;

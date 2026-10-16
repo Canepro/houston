@@ -120,7 +120,9 @@ const ROOT = path.resolve(__dirname, '..');
 // (two); and by an `up` that starts the stopped workspace (one): total 4610.
 // Two more exercise automatic and explicit rollback startup, all-replica recreation,
 // and refusal before restore after either engine failure: total 4612.
-const FLOOR = 4612;
+// Five more cover artifact-wide copies, nested JSON/scalars, cyclic aliases, ordered env files
+// and replica uncertainty, and env mutation of unresolved credentials: total 4617.
+const FLOOR = 4617;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

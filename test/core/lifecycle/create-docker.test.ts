@@ -397,7 +397,12 @@ describe('the create path end to end, stopped at the write seam', () => {
         .map(([, service]) => service);
       const environments = rocketChat.map((service) => service.environment ?? {});
       const envFiles = rocketChat.map((service) => service.env_file);
-      return { environments, envFiles, evidence: await evidenceRecord(name) };
+      return {
+        environments,
+        envFiles,
+        evidence: await evidenceRecord(name),
+        extra: plan.meta?.extra,
+      };
     };
 
     const examples: Array<{
@@ -408,7 +413,8 @@ describe('the create path end to end, stopped at the write seam', () => {
       rocketchat?: Record<string, unknown>;
       files?: Record<string, string>;
       presetFiles?: [string, string][];
-      supplied: boolean;
+      supplied: boolean | null;
+      source?: string;
       instances: number;
     }> = [
       {
@@ -453,7 +459,27 @@ describe('the create path end to end, stopped at the write seam', () => {
         // Only the engine knows an ambient value; the create warning does not count it either.
         name: 'token-list-interpolated',
         rocketchat: { environment: ['REG_TOKEN=${HOST_REG_TOKEN}'] },
-        supplied: false,
+        supplied: null,
+        instances: 2,
+      },
+      {
+        name: 'token-generated-interpolation',
+        rocketchat: { env_file: ['generated.env'] },
+        presetFiles: [['generated.env', 'REG_TOKEN=${TOKEN:+alternate}\n']],
+        supplied: null,
+        instances: 2,
+      },
+      {
+        name: 'token-known-license-unknown',
+        env: { REG_TOKEN: 'literal-token', ROCKETCHAT_LICENSE: '${LICENCE}' },
+        supplied: true,
+        source: 'unknown',
+        instances: 2,
+      },
+      {
+        name: 'token-list-escaped',
+        rocketchat: { environment: ['REG_TOKEN=$$literal'] },
+        supplied: true,
         instances: 2,
       },
       {
@@ -481,7 +507,8 @@ describe('the create path end to end, stopped at the write seam', () => {
     ];
 
     for (const example of examples) {
-      const { environments, envFiles, evidence } = await planAndEvidence(example);
+      const { environments, envFiles, evidence, extra } = await planAndEvidence(example);
+      expect(extra?.reg_token_supplied).toBe(example.supplied);
       expect(environments).toHaveLength(example.instances);
       if (Array.isArray(example.rocketchat?.environment)) {
         // Create trims the winning list token before Compose sees it.
@@ -500,6 +527,10 @@ describe('the create path end to end, stopped at the write seam', () => {
         ).toEqual(Array(example.instances).fill(example.supplied));
       }
       expect((evidence.license as Record<string, unknown>).supplied).toBe(example.supplied);
+      if (example.source !== undefined) {
+        expect((evidence.license as Record<string, unknown>).source).toBe(example.source);
+        expect(extra?.effective_license).toBeNull();
+      }
     }
   });
 
@@ -561,7 +592,17 @@ describe('the create path end to end, stopped at the write seam', () => {
         version: '9.0.0',
       },
       {
+        label: 'unresolved licence interpolation',
+        env: { ROCKETCHAT_LICENSE: '${LICENCE:-fallback}' },
+        expected: '',
+        expectedLicense: '${LICENCE:-fallback}',
+        licensed: false,
+        warns: true,
+        uncertain: true,
+      },
+      {
         label: 'unresolved token interpolation',
+        uncertain: true,
         env: { REG_TOKEN: '${UNSET_REG_TOKEN}' },
         expected: '${UNSET_REG_TOKEN}',
         warns: true,
@@ -618,6 +659,15 @@ describe('the create path end to end, stopped at the write seam', () => {
       const warns = 'warns' in one ? one.warns : one.expected === '' && !licensed;
       expect(seen.meta?.extra.licensed === true).toBe(licensed);
       expect([one.label, codes.includes('LICENSE_ABSENT_EE_PRESET')]).toEqual([one.label, warns]);
+      if ('uncertain' in one) {
+        expect(
+          seen.meta?.extra.effective_license === null ||
+            seen.meta?.extra.reg_token_supplied === null,
+        ).toBe(true);
+        expect(
+          messages.some((message) => message.includes('unknown until Compose resolves its inputs')),
+        ).toBe(true);
+      }
       if (warns && ('flag' in one || 'license' in one)) {
         const warnings = messages.filter(
           (message) =>
@@ -626,7 +676,11 @@ describe('the create path end to end, stopped at the write seam', () => {
         );
         expect(warnings.length).toBeGreaterThanOrEqual(1);
         for (const message of warnings) {
-          expect(message).toContain('no effective licence or registration token');
+          expect(message).toContain(
+            'uncertain' in one
+              ? 'unknown until Compose resolves its inputs'
+              : 'no effective licence or registration token',
+          );
           expect(message).toContain('override');
           expect(message).toMatch(/remove or change/iu);
           expect(message).not.toContain('neither --license nor --reg-token');

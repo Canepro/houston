@@ -392,6 +392,14 @@ describe('the record', () => {
       },
       { name: 'e3e-installed', extra: { licensed: true, effective_license: true } },
       { name: 'e3e-retained', extra: { effective_license: true, reg_token_supplied: false } },
+      {
+        name: 'e3e-unknown',
+        extra: { licensed: true, effective_license: null, reg_token_supplied: false },
+      },
+      {
+        name: 'e3e-known-token-unknown-license',
+        extra: { licensed: true, effective_license: null, reg_token_supplied: true },
+      },
     ];
     const observed: unknown[] = [];
     for (const example of examples) {
@@ -403,6 +411,8 @@ describe('the record', () => {
       ['e3e-token-only', { required: false, supplied: true, source: 'reg_token' }],
       ['e3e-installed', { required: false, supplied: true, source: 'license' }],
       ['e3e-retained', { required: false, supplied: true, source: 'license' }],
+      ['e3e-unknown', { required: false, supplied: null, source: 'unknown' }],
+      ['e3e-known-token-unknown-license', { required: false, supplied: true, source: 'unknown' }],
     ]);
   });
 
@@ -630,7 +640,7 @@ describe('the record', () => {
         { environment?: Record<string, unknown> | string[]; env_file?: string[] }
       >;
       files?: Record<string, string>;
-      supplied: boolean;
+      supplied: boolean | null;
       source?: string;
     }> = [
       {
@@ -658,7 +668,8 @@ describe('the record', () => {
       {
         name: 'e3-legacy-interpolated',
         services: { rocketchat: { environment: ['REG_TOKEN=${HOST_REG_TOKEN}'] } },
-        supplied: false,
+        supplied: null,
+        source: 'unknown',
       },
       {
         name: 'e3-legacy-env-file',
@@ -1099,6 +1110,275 @@ describe('the bundle', () => {
     expect(rendered.services.rocketchat.command).toEqual(['/bin/sh', '-c', 'echo ********']);
     expect(rendered.services.rocketchat.labels['com.example.evidence-note']).toBe('********');
     expect(out.files).not.toContain('logs/compose.log');
+  });
+
+  it('collects artifact credentials before masking aliases and earlier copies', async () => {
+    const name = 'e7-credential-copies';
+    await workspaceNamed(name);
+    const embedded =
+      '{"copy":"EmbeddedCopySentinel","password":"EmbeddedCopySentinel","keep":1.50}';
+    const doc = [
+      'x-before: &copy AliasCopySentinel',
+      'x-json-copy: EmbeddedCopySentinel',
+      'x-list-copy: ListCopySentinel',
+      'x-named-copy: NamedCopySentinel',
+      'x-url-copy: UrlCopySentinel',
+      'x-control: readable',
+      'services:',
+      '  rocketchat:',
+      '    environment:',
+      '      DB_PASSWORD: *copy',
+      `      CONFIG: '${embedded}'`,
+      '      URL: https://UrlCopySentinel@example.test',
+      'x-list: [DB_PASSWORD=ListCopySentinel]',
+      'x-named: {value: NamedCopySentinel, name: DB_PASSWORD}',
+      '',
+    ].join('\n');
+    fs.writeFileSync(path.join(workspace(name), 'docker-compose.yml'), doc);
+    const dest = path.join(workspace(name), 'out', 'bundle');
+    await writeBundle(name, dest, await record(name));
+    const text = fs.readFileSync(path.join(dest, 'docker-compose.yml'), 'utf8');
+    for (const secret of [
+      'AliasCopySentinel',
+      'EmbeddedCopySentinel',
+      'ListCopySentinel',
+      'NamedCopySentinel',
+      'UrlCopySentinel',
+    ])
+      expect(text).not.toContain(secret);
+    const parsed = YAML.parse(text) as {
+      'x-control': string;
+      services: { rocketchat: { environment: { CONFIG: string } } };
+    };
+    expect(parsed['x-control']).toBe('readable');
+    expect(parsed.services.rocketchat.environment.CONFIG).toBe(
+      '{"copy":"********","password":"********","keep":1.50}',
+    );
+  });
+
+  it('collects nested JSON, scalar and cross-document credentials without erasing controls', async () => {
+    const name = 'e7-deep-credential-copies';
+    const cfg =
+      '{"copy":"NestedCopySentinel","password":"NestedCopySentinel","numberCopy":4.500,"numberText":"4.50","apiKey":4.50,"named":[{"value":"ValueFirstSentinel","name":"DB_PASSWORD"},{"name":"client_secret","value":"NameFirstSentinel"}],"assignments":["DB_PASSWORD=AssignedCopySentinel"],"escapedCopy":"Escaped\\u0043opySentinel","secret":"EscapedCopySentinel","password":"DuplicateMemberSentinel","keep":1.50}';
+    const nested = JSON.stringify({ payload: cfg, copy: 'NestedCopySentinel' });
+    const doc = [
+      'x-cross-doc: CrossDocSentinel',
+      'x-before: [NestedCopySentinel, ValueFirstSentinel, NameFirstSentinel, AssignedCopySentinel, DuplicateMemberSentinel]',
+      `x-json: '${nested}'`,
+      'x-raw-scalar: "-0"',
+      'x-original-scalar: -0',
+      'x-url-name: rocket',
+      'x-url-copy: UrlPasswordSentinel',
+      'x-control: rocketchat',
+      'x-port: 27017',
+      'x-password-number: 7',
+      'x-auth-url: https://rocket:UrlPasswordSentinel@example.test',
+      'x-scalar-password: -0',
+      '---',
+      'x-password: CrossDocSentinel',
+      'x-last-control: readable',
+      '',
+    ].join('\n');
+    await workspaceNamed(name, { runtime: 'kubernetes' });
+    fs.mkdirSync(path.join(workspace(name), 'kubernetes'), { recursive: true });
+    fs.writeFileSync(path.join(workspace(name), 'kubernetes', 'values.yaml'), doc);
+    const dest = path.join(workspace(name), 'out', 'bundle');
+    await writeBundle(name, dest, await recordKubernetes(name));
+    const text = fs.readFileSync(path.join(dest, 'values.yaml'), 'utf8');
+    for (const value of [
+      'CrossDocSentinel',
+      'NestedCopySentinel',
+      'ValueFirstSentinel',
+      'NameFirstSentinel',
+      'AssignedCopySentinel',
+      'DuplicateMemberSentinel',
+      'EscapedCopySentinel',
+      'UrlPasswordSentinel',
+    ])
+      expect(text).not.toContain(value);
+    const parsed = YAML.parseAllDocuments(text).map(
+      (document) => document.toJS() as Record<string, unknown>,
+    );
+    expect(parsed[0]?.['x-control']).toBe('rocketchat');
+    expect(parsed[0]?.['x-url-name']).toBe('********');
+    expect(parsed[0]?.['x-port']).toBe(27017);
+    expect(parsed[0]?.['x-raw-scalar']).toBe('********');
+    expect(parsed[0]?.['x-original-scalar']).toBe('********');
+    const json = JSON.parse(String(parsed[0]?.['x-json'])) as { payload: string; copy: string };
+    expect(json.copy).toBe('********');
+    expect(json.payload).toContain('"keep":1.50');
+    const inner = JSON.parse(json.payload) as Record<string, unknown>;
+    expect(inner.escapedCopy).toBe('********');
+    expect(inner.numberCopy).toBe('********');
+    expect(inner.numberText).toBe('********');
+    expect(parsed[1]?.['x-last-control']).toBe('readable');
+  });
+
+  it('bounds cyclic YAML aliases while still masking credentials discovered through aliases', async () => {
+    const name = 'e7-cycle-credentials';
+    await workspaceNamed(
+      name,
+      {},
+      {},
+      [
+        'x-first: &secret {value: CycleCopySentinel}',
+        'x-cycle: &cycle [*cycle]',
+        'x-password: *secret',
+        'x-before-copy: CycleCopySentinel',
+        'x-control: readable',
+        '',
+      ].join('\n'),
+    );
+    const dest = path.join(workspace(name), 'out', 'bundle');
+    await writeBundle(name, dest, await record(name));
+    const text = fs.readFileSync(path.join(dest, 'docker-compose.yml'), 'utf8');
+    expect(text).not.toContain('CycleCopySentinel');
+    const parsed = YAML.parse(text) as Record<string, unknown>;
+    expect(parsed['x-control']).toBe('readable');
+    expect(parsed['x-cycle']).toEqual(['********']);
+  });
+
+  it('resolves credential uncertainty at real env-file and replica boundaries', async () => {
+    const cases: {
+      env?: Record<string, unknown> | string[];
+      files?: [string, string][];
+      refs?: unknown[];
+      services?: Record<string, unknown>;
+      supplied: boolean | null;
+      source: string | null;
+    }[] = [
+      { env: ['REG_TOKEN'], supplied: null, source: 'unknown' },
+      { env: { REG_TOKEN: null }, supplied: false, source: null },
+      { env: { REG_TOKEN: '' }, supplied: false, source: null },
+      { env: { REG_TOKEN: '$$literal' }, supplied: true, source: 'reg_token' },
+      {
+        env: { ROCKETCHAT_LICENSE: '${LICENCE}', REG_TOKEN: 'literal' },
+        supplied: true,
+        source: 'unknown',
+      },
+      {
+        env: { ROCKETCHAT_LICENSE: 'literal', REG_TOKEN: '${TOKEN}' },
+        supplied: true,
+        source: 'license',
+      },
+      {
+        refs: ['creds.env'],
+        files: [['creds.env', 'REG_TOKEN=${TOKEN:-fallback}\n']],
+        supplied: null,
+        source: 'unknown',
+      },
+      {
+        refs: ['creds.env'],
+        files: [['creds.env', "REG_TOKEN='${TOKEN}'\n"]],
+        supplied: true,
+        source: 'reg_token',
+      },
+      {
+        refs: [{ path: 'creds.env', format: 'raw' }],
+        files: [['creds.env', 'REG_TOKEN=${TOKEN}\n']],
+        supplied: true,
+        source: 'reg_token',
+      },
+      {
+        refs: ['earlier.env', 'later.env'],
+        files: [
+          ['earlier.env', 'REG_TOKEN=literal\n'],
+          ['later.env', 'REG_TOKEN=${TOKEN:+alt}\n'],
+        ],
+        supplied: null,
+        source: 'unknown',
+      },
+      {
+        refs: ['earlier.env', 'later.env'],
+        files: [
+          ['earlier.env', 'REG_TOKEN=${TOKEN}\n'],
+          ['later.env', 'REG_TOKEN\n'],
+        ],
+        supplied: false,
+        source: null,
+      },
+      { refs: ['${ENV_FILE}'], supplied: null, source: 'unknown' },
+      { refs: [{ path: 'missing.env', required: false }], supplied: false, source: null },
+      {
+        services: {
+          'rocketchat-1': { environment: { REG_TOKEN: 'literal' } },
+          'rocketchat-2': { environment: { REG_TOKEN: '${TOKEN}' } },
+        },
+        supplied: true,
+        source: 'reg_token',
+      },
+      {
+        services: {
+          'rocketchat-1': { environment: { ROCKETCHAT_LICENSE: 'literal' } },
+          'rocketchat-2': { environment: { ROCKETCHAT_LICENSE: '${LICENCE}' } },
+        },
+        supplied: null,
+        source: 'unknown',
+      },
+    ];
+    for (const [index, example] of cases.entries()) {
+      const name = `e3-uncertain-files-${index}`;
+      await workspaceNamed(
+        name,
+        {},
+        {},
+        YAML.stringify({
+          services: example.services ?? {
+            rocketchat: { environment: example.env ?? {}, env_file: example.refs ?? [] },
+          },
+        }),
+      );
+      for (const [file, text] of example.files ?? [])
+        fs.writeFileSync(path.join(workspace(name), file), text);
+      const evidence = await record(name);
+      if (example.supplied === null)
+        expect(renderMarkdown(evidence)).toContain(
+          'unknown (credential presence could not be determined)',
+        );
+      else if (example.source === 'unknown')
+        expect(renderMarkdown(evidence)).toContain('credential supplied (type unknown)');
+      expect([index, evidence.license]).toEqual([
+        index,
+        { required: false, supplied: example.supplied, source: example.source },
+      ]);
+    }
+  });
+
+  it('retains unknown credential presence through evidence and environment mutation', async () => {
+    const values = [
+      '${TOKEN}',
+      '$TOKEN',
+      '${TOKEN:-fallback}',
+      '${TOKEN-fallback}',
+      '${TOKEN:+alternate}',
+      '${TOKEN?required}',
+    ];
+    for (const [index, value] of values.entries()) {
+      const name = `e3-interpolation-${index}`;
+      await workspaceNamed(
+        name,
+        {},
+        {},
+        YAML.stringify({ services: { rocketchat: { environment: { REG_TOKEN: value } } } }),
+      );
+      expect((await record(name)).license).toMatchObject({ supplied: null, source: 'unknown' });
+    }
+    const name = 'e3-marker-interpolation';
+    await workspaceNamed(
+      name,
+      { reg_token_supplied: false },
+      {},
+      YAML.stringify({ services: { rocketchat: { environment: {} } } }),
+    );
+    await setEnvLocked(name, { REG_TOKEN: '${TOKEN}' }, []);
+    expect((await readMeta(name)).extra.reg_token_supplied).toBeNull();
+    expect((await record(name)).license).toMatchObject({ supplied: null, source: 'unknown' });
+    await setEnvLocked(name, { PORT: '3001' }, []);
+    expect((await record(name)).license).toMatchObject({ supplied: null, source: 'unknown' });
+    await setEnvLocked(name, { REG_TOKEN: '$$literal' }, []);
+    expect((await record(name)).license).toMatchObject({ supplied: true, source: 'reg_token' });
+    await setEnvLocked(name, {}, ['REG_TOKEN']);
+    expect((await record(name)).license).toMatchObject({ supplied: false, source: null });
   });
 
   it('redacts URL userinfo before treating a Compose value as KEY=VALUE', async () => {

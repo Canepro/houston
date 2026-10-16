@@ -180,7 +180,7 @@ export function renderMarkdown(payloadValue: unknown, captureValue?: unknown): s
       [
         'Licence',
         license.supplied === true
-          ? `credential supplied (${license.source === 'license' ? 'licence file' : 'registration token'}); acceptance not verified${license.required === true || license.required === false ? '' : '; requirement unknown'}`
+          ? `credential supplied (${license.source === 'license' ? 'licence file' : license.source === 'reg_token' ? 'registration token' : 'type unknown'}); acceptance not verified${license.required === true || license.required === false ? '' : '; requirement unknown'}`
           : license.supplied === false
             ? license.required === true
               ? 'none supplied (required)'
@@ -188,8 +188,8 @@ export function renderMarkdown(payloadValue: unknown, captureValue?: unknown): s
                 ? 'none supplied (not required)'
                 : 'none supplied (requirement unknown)'
             : license.required === true || license.required === false
-              ? 'unknown (the record predates the marker)'
-              : 'unknown (the record predates the marker; requirement unknown)',
+              ? 'unknown (credential presence could not be determined)'
+              : 'unknown (credential presence could not be determined; requirement unknown)',
       ],
       ['State', markdownText(runtime.state)],
     ]),

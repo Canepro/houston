@@ -508,7 +508,7 @@ export async function mergedOverrides(
  */
 async function refreshCredentialMarkers(
   extra: Bag,
-  before: { license: boolean; token: boolean },
+  before: Awaited<ReturnType<typeof suppliedCredentials>>,
   doc: ComposeDoc,
   target: string,
 ): Promise<void> {
@@ -516,16 +516,27 @@ async function refreshCredentialMarkers(
   if (supplied.license !== before.license || supplied.token !== before.token) {
     extra[CREDENTIALS_PENDING] = true;
   }
-  const tokenMarker = typeof extra.reg_token_supplied === 'boolean';
-  if (!tokenMarker && extra.licensed !== true && typeof extra.effective_license !== 'boolean') {
+  const tokenMarker =
+    typeof extra.reg_token_supplied === 'boolean' || extra.reg_token_supplied === null;
+  if (
+    !tokenMarker &&
+    extra.licensed !== true &&
+    typeof extra.effective_license !== 'boolean' &&
+    extra.effective_license !== null
+  ) {
     return;
   }
-  if (tokenMarker) extra.reg_token_supplied = supplied.token;
+  if (tokenMarker) extra.reg_token_supplied = supplied.token === 'unknown' ? null : supplied.token;
   // Absent means unlicensed once the token marker exists; before it, absent sends evidence to
   // the Compose file, which finds a licence added here.
-  if (!supplied.license) delete extra.licensed;
+  if (supplied.license !== true) delete extra.licensed;
   else if (tokenMarker) extra.licensed = true;
-  if (typeof extra.effective_license === 'boolean') extra.effective_license = supplied.license;
+  if (
+    tokenMarker ||
+    typeof extra.effective_license === 'boolean' ||
+    extra.effective_license === null
+  )
+    extra.effective_license = supplied.license === 'unknown' ? null : supplied.license;
 }
 
 export async function setEnvLocked(

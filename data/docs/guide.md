@@ -196,7 +196,10 @@ names and never holds; on Kubernetes into a Secret the pod reads it from. `env`,
 
 Rocket.Chat 8.8 and 8.9 announce that LDAP, SAML and Custom OAuth login will need a Premium
 plan from 9.0. On Rocket.Chat 9 and later, `up` warns when an `ldap`, `saml` or `oidc`
-workspace has neither `--license` nor `--reg-token`.
+workspace has no effective licence or registration token in its final configuration.
+Overrides can blank either credential. When Compose must resolve an interpolated value or
+an inherited host variable, Houston reports unknown presence until that input is resolved.
+Evidence preserves that uncertainty and does not read ambient host credentials.
 
 ---
 

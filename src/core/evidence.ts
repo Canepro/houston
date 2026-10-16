@@ -37,7 +37,14 @@ import * as config from '../lib/config';
 import { ValidationError } from '../lib/errors';
 import { isTruthy, quotedText, toText } from '../lib/format';
 import { pathExpandUser } from '../lib/home';
-import { credentialKey, REDACTED, redactAssignedText } from '../lib/redact';
+import {
+  credentialKey,
+  discoverTextSecrets,
+  type KnownSecret,
+  REDACTED,
+  redactAssignedText,
+  redactKnownValues,
+} from '../lib/redact';
 import { namesOf } from '../lib/presets/composite';
 import * as presets from '../lib/presets/index';
 import { PROFILES } from '../lib/seed-profiles';
@@ -299,18 +306,30 @@ async function licenseOf(meta: Metadata, deployment: string): Promise<Record<str
   // installs the licence. `effective_license`, when recorded, is what Rocket.Chat ran with,
   // and inspect and the notes read it the same way.
   const licensed =
-    typeof extra.effective_license === 'boolean'
-      ? extra.effective_license
-      : extra.licensed === true;
+    extra.effective_license === null
+      ? false
+      : typeof extra.effective_license === 'boolean'
+        ? extra.effective_license
+        : extra.licensed === true;
   if (licensed) return { required, supplied: true, source: 'license' };
-  if (extra.reg_token_supplied === true) return { required, supplied: true, source: 'reg_token' };
+  const licenseUnknown = extra.effective_license === null;
+  if (extra.reg_token_supplied === true)
+    return { required, supplied: true, source: licenseUnknown ? 'unknown' : 'reg_token' };
+  if (licenseUnknown || extra.reg_token_supplied === null)
+    return { required, supplied: null, source: 'unknown' };
   if (extra.reg_token_supplied === false) return { required, supplied: false, source: null };
   const inferred = await credentialsInCompose(meta);
   if (inferred === null) return { required, supplied: null, source: 'unknown' };
-  // Licence first, as for the markers: a legacy record set `licensed` only for `--license`,
-  // so a preset, `--env` or env-file licence is found here or not at all.
-  if (inferred.license) return { required, supplied: true, source: 'license' };
-  return { required, supplied: inferred.token, source: inferred.token ? 'reg_token' : null };
+  if (inferred.license === true) return { required, supplied: true, source: 'license' };
+  if (inferred.token === true)
+    return {
+      required,
+      supplied: true,
+      source: inferred.license === 'unknown' ? 'unknown' : 'reg_token',
+    };
+  if (inferred.license === 'unknown' || inferred.token === 'unknown')
+    return { required, supplied: null, source: 'unknown' };
+  return { required, supplied: false, source: null };
 }
 
 /**
@@ -319,7 +338,7 @@ async function licenseOf(meta: Metadata, deployment: string): Promise<Record<str
  */
 async function credentialsInCompose(
   meta: Metadata,
-): Promise<{ license: boolean; token: boolean } | null> {
+): Promise<Awaited<ReturnType<typeof suppliedCredentials>> | null> {
   if (topology.ofMeta(meta) === topology.KUBERNETES) return null;
   let doc: Record<string, unknown>;
   try {
@@ -573,20 +592,18 @@ export async function record(
  * redaction still protects standard deployment fields, but cannot discover an unknown secret in
  * arbitrary YAML.
  */
-function redactKnownSecrets(value: string, knownSecrets: readonly string[]): string {
-  return [...new Set(knownSecrets.filter((secret) => secret !== ''))]
-    .sort((left, right) => right.length - left.length)
-    .reduce((masked, secret) => masked.replaceAll(secret, REDACTED), value);
+function redactKnownSecrets(value: string, knownSecrets: readonly KnownSecret[]): string {
+  return redactKnownValues(value, knownSecrets);
 }
 
-function matchesKnownSecret(value: string, knownSecrets: readonly string[]): boolean {
+function matchesKnownSecret(value: string, knownSecrets: readonly KnownSecret[]): boolean {
   return redactKnownSecrets(value, knownSecrets) !== value;
 }
 
 /** YAML's canonical scalar spelling can differ from JavaScript's `String`, such as `-0`. */
 function matchesKnownScalar(
   value: number | boolean | null,
-  knownSecrets: readonly string[],
+  knownSecrets: readonly KnownSecret[],
 ): boolean {
   return (
     matchesKnownSecret(String(value), knownSecrets) ||
@@ -601,7 +618,7 @@ function matchesKnownScalar(
  */
 function redactKnownScalarNodes(
   node: unknown,
-  knownSecrets: readonly string[],
+  knownSecrets: readonly KnownSecret[],
   forceValue = false,
   mapKey = false,
   seen = new WeakSet<object>(),
@@ -637,30 +654,30 @@ function redactKnownScalarNodes(
 function redactArtifactText(
   value: string,
   secret: boolean,
-  knownSecrets: readonly string[],
+  knownSecrets: readonly KnownSecret[],
 ): string {
   if (secret) return REDACTED;
   // A bundle also masks the URL user name, which log redaction leaves readable and which can
   // be the credential itself. The same rule masks a JSON string inside the value.
-  return redactKnownSecrets(redactAssignedText(value), knownSecrets);
+  return redactAssignedText(value, knownSecrets);
 }
 
 /** Redact standard credential fields and the workspace's known secret values in parsed YAML. */
 function redactArtifactValue(
   value: unknown,
-  knownSecrets: readonly string[],
+  knownSecrets: readonly KnownSecret[],
   secret = false,
   seen = new WeakSet<object>(),
 ): unknown {
   if (typeof value === 'string') return redactArtifactText(value, secret, knownSecrets);
-  if (Array.isArray(value))
-    return value.map((item) => redactArtifactValue(item, knownSecrets, secret, seen));
   if (typeof value === 'number' || typeof value === 'boolean' || value === null) {
     return secret || matchesKnownScalar(value, knownSecrets) ? REDACTED : value;
   }
   if (typeof value !== 'object') return secret ? REDACTED : value;
   if (seen.has(value)) return REDACTED;
   seen.add(value);
+  if (Array.isArray(value))
+    return value.map((item) => redactArtifactValue(item, knownSecrets, secret, seen));
 
   const fields = value as Record<string, unknown>;
   const name = toText(fields.name);
@@ -678,19 +695,76 @@ function redactArtifactValue(
   return out;
 }
 
+/** Discover before `toJS` loses duplicate members and original numeric spellings. */
+function discoverArtifactSecrets(
+  node: unknown,
+  doc: YAML.Document,
+  secrets: Set<string>,
+  wholeSecrets: Set<string>,
+  secret = false,
+  seen = new WeakMap<object, boolean>(),
+  depth = 0,
+): void {
+  if (typeof node !== 'object' || node === null) return;
+  // A benign alias visited first must still be revisited under a credential key.
+  if (seen.has(node) && (seen.get(node) === true || !secret)) return;
+  if (depth > 100) throw new RangeError('artifact credential nesting exceeds limit');
+  seen.set(node, secret);
+  const visit = (child: unknown, credential = secret): void =>
+    discoverArtifactSecrets(child, doc, secrets, wholeSecrets, credential, seen, depth + 1);
+  const add = (text: string, whole = false): void => {
+    if (text !== '') (whole ? wholeSecrets : secrets).add(text);
+  };
+  if (YAML.isAlias(node)) {
+    visit(node.resolve(doc));
+  } else if (YAML.isScalar(node)) {
+    const value: unknown = node.value;
+    if (typeof value === 'string') {
+      if (secret) add(value);
+      discoverTextSecrets(value, add);
+    } else if (secret) {
+      add(String(value), true);
+      add(YAML.stringify(value).replace(/\n$/u, ''), true);
+      if (typeof node.source === 'string') add(node.source, true);
+    }
+  } else if (YAML.isSeq(node)) {
+    for (const item of node.items) visit(item);
+  } else if (YAML.isMap(node)) {
+    const name = node.get('name', true);
+    const resolvedName = YAML.isAlias(name) ? name.resolve(doc) : name;
+    const named = YAML.isScalar(resolvedName) && credentialKey(String(resolvedName.value));
+    for (const pair of node.items) {
+      visit(pair.key, false);
+      const key = YAML.isAlias(pair.key) ? pair.key.resolve(doc) : pair.key;
+      const text = YAML.isScalar(key) ? String(key.value) : '';
+      visit(pair.value, secret || credentialKey(text) || (text === 'value' && named));
+    }
+  }
+}
+
 /** Render an artifact for attachment, or omit it rather than copying unparseable bytes. */
 function redactedArtifact(
   artifact: CapturedArtifact,
-  knownSecrets: readonly string[],
+  knownSecrets: readonly KnownSecret[],
 ): string | null {
   if (artifact.bytes === null) return null;
   try {
     const docs = YAML.parseAllDocuments(artifact.bytes.toString('utf8'), { uniqueKeys: false });
     if (docs.length === 0 || docs.some((doc) => doc.errors.length > 0)) return null;
+    const secrets = new Set(
+      knownSecrets.filter((item): item is string => typeof item === 'string'),
+    );
+    const wholeSecrets = new Set<string>();
+    // Keep aliases under the parser's existing expansion limit and visit every document first.
+    for (const doc of docs) discoverArtifactSecrets(doc.contents, doc, secrets, wholeSecrets);
+    const discovered: KnownSecret[] = [
+      ...secrets,
+      ...[...wholeSecrets].map((value) => ({ value, whole: true as const })),
+    ];
     return docs
       .map((doc) => {
-        redactKnownScalarNodes(doc.contents, knownSecrets);
-        return YAML.stringify(redactArtifactValue(doc.toJS() as unknown, knownSecrets));
+        redactKnownScalarNodes(doc.contents, discovered);
+        return YAML.stringify(redactArtifactValue(doc.toJS() as unknown, discovered));
       })
       .join('---\n');
   } catch {
@@ -762,7 +836,7 @@ async function writeBundleAt(
   dest: string,
   payload: Record<string, unknown>,
   artifact: CapturedArtifact,
-  knownSecrets: readonly string[],
+  knownSecrets: readonly KnownSecret[],
   capture?: unknown,
 ): Promise<Bundle> {
   // The manifest records the digest of the raw deployment file. Only attach the rendered

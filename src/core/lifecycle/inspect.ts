@@ -239,9 +239,11 @@ function buildAndLicense(meta: Metadata): { ci_build: string; licensed: boolean 
   const tag = meta.rcImage.startsWith(prefix) ? meta.rcImage.slice(prefix.length) : '';
   const extra = bag(meta.extra);
   const licensed =
-    typeof extra.effective_license === 'boolean'
-      ? extra.effective_license
-      : extra.licensed === true;
+    extra.effective_license === null
+      ? false
+      : typeof extra.effective_license === 'boolean'
+        ? extra.effective_license
+        : extra.licensed === true;
   return { ci_build: isBuildTag(tag) ? tag : '', licensed };
 }
 
