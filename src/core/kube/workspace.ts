@@ -343,10 +343,11 @@ async function installChart(options: ChartInstall): Promise<Record<string, unkno
     { phase: 'boot', pct: 60 },
   );
   await install({ namespace, context, values, chartVersion, emit });
-  // The tools Ingress is later work. Helm has accepted the release. A failure there must
-  // not leave an adopted namespace without the licence markers, and a failed Helm install
-  // must not gain them for a licence that was not already retained.
-  if (options.license !== '') {
+  // An adopted namespace is not deleted when later work fails, so the licence Helm just
+  // accepted has to be recorded before the tools Ingress can throw. A namespace this run
+  // created is deleted by that failure, Secret included, so its marker waits until the
+  // Ingress has succeeded and is still written before this function returns.
+  if (options.license !== '' && options.receipt.createdUid === '') {
     await noteInstalledLicense(name, namespace, context, options.receipt);
   }
   // The preset's own UIs at paths of the same name (Mailpit, Keycloak, the demo page).
@@ -364,6 +365,9 @@ async function installChart(options: ChartInstall): Promise<Record<string, unkno
       }),
       { namespace, context },
     );
+  }
+  if (options.license !== '' && options.receipt.createdUid !== '') {
+    await noteInstalledLicense(name, namespace, context, options.receipt);
   }
   return values;
 }

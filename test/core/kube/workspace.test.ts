@@ -1059,6 +1059,97 @@ describe('the values the release is installed with', () => {
     }
   });
 
+  it('does not keep a licence when rollback deletes the namespace this run created', async () => {
+    // Helm accepted the release, then the tools Ingress failed. The namespace was one
+    // this run created, so rollback deleted it and the Secret. The markers had already
+    // been written, the record survived, and the next empty payload referenced a Secret
+    // that was gone.
+    const LICENSE = 'synthetic-created-namespace-license';
+    const licenseRef = {
+      name: 'ROCKETCHAT_LICENSE',
+      valueFrom: { secretKeyRef: { name: 'houston-license', key: 'license' } },
+    };
+    const events: string[] = [];
+    const helmValues: Record<string, unknown>[] = [];
+    let failTools = false;
+    let useTls = false;
+    const req = (license: string) =>
+      createReq({
+        version: '8.5.1',
+        name: 'tk',
+        preset: 'email',
+        runtime: 'kubernetes',
+        offline: true,
+        wait: false,
+        license,
+      });
+    const refOf = (values: Record<string, unknown> | undefined) =>
+      (values?.extraEnv as unknown[] | undefined) ?? [];
+    harness();
+    mocked(sizing.checkCapacity).mockResolvedValue(undefined);
+    mocked(lifecyclePorts.pickHostPort).mockResolvedValue(3000);
+    mocked(lifecyclePorts.checkSidecarPorts).mockResolvedValue(undefined);
+    mocked(tlsplan.resolveTls).mockImplementation(() =>
+      Promise.resolve(useTls ? ({ mode: 'local', host: 'rc.example.test' } as never) : null),
+    );
+    mocked(tlsplan.kubernetesTlsPlan).mockResolvedValue({
+      host: 'rc.example.test',
+      ingressClass: 'traefik',
+      endpoint: { address: '127.0.0.1', port: 443, source: 'stated' },
+      context: 'prod',
+      issuer: { mode: 'local' },
+      clusterOwns443: true,
+    } as never);
+    mocked(tlsplan.routeKubernetesName).mockResolvedValue(undefined);
+    mocked(release.apply).mockImplementation((body: unknown) => {
+      const text = String(body);
+      if (text.includes('name: houston-license')) events.push('secret');
+      if (text.includes('houston-tools')) {
+        events.push('tools');
+        if (failTools) {
+          return Promise.reject(
+            new CreateFailedError('kubectl apply failed: tools ingress refused'),
+          );
+        }
+      }
+      return Promise.resolve();
+    });
+    mocked(release.install).mockImplementation((options: { values: Record<string, unknown> }) => {
+      events.push('helm');
+      helmValues.push(options.values);
+      return Promise.resolve();
+    });
+    try {
+      await paths.remove('tk');
+      await createKubernetes(req(''));
+
+      failTools = true;
+      useTls = true;
+      const toolsAt = events.length;
+      await expect(createKubernetes(req(LICENSE))).rejects.toThrow(
+        'kubectl apply failed: tools ingress refused',
+      );
+      const toolsPhase = events.slice(toolsAt);
+      expect(toolsPhase.indexOf('secret')).toBeGreaterThanOrEqual(0);
+      expect(toolsPhase.indexOf('secret')).toBeLessThan(toolsPhase.indexOf('helm'));
+      expect(toolsPhase.indexOf('helm')).toBeLessThan(toolsPhase.indexOf('tools'));
+      const removed = await readMeta('tk');
+      expect(removed.extra.retained_license).toBe(false);
+      expect(removed.extra.effective_license).toBe(false);
+      expect(removed.extra.incomplete).toBe(true);
+      expect(JSON.stringify(removed)).not.toContain(LICENSE);
+      expect(ran.some((argv) => argv.includes('delete'))).toBe(true);
+
+      failTools = false;
+      useTls = false;
+      await createKubernetes(req(''));
+      expect(refOf(helmValues.at(-1))).not.toContainEqual(licenseRef);
+      expect(JSON.stringify(helmValues.at(-1))).not.toContain(LICENSE);
+    } finally {
+      await paths.remove('tk');
+    }
+  });
+
   it('gives the chart a host OR a root_url, never both', async () => {
     // Two entries for ROOT_URL is a server-side-apply conflict, not an override -- so a
     // workspace with a TLS host must not also carry the port-forward URL.

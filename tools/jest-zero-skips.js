@@ -100,7 +100,8 @@ const ROOT = path.resolve(__dirname, '..');
 // R6 adds one mixed-replica credential lifecycle regression; collection measures 4539.
 // R7 adds one equivalent-file regression and two interrupted-create cleanup cases; total 4542.
 // R8 adds two interrupted-install controls and one workspace-identity control; total 4545.
-const FLOOR = 4545;
+// CI on 21aa5b3 measured 4550. This commit adds one created-namespace rollback regression.
+const FLOOR = 4551;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [
