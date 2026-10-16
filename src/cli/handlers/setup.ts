@@ -96,9 +96,10 @@ export async function run(invocation: Invocation) {
     if (!(await confirm('Apply these setup choices?')))
       return { ...(await setup.snapshot({ section })), action: 'cancelled' };
   }
-  const changed = defaults || Object.keys(patch).length > 0;
+  const applied = await setup.applyPatch(patch, { defaults, section });
+  const { changed, ...view } = applied;
   return {
-    ...(await setup.applyPatch(patch, { defaults, section })),
+    ...view,
     action: changed ? 'setup' : 'unchanged',
   };
 }

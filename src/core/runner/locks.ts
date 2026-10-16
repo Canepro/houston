@@ -85,14 +85,33 @@ export async function reproLock<T>(
  * OFD lock) around the same three steps; this is that lock, on that file, so the two
  * builds also exclude each other. Every production writer comes through here.
  */
-export async function updateConfig(mutate: (cfg: config.Config) => void): Promise<config.Config> {
+async function withConfigLock<T>(body: () => T | Promise<T>): Promise<T> {
   // The home made with its parents, the mode 0700 on the home alone.
   mkdirParents(config.home(), 0o700);
   const target = joinPath(config.home(), '.config.lock');
   // `.config.lock` opened `O_WRONLY | O_CREAT`: created 0600, never truncated, and a lock
   // that cannot be opened for writing is the established OS error here too.
-  return await withFileLock(target, () => config.updateConfig(mutate), {
+  return await withFileLock(target, body, {
     open: { truncate: false, mode: 0o600 },
+  });
+}
+
+export async function updateConfig(mutate: (cfg: config.Config) => void): Promise<config.Config> {
+  return await withConfigLock(() => config.updateConfig(mutate));
+}
+
+/**
+ * Read, decide, and write config.yaml under one cross-process lock.
+ *
+ * A caller with no change must avoid config.updateConfig: it always rewrites the file, which
+ * can refresh versioned metadata even when its callback did not mutate a value.
+ */
+export async function updateConfigIf(mutate: (cfg: config.Config) => boolean): Promise<boolean> {
+  return await withConfigLock(() => {
+    const cfg = config.loadConfig(false);
+    if (!mutate(cfg)) return false;
+    config.saveConfig(cfg);
+    return true;
   });
 }
 

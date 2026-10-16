@@ -10,7 +10,7 @@ import * as presets from '../lib/presets';
 import { deployment, scenarios, savedSelectors, DEPLOYMENTS } from '../lib/setup-selectors';
 import * as versions from '../lib/versions';
 import * as host from './runner/host';
-import { updateConfig } from './runner/locks';
+import { updateConfigIf } from './runner/locks';
 import { which } from './kube/tools';
 import { ENGINE_FLOOR_CPUS, ENGINE_FLOOR_MEMORY_GIB } from './lifecycle/sizing';
 
@@ -364,25 +364,18 @@ export async function snapshot(
     'owned-cluster',
   );
   // Legacy answers remain visible, but no unsupported resize permission is offered.
-  const commands = [
-    'houston',
-    'up',
-    '--version',
-    FIRST_VERSION,
-    '--name',
-    'first-repro',
-    '--wait',
-    '--runtime',
-    kube ? 'kubernetes' : 'docker',
-    '--deployment',
-    view.deployment,
-  ];
-  for (const name of view.scenarios) commands.push('--preset', name);
+  // Leave topology selectors absent so this command resolves through the saved setup choice.
+  // In particular, a saved microservices default reaches the owned-local guard instead of
+  // turning the generated command into an explicit remote-adoption request.
+  const commands = ['houston', 'up', '--version', FIRST_VERSION, '--name', 'first-repro', '--wait'];
   if (view.seed_profile !== 'none' && !deferred)
     commands.push('--seed', '--seed-profile', view.seed_profile);
   const shell = (value: string) =>
     /^[a-zA-Z0-9_./:-]+$/u.test(value) ? value : "'" + value.replaceAll("'", "'\\''") + "'";
-  const firstRun = conflict === '' ? commands.map(shell).join(' ') : '';
+  // A flagless command resolves its topology from persisted setup. A draft has not
+  // changed those selectors yet, so it must not be presented as an executable first run.
+  const firstRun =
+    conflict === '' && Object.keys(patch).length === 0 ? commands.map(shell).join(' ') : '';
   const gates: { kind: string; code: string; message: string; approve_with: string }[] = [];
   if (conflict !== '')
     gates.push({
@@ -474,32 +467,41 @@ export async function snapshot(
   };
 }
 
+function defaultPatch(
+  cfg: config.Config,
+  explicit: SetupPatch,
+  defaults: boolean,
+  section: string,
+): SetupPatch {
+  const patch = { ...explicit };
+  if (!defaults) return patch;
+  const saved = savedSelectors(cfg);
+  const storedPrefs = map(cfg.preferences);
+  const want = (name: string) => section === '' || section === name;
+  if (want('deployment') && !saved.answered_deployment && patch.deployment === undefined)
+    patch.deployment = saved.deployment;
+  if (want('scenarios') && !saved.answered_scenarios && patch.scenarios === undefined)
+    patch.scenarios = saved.scenarios;
+  if (want('seed') && !own(storedPrefs, 'seed_profile') && patch.seed_profile === undefined)
+    patch.seed_profile = PREFERENCES.seed_profile;
+  if (want('cleanup') && !own(storedPrefs, 'retain_runs') && patch.retain_runs === undefined)
+    patch.retain_runs = false;
+  return patch;
+}
+
 /** Validate under the config lock, then apply only supplied answers in one atomic write. */
 export async function applyPatch(
   raw: SetupPatch,
   options: { defaults?: boolean; section?: string } = {},
 ) {
   const explicit = validatedPatch(raw);
-  if (Object.keys(explicit).length === 0 && options.defaults !== true)
-    return await snapshot({ section: options.section ?? '' });
   const section = options.section ?? '';
   if (section !== '' && !SECTIONS.some((name) => name === section))
     throw new ValidationError(`unknown setup section ${section}`);
-  await updateConfig((cfg) => {
-    const patch = { ...explicit };
+  const changed = await updateConfigIf((cfg) => {
+    const patch = defaultPatch(cfg, explicit, options.defaults === true, section);
+    if (Object.keys(patch).length === 0) return false;
     const saved = savedSelectors(cfg);
-    const storedPrefs = map(cfg.preferences);
-    const want = (name: string) => section === '' || section === name;
-    if (options.defaults === true) {
-      if (want('deployment') && !saved.answered_deployment && patch.deployment === undefined)
-        patch.deployment = saved.deployment;
-      if (want('scenarios') && !saved.answered_scenarios && patch.scenarios === undefined)
-        patch.scenarios = saved.scenarios;
-      if (want('seed') && !own(storedPrefs, 'seed_profile') && patch.seed_profile === undefined)
-        patch.seed_profile = PREFERENCES.seed_profile;
-      if (want('cleanup') && !own(storedPrefs, 'retain_runs') && patch.retain_runs === undefined)
-        patch.retain_runs = false;
-    }
     const view = selection(cfg, patch);
     // Check all writable maps before mutating any of them.
     writable(cfg, 'onboarding');
@@ -524,6 +526,7 @@ export async function applyPatch(
     )
       cfg.default_scenarios = view.scenarios;
     onboarding.complete(cfg);
+    return true;
   });
-  return await snapshot({ section });
+  return { ...(await snapshot({ section })), changed };
 }

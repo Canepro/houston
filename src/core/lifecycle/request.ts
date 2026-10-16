@@ -250,6 +250,7 @@ export function sayWhereThisIsGoing(
   typedRuntime: string,
   emit: Emit = nullEmit,
 ): void {
+  if (req.implicitOwnedLocal) return;
   const saved = config.defaultKubeContext();
   if (!saved || String(req.context).trim()) return;
   if (topology.normalize(req.runtime) === topology.KUBERNETES) {
@@ -301,7 +302,8 @@ export function savedDefaultIsBillable(context: string): boolean {
  */
 export function reqContext(req: CreateReq): string {
   const named = String(req.context).trim();
-  return named || config.defaultKubeContext();
+  if (named) return named;
+  return req.implicitOwnedLocal ? '' : config.defaultKubeContext();
 }
 
 /** The params the preset does not document, sorted. */

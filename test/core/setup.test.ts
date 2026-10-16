@@ -30,10 +30,16 @@ it('previews a draft without changing durable answers, and rejects invalid patch
   });
   const file = path.join(config.home(), 'config.yaml');
   const before = fs.readFileSync(file);
-  const preview = await setup.snapshot({ draft: { seed_profile: 'none', retain_runs: false } });
+  const preview = await setup.snapshot({
+    draft: { deployment: 'microservices', seed_profile: 'none', retain_runs: false },
+  });
   expect(preview.persisted.preferences).toMatchObject({ seed_profile: 'large', retain_runs: true });
-  expect(preview.selection).toMatchObject({ seed_profile: 'none', retain_runs: false });
-  expect(preview.first_run_command).not.toContain('--seed');
+  expect(preview.selection).toMatchObject({
+    deployment: 'microservices',
+    seed_profile: 'none',
+    retain_runs: false,
+  });
+  expect(preview.first_run_command).toBe('');
   for (const patch of [
     { retain_runs: 'false' },
     { grants: { owned_cluster: 'true' } },
