@@ -706,8 +706,12 @@ describe('SSH loopback guidance', () => {
         ['8082', ['--preset', 'saml']],
         ['9090', ['--runtime', 'kubernetes', '--monitor']],
         ['4402', ['--runtime', 'kubernetes', '--port', '4400', '--replicas', '3']],
+        ['9090', ['--deployment', 'microservices', '--monitor']],
+        // A re-up: the workspace the previous row created is kept, and its record decides.
+        ['9090', ['--monitor', 're-up']],
       ] as const) {
-        await paths.remove(name);
+        const reUp = (flags as readonly string[]).includes('re-up');
+        if (!reUp) await paths.remove(name);
         for (const key of keys) delete process.env[key];
         process.env.SSH_TTY = '/dev/ttys001';
         process.env.HOUSTON_BIND_HOST = '127.0.0.1';
@@ -735,7 +739,15 @@ describe('SSH loopback guidance', () => {
         let stderr = '';
         const io = { writeOut: () => undefined, writeErr: (text: string) => void (stderr += text) };
         const code = await app.runCli(
-          ['up', '--version', '8.5.1', '--name', name, '--offline', ...flags],
+          [
+            'up',
+            '--version',
+            '8.5.1',
+            '--name',
+            name,
+            '--offline',
+            ...(flags as readonly string[]).filter((flag) => flag !== 're-up'),
+          ],
           { execute: handlers.createExecutor(io), io },
         );
         observed.push([local, code, create.mock.calls.length, stderr.includes('side ports')]);
@@ -757,6 +769,8 @@ describe('SSH loopback guidance', () => {
       // Kubernetes forwards Grafana only and publishes no replica ports.
       ['9090', 0, 1, false],
       ['4402', 0, 1, false],
+      ['9090', 0, 1, false],
+      ['9090', 0, 1, false],
     ]);
   });
 

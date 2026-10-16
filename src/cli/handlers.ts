@@ -800,13 +800,10 @@ async function confirmDestruction(
  * monitoring when asked for, and an explicit `--port`'s replica ports. A port allocated
  * during the create is checked by the handoff afterwards.
  */
-function portsKnownBeforeUp(o: Values): number[] {
+async function portsKnownBeforeUp(o: Values): Promise<number[]> {
   const presets = require('../lib/presets') as typeof PresetsNS;
   const config = require('../lib/config') as typeof ConfigNS;
   const topology = require('../core/topology') as typeof TopologyNS;
-  // Where it runs, as create infers it: a named runtime, else a context means Kubernetes,
-  // else Docker. Kubernetes forwards Grafana only and publishes no per-replica ports.
-  const named = text(o.runtime).trim();
   const normalized = (value: string): string => {
     try {
       return topology.normalize(value);
@@ -814,8 +811,18 @@ function portsKnownBeforeUp(o: Values): number[] {
       return value; // An invalid name is the create's refusal to make.
     }
   };
-  const runtime = normalized(named || (text(o.context).trim() ? topology.KUBERNETES : ''));
-  const docker = runtime !== topology.KUBERNETES;
+  // Only a NEW workspace whose request is plainly Docker is checked here. A Kubernetes
+  // request, a microservices deployment, a context, or a re-up (whose recorded runtime,
+  // ports and settings win) is checked by the handoff after create instead.
+  const deployment = normalized(text(o.deployment));
+  if (
+    normalized(text(o.runtime)) === topology.KUBERNETES ||
+    text(o.context).trim() !== '' ||
+    deployment === topology.MICROSERVICES ||
+    (await upTargetsExistingWorkspace(o))
+  ) {
+    return [];
+  }
   const names = strings(o.preset);
   const ports: number[] = [];
   for (const name of names) {
@@ -825,16 +832,36 @@ function portsKnownBeforeUp(o: Values): number[] {
       // An unknown preset is the create's refusal to make, with its own message.
     }
   }
-  if (bool(o.monitor)) ports.push(...(docker ? config.MONITOR_PORTS : [config.MONITOR_PORTS[1]]));
+  if (bool(o.monitor)) ports.push(...config.MONITOR_PORTS);
   const port = number(o.port);
-  const multi =
-    normalized(text(o.deployment)) === topology.MULTI_INSTANCE || names.includes('multi-instance');
+  const multi = deployment === topology.MULTI_INSTANCE || names.includes('multi-instance');
   // A multi-instance deployment without --replicas runs its default of two.
   const replicas = number(o.replicas) || (multi ? 2 : 0);
-  if (docker && port > 0 && replicas > 1) {
+  if (port > 0 && replicas > 1) {
     for (let at = 1; at <= replicas; at += 1) ports.push(port + at);
   }
   return ports.filter((value) => Number.isSafeInteger(value) && value > 0);
+}
+
+/** Whether `up` names a workspace that already has a record, as create resolves the name. */
+async function upTargetsExistingWorkspace(o: Values): Promise<boolean> {
+  const types = require('../core/lifecycle/types') as typeof LifecycleTypesNS;
+  const audit = require('../core/audit') as typeof AuditNS;
+  const naming = require('../core/lifecycle/naming') as typeof NamingNS;
+  const ownership = require('../core/lifecycle/ownership') as typeof OwnershipNS;
+  const paths = require('../core/runner/paths') as typeof RunnerPathsNS;
+  const req = types.createReq({
+    version: text(o.version),
+    preset: strings(o.preset).length > 0 ? compositeName(strings(o.preset)) : '',
+    runtime: text(o.runtime),
+    context: text(o.context),
+    name: text(o.name),
+    actor: audit.actor(),
+    bind: text(o.bind),
+  });
+  await ownership.claimTypedName(req);
+  const name = naming.deriveFor(req);
+  return name !== '' && (await paths.exists(name));
 }
 
 async function handoffBindForUp(o: Values): Promise<string | null> {
@@ -943,7 +970,7 @@ async function dispatch(
           (require('../core/lifecycle/access') as typeof AccessNS).validateEnvironment(
             process.env,
             bind,
-            portsKnownBeforeUp(o),
+            await portsKnownBeforeUp(o),
           );
         }
       }
