@@ -699,23 +699,36 @@ function redactArtifactValue(
 
 /**
  * Whether `flag` takes `value` as a credential: a long credential flag (`--password`), or `-p`
- * followed by something that is not a port number, as `mongosh -p` and `mysql -p` use it.
+ * once a user flag came earlier in the same command, as `mongosh -u x -p` and `mysql -u x -p`
+ * write it. Elsewhere `-p` is a port or `mkdir -p`, and masking those would erase evidence.
  */
-function credentialArgument(flag: string, value: string): boolean {
+function credentialArgument(flag: string, value: string, userGiven: boolean): boolean {
   if (credentialFlag(flag)) return true;
-  return flag === '-p' && value !== '' && !/^[0-9]+(?::[0-9]+)*$/u.test(value);
+  return flag === '-p' && userGiven && value !== '';
 }
 
-/** The values after credential flags in one command string, quotes removed. */
+const USER_FLAGS: readonly string[] = ['-u', '--user', '--username'];
+
+/**
+ * Shell words of one command string: a quoted run is one word without its quotes, and `;`,
+ * `&`, `|`, parentheses and redirections end a word rather than joining the value before them.
+ */
+function commandWords(text: string): string[] {
+  const words: string[] = [];
+  const word = /'([^']*)'|"((?:[^"\\]|\\.)*)"|([^\s'";&|()<>]+)/gu;
+  for (const match of text.matchAll(word)) words.push(match[1] ?? match[2] ?? match[3] ?? '');
+  return words;
+}
+
+/** The values after credential flags in one command string. */
 function discoverCommandText(text: string, add: (value: string) => void): void {
-  const unquote = (token: string): string => token.replace(/^(['"])(.*)\1$/su, '$2');
-  const tokens = text
-    .split(/\s+/u)
-    .filter((token) => token !== '')
-    .map(unquote);
-  for (let index = 0; index + 1 < tokens.length; index += 1) {
-    const value = tokens[index + 1] ?? '';
-    if (credentialArgument(tokens[index] ?? '', value)) add(value);
+  const words = commandWords(text);
+  let userGiven = false;
+  for (let index = 0; index + 1 < words.length; index += 1) {
+    const flag = words[index] ?? '';
+    if (USER_FLAGS.includes(flag)) userGiven = true;
+    const value = words[index + 1] ?? '';
+    if (credentialArgument(flag, value, userGiven)) add(value);
   }
 }
 
@@ -763,14 +776,16 @@ function discoverArtifactSecrets(
   // a credential on its own, so classify it here, before any scalar renders.
   const discoverArguments = (list: YAML.YAMLSeq): void => {
     const items = list.items.map((item) => (YAML.isAlias(item) ? item.resolve(doc) : item));
+    let userGiven = false;
     for (let index = 0; index < items.length; index += 1) {
       const flag = items[index];
       if (!YAML.isScalar(flag) || typeof flag.value !== 'string') continue;
       // A shell string (`sh -c "client --password X"`, `CMD-SHELL`) holds its own arguments.
       discoverCommandText(flag.value, add);
+      if (USER_FLAGS.includes(flag.value)) userGiven = true;
       const next = items[index + 1];
       const value = YAML.isScalar(next) ? String(next.value) : '';
-      if (credentialArgument(flag.value, value)) visit(list.items[index + 1], true);
+      if (credentialArgument(flag.value, value, userGiven)) visit(list.items[index + 1], true);
     }
   };
   if (YAML.isAlias(node)) {

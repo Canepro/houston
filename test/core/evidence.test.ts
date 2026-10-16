@@ -1515,34 +1515,38 @@ describe('the bundle', () => {
     expect(parsed['x-control']).toBe('readable');
   });
 
-  it('discovers credential flags inside command strings, sparing a port after -p', async () => {
+  it('discovers credential flags inside quoted command strings, and -p only after a user', async () => {
     const { compose } = await bundledCompose(
       'e7-argv-strings',
       [
         'services:',
         '  rocketchat:',
         '    image: example',
-        '    command: client --reg-token StringCommandSentinel --port 27017',
-        '    entrypoint: [sh, -c, "client --password \'ShellStringSentinel\' --verbose"]',
+        '    command: client --reg-token "Two WordsSentinel" --port 27017',
+        '    entrypoint: [sh, -c, "client --password \'QuotedSentinel\'; echo done"]',
         '    healthcheck:',
-        '      test: [CMD-SHELL, "mongosh -p ShortFlagSentinel --eval ping"]',
+        '      test: [CMD-SHELL, "mongosh -u admin -p ShortFlagSentinel --eval ping"]',
         '  proxy:',
         '    image: example',
-        '    command: proxy -p 8080',
+        '    command: sh -c "mkdir -p /data/db && proxy -p 8080"',
+        'x-copy: QuotedSentinel',
         'x-port: 8080',
         'x-control: readable',
         '',
       ].join('\n'),
     );
-    expect(compose).not.toContain('StringCommandSentinel');
-    expect(compose).not.toContain('ShellStringSentinel');
+    expect(compose).not.toContain('WordsSentinel');
+    expect(compose).not.toContain('QuotedSentinel');
     expect(compose).not.toContain('ShortFlagSentinel');
     const parsed = YAML.parse(compose) as Record<string, unknown>;
     expect(pick(parsed, 'services', 'rocketchat', 'command')).toBe(
-      'client --reg-token ******** --port 27017',
+      'client --reg-token "********" --port 27017',
     );
-    // A numeric value after -p is a port, not a password, and stays readable everywhere.
-    expect(pick(parsed, 'services', 'proxy', 'command')).toBe('proxy -p 8080');
+    expect(parsed['x-copy']).toBe('********');
+    // Without a user flag, -p is mkdir's or a port, and stays readable everywhere.
+    expect(pick(parsed, 'services', 'proxy', 'command')).toBe(
+      'sh -c "mkdir -p /data/db && proxy -p 8080"',
+    );
     expect(parsed['x-port']).toBe(8080);
     expect(parsed['x-control']).toBe('readable');
   });
