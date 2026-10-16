@@ -814,11 +814,17 @@ async function portsKnownBeforeUp(o: Values): Promise<number[]> {
   // Only a NEW workspace whose request is plainly Docker is checked here. A Kubernetes
   // request, a microservices deployment, a context, or a re-up (whose recorded runtime,
   // ports and settings win) is checked by the handoff after create instead.
-  const deployment = normalized(text(o.deployment));
+  // The deployment as Docker would read it; any spelling Docker cannot host (`micro`,
+  // `Microservices`) or does not know leaves the decision to create.
+  let deployment: string;
+  try {
+    deployment = topology.normalizeDeployment(text(o.deployment), topology.DOCKER);
+  } catch {
+    return [];
+  }
   if (
     normalized(text(o.runtime)) === topology.KUBERNETES ||
     text(o.context).trim() !== '' ||
-    deployment === topology.MICROSERVICES ||
     (await upTargetsExistingWorkspace(o))
   ) {
     return [];

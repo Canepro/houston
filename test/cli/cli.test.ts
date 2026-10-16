@@ -707,6 +707,7 @@ describe('SSH loopback guidance', () => {
         ['9090', ['--runtime', 'kubernetes', '--monitor']],
         ['4402', ['--runtime', 'kubernetes', '--port', '4400', '--replicas', '3']],
         ['9090', ['--deployment', 'microservices', '--monitor']],
+        ['9090', ['--deployment', 'Micro', '--monitor']],
         // A re-up: the workspace the previous row created is kept, and its record decides.
         ['9090', ['--monitor', 're-up']],
       ] as const) {
@@ -769,6 +770,7 @@ describe('SSH loopback guidance', () => {
       // Kubernetes forwards Grafana only and publishes no replica ports.
       ['9090', 0, 1, false],
       ['4402', 0, 1, false],
+      ['9090', 0, 1, false],
       ['9090', 0, 1, false],
       ['9090', 0, 1, false],
     ]);
