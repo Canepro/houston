@@ -1,6 +1,7 @@
 /** Goal-first setup shared by the CLI and read-only GUI API. */
 import * as os from 'node:os';
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 import * as config from '../lib/config';
 import * as onboarding from '../lib/onboarding';
@@ -133,8 +134,16 @@ function validatedPatch(input: unknown): SetupPatch {
   }
   return out;
 }
+/** Explicit replacements need not parse the malformed saved value they repair. */
+function unreplacedSelectors(cfg: config.Config, patch: SetupPatch) {
+  return savedSelectors({
+    ...cfg,
+    ...(patch.deployment === undefined ? {} : { default_deployment: patch.deployment }),
+    ...(patch.scenarios === undefined ? {} : { default_scenarios: patch.scenarios }),
+  });
+}
 function selection(cfg: config.Config, patch: SetupPatch) {
-  const saved = savedSelectors(cfg);
+  const saved = unreplacedSelectors(cfg, patch);
   const prefs = map(cfg.preferences);
   const dep = patch.deployment ?? saved.deployment;
   let selected = patch.scenarios === undefined ? saved.scenarios : scenarios(patch.scenarios);
@@ -171,14 +180,17 @@ export async function detectEnvironment() {
   const tools = Object.fromEntries(
     ['docker', 'kubectl', 'helm', 'kind'].map((name) => [name, which(name) !== '']),
   );
-  let free = 0;
+  let free: number | null = null;
   try {
-    const disk = fs.statfsSync(config.home());
+    let directory = config.home();
+    while (!fs.existsSync(directory) && path.dirname(directory) !== directory)
+      directory = path.dirname(directory);
+    const disk = fs.statfsSync(directory);
     free = (disk.bavail * disk.bsize) / 1024 ** 3;
   } catch {
-    /* Home may not exist yet. */
+    /* A failed probe is unknown, not a measured zero. */
   }
-  const missing = ['kubectl', 'helm', 'kind'].filter((name) => tools[name] !== true);
+  const missing = ['kubectl', 'helm'].filter((name) => tools[name] !== true);
   const enoughCapacity =
     engine !== null &&
     engine.cpus >= ENGINE_FLOOR_CPUS &&
@@ -197,6 +209,8 @@ export async function detectEnvironment() {
     engine_memory_gib: (engine?.memBytes ?? 0) / 1024 ** 3,
     engine_kernel_version: engine?.kernel ?? '',
     missing_kubernetes_tools: missing,
+    kubernetes_provisioning_available:
+      tools.kind === true && missing.length === 0 && enoughCapacity,
     microservices_ready: engine !== null && missing.length === 0 && enoughCapacity,
     engine_resize_supported: false,
   };
@@ -475,7 +489,7 @@ function defaultPatch(
 ): SetupPatch {
   const patch = { ...explicit };
   if (!defaults) return patch;
-  const saved = savedSelectors(cfg);
+  const saved = unreplacedSelectors(cfg, explicit);
   const storedPrefs = map(cfg.preferences);
   const want = (name: string) => section === '' || section === name;
   if (want('deployment') && !saved.answered_deployment && patch.deployment === undefined)
@@ -501,7 +515,7 @@ export async function applyPatch(
   const changed = await updateConfigIf((cfg) => {
     const patch = defaultPatch(cfg, explicit, options.defaults === true, section);
     if (Object.keys(patch).length === 0) return false;
-    const saved = savedSelectors(cfg);
+    const saved = unreplacedSelectors(cfg, patch);
     const view = selection(cfg, patch);
     // Check all writable maps before mutating any of them.
     writable(cfg, 'onboarding');

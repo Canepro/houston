@@ -22,6 +22,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 
 const ROOT = path.resolve(__dirname, '..');
 const TEMPLATE = path.join(ROOT, 'tools', 'skill', 'SKILL.template.md');
@@ -126,7 +127,17 @@ function generate() {
   require(path.join(ROOT, 'tools', 'ts-require')).install();
   const { capabilities } = require(path.join(ROOT, 'src', 'cli', 'capabilities.ts'));
   const version = require(path.join(ROOT, 'package.json')).version;
-  return render(capabilities(), fs.readFileSync(TEMPLATE, 'utf8'), version);
+  // A packaged skill describes bundled presets, never the caller's private catalogue.
+  const previous = process.env.HOUSTON_HOME;
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-skill-generate-'));
+  try {
+    process.env.HOUSTON_HOME = home;
+    return render(capabilities(), fs.readFileSync(TEMPLATE, 'utf8'), version);
+  } finally {
+    if (previous === undefined) delete process.env.HOUSTON_HOME;
+    else process.env.HOUSTON_HOME = previous;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 }
 
 if (require.main === module) {

@@ -243,14 +243,8 @@ export async function createUnderTheLock(
       journalClear(note);
       throw error;
     }
-    // RE-KEYED TO THE WORKSPACE THAT EXISTS. The note is recorded under the name derived
-    // BEFORE `resolveAxes` ran, and `--deployment multi-instance` without a `--name` renames
-    // the workspace on the way (`rc8-5-1` becomes `rc8-5-1-multi-instance`). With `seedHere`
-    // the note is the CALLER's to close, by the name it is handed back -- so the one under
-    // the old name was never cleared, and `doctor` reported an unfinished create for a
-    // workspace that does not exist. Moved rather than dropped: until the caller's seed
-    // lands, a kill must still leave a note, for the right name. The previous
-    // implementation moves it the same way.
+    // Direct callers can still supply a pre-normalized name. Keep their seedHere
+    // recovery note under the returned workspace until the caller finishes seeding.
     const created = isTruthy(out.name) ? String(out.name) : name;
     if (req.seedHere && created !== name) {
       journalClear(note);
@@ -308,10 +302,19 @@ export async function createRepro(
   await ownership.claimTypedName(req);
   // A workspace brought back goes to its recorded cluster: carried before anything says
   // where this is going, or that would name the box's default instead.
-  await carryRecordedAxes(req, naming.deriveFor(req));
+  const recordedName = naming.deriveFor(req);
+  await carryRecordedAxes(req, recordedName);
+  // A recorded preset may differ from the spelling that originally derived this name.
+  // Reusing that workspace must not derive a different lock from its recorded preset.
+  if (req.name === '' && recordedName !== '' && (await paths.exists(recordedName)))
+    req.name = recordedName;
+  await applySavedSelectors(req);
   req.runtime = request.inferRuntime(req);
 
-  const name = naming.deriveFor(req);
+  // Deployment aliases can add a preset suffix too. The lock and recovery journal
+  // must use the same effective name that the runtime planner will write.
+  const axes = topology.resolveAxes(req);
+  const name = naming.deriveFor({ ...req, preset: axes.preset });
   if (!name) {
     throw new ValidationError(
       `name '${req.name}' contains no usable characters (want a-z, 0-9, '-')`,
@@ -450,6 +453,31 @@ export async function carryRecordedAxes(req: CreateReq, name: string): Promise<v
   req.monitor ||= isTruthy(meta.extra.monitoring);
 }
 
+/** Saved defaults must be applied before the front door derives its lock/journal name. */
+async function applySavedSelectors(req: CreateReq): Promise<void> {
+  const existing = naming.deriveFor(req);
+  // Saved choices apply only to a new workspace with no explicit topology/scenario.
+  // Reusing a record must keep its recorded axes, even after setup defaults change.
+  if (
+    !(existing && (await paths.exists(existing))) &&
+    req.runtime === '' &&
+    req.context === '' &&
+    req.deployment === '' &&
+    req.preset === ''
+  ) {
+    const saved = savedSelectors();
+    if (saved.answered_deployment || saved.answered_scenarios) {
+      req.deployment = saved.deployment;
+      req.preset = compositeName(saved.scenarios);
+      req.implicitOwnedLocal = saved.deployment === 'microservices';
+    } else {
+      // Freeze the unanswered choice too: a config update during the workspace-lock
+      // wait must not choose another workspace after its lock has already been taken.
+      req.preset = 'default';
+    }
+  }
+}
+
 /** Runtime x deployment x scenario, decided before anything else reads the request. */
 export async function resolveAxesStep(plan: CreatePlan): Promise<void> {
   // An existing workspace's RECORDED runtime beats the flag default. Without this,
@@ -459,22 +487,7 @@ export async function resolveAxesStep(plan: CreatePlan): Promise<void> {
   // Read BEFORE resolveAxes: it normalises an empty --runtime to "docker", after which
   // `!req.runtime` is never true and this could not fire.
   const existing = naming.deriveFor(plan.req);
-  // Saved choices apply only to a new workspace with no explicit topology/scenario.
-  // Reusing a record must keep its recorded axes, even after setup defaults change.
-  if (
-    !(existing && (await paths.exists(existing))) &&
-    plan.req.runtime === '' &&
-    plan.req.context === '' &&
-    plan.req.deployment === '' &&
-    plan.req.preset === ''
-  ) {
-    const saved = savedSelectors();
-    if (saved.answered_deployment || saved.answered_scenarios) {
-      plan.req.deployment = saved.deployment;
-      plan.req.preset = compositeName(saved.scenarios);
-      plan.req.implicitOwnedLocal = saved.deployment === 'microservices';
-    }
-  }
+  await applySavedSelectors(plan.req);
   if (!plan.req.runtime && existing && (await paths.exists(existing))) {
     plan.req.runtime = await topology.ofRepro(existing);
   }

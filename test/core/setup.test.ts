@@ -9,7 +9,12 @@ import { savedSelectors } from '../../src/lib/setup-selectors';
 import * as host from '../../src/core/runner/host';
 import type * as KubeToolsNS from '../../src/core/kube/tools';
 import type * as PolicyNS from '../testsetup-policy';
+jest.mock('node:fs', () => {
+  const actual = jest.requireActual<typeof fs>('node:fs');
+  return { ...actual, statfsSync: jest.fn(actual.statfsSync) };
+});
 let mockKubernetesToolsAvailable = false;
+let mockMissingTools: string[] = [];
 jest.mock('../../src/core/runner/host', () => {
   const healthy = (require('../testsetup-policy') as typeof PolicyNS).healthyHost();
   return { ...healthy, engine: jest.fn(healthy.engine) };
@@ -18,7 +23,8 @@ jest.mock('../../src/core/kube/tools', () => {
   const actual = jest.requireActual<typeof KubeToolsNS>('../../src/core/kube/tools');
   return {
     ...actual,
-    which: (name: string) => (mockKubernetesToolsAvailable ? `/test/${name}` : ''),
+    which: (name: string) =>
+      mockKubernetesToolsAvailable && !mockMissingTools.includes(name) ? `/test/${name}` : '',
   };
 });
 
@@ -179,4 +185,62 @@ it('reports measured Podman capacity and the current MongoDB kernel boundary wit
     engine.mockResolvedValue(observed);
     mockKubernetesToolsAvailable = false;
   }
+});
+
+it('separates missing Kind provisioning from Kubernetes runtime tools without approving authority', async () => {
+  mockKubernetesToolsAvailable = true;
+  mockMissingTools = ['kind'];
+  try {
+    const view = await setup.snapshot({ cfg: { default_deployment: 'microservices' } });
+    expect(view.environment.missing_kubernetes_tools).toEqual([]);
+    expect(view.environment.microservices_ready).toBe(true);
+    expect(view.environment).toMatchObject({ kubernetes_provisioning_available: false });
+    expect(view.gates.map((gate) => gate.code)).not.toContain('KUBERNETES_TOOLS_MISSING');
+    expect(view.gates.map((gate) => gate.code)).toContain('GATE_OWNED_CLUSTER');
+    mockMissingTools = ['helm', 'kubectl', 'kind'];
+    const blocked = await setup.snapshot({ cfg: { default_deployment: 'microservices' } });
+    expect(blocked.environment.missing_kubernetes_tools).toEqual(['kubectl', 'helm']);
+    expect(blocked.environment.microservices_ready).toBe(false);
+    expect(blocked.gates.map((gate) => gate.code)).toContain('KUBERNETES_TOOLS_MISSING');
+  } finally {
+    mockKubernetesToolsAvailable = false;
+    mockMissingTools = [];
+  }
+});
+
+it('measures a fresh home through its existing parent and reports failed capacity probes as unknown', async () => {
+  const original = process.env.HOUSTON_HOME;
+  const parent = config.home();
+  const expected = fs.statfsSync(parent);
+  process.env.HOUSTON_HOME = path.join(parent, 'not-created', 'nested');
+  try {
+    const view = await setup.detectEnvironment();
+    expect(view.disk_free_gib).toBeGreaterThan(0);
+    expect(view.disk_free_gib).toBeCloseTo((expected.bavail * expected.bsize) / 1024 ** 3, 0);
+    expect(fs.existsSync(config.home())).toBe(false);
+    jest.mocked(fs.statfsSync).mockImplementationOnce(() => {
+      throw new Error('probe denied');
+    });
+    expect((await setup.detectEnvironment()).disk_free_gib).toBeNull();
+  } finally {
+    process.env.HOUSTON_HOME = original;
+  }
+});
+
+it('repairs an invalid saved deployment only when explicitly replaced and preserves unrelated config', async () => {
+  config.saveConfig({
+    default_deployment: 'broken',
+    default_scenarios: ['email'],
+    future: { keep: true },
+  });
+  const file = path.join(config.home(), 'config.yaml');
+  const before = fs.readFileSync(file);
+  await expect(setup.applyPatch({ seed_profile: 'none' })).rejects.toThrow(/deployment/u);
+  expect(fs.readFileSync(file)).toEqual(before);
+  const fixed = await setup.applyPatch({ deployment: 'monolith' });
+  expect(fixed.selection).toMatchObject({ deployment: 'monolith', scenarios: ['email'] });
+  expect(config.loadConfig(false)).toMatchObject({
+    default_deployment: 'monolith',
+    future: { keep: true },
+  });
 });

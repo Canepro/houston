@@ -10,6 +10,8 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import * as config from '../../src/lib/config';
 
 import { capabilities } from '../../src/cli/capabilities';
 
@@ -90,4 +92,20 @@ describe('the shipped skill file', () => {
     };
     expect(() => generator.render(fewer, template, VERSION)).toThrow(/names gate/u);
   });
+});
+
+it('generates only bundled presets even when the caller home adds or overrides presets', () => {
+  const dir = path.join(config.home(), 'presets');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'hostile-custom.yaml'), 'name: hostile-custom\nenv: {}\n');
+  fs.writeFileSync(path.join(dir, 'email.yaml'), 'name: renamed-email\nenv: {}\n');
+  const script = "const g = require('./tools/skill-generate'); process.stdout.write(g.generate());";
+  const generated = execFileSync(process.execPath, ['-e', script], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, HOUSTON_HOME: config.home() },
+  });
+  expect(generated).not.toContain('`hostile-custom`');
+  expect(generated).not.toContain('`renamed-email`');
+  expect(generated).toBe(fs.readFileSync(generator.TARGET, 'utf8'));
 });
