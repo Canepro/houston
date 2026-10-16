@@ -4,7 +4,8 @@ Read `src/core/setup.ts`, `src/cli/handlers/setup.ts`, the onboard command in
 `src/cli/spec-data.ts`, and `src/web/routes/meta.ts` on the candidate. When onboard
 advertises `--show`, the helper drives the real CLI in its disposable home after
 the onboarding checks. The outer JSON schema remains `houston.onboard.v1`; setup
-responses carry `data.schema: houston.setup.v1`.
+responses carry `data.schema: houston.setup.v1`. The helper validates this inner
+schema independently on preview, save, readback, defaults and prompt readback.
 
 The preview must preserve configuration bytes, report saved answers, and offer no
 automatic infrastructure actions. Empty JSON setup, an invalid deployment, and
@@ -35,7 +36,10 @@ committed engine floor of 4 CPUs and 6 GiB. Never treat a ready runtime with
 sufficient capacity, or usable Kind provisioning, as justification for a blank.
 An unexplained empty command fails. Keep a separate supported ready-command drive
 and mutation controls so the blocked path cannot replace grammar coverage. Human output must
-show the deployment and authority gate. Persisted YAML must retain unknown fields
+show exactly one `deployment  <selected value>` line matching the saved selection,
+as rendered by `humanLines` in `src/cli/handlers/setup.ts`, and the authority gate.
+Incidental deployment names in engine or options text do not establish the selection.
+Persisted YAML must retain unknown fields
 and legacy denials. Receipts are `setup-*`, `setup-persisted.json`, and
 `commands.json`.
 

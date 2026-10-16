@@ -776,6 +776,16 @@ def git_evidence_context(root):
 
 @bounded_file_work
 def git_evidence_output(context, label, arguments, text=False, stdin=None, accepted_exits=(0,)):
+    if arguments[0] == 'diff':
+        # diff hashes worktree bytes through convert_to_git, which can run clean
+        # and process filters. Query effective config, including includes and
+        # worktree config, on every diff so probe-written config is covered too.
+        filters = git_evidence_output(
+            context, 'candidate Git filter configuration',
+            ['config', '--includes', '--null', '--name-only', '--get-regexp',
+             r'^filter\..*\.(clean|process)$'], accepted_exits=(0, 1),
+        )
+        require(not filters, 'Candidate Git clean/process filter configured')
     result = bounded_output(
         label,
         [context['git'], '--no-pager', '-c', 'core.fsmonitor=false',
@@ -852,10 +862,35 @@ def source_manifest(context):
     names.update(untracked_names)
     manifest = {}
     for name in sorted(names):
-        value = path_fingerprint(root / name)
+        path = root / name
+        # A tracked link or linked parent can redirect Node's source loading.
+        # Only file links to nonignored, manifested candidate files are supported.
+        linked_parent = any(parent.is_symlink() for parent in path.parents
+                            if parent != root and parent.is_relative_to(root))
+        if path.is_symlink() or linked_parent:
+            target = path.resolve(strict=True)
+            require(target.is_relative_to(root) and target.is_file(),
+                    f'Unsafe candidate source link: {name}')
+            target_name = str(target.relative_to(root))
+            require(target_name in names,
+                    f'Unsafe candidate source link: {name} (target is not manifested)')
+            ignored = git_evidence_output(
+                context, 'candidate source link ignore rule',
+                ['check-ignore', '--no-index', '--stdin', '-z'],
+                stdin=('./' + target_name + '\0').encode(), accepted_exits=(0, 1),
+            )
+            require(not ignored, f'Unsafe candidate source link: {name} (ignored target)')
+            value = path_fingerprint(path) + ':resolved:' + target_name + ':sha256:' + hash_file(target)
+        else:
+            value = path_fingerprint(path)
         require(name not in untracked_names or value.startswith('file:'),
                 f'Untracked candidate entry is not a regular file: {name}')
         manifest[name] = value
+    # This verifier accepts source checkouts, never the dispatcher's ignored
+    # dist fallback or an ignored regular tools/cli.js entry.
+    for name in ('src/cli/entry.ts', 'tools/cli.js'):
+        require(name in manifest and (root / name).is_file(),
+                f'Candidate checkout source dispatch is not manifested: {name}')
     return manifest
 
 
@@ -863,7 +898,10 @@ def source_manifest(context):
 def entrypoint_fingerprint(root):
     entrypoint = (root / 'bin' / 'houston').resolve(strict=True)
     require(entrypoint.is_relative_to(root), 'Candidate entrypoint escapes checkout')
-    # Include actual bytes even if Git ignores the target or a parent is a link.
+    # The real dispatcher computes its tools/src root from its own directory.
+    require(entrypoint.parent == root / 'bin' and (root / 'bin').resolve() == root / 'bin',
+            'Candidate dispatcher root differs from checkout')
+    # Same-bin file links may be supported; source_manifest binds their targets.
     return {'path': str(entrypoint.relative_to(root)), 'sha256': hash_file(entrypoint)}
 
 
@@ -1890,8 +1928,9 @@ def main():
             setup_before = read_bounded_file(config_file)
             shown = run('setup-show', ['onboard', 'setup', '--show', '--json'],
                         schema='houston.onboard.v1')['data']
-            require(shown['schema'] == 'houston.setup.v1'
-                    and shown['selection']['deployment'] == 'monolith'
+            require(isinstance(shown, dict) and shown.get('schema') == 'houston.setup.v1',
+                    'Invalid setup inner schema: setup-show')
+            require(shown['selection']['deployment'] == 'monolith'
                     and shown['persisted']['grants']['owned_cluster'] is False
                     and shown['actions'] == [], 'Setup preview lost saved answers or offers actions')
             require(read_bounded_file(config_file) == setup_before, 'Setup preview wrote answers')
@@ -1905,6 +1944,8 @@ def main():
             saved = run('setup-save', ['onboard', 'setup', '--deployment', 'microservices',
                         '--scenario', 'none', '--seed-profile', 'none', '--retain-runs', '--json'],
                         schema='houston.onboard.v1')['data']
+            require(isinstance(saved, dict) and saved.get('schema') == 'houston.setup.v1',
+                    'Invalid setup inner schema: setup-save')
             require(saved['selection']['deployment'] == 'microservices'
                     and saved['selection']['scenarios'] == []
                     and saved['selection']['seed_profile'] == 'none'
@@ -1918,18 +1959,26 @@ def main():
             after = read_bounded_file(config_file)
             repeated = run('setup-readback', ['onboard', '--show', '--json'],
                            schema='houston.onboard.v1')['data']
+            require(isinstance(repeated, dict) and repeated.get('schema') == 'houston.setup.v1',
+                    'Invalid setup inner schema: setup-readback')
             require(repeated['selection'] == saved['selection']
                     and read_bounded_file(config_file) == after, 'Setup choices did not survive process exit')
             defaults = run('setup-defaults', ['onboard', '--accept-defaults', '--json'],
                            schema='houston.onboard.v1')['data']
+            require(isinstance(defaults, dict) and defaults.get('schema') == 'houston.setup.v1',
+                    'Invalid setup inner schema: setup-defaults')
             require(defaults['selection'] == saved['selection']
                     and defaults['persisted']['grants']['owned_cluster'] is False
                     and defaults['action'] == 'unchanged'
                     and read_bounded_file(config_file) == after,
                     'Accepting redundant defaults rewrote answered choices or granted authority')
             human = run('setup-human', ['onboard', '--show'])
-            require('microservices' in human and 'GATE_OWNED_CLUSTER' in human,
-                    'Human setup omitted selected deployment or authority gate')
+            # humanLines in src/cli/handlers/setup.ts prints the selected value
+            # on its own line. Engine readiness text also mentions microservices.
+            deployments = re.findall(r'^deployment[ \t]+([^\r\n]+)', human, re.MULTILINE)
+            require(deployments == [saved['selection']['deployment']],
+                    'Human setup selected deployment differs')
+            require('GATE_OWNED_CLUSTER' in human, 'Human setup omitted authority gate')
             persisted_setup = yaml_document(node_exec, root, env, config_file)
             require(persisted_setup['future_config'] == legacy['future_config']
                     and persisted_setup['grants']['future_grant'] == legacy['grants']['future_grant']
@@ -1947,6 +1996,8 @@ def main():
                            stdin=b'small\nyes\n')
             prompt_saved = run('setup-prompt-readback', ['onboard', '--show', '--json'],
                                schema='houston.onboard.v1')['data']
+            require(isinstance(prompt_saved, dict) and prompt_saved.get('schema') == 'houston.setup.v1',
+                    'Invalid setup inner schema: setup-prompt-readback')
             require('Setup choices recorded.' in accepted
                     and prompt_saved['selection']['seed_profile'] == 'small'
                     and prompt_saved['selection']['retain_runs'] is True

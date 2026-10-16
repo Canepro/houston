@@ -44,7 +44,10 @@ The Python safety regression drives actual verifier `main` with a synthetic
 candidate CLI; it does not replace the real Houston CLI integration sweep.
 
 Human access probes check their own exact workspace title and distinct Docker/Kubernetes
-ports. Candidate fingerprints bind resolved in-tree entrypoint bytes and refuse escaping
-links. Evidence Git commands use an allowlisted environment with fsmonitor and hooks
-disabled. Scratch removal has a fresh bounded traversal; a retained scratch locator
+ports. Candidate fingerprints bind the dispatcher root and source-link target bytes.
+Relocated dispatchers and escaping, directory or ignored-target links are refused.
+Evidence Git commands use an allowlisted environment with fsmonitor and hooks
+disabled, and refuse effective clean/process filters before each diff. The source
+entry and tools dispatcher must be manifested; ignored dist fallback is refused.
+Scratch removal has a fresh bounded traversal; a retained scratch locator
 and FAIL summary report exhaustion without claiming complete cleanup.

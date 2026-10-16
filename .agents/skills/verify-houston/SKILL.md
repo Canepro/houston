@@ -32,7 +32,9 @@ path, head and tracked diff digest, plus this verifier script's digest. Fingerpr
 lookups use a resolved Git executable with an allowlisted environment, an explicit
 candidate checkout, and a verified Git top level. Every evidence Git command disables
 fsmonitor and hooks. Global/system config, caller Git overrides, prompts and optional
-locks are disabled; diff also disables external diff and textconv helpers. Store evidence outside both
+locks are disabled; diff also disables external diff and textconv helpers. Before every diff,
+the helper inspects effective config, including local/worktree config and includes, and
+refuses configured clean or process filters before they can execute. Store evidence outside both
 checkouts.
 
 The helper requires Python 3.9+, Node, `dirname`, and `readlink`. Process-group
@@ -57,8 +59,11 @@ The runner retains at most 4 MiB from each of stdout and stderr. Output beyond
 either limit fails the command and triggers cleanup; discarded output cannot
 produce a passing receipt.
 Readiness means version and capability envelopes match `package.json`, followed
-by the expected missing-workspace refusal. There is no listener to bind and no
-persistent process or container to stop. Parallel runs require different evidence
+by the expected missing-workspace refusal. The prescribed offline probes start no
+listener or container. Cleanup proves only
+that the original command process group has no live members. Detached descendants
+or descendants in a new session are outside containment; `PASS_SCOPED` does not
+prove their absence. Parallel runs require different evidence
 directories; scratch homes are unique per invocation.
 
 ## Doctor
@@ -87,8 +92,14 @@ walk applies Git's ignore rules and refuses untracked symlinks, FIFOs, sockets,
 and other special files. Git's untracked listing alone omits some special files.
 Root Git metadata and ignored dependency or build paths stay outside this manifest.
 The candidate fingerprints additionally record the resolved `bin/houston` path and
-its actual executable digest, including an ignored or untracked in-tree target.
-An entrypoint or parent symlink escaping the checkout fails before CLI execution.
+its actual executable digest. The resolved dispatcher must remain in the checkout
+`bin/` directory so its computed tools/source root is the candidate. Source links,
+including parent-directory links, must resolve to regular, nonignored files already
+in the source manifest; their target path and bytes are hashed as well as the link.
+Escaping, relocated, directory or ignored-target links fail before CLI execution.
+A file link within `bin/` to a manifested, nonignored file is supported.
+Both `src/cli/entry.ts` and `tools/cli.js` must be manifested files. Installed-package
+`dist/` fallback and ignored source dispatchers are outside this checkout verifier.
 Nonignored nested repository metadata is included by the same walk.
 Root filenames beginning with a colon are treated as literal paths.
 The helper refuses a run if that manifest changes during verification. Commit
