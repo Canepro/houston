@@ -276,8 +276,17 @@ describe('the record', () => {
     // The Compose file on disk may still be the previous one, so it cannot say what was supplied.
     expect(rec.license).toEqual({ required: false, supplied: null, source: 'unknown' });
     const dest = path.join(workspace(name), 'out', 'interrupted');
-    await writeBundle(name, dest, rec);
+    const collected = await collect(name, { bundle: dest });
+    expect(collected.artifact).toEqual({ name: '', sha256: '' });
+    expect(collected.runtime).toMatchObject({ state: '?' });
     expect(fs.readdirSync(dest).sort()).toEqual(['README.md', 'manifest.json']);
+    const readme = fs.readFileSync(path.join(dest, 'README.md'), 'utf8');
+    expect(readme).toContain(
+      'This bundle records workspace metadata and any available configuration.',
+    );
+    expect(readme).toContain('Runtime deployment was not verified.');
+    expect(readme).toContain('No scripted capture was run, so user actions were not recorded.');
+    expect(readme).not.toContain('proves what was deployed');
 
     // An edit of the file that survived is not the replacement. It writes the 8.5.1 image beside
     // the 8.6.0 record, so the record must stay unfinished and the artifact withheld.
@@ -1214,6 +1223,93 @@ describe('the bundle', () => {
     expect(parsed[1]?.['x-last-control']).toBe('readable');
   });
 
+  it('discovers every duplicate YAML credential name before rendering earlier copies', async () => {
+    const name = 'e7-duplicate-names';
+    const doc = [
+      'x-copy: DuplicateYamlSentinel',
+      'x-alias-copy: AliasNameSentinel',
+      'x-label-copy: AliasKeySentinel',
+      'x-value-copy: DuplicateValueSentinel',
+      'x-name: &credentialName DB_PASSWORD',
+      'x-label: &nameKey name',
+      'x-pair: {name: benign, name: DB_PASSWORD, value: DuplicateYamlSentinel}',
+      'x-alias-pair: {name: benign, name: *credentialName, value: AliasNameSentinel}',
+      'x-label-pair: {name: benign, *nameKey : DB_PASSWORD, value: AliasKeySentinel}',
+      'x-values: {name: benign, name: DB_PASSWORD, value: DuplicateValueSentinel, value: last}',
+      'x-control: readable',
+      '',
+    ].join('\n');
+    await workspaceNamed(name, {}, {}, doc);
+    const dest = path.join(workspace(name), 'out', 'bundle');
+    await collect(name, { bundle: dest });
+    const text = fs.readFileSync(path.join(dest, 'docker-compose.yml'), 'utf8');
+    for (const secret of [
+      'DuplicateYamlSentinel',
+      'AliasNameSentinel',
+      'AliasKeySentinel',
+      'DuplicateValueSentinel',
+    ])
+      expect(text).not.toContain(secret);
+    const parsed = YAML.parse(text) as Record<string, unknown>;
+    expect(parsed['x-control']).toBe('readable');
+    expect(parsed['x-pair']).toEqual({ name: 'DB_PASSWORD', value: '********' });
+  });
+
+  it.each(['yaml', 'assignment', 'json', 'named', 'alias', 'nested-json'])(
+    'keeps numeric text credentials whole through %s discovery in actual bundles',
+    async (origin) => {
+      // Each route is isolated: another credential representation must not supply its match class.
+      for (const spelling of ['7', '+7', '-0', '4.50', '2E3', '0x7', '0o7', '.inf', '.nan']) {
+        const name = `e7-numeric-${origin}`;
+        const json = JSON.stringify({ password: spelling });
+        const sources: Record<string, string> = {
+          yaml: `x-password: ${JSON.stringify(spelling)}`,
+          assignment: `x-list: [${JSON.stringify(`DB_PASSWORD=${spelling}`)}]`,
+          json: `x-source: ${JSON.stringify(json)}`,
+          named: `x-pair: {value: ${JSON.stringify(spelling)}, name: DB_PASSWORD}`,
+          alias: `x-alias: &numeric ${JSON.stringify(spelling)}\nx-password: *numeric`,
+          'nested-json': `x-source: ${JSON.stringify(JSON.stringify({ payload: JSON.stringify({ value: spelling, name: 'DB_PASSWORD' }) }))}`,
+        };
+        const canonical: Record<string, string> = {
+          '+7': '7',
+          '-0': '0',
+          '4.50': '4.5',
+          '2E3': '2000',
+          '0x7': '7',
+          '0o7': '7',
+        };
+        const copied = `{ "keep":27017, "decimal":1.50, "exponent":2E4, "copy":${JSON.stringify(spelling)} }`;
+        const doc = [
+          `x-copy: ${JSON.stringify(spelling)}`,
+          `x-canonical-copy: ${canonical[spelling] ?? spelling}`,
+          `x-embedded-copy: ${JSON.stringify(copied)}`,
+          'x-port: 27017',
+          `x-service: ${JSON.stringify(`rocketchat-${spelling}`)}`,
+          sources[origin],
+          'x-long-password: LongCredentialSentinel',
+          'x-long-copy: prefix-LongCredentialSentinel-suffix',
+          'x-control: readable',
+          '',
+        ].join('\n');
+        await workspaceNamed(name, {}, {}, doc);
+        const dest = path.join(workspace(name), 'out', `bundle-${spelling}`);
+        await collect(name, { bundle: dest });
+        const text = fs.readFileSync(path.join(dest, 'docker-compose.yml'), 'utf8');
+        const parsed = YAML.parse(text) as Record<string, unknown>;
+        expect(parsed['x-port']).toBe(27017);
+        expect(parsed['x-service']).toBe(`rocketchat-${spelling}`);
+        expect(parsed['x-copy']).toBe('********');
+        expect(parsed['x-canonical-copy']).toBe('********');
+        expect(parsed['x-embedded-copy']).toBe(
+          '{ "keep":27017, "decimal":1.50, "exponent":2E4, "copy":"********" }',
+        );
+        expect(parsed['x-long-copy']).toBe('prefix-********-suffix');
+        expect(parsed['x-control']).toBe('readable');
+        expect(text).not.toContain('LongCredentialSentinel');
+      }
+    },
+  );
+
   it('bounds cyclic YAML aliases while still masking credentials discovered through aliases', async () => {
     const name = 'e7-cycle-credentials';
     await workspaceNamed(
@@ -1712,6 +1808,12 @@ describe('the bundle', () => {
       fs.readFileSync(path.join(dest, 'manifest.json'), 'utf8'),
     ) as Record<string, unknown>;
 
+    const readme = fs.readFileSync(path.join(dest, 'README.md'), 'utf8');
+    expect(readme).toContain(
+      'This bundle records workspace metadata and any available configuration.',
+    );
+    expect(readme).toContain('Runtime deployment was not verified.');
+    expect(readme).not.toContain('proves what was deployed');
     expect(manifest.artifact).toMatchObject(payload.artifact as Record<string, unknown>);
     expect(payload.bundle).toEqual({
       path: dest,

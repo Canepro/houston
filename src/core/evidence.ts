@@ -713,7 +713,21 @@ function discoverArtifactSecrets(
   const visit = (child: unknown, credential = secret): void =>
     discoverArtifactSecrets(child, doc, secrets, wholeSecrets, credential, seen, depth + 1);
   const add = (text: string, whole = false): void => {
-    if (text !== '') (whole ? wholeSecrets : secrets).add(text);
+    if (text === '') return;
+    // Numeric text is still a credential, but its digits must not erase ports or replica
+    // suffixes. Use the same core scalar parser as the artifact, including hex and .inf.
+    const numeric = /^[-+.0-9]/u.test(text) ? YAML.parseDocument(text) : null;
+    if (
+      numeric !== null &&
+      numeric.errors.length === 0 &&
+      YAML.isScalar(numeric.contents) &&
+      typeof numeric.contents.value === 'number' &&
+      numeric.contents.source === text
+    ) {
+      wholeSecrets.add(text);
+      wholeSecrets.add(String(numeric.contents.value));
+      wholeSecrets.add(YAML.stringify(numeric.contents.value).replace(/\n$/u, ''));
+    } else (whole ? wholeSecrets : secrets).add(text);
   };
   if (YAML.isAlias(node)) {
     visit(node.resolve(doc));
@@ -730,9 +744,18 @@ function discoverArtifactSecrets(
   } else if (YAML.isSeq(node)) {
     for (const item of node.items) visit(item);
   } else if (YAML.isMap(node)) {
-    const name = node.get('name', true);
-    const resolvedName = YAML.isAlias(name) ? name.resolve(doc) : name;
-    const named = YAML.isScalar(resolvedName) && credentialKey(String(resolvedName.value));
+    // `get` selects the first duplicate, while `toJS` selects the last. Conservatively
+    // discover all values when any name identifies a credential, including aliased keys.
+    const named = node.items.some((pair) => {
+      const key = YAML.isAlias(pair.key) ? pair.key.resolve(doc) : pair.key;
+      const name = YAML.isAlias(pair.value) ? pair.value.resolve(doc) : pair.value;
+      return (
+        YAML.isScalar(key) &&
+        key.value === 'name' &&
+        YAML.isScalar(name) &&
+        credentialKey(String(name.value))
+      );
+    });
     for (const pair of node.items) {
       visit(pair.key, false);
       const key = YAML.isAlias(pair.key) ? pair.key.resolve(doc) : pair.key;
