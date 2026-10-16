@@ -304,7 +304,7 @@ describe('binding', () => {
         '${BIND_IP?set it}:${HOST_PORT?set it}:${CONTAINER_PORT?set it}/UDP',
         '${BIND_IP:+127.0.0.1}:${HOST_PORT:+8080}:${CONTAINER_PORT:+80}',
         '${BIND_IP+127.0.0.1}:${HOST_PORT+8080}:${CONTAINER_PORT+80}/TCP',
-        '${CONTAINER_PORT:-80}',
+        ':${CONTAINER_PORT:-80}',
       ]),
     ).toEqual([
       '127.0.0.1:8080:80',
@@ -314,6 +314,24 @@ describe('binding', () => {
       '127.0.0.1:${HOST_PORT+8080}:${CONTAINER_PORT+80}/tcp',
       '127.0.0.1::${CONTAINER_PORT:-80}',
     ]);
+  });
+
+  it.each([
+    '${PORT_MAPPING:-8080:80}',
+    '${PORT_MAPPING-8080:80}',
+    '${PORT_MAPPING:+8080:80}',
+    '${PORT_MAPPING+8080:80}',
+    '${PORT_MAPPING?set a mapping}',
+    '${PORT_MAPPING:?set a mapping}',
+    '${PORT_MAPPING}',
+    '$PORT_MAPPING',
+    '${PORT_MAPPING:-0.0.0.0:8080:80}/UDP',
+    '${PORT_MAPPING:-${FALLBACK:-8080:80}}',
+    '${CONTAINER_PORT:-80}',
+  ])('refuses an unresolved whole-value port mapping without bypassing the bind: %s', (port) => {
+    expect(() => bound([port])).toThrow(ValidationError);
+    expect(() => bound([port])).toThrow(/whole-value Compose interpolation.*service "s"/);
+    expect(() => bound([port])).toThrow(/long syntax with separate target and published fields/);
   });
 
   it('REPLACES a host address the entry already names, rather than keeping it', () => {

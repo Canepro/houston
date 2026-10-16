@@ -680,7 +680,19 @@ export function bindPorts(doc: ComposeDoc, bind: string): void {
         out.push(long);
         continue;
       }
-      const parsed = shortPort(String(p));
+      const entry = String(p);
+      const slash = topLevelPositions(entry, '/')[0] ?? entry.length;
+      if (composeVariable(entry.slice(0, slash))) {
+        // The variable can expand to an entire mapping, including a wildcard address.
+        // Its default cannot prove the shape of the value Compose will read later.
+        throw new ValidationError(
+          `whole-value Compose interpolation in port entry ${JSON.stringify(p)} in service ` +
+            `${JSON.stringify(name)} cannot be safely bound to ${bind}. Use Compose ` +
+            'long syntax with separate target and published fields, or resolve the mapping ' +
+            'to literal ports before loading the preset.',
+        );
+      }
+      const parsed = shortPort(entry);
       if (parsed === null) {
         // NOT SILENTLY PASSED THROUGH. Everything this function understands is bound
         // above; anything else is a published port it would be leaving on every

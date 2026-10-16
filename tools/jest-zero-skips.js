@@ -91,7 +91,8 @@ const ROOT = path.resolve(__dirname, '..');
 // Bind enforcement covers protocol preservation, ephemeral long ports and invalid addresses.
 // Compose interpolation keeps the selected bind while preserving variable port fields, and
 // monitoring reads that bind back without treating interpolation defaults as port fields.
-const FLOOR = 4512;
+// Whole-value Compose interpolation refusals: 11 cases, collection-only total 4523.
+const FLOOR = 4523;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [
