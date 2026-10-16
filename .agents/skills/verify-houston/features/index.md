@@ -27,8 +27,12 @@ file existence alone proves no verdict. Bundle attachments retain their recipe-s
 The shared finalization contract is in [Doctor](../SKILL.md#doctor) and
 [Cleanup](../SKILL.md#cleanup). Use the actual printed summary path and exit
 status. PASS also requires a real evidence directory, regular receipts and the
-original bytes of mandatory provenance and every emitted feature snapshot.
-Final inventory hashes include that printed summary and exclude the inventory
-itself. A missing inventory after a finalizer failure is incomplete proof.
+original bytes of mandatory provenance, every emitted feature snapshot, and
+every command stdout and stderr stream, including empty and failed outputs.
+Read the authoritative inventory named by the printed summary's `inventory`
+field. Its hashes include that summary and exclude the inventory itself.
+If no summary can be written, stdout contains no path and stderr reports the
+primary error and cleanup facts. A missing inventory after a finalizer failure
+is incomplete proof.
 The Python safety regression drives actual verifier `main` with a synthetic
 candidate CLI; it does not replace the real Houston CLI integration sweep.

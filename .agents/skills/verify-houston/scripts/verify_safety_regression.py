@@ -143,6 +143,18 @@ if 'verify-kube-fixture' not in args and 'verify-fixture' not in args:
                 sock.bind(str(target))
             elif kind == 'hardlink':
                 os.link(OUTSIDE, target)
+        elif attack.startswith('command-forge:'):
+            (out / attack.split(':')[1]).write_text('forged command bytes\n')
+        elif attack == 'summary-planted':
+            (out / 'summary.json').mkdir()
+            for index in range(100):
+                (out / f'summary.json.refused.{index}').write_text('{"result":"PASS_SCOPED"}')
+        elif attack.startswith('manifest-decoy'):
+            (out / 'sha256.json').mkdir()
+            (out / 'sha256.json.refused.0').write_text('{"summary.json":"forged"}')
+        elif attack in ('no-summary', 'failed-command-forge'):
+            print('candidate command failed', file=sys.stderr)
+            sys.exit(3)
         elif attack.startswith('delete:'):
             (out / attack.split(':')[1]).unlink()
         elif attack.startswith('symlink:'):
@@ -176,7 +188,7 @@ def load(path):
 
 def worker(path, checkout, out, attack):
     module = load(path)
-    if attack == 'outer-failure':
+    if attack in ('outer-failure', 'manifest-decoy-outer'):
         # Fail at real inventory readback, after summary and inventory exist.
         original = module.require_regular_file
 
@@ -186,6 +198,29 @@ def worker(path, checkout, out, attack):
             return original(target, message)
 
         module.require_regular_file = refuse_manifest_readback
+    if attack == 'no-summary':
+        original_write = module.atomic_receipt_bytes
+
+        def deny_summary(destination, payload):
+            if destination.name.startswith('summary.json'):
+                raise OSError('injected summary write denial')
+            return original_write(destination, payload)
+
+        module.atomic_receipt_bytes = deny_summary
+    if attack == 'failed-command-forge':
+        fingerprint = module.candidate_fingerprint
+        calls = 0
+
+        def tamper_failed_command(root):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                target = out / 'access-discovery-kubernetes.stderr'
+                assert target.read_text() == 'candidate command failed\n'
+                target.write_text('forged failure output\n')
+            return fingerprint(root)
+
+        module.candidate_fingerprint = tamper_failed_command
     if attack.startswith(('feature-delete:', 'feature-forge:')):
         fingerprint = module.candidate_fingerprint
         calls = 0
@@ -256,6 +291,26 @@ def run_main_case(path, attack):
         except subprocess.TimeoutExpired as error:
             raise AssertionError(f'actual main timed out after 12s: {attack}') from error
         assert outside.read_bytes() == b'outside source unchanged\n', 'outside source bytes overwritten'
+        if attack == 'no-summary':
+            assert result.returncode == 1, result.returncode
+            assert result.stdout == '', f'printed unwritten summary: {result.stdout!r}'
+            assert 'expected exit 0, got 3' in result.stderr, result.stderr
+            assert 'Could not write a safe failure summary' in result.stderr, result.stderr
+            assert 'injected summary write denial' in result.stderr, result.stderr
+            prefix = 'No verification summary could be retained: '
+            reports = [line[len(prefix):] for line in result.stderr.splitlines() if line.startswith(prefix)]
+            assert len(reports) == 1, result.stderr
+            report = json.loads(reports[0])
+            assert report['result'] == 'FAIL' and report['scratch_removed'] is True, report
+            assert report['candidate_unchanged'] is True and report['fixture_unchanged'] is True, report
+            assert 'expected exit 0, got 3' in report['error'], report
+            assert any('Could not write a safe failure summary' in item
+                       for item in report['cleanup_errors']), report
+            assert 'inventory' not in report, report
+            assert not list(out.glob('summary.json*')), 'summary unexpectedly survived'
+            assert not list(out.glob('sha256.json*')), 'inventory survived without summary'
+            return dict(exit=result.returncode, printed_summary=None,
+                        primary_error_preserved=True, cleanup_facts_reported=True)
         lines = result.stdout.splitlines()
         assert lines, f'main did not print summary: {result.stderr[-1200:]}'
         summary_path = Path(lines[-1])
@@ -274,8 +329,13 @@ def run_main_case(path, attack):
         error = str(summary.get('cleanup_errors', '')) + str(summary.get('error', ''))
         if attack.startswith(('delete:', 'symlink:')):
             assert 'Mandatory provenance artifact' in error, error
-        elif attack.startswith(('forge:', 'feature-delete:', 'feature-forge:')):
+        elif attack.startswith(('forge:', 'feature-delete:', 'feature-forge:', 'command-forge:')) or attack == 'failed-command-forge':
             assert 'receipt integrity failed' in error, error
+            if attack.startswith('command-forge:'):
+                assert 'receipt integrity failed: ' + attack.split(':')[1] in error, error
+            elif attack == 'failed-command-forge':
+                assert 'receipt integrity failed: access-discovery-kubernetes.stderr' in error, error
+                assert 'expected exit 0, got 3' in summary['error'], summary
         elif attack.startswith(('bundle-', 'config-', 'package-')):
             assert 'exceeds parse limit' in error, error
         elif attack.startswith('admin-'):
@@ -290,14 +350,28 @@ def run_main_case(path, attack):
             expected['summary.json'] = forged_summary
             assert {p.name: p.read_bytes() for p in other.iterdir()} == expected, 'writes through replaced root'
             return dict(observed, inventory=None, replaced_root_untouched=True)
-        elif attack == 'outer-failure':
+        elif attack in ('outer-failure', 'manifest-decoy-outer'):
+            assert 'inventory' not in summary, f'stale inventory locator: {summary}'
             assert 'injected inventory readback failure' in error, error
-            assert not (out / 'sha256.json').exists(), 'obsolete manifest retained'
+            assert not [p for p in out.glob('sha256.json*') if p.is_file()], 'obsolete manifest retained'
             return dict(observed, inventory=None, obsolete_inventory_removed=True)
+        if attack == 'summary-planted':
+            assert summary_path.name not in {f'summary.json.refused.{i}' for i in range(100)}
+            for i in range(100):
+                assert (out / f'summary.json.refused.{i}').read_bytes() == forged_summary
+            assert 'Refused pre-existing non-regular receipt path' in error, error
+        if attack == 'manifest-decoy':
+            assert (out / 'sha256.json.refused.0').read_text() == '{"summary.json":"forged"}'
         # The actual printed summary must belong to the final byte inventory.
-        manifests = [p for p in out.glob('sha256.json*') if p.is_file()]
-        assert len(manifests) == 1, manifests
-        manifest_path = manifests[0]
+        locator = summary.get('inventory')
+        if attack == 'manifest-decoy' or locator is not None:
+            assert isinstance(locator, str) and Path(locator).name == locator, f'missing inventory locator: {summary}'
+            manifest_path = out / locator
+        else:
+            manifests = [p for p in out.glob('sha256.json*') if p.is_file()]
+            assert len(manifests) == 1, manifests
+            manifest_path = manifests[0]
+        assert manifest_path.is_file(), f'named inventory missing: {locator}'
         manifest = json.loads(manifest_path.read_text())
         relative = str(summary_path.relative_to(out))
         assert relative in manifest, f'printed summary missing from inventory: {relative}'
@@ -426,7 +500,10 @@ def main():
     args = parser.parse_args()
     path = args.verify_source
     attacks = (
-        'clean', 'root-symlink',
+        'clean', 'root-symlink', 'summary-planted', 'no-summary',
+        'manifest-decoy', 'manifest-decoy-outer', 'failed-command-forge',
+        *('command-forge:' + name for name in ('version.stdout', 'capabilities.stdout',
+           'version.stderr', 'missing-workspace.stdout', 'missing-workspace.stderr')),
         *('receipt:' + name + ':' + kind for name in ('summary.json', 'sha256.json')
           for kind in ('symlink', 'fifo', 'socket', 'directory', 'hardlink')),
         'stdout-hardlink', 'symlink:candidate-source.json',

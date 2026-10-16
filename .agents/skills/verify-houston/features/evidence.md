@@ -35,6 +35,10 @@ sentinel is a product failure. The manifest, README and parsed Compose input
 each have a 1 MiB descriptor read cap; oversized candidate output fails before
 parsing. Hash and sentinel scans remain chunked independently of that cap.
 
+Command stdout and stderr must also match the expected digests retained at
+emission, including empty streams and failed commands. Use the printed summary
+and its `inventory` field to select the authoritative hash manifest.
+
 Keep stdout, stderr, bundle files, exit receipts, and hashes after scratch
 cleanup. Record the before/after topology manifest for the synthetic workspace
 and the full candidate fingerprint on both passing and failing runs. Re-read every

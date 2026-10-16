@@ -67,7 +67,10 @@ A nonzero exit is a failed run even if another file claims `PASS_SCOPED`.
 When the evidence root is replaced by a symlink or another non-directory, the
 failure summary is a lexical sibling, `<evidence-directory>.summary.json`.
 A directory occupying a receipt name remains in place and the failure receipt
-uses `<receipt-name>.refused.N`. Trust only the printed summary path. Reading a
+uses `<receipt-name>.refused.<random-id>`, reserved with exclusive creation.
+Trust only the printed summary path. If both normal and failure-summary writes
+fail, stdout contains no path. The process fails and stderr reports the primary
+error and cleanup facts; no retained summary is available in that case. Reading a
 fixed `run-001/summary.json` can follow a candidate-controlled symlink.
 
 Require `result: PASS_SCOPED`, `scratch_removed: true`, and
@@ -115,7 +118,10 @@ strings or branch names, when choosing applicability.
 ## Evidence
 
 `commands.json` records actual argv and exit codes. Each command has separate
-stdout and stderr files. The helper scans each pair at the command-output boundary,
+stdout and stderr files. At emission, the helper retains expected digests for
+both streams, including empty streams and commands that fail. The final gate
+rejects any missing, replaced or changed command output. The helper scans each
+pair at the command-output boundary,
 including refusals and timeouts, then requires both regular files for every expected command label and repeats
 the scan over every retained command receipt before it can report `PASS_SCOPED`.
 A symlink or other special entry anywhere in that retained tree fails the run.
@@ -151,19 +157,21 @@ termination can leave its uniquely named `verify-houston-*` scratch directory;
 remove only that run's confirmed directory after checking its owner and retaining
 proof. Never clean by a shared name or glob.
 
-After exit, read the printed summary and the regular `sha256.json` manifest in
-the evidence directory. A refused manifest destination can instead produce
-`sha256.json.refused.N`; the summary records that refusal. The final inventory
-includes the printed summary's exact bytes and excludes the manifest itself.
+After exit, read the printed summary. Its `inventory` field names the authoritative
+manifest relative to the evidence directory. Read that exact file, even when
+other manifest-shaped files exist. The usual name is `sha256.json`; a refused
+destination uses `sha256.json.refused.<random-id>`. The summary records the
+chosen name before it is hashed. The final inventory includes the printed summary's exact bytes and excludes the manifest itself.
 If later finalization fails, the helper removes the obsolete inventory before
-writing a failure summary. A missing inventory means the evidence package is
-incomplete, never successful verification. A replaced evidence root receives
+writing a failure summary with no `inventory` field. A missing inventory means
+the evidence package is incomplete, never successful verification. A replaced evidence root receives
 only the sibling failure summary and has no valid inventory.
 
 `PASS_SCOPED` requires a real directory at the evidence root, regular retained
 receipts, unchanged mandatory before-state provenance, and unchanged emitted
-onboarding and setup snapshots. The helper retains expected hashes when it
-writes those snapshots and rechecks them before selecting PASS. Absent feature
+onboarding and setup snapshots, and unchanged stdout and stderr for every
+emitted command. The helper retains expected hashes when it writes these receipts
+and rechecks them before selecting PASS. Absent feature
 capabilities remain pending and do not require snapshots for unexecuted features.
 Receipt writes atomically replace the destination with a new regular inode, so
 an existing hardlink cannot redirect a write into candidate source. Non-regular

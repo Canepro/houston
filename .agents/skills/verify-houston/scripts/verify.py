@@ -225,11 +225,22 @@ def receipt_entry_kind(path):
 
 
 def unused_receipt_name(path):
-    for index in range(100):
-        candidate = path.parent / f'{path.name}.refused.{index}'
-        if receipt_entry_kind(candidate) == 'absent':
+    # Reserve an unpredictable sibling exclusively in the pinned real parent.
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    parent_fd = os.open(path.parent, flags)
+    try:
+        while True:
+            candidate = path.with_name(f'{path.name}.refused.{uuid.uuid4().hex}')
+            try:
+                descriptor = os.open(candidate.name,
+                                     os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                     0o600, dir_fd=parent_fd)
+            except FileExistsError:
+                continue
+            os.close(descriptor)
             return candidate
-    raise RuntimeError(f'{RECEIPT_REFUSAL}: no safe name beside {path.name}')
+    finally:
+        os.close(parent_fd)
 
 
 def claim_regular_receipt(path):
@@ -302,6 +313,7 @@ def write_summary_file(path, summary):
 
 
 def write_failure_summary(out, summary):
+    summary.pop('inventory', None)
     if receipt_entry_kind(out) == 'directory':
         destination = out / 'summary.json'
     else:
@@ -340,6 +352,7 @@ def write_verification_receipts(out, summary):
     manifest_path, manifest_refusal = claim_regular_receipt(manifest_target)
     refusals = [item for item in (summary_refusal, manifest_refusal) if item]
     record_receipt_refusal(summary, refusals)
+    summary['inventory'] = manifest_path.name
     write_summary_file(summary_path, summary)
     skipped = [path for path, kind in (
         (summary_target, summary_kind),
@@ -1071,6 +1084,7 @@ def main():
     candidate_before = candidate_fingerprint(root)
     source_before = candidate_before['source']
     expected_provenance = {}
+    expected_command_hashes = {}
 
     def retain_provenance(name, text):
         write_evidence_text(out, name, text)
@@ -1196,8 +1210,10 @@ def main():
             result = run_command(command, root, child_env, stdin=stdin)
             stdout = result['stdout']
             stderr = result['stderr']
-            write_evidence_bytes(out, f'{label}.stdout', stdout)
-            write_evidence_bytes(out, f'{label}.stderr', stderr)
+            for suffix, payload in (('stdout', stdout), ('stderr', stderr)):
+                name = f'{label}.{suffix}'
+                write_evidence_bytes(out, name, payload)
+                expected_command_hashes[name] = hashlib.sha256(payload).hexdigest()
             receipt = {'label': label, 'argv': ['bin/houston', *argv], 'exit': result['exit']}
             scan_error = None
             try:
@@ -1727,6 +1743,10 @@ def main():
             except Exception as error:
                 cleanup_errors.append(str(error))
             try:
+                require_provenance_receipts(out, expected_command_hashes, names=())
+            except Exception as error:
+                cleanup_errors.append(str(error))
+            try:
                 require(expected_receipt_labels, 'No command receipts were expected')
                 scan_command_receipts(sentinel, out, *expected_receipt_labels)
                 scanned_receipts = scan_command_receipts(sentinel, out)
@@ -1769,12 +1789,12 @@ def main():
             except Exception as second:
                 cleanup_errors.append(f'Could not write a safe failure summary: {second}')
                 summary['cleanup_errors'] = cleanup_errors
-        if summary_path is None:
-            if receipt_entry_kind(out) == 'directory':
-                summary_path = out / 'summary.json'
-            else:
-                summary_path = out.parent / f'{out.name}.summary.json'
-        print(summary_path)
+        if summary_path is not None:
+            print(summary_path)
+        else:
+            # No stdout locator exists unless a verifier summary was written.
+            print('No verification summary could be retained: ' + json.dumps(summary),
+                  file=sys.stderr)
     if failure is not None:
         raise failure
 
