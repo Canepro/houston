@@ -138,7 +138,8 @@ const ROOT = path.resolve(__dirname, '..');
 // merged tree (capture on the PR 61 base) measured 4861 tests.
 // Round 7 adds six cases (unresolved placeholders, a leftover raw recording, its publication
 // in two modes, workspace HTTP credentials and the browser context options): 4867.
-const FLOOR = 4867;
+// Round 8 adds one case (timing modifiers and fill values taken as authored or refused): 4868.
+const FLOOR = 4868;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

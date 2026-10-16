@@ -116,8 +116,16 @@ those is refused. Goto targets in the manifest and step banner omit URL userinfo
 still uses the original authored target. Targets containing nested URL credentials are
 redacted as a whole, including encoded nested URLs, encoded delimiters inside their userinfo,
 and userinfo that contains whitespace or a backslash. Ambiguous encodings can redact a
-harmless target too. Userinfo in the workspace URL (`http://user:pass@host`) is used as HTTP
-basic auth for that origin only and appears in no artifact. Placeholder values are expanded
+harmless target too. The value of a credential-shaped query or fragment parameter (`token`,
+`access_token`, `id_token`, `refresh_token`, `password`, `api_key`, an OAuth `code` and similar)
+is replaced with `REDACTED` in the manifest and step banner, and `state` is kept. A workspace
+under a path (`https://example.test/rocketchat`) keeps that path: `goto: /` opens the path
+and evidence shows no more than the origin. Userinfo in the workspace URL
+(`http://user:pass@host`) is used as HTTP
+basic auth for that origin only and appears in no artifact. `timeout_ms` is a positive and
+`settle_ms` a nonnegative whole number of milliseconds, and a `fill` value must be a quoted
+YAML string; anything else stops the capture at parse time instead of running a different
+workload. Placeholder values are expanded
 only for navigation, and a `{{placeholder}}` that nothing defines stops the capture before a
 browser opens. Houston saves the video and then removes Playwright's raw copy. If it cannot
 remove it, the capture fails and the raw directory stays out of the bundle. Inspect the visible

@@ -11,8 +11,9 @@
 // regressions bring the browser total to 224. Four URL scheme, failure and nested-userinfo
 // cases bring the browser total to 228. Encoded-delimiter success/failure and harmless
 // nested-URL navigation bring the measured browser total to 231. Three replaced-control
-// and later-page mask cases bring it to 234.
-const EXPECTED = 234;
+// and later-page mask cases bring it to 234. Late shadow-root and late-attribute mask cases
+// and the idle-page scan count bring it to 237.
+const EXPECTED = 237;
 
 module.exports = (results) => {
   const wanted = process.env.BROWSER_GATE_PROBE === 'count' ? EXPECTED + 1 : EXPECTED;

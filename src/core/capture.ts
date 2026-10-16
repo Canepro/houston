@@ -47,7 +47,8 @@ import {
   ReproError,
   ValidationError,
 } from '../lib/errors';
-import { toInt, toText, valueKind } from '../lib/format';
+import { toText, valueKind } from '../lib/format';
+import { credentialKey } from '../lib/redact';
 import { joinPath, pathExpandUser } from '../lib/home';
 import { type Bundle, record as evidenceRecord, writeBundle } from './evidence';
 import * as naming from './lifecycle/naming';
@@ -122,8 +123,9 @@ export interface Step {
   action: Action;
   target: string;
   value: string;
-  timeoutMs: number;
-  settleMs: number;
+  /** Absent means the default, so an authored `settle_ms: 0` stays a real zero. */
+  timeoutMs: number | null;
+  settleMs: number | null;
 }
 
 export interface Workload {
@@ -243,14 +245,33 @@ function stamp(): string {
   return new Date().toISOString().replace(/\.\d{3}Z$/u, 'Z');
 }
 
-function integerModifier(item: Record<string, unknown>, key: string, where: string): number {
+/**
+ * A timing modifier exactly as authored: a nonnegative whole number of milliseconds, as a
+ * YAML integer or an unsigned digit string. Truncating `1.9` or clamping `-5` would run the
+ * step with timing the workload never declared, and a timing-sensitive reproduction would
+ * quietly stop reproducing. `positive` also refuses 0, for a timeout: Playwright reads 0 as
+ * "wait forever", which a capture must not do on a typo.
+ */
+function integerModifier(
+  item: Record<string, unknown>,
+  key: string,
+  where: string,
+  positive = false,
+): number | null {
   const raw = item[key];
-  if (raw === undefined || raw === null) return 0;
-  try {
-    return Math.max(0, toInt(raw));
-  } catch {
-    throw new ValidationError(`${where}: ${key} must be a whole number of milliseconds`);
+  if (raw === undefined || raw === null) return null;
+  const whole =
+    typeof raw === 'number'
+      ? raw
+      : typeof raw === 'string' && /^\d+$/u.test(raw)
+        ? Number(raw)
+        : NaN;
+  if (!Number.isSafeInteger(whole) || whole < 0 || (positive && whole === 0)) {
+    throw new ValidationError(
+      `${where}: ${key} must be a whole number of milliseconds${positive ? ' greater than zero' : ''}`,
+    );
   }
+  return whole;
 }
 
 /** A workload document, refused loudly for every shape that would silently do nothing. */
@@ -299,11 +320,18 @@ export function parseWorkload(text: string, source: string): Workload {
     if (action === 'fill' && (value === undefined || value === null)) {
       throw new ValidationError(`${where}: fill needs a value`);
     }
+    // Typed exactly as written or not at all: `false`, `0` or a list coerced to text would
+    // enter different data than the workload declares and still report a finished capture.
+    if (action === 'fill' && typeof value !== 'string') {
+      throw new ValidationError(
+        `${where}: fill value must be a string, got ${valueKind(value)} (quote it in YAML)`,
+      );
+    }
     steps.push({
       action,
       target,
-      value: value === undefined || value === null ? '' : toText(value),
-      timeoutMs: integerModifier(item, 'timeout_ms', where),
+      value: typeof value === 'string' ? value : '',
+      timeoutMs: integerModifier(item, 'timeout_ms', where, true),
       settleMs: integerModifier(item, 'settle_ms', where),
     });
   });
@@ -445,22 +473,86 @@ function assertResolvable(workload: Workload, context: Context): void {
   }
 }
 
-/** Browser captures use an origin only: metadata paths, queries and userinfo are not evidence. */
-function navigationOrigin(rootUrl: string): string {
+/**
+ * The workspace's base URL for navigation: scheme, host and path, so a path-prefixed
+ * deployment (`https://example.test/rocketchat`) keeps its prefix. Userinfo, query and
+ * fragment are dropped, and evidence never shows more than the origin.
+ */
+function navigationBase(rootUrl: string): string {
   if (rootUrl === '') return '';
   try {
     const parsed = new URL(rootUrl);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('not HTTP(S)');
-    return parsed.origin;
+    return `${parsed.origin}${parsed.pathname.replace(/\/+$/u, '')}`;
   } catch {
     throw new PreflightError('capture requires a valid HTTP(S) workspace origin');
   }
 }
 
-/** Preserve a workload's valid URL shape instead of treating every target as a root path. */
+/**
+ * Preserve a workload's valid URL shape instead of treating every target as a root path. A
+ * root-relative target (`/`, `/rooms/general`) is relative to the workspace, so it goes under
+ * the base path; `//host` and `/\host` are other authorities and are left to the URL parser.
+ */
 function navigationTarget(root: string, target: string, context: Context): string {
   const resolved = resolve(target, context);
-  return root === '' ? resolved : new URL(resolved, root).toString();
+  if (root === '') return resolved;
+  // The URL parser ignores leading control characters and spaces and strips tab and newline.
+  let first = 0;
+  while (first < resolved.length && resolved.charCodeAt(first) <= 0x20) first += 1;
+  const seen = resolved.slice(first).replace(/[\t\n\r]/gu, '');
+  // Joined as text, not resolved: `/https://x` is a path under the workspace, where resolving
+  // `https://x` against the base would make it an absolute URL.
+  if (seen.startsWith('/') && !/^\/[/\\]/u.test(seen)) return new URL(`${root}${seen}`).toString();
+  return new URL(resolved, `${root}/`).toString();
+}
+
+/**
+ * Query and fragment parameters whose value is a credential. The shared key rule covers
+ * `token`, `access_token`, `password`, `api_key` and the like. OAuth adds names it does not:
+ * an authorization `code` is a credential, `state` is not, and the others are bearer values
+ * of the same kind. Matching is on the whole name so `error_code` and `barcode` stay readable.
+ */
+const CREDENTIAL_PARAM =
+  /^(?:code|(?:auth|authorization|oauth|verification|reset|login|magic|invite)[_-]?code|auth|otp|jwt|assertion|saml[_-]?(?:response|request)|sig|signature|sid|session[_-]?id)$/iu;
+
+function credentialParam(name: string): boolean {
+  let key = name;
+  // The key can be percent-encoded as deeply as the target: `%74oken`, `%2574oken`.
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (CREDENTIAL_PARAM.test(key) || credentialKey(key)) return true;
+    const next = decoded(key);
+    if (next === key) return false;
+    key = next;
+  }
+  return true;
+}
+
+/** A parameter name after a `?`, `&`, `#` or `;`, up to its `=`. */
+const PARAMETER_NAME = /[?&#;]([^=&#;?\s/]*)=/gu;
+
+/**
+ * `text` with the value of every credential-shaped parameter replaced, running to the next
+ * `&` or `#`, and whether any was. A value made only of placeholders is left as authored: it
+ * carries no secret by construction, as in `recordedValue`. An empty or already masked value
+ * has nothing to hide and is not counted.
+ */
+function maskedParameters(text: string): { text: string; found: boolean } {
+  let masked = '';
+  let copied = 0;
+  for (const match of text.matchAll(PARAMETER_NAME)) {
+    // A parameter inside a value already masked is part of that value.
+    if (match.index < copied || !credentialParam(match[1] ?? '')) continue;
+    const start = match.index + match[0].length;
+    let end = start;
+    while (end < text.length && text[end] !== '&' && text[end] !== '#') end += 1;
+    const value = text.slice(start, end);
+    if (value === '' || value === REDACTED || value.replace(PLACEHOLDER, '') === '') continue;
+    masked += `${text.slice(copied, start)}${REDACTED}`;
+    copied = end;
+  }
+  PLACEHOLDER.lastIndex = 0;
+  return { text: masked + text.slice(copied), found: copied > 0 };
 }
 
 /** Display authored navigation only. Context expansion belongs exclusively to the browser. */
@@ -500,6 +592,16 @@ function recordedTarget(step: Step, root: string): string {
         )
       )
         return REDACTED;
+      if (depth === 0) {
+        // A credential parameter at the top level keeps its key and loses its value, so the
+        // record still says which link was followed. The rest is read as authored.
+        display = maskedParameters(display).text;
+        decoded = display;
+      } else if (maskedParameters(decoded).found) {
+        // One inside another parameter's encoded value cannot be masked in place: it would
+        // have to be re-encoded at the depth it was found. The whole target stays private.
+        return REDACTED;
+      }
       const next = decodeURIComponent(decoded);
       if (next === decoded) return display;
       decoded = next;
@@ -572,7 +674,7 @@ async function apply(
   // `timeout_ms` is honoured by every action that waits on the page, not just `wait_for`: a
   // click during a slow Rocket.Chat boot needs the same allowance, and a modifier that
   // parses but is ignored fails as "your selectors moved" when the real cause was the clock.
-  const timeout = step.timeoutMs || DEFAULT_TIMEOUT_MS;
+  const timeout = step.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   switch (step.action) {
     case 'goto':
       await driver.goto(navigationTarget(root, step.target, context), timeout);
@@ -771,13 +873,15 @@ export async function run(
     // The driver is already live here, so a refusal still closes it in the `finally` below.
     assertResolvable(workload, context);
     await fs.mkdir(stepsDir, { recursive: true });
-    root = navigationOrigin(context.root_url ?? '');
+    root = navigationBase(context.root_url ?? '');
+    // Evidence shows an authored target against the origin alone, never the base path.
+    const origin = root === '' ? '' : new URL(root).origin;
     try {
       for (const [i, step] of workload.steps.entries()) {
         const rec: StepRecord = {
           index: i,
           action: step.action,
-          target: recordedTarget(step, root),
+          target: recordedTarget(step, origin),
           outcome: 'ok',
           frame: null,
           ms: 0,
@@ -816,7 +920,7 @@ export async function run(
             // omitted or invisible action detectable at review instead of at escalation.
             const settle = driver.settle?.bind(driver);
             await quietly(
-              settle === undefined ? undefined : () => settle(step.settleMs || SETTLE_MS),
+              settle === undefined ? undefined : () => settle(step.settleMs ?? SETTLE_MS),
             );
             const frame = `steps/step-${String(i).padStart(2, '0')}-${step.action}.png`;
             rec.frame = frame;
@@ -1156,7 +1260,7 @@ export async function captureBundle(
     await checkedBundleRoot(out, force);
     const workspaceUrl = externalUrl(meta);
     const context: Context = {
-      root_url: navigationOrigin(workspaceUrl),
+      root_url: navigationBase(workspaceUrl),
       admin_user: config.ADMIN_USERNAME,
       admin_pass: adminPass(meta),
     };
@@ -1168,7 +1272,11 @@ export async function captureBundle(
     let driver: Driver;
     try {
       driver = await driverFactory(
-        context.root_url ?? '',
+        // The browser is told the origin: it scopes HTTP credentials, which must not follow a
+        // navigation to another site. Navigation itself carries the base path.
+        context.root_url === undefined || context.root_url === ''
+          ? ''
+          : new URL(context.root_url).origin,
         captureDir,
         [...secretValues(context), ...credentials.secrets],
         credentials.options,
@@ -1346,12 +1454,13 @@ function bannerScript(text: string): string {
 interface MaskRoot {
   querySelectorAll(selector: string): ArrayLike<MaskTarget>;
 }
-interface MaskTarget {
+interface MaskTarget extends MaskRoot {
   style: {
     setProperty(name: string, value: string, priority: string): void;
     getPropertyValue(name: string): string;
     getPropertyPriority(name: string): string;
   };
+  nodeType: number;
   isConnected: boolean;
   tagName: string;
   assignedSlot: MaskTarget | null;
@@ -1380,6 +1489,12 @@ interface MaskOptions {
   /** CSS selectors to protect for the rest of the document, whatever node they resolve to. */
   selectors: string[];
 }
+interface MaskRecord {
+  type: string;
+  target: MaskTarget;
+  addedNodes: ArrayLike<MaskTarget>;
+  attributeName: string | null;
+}
 interface MaskObserver {
   observe(
     target: MaskTarget | MaskRoot,
@@ -1391,11 +1506,22 @@ interface MaskObserver {
     },
   ): void;
 }
+interface MaskEntry {
+  target: MaskTarget;
+  cover: MaskCover;
+  watched: boolean;
+  /** The geometry last written to the cover, so an unmoved control costs no style write. */
+  placed: string;
+}
 interface MaskState {
-  entries: { target: MaskTarget; cover: MaskCover; watched: boolean }[];
+  entries: MaskEntry[];
   selectors: string[];
+  /** The document and every shadow root seen, each observed for the rest of the page. */
   roots: MaskRoot[];
-  sweeper: MaskObserver | null;
+  covers: WeakSet<object>;
+  observer: MaskObserver | null;
+  adopt: ((root: MaskRoot) => void) | null;
+  patched: boolean;
   running: boolean;
 }
 
@@ -1408,6 +1534,10 @@ interface MaskState {
  * selector (`xpath=`, `>>`, `text=`) cannot be re-resolved here, so the control's own
  * attributes become the tracked selector. A control with none to go on is refused, because
  * tracking its handle alone would leave a replacement uncovered.
+ *
+ * New matches are found by observing mutations, and only the nodes a mutation names are
+ * examined: the document is walked once, when a selector is first tracked. The animation
+ * frame loop only moves existing covers, so an idle page costs it no selector query.
  */
 function installSecretMask(target: MaskTarget | null, options: MaskOptions): string[] | null {
   const browser = globalThis as unknown as {
@@ -1420,40 +1550,29 @@ function installSecretMask(target: MaskTarget | null, options: MaskOptions): str
       elementFromPoint(left: number, top: number): MaskCover | null;
       fullscreenElement: MaskTarget | null;
     };
+    Element: { prototype: { attachShadow(init: unknown): MaskRoot } };
     requestAnimationFrame(callback: () => void): void;
     getComputedStyle(target: MaskTarget): {
       opacity: string;
       transitionProperty: string;
       animationName: string;
     };
-    MutationObserver: new (callback: () => void) => MaskObserver;
+    MutationObserver: new (callback: (records: MaskRecord[]) => void) => MaskObserver;
   };
   const state = (browser.__houstonSecretMasks__ ??= {
     entries: [],
     selectors: [],
     roots: [],
-    sweeper: null,
+    covers: new WeakSet(),
+    observer: null,
+    adopt: null,
+    patched: false,
     running: false,
   });
-  // Every match for a selector, including inside open shadow roots, which a document-level
-  // query does not reach. Each root found is observed so a replacement there is seen too.
-  const query = (selector: string): MaskTarget[] => {
-    const found: MaskTarget[] = [];
-    const visit = (root: MaskRoot): void => {
-      found.push(...Array.from(root.querySelectorAll(selector)));
-      for (const host of Array.from(root.querySelectorAll('*'))) {
-        const inner = host.shadowRoot;
-        if (inner === null) continue;
-        if (!state.roots.includes(inner)) {
-          state.roots.push(inner);
-          state.sweeper?.observe(inner, { childList: true, subtree: true });
-        }
-        visit(inner);
-      }
-    };
-    visit(browser.document);
-    return found;
-  };
+  const WATCH = { childList: true, subtree: true, attributes: true };
+  // A selector whose match can change without the matching node itself changing: a
+  // combinator or a pseudo-class. Its mutations also re-examine the parent.
+  const structural = (selector: string): boolean => /[\s>+~:]/u.test(selector);
   const maskingUnproved = (node: MaskTarget): boolean => {
     if (!node.isConnected) return true;
     let current: MaskTarget | null = node;
@@ -1475,7 +1594,7 @@ function installSecretMask(target: MaskTarget | null, options: MaskOptions): str
     }
     return false;
   };
-  const cover = (node: MaskTarget): MaskState['entries'][number] => {
+  const cover = (node: MaskTarget): MaskEntry => {
     let entry = state.entries.find((item) => item.target === node);
     if (entry === undefined) {
       const element = browser.document.createElement('div');
@@ -1483,20 +1602,25 @@ function installSecretMask(target: MaskTarget | null, options: MaskOptions): str
       element.style.cssText =
         'position:fixed;z-index:2147483647;pointer-events:none;' +
         `background:${options.color};opacity:1;display:none;`;
+      state.covers.add(element);
       browser.document.documentElement?.appendChild(element);
-      entry = { target: node, cover: element, watched: false };
+      entry = { target: node, cover: element, watched: false, placed: '' };
       state.entries.push(entry);
     }
     return entry;
   };
+  // The only work the frame loop does. A scroll or a layout change moves a control without
+  // any mutation, so geometry is read every frame, and written only when it changed.
   const position = (): void => {
     for (const item of state.entries) {
-      if (!item.target.isConnected) {
-        item.cover.style.display = 'none';
-        continue;
-      }
-      const rect = item.target.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) {
+      const rect = item.target.isConnected ? item.target.getBoundingClientRect() : null;
+      const placed =
+        rect === null || rect.width <= 0 || rect.height <= 0
+          ? 'hidden'
+          : `${String(rect.left)} ${String(rect.top)} ${String(rect.width)} ${String(rect.height)}`;
+      if (placed === item.placed) continue;
+      item.placed = placed;
+      if (rect === null || placed === 'hidden') {
         item.cover.style.display = 'none';
         continue;
       }
@@ -1527,27 +1651,90 @@ function installSecretMask(target: MaskTarget | null, options: MaskOptions): str
   };
   // Hide the control itself and keep it hidden: the style observer restores page edits in
   // the mutation microtask, before paint, rather than after frames have been recorded.
-  const protect = (entry: MaskState['entries'][number]): void => {
+  const protect = (entry: MaskEntry): void => {
     if (entry.watched) return;
     entry.watched = true;
     hide(entry.target);
     new browser.MutationObserver(() => {
       hide(entry.target);
     }).observe(entry.target, { attributes: true, attributeFilter: ['style'] });
-  };
-  // Re-resolve every tracked selector and protect each new match. This is what keeps a
-  // replacement control, whose value may have been copied from the filled one, covered.
-  const sweep = (): void => {
-    for (const selector of state.selectors) {
-      try {
-        for (const node of query(selector)) protect(cover(node));
-      } catch {
-        // The selector was valid when it was accepted; never let a page break the sweep.
-      }
-    }
     position();
   };
+  const protectMatches = (scope: MaskRoot, deep: boolean, node: MaskTarget | null): void => {
+    for (const selector of state.selectors) {
+      try {
+        if (node !== null && node.matches(selector)) protect(cover(node));
+        if (deep || structural(selector))
+          for (const match of Array.from(scope.querySelectorAll(selector))) protect(cover(match));
+      } catch {
+        // The selector was valid when it was accepted; never let a page break the observer.
+      }
+    }
+  };
+  // Shadow hosts at or below `scope`. Walks only that subtree, and only for a root or an
+  // added node, never for the whole document on a frame.
+  const discover = (scope: MaskTarget | MaskRoot): void => {
+    const hosts = Array.from(scope.querySelectorAll('*'));
+    if ('shadowRoot' in scope) hosts.unshift(scope);
+    for (const host of hosts) {
+      if (host.shadowRoot !== null) state.adopt?.(host.shadowRoot);
+    }
+  };
+  const adopt = (root: MaskRoot): void => {
+    if (state.roots.includes(root)) return;
+    state.roots.push(root);
+    state.observer?.observe(root, WATCH);
+    discover(root);
+    protectMatches(root, true, null);
+  };
+  state.adopt = adopt;
+  // Mutation records name what changed. Each added node is examined with its subtree, and a
+  // changed attribute only for the node it is on: the page's own churn, and this mask's style
+  // writes and covers, must not become a scan of the document.
+  state.observer ??= new browser.MutationObserver((records) => {
+    const added = new Set<MaskTarget>();
+    const touched = new Set<MaskTarget>();
+    for (const record of records) {
+      if (state.covers.has(record.target)) continue;
+      if (record.type === 'attributes') {
+        if (record.attributeName !== 'style') touched.add(record.target);
+        continue;
+      }
+      touched.add(record.target);
+      for (const node of Array.from(record.addedNodes)) {
+        if (node.nodeType === 1 && !state.covers.has(node)) added.add(node);
+      }
+    }
+    for (const node of added) {
+      discover(node);
+      protectMatches(node, true, node);
+    }
+    for (const node of touched) {
+      if (!added.has(node) && node.nodeType === 1) protectMatches(node, false, node);
+    }
+    position();
+  });
+  if (!state.patched) {
+    // Attaching a shadow root changes nothing the document observer can see, and the content
+    // that follows lands inside a root it does not watch. Hear about the root itself, closed
+    // roots included, which no later walk could find.
+    state.patched = true;
+    const attach = browser.Element.prototype.attachShadow;
+    browser.Element.prototype.attachShadow = function (this: MaskTarget, init: unknown) {
+      const root = attach.call(this, init);
+      try {
+        state.adopt?.(root);
+      } catch {
+        // Never let the mask break the page's own component.
+      }
+      return root;
+    };
+  }
+  adopt(browser.document);
 
+  // Every match for a selector in every root known. Used when a selector is first tracked.
+  const query = (selector: string): MaskTarget[] =>
+    state.roots.flatMap((root) => Array.from(root.querySelectorAll(selector)));
   const resolves = (selector: string, node: MaskTarget): boolean => {
     try {
       return selector !== '' && query(selector).includes(node);
@@ -1598,19 +1785,16 @@ function installSecretMask(target: MaskTarget | null, options: MaskOptions): str
   for (const selector of tracked) {
     if (!state.selectors.includes(selector)) state.selectors.push(selector);
   }
-  if (state.sweeper === null) {
-    state.sweeper = new browser.MutationObserver(sweep);
-    state.sweeper.observe(browser.document, { childList: true, subtree: true });
-  }
+  // One walk per newly tracked selector set: a control already present beyond the filled one.
+  for (const root of state.roots) protectMatches(root, true, null);
   if (!state.running) {
     state.running = true;
     const tick = (): void => {
-      sweep();
+      position();
       browser.requestAnimationFrame(tick);
     };
     browser.requestAnimationFrame(tick);
   }
-  sweep();
   return tracked;
 }
 

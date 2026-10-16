@@ -548,6 +548,8 @@ describe('scripted capture in a real browser', () => {
       'xpath=//input[@name="token"]',
     ],
     ['control on a later page', 'navigate', 'input[name=token]'],
+    ['control in a shadow root attached later', 'shadow', 'input[name=token]'],
+    ['control that gains the selector later', 'attribute', 'input[name=token]'],
   ])('keeps the mask on a %s for the rest of the capture', async (_label, mode, selector) => {
     const control =
       '<input name="token" style="width:600px;height:70px;font:40px monospace;color:rgb(0,160,0);background:white">';
@@ -560,18 +562,32 @@ describe('scripted capture in a real browser', () => {
         return;
       }
       response.end(`<!doctype html><body style="margin:0">
-      <div id="slot">${control}</div>
+      <div id="slot">${control}</div><div id="host"></div>
+      <input id="plain" style="width:600px;height:70px;font:40px monospace;color:rgb(0,160,0);background:white">
       <button id="replace">Replace control</button><a id="next" href="/second">Next page</a>
       <p id="done" hidden>Replaced</p>
       <script>
+        const style = 'width:600px;height:70px;font:40px monospace;color:rgb(0,160,0);background:white';
         document.getElementById('replace').onclick = () => {
           const old = document.querySelector('#slot input');
           if (!old.value) throw new Error('replacement must follow fill');
-          const copy = document.createElement('input');
-          copy.name = 'token';
-          copy.style.cssText = 'width:600px;height:70px;font:40px monospace;color:rgb(0,160,0);background:white';
-          copy.value = old.value;
-          old.replaceWith(copy);
+          const mode = ${JSON.stringify(mode)};
+          if (mode === 'shadow') {
+            // Attaching a shadow root is not a DOM mutation; only the root's own content is.
+            const root = document.getElementById('host').attachShadow({ mode: 'open' });
+            root.innerHTML = '<input name="token" style="' + style + '">';
+            root.querySelector('input').value = old.value;
+          } else if (mode === 'attribute') {
+            const plain = document.getElementById('plain');
+            plain.value = old.value;
+            plain.setAttribute('name', 'token');
+          } else {
+            const copy = document.createElement('input');
+            copy.name = 'token';
+            copy.style.cssText = style;
+            copy.value = old.value;
+            old.replaceWith(copy);
+          }
           document.getElementById('done').hidden = false;
         };
       </script></body>`);
@@ -589,9 +605,9 @@ describe('scripted capture in a real browser', () => {
           '  - goto: /',
           `  - fill: ${JSON.stringify(selector)}`,
           '    value: "{{admin_pass}}"',
-          mode === 'replace' ? '  - click: "#replace"' : '  - click: "#next"',
+          mode === 'navigate' ? '  - click: "#next"' : '  - click: "#replace"',
           '    settle_ms: 1000',
-          mode === 'replace' ? '  - wait_for: "#done"' : '  - wait_for: "#second-ready"',
+          mode === 'navigate' ? '  - wait_for: "#second-ready"' : '  - wait_for: "#done"',
           '  - shot: after-replacement',
         ].join('\n'),
         'replaced control fixture',
@@ -611,6 +627,70 @@ describe('scripted capture in a real browser', () => {
       if (image.data[at]! < 80 && image.data[at + 1]! > 90 && image.data[at + 2]! < 80) green += 1;
     }
     expect(green).toBe(0);
+  });
+
+  test('finds new credential controls by observing mutations, not by scanning the document every frame', async () => {
+    // The page counts every querySelectorAll call from the first script on. Once a credential
+    // is filled the mask runs for the rest of the page, so an idle page must stay idle.
+    const scans: number[] = [];
+    server = createServer((request, response) => {
+      if (request.url?.startsWith('/scans') === true) {
+        scans.push(Number(new URL(request.url, 'http://x').searchParams.get('n')));
+        response.writeHead(204).end();
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html><body style="margin:0">
+      <script>
+        window.__scans = 0;
+        for (const proto of [Document.prototype, DocumentFragment.prototype, Element.prototype]) {
+          const original = proto.querySelectorAll;
+          proto.querySelectorAll = function (...args) {
+            window.__scans += 1;
+            return original.apply(this, args);
+          };
+        }
+      </script>
+      <div>${Array.from({ length: 400 }, (_, i) => `<span>${String(i)}</span>`).join('')}</div>
+      <input name="token" style="width:600px;height:70px;font:40px monospace;color:rgb(0,160,0);background:white">
+      <button id="mark">Mark</button><p id="reported" hidden>Reported</p>
+      <script>
+        document.getElementById('mark').onclick = () => {
+          const before = window.__scans;
+          setTimeout(async () => {
+            await fetch('/scans?n=' + String(window.__scans - before));
+            document.getElementById('reported').hidden = false;
+          }, 1500);
+        };
+      </script></body>`);
+    });
+    await listen(server);
+    const address = server.address() as AddressInfo;
+    const origin = `http://127.0.0.1:${String(address.port)}`;
+    dest = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-capture-idle-scan-'));
+    const driver = await browserDriver(origin, dest, [ADMIN_PASSWORD]);
+    const manifest = await run(
+      parseWorkload(
+        [
+          'steps:',
+          '  - goto: /',
+          '  - fill: "input[name=token]"',
+          '    value: "{{admin_pass}}"',
+          '  - click: "#mark"',
+          '  - wait_for: "#reported"',
+        ].join('\n'),
+        'idle scan fixture',
+      ),
+      driver,
+      dest,
+      { root_url: origin, admin_pass: ADMIN_PASSWORD },
+    );
+    expect(manifest.status).toBe('ok');
+    expect(scans).toHaveLength(1);
+    // About ninety animation frames pass in the window. A rescan per frame made this
+    // hundreds (182 measured); an idle page measures 0. The headroom is for a banner
+    // update that lands inside the window.
+    expect(scans[0]).toBeLessThanOrEqual(30);
   });
 
   test.each([

@@ -198,18 +198,30 @@ describe('scripted browser capture', () => {
           '  - goto: login',
           '  - goto: /rooms/general',
           '  - goto: "https://idp.example.test/login?prompt=login"',
+          '  - goto: /',
+          '  - goto: "/?a=1"',
+          '  - goto: "/#frag"',
+          '  - goto: "//other.test/x"',
+          '  - goto: "/\\\\other.test/y"',
         ].join('\n'),
         'fixture',
       ),
       driver,
       dest,
-      { root_url: 'http://127.0.0.1:3000/customer/path?ticket=hidden' },
+      { root_url: 'http://user:pw@127.0.0.1:3000/customer/path/?ticket=hidden#h' },
     );
 
+    // A path-prefixed workspace keeps its prefix for relative and root-relative targets;
+    // userinfo, query and fragment of the workspace URL are never navigated to.
     expect(goto.mock.calls).toEqual([
-      ['http://127.0.0.1:3000/login', 15000],
-      ['http://127.0.0.1:3000/rooms/general', 15000],
+      ['http://127.0.0.1:3000/customer/path/login', 15000],
+      ['http://127.0.0.1:3000/customer/path/rooms/general', 15000],
       ['https://idp.example.test/login?prompt=login', 15000],
+      ['http://127.0.0.1:3000/customer/path/', 15000],
+      ['http://127.0.0.1:3000/customer/path/?a=1', 15000],
+      ['http://127.0.0.1:3000/customer/path/#frag', 15000],
+      ['http://other.test/x', 15000],
+      ['http://other.test/y', 15000],
     ]);
   });
 
@@ -351,12 +363,58 @@ describe('scripted browser capture', () => {
     ]) {
       cases.push(['https://workspace.test', target, REDACTED, `https://workspace.test${target}`]);
     }
+    // Credential-shaped query and fragment parameters keep their key and lose their value.
+    // OAuth `code` is a credential and `state` is not. A credential nested inside another
+    // parameter's encoded value, at any depth, makes the whole target private.
+    const credentialTargets: [string, string][] = [
+      ['/login?token=sekret', '/login?token=REDACTED'],
+      ['/#access_token=sekret', '/#access_token=REDACTED'],
+      ['/cb?code=sekret&state=keep', '/cb?code=REDACTED&state=keep'],
+      ['/cb?state=keep', '/cb?state=keep'],
+      ['/?id_token=sekret.a.b#refresh_token=sekret', '/?id_token=REDACTED#refresh_token=REDACTED'],
+      ['/#/login?token=sekret&page=2', '/#/login?token=REDACTED&page=2'],
+      ['/?%74oken=sekret', '/?%74oken=REDACTED'],
+      ['/?%2574oken=sekret', '/?%2574oken=REDACTED'],
+      ['/?token=%73ekret', '/?token=REDACTED'],
+      ['/?api_key=sekret&page=2', '/?api_key=REDACTED&page=2'],
+      ['/?a=1;password=sekret', '/?a=1;password=REDACTED'],
+      [
+        '/?access_token=sekret&access_token=sekret2',
+        '/?access_token=REDACTED&access_token=REDACTED',
+      ],
+      ['/?error_code=7&barcode=1&keystone=1', '/?error_code=7&barcode=1&keystone=1'],
+      ['/?token=', '/?token='],
+      ['/?next=https%3A%2F%2Fidp.example.test%2Fcb%3Ftoken%3Dsekret', REDACTED],
+      ['/?next=https%253A%252F%252Fidp.example.test%252Fcb%253Fcode%253Dsekret', REDACTED],
+      [
+        '/?next=https://idp.example.test/cb?access_token=sekret',
+        '/?next=https://idp.example.test/cb?access_token=REDACTED',
+      ],
+      ['/?token=sekret&next=https%3A%2F%2Fidp.example.test%2Fcb%3Fcode%3Dsekret2', REDACTED],
+      ['/?token=sekret&page=%20a', '/?token=REDACTED&page=%20a'],
+    ];
+    for (const [target, recorded] of credentialTargets) {
+      cases.push(['https://workspace.test', target, recorded, `https://workspace.test${target}`]);
+    }
+    // A placeholder value carries no secret, so it is recorded as authored; the browser
+    // still gets the expansion.
+    cases.push([
+      'https://workspace.test',
+      '/?token={{admin_pass}}',
+      '/?token={{admin_pass}}',
+      'https://workspace.test/?token=context-password',
+    ]);
     const recordings: { target: string; recorded: string }[] = [];
     const expected: { target: string; recorded: string }[] = [];
+    const narrated: string[] = [];
     for (const [index, row] of cases.entries()) {
       const [root, target, recorded, navigated] = row as [string, string, string, string];
       const dest = path.join(config.home(), `recorded-target-${String(index)}`);
-      const driver = new FakeDriver(dest);
+      const driver = Object.assign(new FakeDriver(dest), {
+        banner: async (text: string): Promise<void> => {
+          narrated.push(text);
+        },
+      });
       const goto = jest.spyOn(driver, 'goto');
       const manifest = await run(
         parseWorkload(`steps:\n  - goto: ${JSON.stringify(target)}\n`, 'fixture'),
@@ -365,6 +423,10 @@ describe('scripted browser capture', () => {
         { root_url: root, next: contextURL, admin_pass: 'context-password' },
       );
       expect(goto.mock.calls).toEqual([[navigated, 15000]]);
+      // The manifest, and so the README, and the on-video banner say the same thing.
+      expect(narrated.filter((text) => text !== '')).toEqual([`step 0: goto ${recorded}`]);
+      narrated.length = 0;
+      expect(JSON.stringify(manifest)).not.toMatch(/sekret/u);
       recordings.push({ target, recorded: manifest.steps[0]!.target });
       expected.push({ target, recorded });
       expect(JSON.stringify(manifest)).not.toContain('context-value');
@@ -447,6 +509,66 @@ describe('scripted browser capture', () => {
     expect(browserVersion).toBe('old');
     expect(payload.repro).toEqual({ rc_version: browserVersion });
     expect(version).toBe('new');
+  });
+
+  test('takes timing modifiers and fill values exactly as authored or refuses them', () => {
+    const steps = (extra: string): string => `steps:\n  - goto: /\n${extra}`;
+    for (const key of ['timeout_ms', 'settle_ms']) {
+      for (const bad of [
+        '1.9',
+        '-1',
+        '-0.5',
+        '1e21',
+        'true',
+        '"1.5"',
+        '"abc"',
+        '[1]',
+        '{a: 1}',
+        '.nan',
+      ]) {
+        expect(() => parseWorkload(steps(`    ${key}: ${bad}\n`), 'fixture')).toThrow(
+          new RegExp(`step 0: ${key} must be a whole number of milliseconds`, 'u'),
+        );
+      }
+    }
+    // Zero is a real settle (none) but not a timeout: Playwright reads 0 as "wait forever".
+    expect(() => parseWorkload(steps('    timeout_ms: 0\n'), 'fixture')).toThrow(
+      /timeout_ms must be a whole number of milliseconds greater than zero/u,
+    );
+    const parsed = parseWorkload(
+      [
+        'steps:',
+        '  - goto: /a',
+        '    timeout_ms: 2500',
+        '    settle_ms: 0',
+        '  - goto: /b',
+        '    timeout_ms: "3000"',
+        '    settle_ms: 1000',
+        '  - goto: /c',
+      ].join('\n'),
+      'fixture',
+    ).steps;
+    expect(parsed.map((step) => [step.timeoutMs, step.settleMs])).toEqual([
+      [2500, 0],
+      [3000, 1000],
+      [null, null],
+    ]);
+
+    for (const bad of ['false', '0', '123456', '1.50', '[a, b]', '{a: b}', 'true', '2026-01-01']) {
+      expect(() =>
+        parseWorkload(`steps:\n  - fill: "#field"\n    value: ${bad}\n`, 'fixture'),
+      ).toThrow(/step 0: fill value must be a string, got /u);
+    }
+    for (const text of ['""', '"0"', '"false"', '"007"', "'1.50'", '"{{admin_pass}}"']) {
+      const [step] = parseWorkload(
+        `steps:\n  - fill: "#field"\n    value: ${text}\n`,
+        'fixture',
+      ).steps;
+      expect(step!.value).toBe(text.slice(1, -1));
+    }
+    expect(() => parseWorkload('steps:\n  - fill: "#field"\n', 'fixture')).toThrow(
+      /fill needs a value/u,
+    );
   });
 
   test('rejects an invalid workload before starting a browser or creating an output root', async () => {
@@ -842,7 +964,8 @@ describe('scripted browser capture', () => {
     mockReadMeta.mockResolvedValue(
       metadata({
         name: 'ticket-1234',
-        rootUrl: 'http://basic%20user:p%40ss%3Aword@127.0.0.1:3000',
+        rootUrl:
+          'http://basic%20user:p%40ss%3Aword@127.0.0.1:3000/rocketchat/?hidden=query#hidden-fragment',
         adminPassword: ADMIN_PASSWORD,
       }),
     );
@@ -852,12 +975,19 @@ describe('scripted browser capture', () => {
       return { path: dest, files: ['README.md'] };
     });
     const seen: { root: string; secrets: readonly string[]; options: unknown }[] = [];
+    const drivers: FakeDriver[] = [];
     const driverFactory: DriverFactory = async (root, dest, secrets, options) => {
       seen.push({ root, secrets, options });
-      return new FakeDriver(dest);
+      const driver = new FakeDriver(dest);
+      drivers.push(driver);
+      return driver;
     };
     const out = path.join(config.home(), 'basic-auth-bundle');
     await captureBundle('ticket-1234', 'basic-auth', out, { driverFactory });
+
+    // The browser goes to the workspace's own path, not to the host root, while the
+    // evidence-facing origin and the HTTP credentials stay origin-only.
+    expect(drivers[0]!.calls[0]).toBe('goto:http://127.0.0.1:3000/rocketchat/');
 
     expect(seen).toHaveLength(1);
     expect(seen[0]!.root).toBe('http://127.0.0.1:3000');
@@ -871,7 +1001,7 @@ describe('scripted browser capture', () => {
     const files = fs.readdirSync(out, { recursive: true, withFileTypes: true });
     for (const entry of files.filter((item) => item.isFile())) {
       const text = fs.readFileSync(path.join(entry.parentPath, entry.name)).toString('latin1');
-      expect(text).not.toMatch(/p%40ss|p@ss|basic(?:%20| )user/u);
+      expect(text).not.toMatch(/p%40ss|p@ss|basic(?:%20| )user|hidden/u);
     }
   });
 
