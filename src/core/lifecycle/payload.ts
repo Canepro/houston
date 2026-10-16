@@ -142,7 +142,8 @@ export async function bindHostOf(meta: Metadata): Promise<string> {
   const rc = bag(services.rocketchat ?? services['rocketchat-1']);
   const ports = Array.isArray(rc.ports) ? rc.ports : [];
   for (const port of ports) {
-    if (typeof port !== 'string') continue;
+    // Interpolated mappings cannot establish an observed address without evaluation.
+    if (typeof port !== 'string' || port.includes('$')) continue;
     // The two rightmost fields are the ports. A legacy IPv6 address can be bracketed or
     // bare, but a malformed bracketed address must remain unknown rather than becoming `[`.
     const published = port.replace(/\/(?:tcp|udp|sctp)$/iu, '');
@@ -347,7 +348,14 @@ export function rollbackTarget(extra: Record<string, unknown>): string {
  */
 export async function detail(name: string): Promise<Record<string, unknown>> {
   const target = await naming.resolveName(name);
-  const meta = await readMeta(target);
+  return await detailOf(target, await readMeta(target));
+}
+
+/**
+ * The detail for a record already in hand, so a caller adding to the payload (the CLI's
+ * access advice) works from the same snapshot rather than a second read that may differ.
+ */
+export async function detailOf(target: string, meta: Metadata): Promise<Record<string, unknown>> {
   const d = await inspect.summary(meta);
   // The env tab masks credentials and tells the reader that the workspace's
   // docker-compose.yml is the source of truth for a real value -- but nothing in the GUI

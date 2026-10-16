@@ -26,7 +26,13 @@ import {
 } from '../kube/status';
 import { dockerAvailable } from '../runner/host';
 import { projectStates, rcStatusByProject, servicesByProject } from '../runner/queries';
-import { type Metadata, externalUrl, listMeta, readMeta } from '../runner/record';
+import {
+  hasComposeInstancePorts,
+  type Metadata,
+  externalUrl,
+  listMeta,
+  readMeta,
+} from '../runner/record';
 import * as topology from '../topology';
 
 import * as naming from './naming';
@@ -269,7 +275,7 @@ export function reproLinks(meta: Metadata): { label: string; url: string; kind: 
     links.push({ label: 'direct HTTP', url: meta.rootUrl, kind: 'rc' });
   }
   const n = extra.instances;
-  if (typeof n === 'number' && Number.isInteger(n) && n > 1) {
+  if (hasComposeInstancePorts(meta) && typeof n === 'number' && Number.isInteger(n) && n > 1) {
     for (let i = 1; i <= n; i += 1) {
       links.push({
         label: `instance ${String(i)}`,
@@ -440,7 +446,7 @@ export async function summary(meta: Metadata): Promise<Record<string, unknown>> 
         }
       : null;
   const n = extra.instances;
-  if (isTruthy(n)) {
+  if (hasComposeInstancePorts(meta) && isTruthy(n)) {
     const count = Number(n);
     d.instances = count;
     d.instance_urls = Array.from(

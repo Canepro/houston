@@ -126,7 +126,10 @@ const ROOT = path.resolve(__dirname, '..');
 // Three more cover authorization copies, a failed licence write and an external kill during
 // that write. Existing complete-licence and Compose-kill cases are extended, not recounted.
 // Inspect adds twenty cases on top of the evidence base: total 4647.
-const FLOOR = 4647;
+// SSH access adds ninety-eight cases over the inspect base: total 4745.
+// One more passes a bracketed IPv6 SSH host bare: total 4746.
+// One more refuses a tunnel port a preset or monitoring will publish, before create: 4747.
+const FLOOR = 4747;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

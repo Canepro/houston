@@ -80,6 +80,17 @@ From `houston info --name <n> --json`:
 - the Rocket.Chat and MongoDB versions it runs (`data.rc_version`, `data.mongo_tag`);
 - that it is still running, and the command that removes it.
 
+### SSH access handoff
+
+For a loopback-only workspace reached through SSH, human `up`, `ready`, and `info` print a
+client-side `ssh -N -L` command and browser URL. It is advice only: do not run the tunnel from
+the remote host, widen the workspace bind, or treat the command as proof that the tunnel works.
+`info --json` returns the same structured handoff at `data.access`. Set `HOUSTON_SSH_HOST` or
+`HOUSTON_SSH_USER` before the remote command if its suggested destination is wrong; set
+`HOUSTON_SSH_LOCAL_PORT` when the selected client port is already occupied.
+The suggested command binds the client listener to `127.0.0.1` even when an SSH client
+configuration enables `GatewayPorts`, and it ends SSH option parsing before the destination.
+
 ### Ask a person first
 
 - anything that touches a cloud cluster: `cluster create`, `cluster delete`,
