@@ -50,7 +50,7 @@ def emit(schema, data=None, error=None, code=0):
     value = dict(schema=schema, contract=2, ok=code == 0, houston_version='9.9.9')
     if attack.startswith('feature-schema:') and schema == 'houston.onboard.v1' and isinstance(data, dict) and data.get('schema') == 'houston.setup.v1':
         _, response, fault = attack.split(':')
-        selected = ('save' if '--deployment' in args else 'defaults' if '--accept-defaults' in args else
+        selected = ('ready' if os.environ.get('NODE_OPTIONS') else 'save' if '--deployment' in args else 'defaults' if '--accept-defaults' in args else
                     'show' if args[1:2] == ['setup'] else
                     'prompt-readback' if data['selection']['seed_profile'] == 'small' else 'readback')
         if response == selected:
@@ -122,7 +122,28 @@ if args[0] == 'evidence':
             name = {'bundle-manifest': 'manifest.json', 'bundle-readme': 'README.md', 'bundle-compose': 'docker-compose.yml'}[attack]
             with (bundle / name).open('ab') as stream:
                 stream.write(b' ' * (2 * 1024 * 1024))
-        data['bundle'] = dict(path=str(bundle), files=['manifest.json', 'README.md', 'docker-compose.yml'])
+        reported = str(bundle)
+        if attack.startswith('bundle-path:'):
+            kind = attack.split(':')[1]
+            if kind == 'missing':
+                reported += '/missing/..'
+            elif kind == 'file':
+                reported += '/README.md/..'
+            elif kind == 'relative':
+                reported = os.path.relpath(bundle)
+            elif kind == 'wrong':
+                reported = str(home)
+            elif kind == 'symlink-missing':
+                (home / 'bundle-link').symlink_to(bundle, target_is_directory=True)
+                reported = str(home / 'bundle-link/missing/..')
+            elif kind == 'symlink-wrong':
+                (home / 'bundle-link').symlink_to(home, target_is_directory=True)
+                reported = str(home / 'bundle-link')
+            elif kind == 'symlink-valid':
+                # A usable absolute alias to the same directory is supported.
+                (home / 'bundle-link').symlink_to(bundle, target_is_directory=True)
+                reported = str(home / 'bundle-link')
+        data['bundle'] = dict(path=reported, files=['manifest.json', 'README.md', 'docker-compose.yml'])
     emit('houston.evidence.v1', data)
 if args[0] == 'down':
     config = json.loads((home / 'config.yaml').read_text())
@@ -167,8 +188,60 @@ if args[0] == 'onboard':
             print('deployment  ' + deployment)
             print('engine      microservices ready no')
             print('  GATE_OWNED_CLUSTER: permission denied')
+            if attack.startswith('feature-human-mutate:'):
+                field = attack.split(':')[1]
+                if field == 'deployment':
+                    config['default_deployment'] = 'monolith'
+                elif field == 'scenarios':
+                    config['default_scenarios'] = ['email']
+                else:
+                    config['preferences']['retain_runs'] = False
+                config_file.write_text(json.dumps(config))
             sys.exit(0)
-        emit('houston.onboard.v1', dict(schema='houston.setup.v1', selection=selection, persisted=config, actions=[], capacity=dict(supported_action=None), gates=[dict(code='GATE_OWNED_CLUSTER')], action='unchanged', first_run_command='houston up --version 8.5.1 --name fixture --wait'))
+        ready = bool(os.environ.get('NODE_OPTIONS'))
+        environment = dict(tools=dict(docker=False, kubectl=False, helm=False, kind=False),
+                           microservices_ready=False, kubernetes_provisioning_available=False,
+                           owned_kubernetes_runtime='unknown', missing_kubernetes_tools=['kubectl', 'helm'],
+                           engine_cpus=0, engine_memory_gib=0)
+        capacity = dict(applicable=True, ready=False, status='unknown', code='CAPACITY_UNKNOWN',
+                        required_cpu=4, required_memory_gib=6, observed_cpu=0, observed_memory_gib=0,
+                        supported_action=None)
+        gates = [dict(code='GATE_OWNED_CLUSTER'), dict(code='KUBERNETES_TOOLS_MISSING', kind='tools',
+                 message='Missing kubectl, helm', approve_with='')]
+        command = '' if attack.startswith('feature-ready:') else 'houston up --version 8.5.1 --name fixture --wait'
+        if ready:
+            # Invoke the candidate's existing observation modules under the real
+            # Node preload, without importing setup or copying verifier predicates.
+            import subprocess
+            facts = subprocess.check_output(['node', '-e', """
+const path = require('node:path');
+const base = process.cwd();
+(async () => {
+ const engine = await require(path.join(base,'src/core/runner/host.ts')).engine();
+ const which = require(path.join(base,'src/core/kube/tools.ts')).which;
+ const tools = Object.fromEntries(['docker','kubectl','helm','kind'].map(n=>[n,which(n)!=='']));
+ const state = await require(path.join(base,'src/core/kube/cluster.ts')).ownedRuntimeState();
+ console.log(JSON.stringify({engine, tools, state}));
+})();
+"""], env=os.environ)
+            facts = json.loads(facts)
+            environment.update(tools=facts['tools'], microservices_ready=True,
+                kubernetes_provisioning_available=False, owned_kubernetes_runtime=facts['state'],
+                missing_kubernetes_tools=[], docker_ready=True, engine_provider=facts['engine']['kind'],
+                engine_cpus=facts['engine']['cpus'], engine_memory_gib=facts['engine']['memBytes']/1024**3,
+                engine_kernel_version=facts['engine']['kernel'])
+            capacity.update(ready=True, status='ready', code='', observed_cpu=8, observed_memory_gib=16)
+            gates = gates[:1]
+            command = ('houston up --version 8.5.1 --name fixture --wait' if attack != 'feature-ready:blank' else '')
+            if attack == 'feature-ready:grammar':
+                command += ' --runtime kubernetes'
+            if attack == 'feature-ready:facts':
+                environment['microservices_ready'] = False
+            if attack == 'feature-ready:write':
+                config_file.write_text(config_file.read_text() + ' ')
+        if attack == 'feature-ready:blocked-facts' and not ready:
+            environment['tools']['kubectl'] = True
+        emit('houston.onboard.v1', dict(schema='houston.setup.v1', selection=selection, persisted=config, actions=[], capacity=capacity, environment=environment, gates=gates, action='unchanged', first_run_command=command))
     completed = config['onboarding'].get('completed', False)
     emit('houston.onboard.v1', dict(completed=completed, completed_at=config['onboarding'].get('completed_at'), grants=dict(owned_cluster=config['grants'].get('owned_cluster', False)), answered_grants=dict(owned_cluster=completed), clusters=config['grants']['clusters'], rc_repro_version='9.9.9'))
 if args[0] == 'inspect':
@@ -649,6 +722,15 @@ def run_main_case(path, attack, proof_dir=None):
             (candidate / 'tools').mkdir()
             (candidate / 'src/cli/entry.ts').write_text('// synthetic source layout\n')
             (candidate / 'tools/cli.js').write_text('// synthetic source layout\n')
+        if attack.startswith('feature-'):
+            for name, code in {
+                'runner/host.ts': 'exports.engine=async()=>null;',
+                'kube/tools.ts': 'exports.which=()=>"";',
+                'kube/cluster.ts': 'exports.ownedRuntimeState=async()=>"unknown";',
+            }.items():
+                target = candidate / 'src/core' / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(code)
         (candidate / 'package.json').write_text(
             ('{"version":"9.9.9","extra_numeric":NaN}' if attack == 'json-package-constant' else '{"version":"9.9.9"}') + (' ' * (2 * 1024 * 1024) if attack == 'package-large' else ''))
         # The synthetic CLI writes JSON, a YAML subset. This parser dependency
@@ -784,8 +866,11 @@ def run_main_case(path, attack, proof_dir=None):
                     target = out / 'bundle' / name
                     if target.is_file():
                         retain_bytes('bundle-' + name, target.read_bytes())
+            if attack.startswith('bundle-path:'):
+                names.extend(p.name for p in out.glob('evidence*.stdout'))
+                names.extend(p.name for p in out.glob('evidence*.stderr'))
             if attack.startswith('feature-'):
-                names.extend(p.name for p in out.glob('setup-*.stdout'))
+                names.extend(p.name for p in out.glob('setup-*') if p.is_file())
             if attack.startswith('dispatch-'):
                 (retained / 'executed-code-before.bin').write_bytes(executable_before)
                 (retained / 'executed-code-after.bin').write_bytes(executable_target.read_bytes())
@@ -855,7 +940,7 @@ def run_main_case(path, attack, proof_dir=None):
         summary_path = Path(lines[-1])
         summary = json.loads(summary_path.read_text())
         should_pass = (attack in ('clean', 'feature-clean', 'stdout-hardlink', 'access-clean', 'inspect-clean', 'untracked-clean', 'untracked-ignored', 'untracked-colon-clean', 'entrypoint-bin-clean', 'dispatch-clean', 'dispatch-bin-clean', 'dispatch-source-clean',
-                                  'git-helper-initial', 'git-helper-during', 'git-clean', 'cleanup-clean', 'dispatch-legacy-clean', 'json-number-clean', 'retained-name:safe', 'decoded-json:clean', 'decoded-attachment:compose-clean')
+                                  'git-helper-initial', 'git-helper-during', 'git-clean', 'cleanup-clean', 'dispatch-legacy-clean', 'json-number-clean', 'retained-name:safe', 'decoded-json:clean', 'decoded-attachment:compose-clean', 'feature-ready:clean', 'bundle-path:absolute', 'bundle-path:symlink-valid')
                        or attack.endswith(':hardlink'))
         assert (result.returncode == 0) == should_pass, f'exit={result.returncode}: {summary}'
         assert summary['result'] == ('PASS_SCOPED' if should_pass else 'FAIL'), summary
@@ -940,6 +1025,27 @@ def run_main_case(path, attack, proof_dir=None):
         elif attack.startswith('feature-schema:'):
             assert ('Invalid setup inner schema: setup-' + attack.split(':')[1] in error
                     or (attack.split(':')[1] == 'show' and ('Setup preview lost saved answers' in error or "'schema'" in error))), error
+        elif attack.startswith('feature-human-mutate:'):
+            assert 'Human setup preview wrote answers' in error, error
+        elif attack.startswith('feature-ready:'):
+            if attack == 'feature-ready:blank':
+                assert 'Ready setup must generate a first-run command' in error, error
+            elif attack == 'feature-ready:grammar':
+                assert 'Setup first-run command must use saved topology' in error, error
+            elif attack == 'feature-ready:facts':
+                assert 'Ready setup observation facts differ' in error, error
+            elif attack == 'feature-ready:write':
+                assert 'Ready setup preview wrote answers' in error, error
+            elif attack == 'feature-ready:blocked-facts':
+                assert 'Blank setup first-run command lacks matching' in error, error
+            else:
+                assert summary['setup_ready']['config_unchanged'] is True, summary
+                assert summary['setup_ready']['controlled_observations'] is True, summary
+                assert (out / 'setup-ready-observations.json').is_file()
+                assert summary['setup_ready']['config_before_sha256'] == summary['setup_ready']['config_after_sha256']
+        elif attack.startswith('bundle-path:'):
+            if attack not in ('bundle-path:absolute', 'bundle-path:symlink-valid'):
+                assert 'Bundle response path must be an absolute usable directory' in error, error
         elif attack == 'feature-human-wrong':
             assert 'Human setup selected deployment differs' in error, error
         elif attack.startswith('dispatch-'):
@@ -1198,6 +1304,9 @@ def main():
     args = parser.parse_args()
     path = args.verify_source
     attacks = (
+        *('feature-ready:' + kind for kind in ('blank', 'grammar', 'facts', 'write', 'blocked-facts', 'clean')),
+        *('feature-human-mutate:' + field for field in ('deployment', 'scenarios', 'legacy')),
+        *('bundle-path:' + kind for kind in ('missing', 'file', 'relative', 'wrong', 'symlink-missing', 'symlink-wrong', 'absolute', 'symlink-valid')),
         'access-global-ban',
         *('decoded-json:' + field for field in ('value', 'key', 'nested', 'clean')),
         *('decoded-attachment:compose-' + field for field in ('value', 'key', 'nested', 'clean')),
@@ -1216,7 +1325,7 @@ def main():
         'dispatch-source-ignored-mutate', 'dispatch-source-clean', 'dispatch-source-mutate',
         'dispatch-fallback-mutate', 'dispatch-ignored-regular-mutate',
         'dispatch-bin-clean', 'dispatch-clean', 'entrypoint-bin-clean',
-        *('feature-schema:' + response + ':' + fault for response in ('show', 'save', 'readback', 'defaults', 'prompt-readback') for fault in ('wrong', 'missing')),
+        *('feature-schema:' + response + ':' + fault for response in ('show', 'save', 'readback', 'defaults', 'prompt-readback', 'ready') for fault in ('wrong', 'missing')),
         'feature-human-wrong',
         'cleanup-budget', 'cleanup-primary', 'cleanup-time', 'cleanup-clean',
         'entrypoint-external-mutate', 'entrypoint-internal-mutate', 'entrypoint-internal-clean',

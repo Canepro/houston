@@ -24,7 +24,12 @@ this secret-bearing fixture.
 Require the exact seed projection `{profile, planned.users, actual.users}` in
 the JSON response, bundle response, and manifest. Require the bundle response to
 list exactly `README.md`, `docker-compose.yml`, and `manifest.json`; each must be
-a self-contained regular file. The bundle root must be a real directory, never
+a self-contained regular file. The reported bundle path must be absolute, usable
+as a directory at the response boundary and resolve strictly to the requested
+bundle. A usable absolute symlink alias to that same directory is supported;
+relative paths, wrong destinations, missing intermediate components and
+regular-file traversal are refused. No cwd-based path expansion is accepted.
+The bundle root must be a real directory, never
 a symlink, and must remain a real directory after scratch cleanup. Compare the manifest projection with the bundle
 response and fixture. The README must identify the fixture, and the parsed Compose
 attachment must preserve the Rocket.Chat service while masking its synthetic

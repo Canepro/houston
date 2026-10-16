@@ -7,6 +7,8 @@ description: Verify recurring Houston v2 CLI migrations through bin/houston with
 
 This repository verifier exercises the real checkout entry point and parser. It
 uses synthetic persisted workspace files and keeps real engine executables unavailable.
+A separate setup preview supplies controlled read-only readiness observations
+through a temporary preload, as described in the setup recipe.
 Its offline result does not establish Docker, Kubernetes, authentication, or
 browser behavior. Keep the generated application skill in `data/skill/` and its
 mirrors under their existing generator's ownership.
@@ -53,7 +55,9 @@ retaining caller PATH only to resolve the installed Node shim. It excludes calle
 Node options, module paths, credentials, and other overrides. Only
 entry-point utilities are initially on the CLI child's PATH. The onboarding refusal
 drive adds a disposable kubectl trap and requires it never to be invoked. It passes no inherited credentials, engine sockets, kubeconfig,
-proxy variables, or Houston overrides. Do not broaden that environment to make a
+proxy variables, or Houston overrides. The setup-ready preview alone adds a temporary Node preload for the named
+read-only observation seams, retains their call evidence and requires unchanged
+config bytes. Do not add real engine tools or broaden other commands to make a
 check pass.
 
 Each CLI process has a 60-second timeout and completes before the next command.

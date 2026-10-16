@@ -1506,7 +1506,7 @@ def main():
                'file_work_limits': {'per_file_bytes': FILE_WORK_LIMIT_BYTES,
                                     'aggregate_bytes': TOTAL_WORK_LIMIT_BYTES,
                                     'seconds': FILE_WORK_SECONDS, 'entries': FILE_WORK_ENTRIES},
-               'features': {}, 'boundary': 'Real checkout CLI; synthetic workspace; engine tools unavailable. No live runtime proof.'}
+               'features': {}, 'boundary': 'Real checkout CLI; synthetic workspace; engine tools unavailable except controlled setup-ready observations. No live runtime proof.'}
     scratch = None
     fixture_root = None
     fixture_before = None
@@ -1758,8 +1758,15 @@ def main():
             bundle_names = bundle_payload.get('bundle', {}).get('files')
             require(isinstance(bundle_names, list) and sorted(bundle_names) == expected_bundle_files,
                     'Bundle response listed an incomplete or stale file set')
-            require(Path(bundle_payload['bundle']['path']).resolve() == bundle.resolve(),
-                    'Bundle response named another destination')
+            reported_path = bundle_payload['bundle'].get('path')
+            path_message = 'Bundle response path must be an absolute usable directory identifying the requested bundle'
+            require(isinstance(reported_path, str) and Path(reported_path).is_absolute(), path_message)
+            try:
+                reported_bundle = Path(reported_path)
+                usable = reported_bundle.is_dir() and reported_bundle.resolve(strict=True) == bundle.resolve(strict=True)
+            except (OSError, RuntimeError, ValueError):
+                usable = False
+            require(usable, path_message)
             require(stat.S_ISDIR(bundle.lstat().st_mode),
                     'Bundle root must be a real directory, not a symlink')
             require(set(tree_manifest(bundle)) == {'.', *expected_bundle_files},
@@ -2071,6 +2078,69 @@ def main():
                     'Setup failed to persist explicit choices or changed authority')
             summary['setup_first_run'] = require_setup_first_run(saved)
             after = read_bounded_file(config_file)
+            # Substitute only read-only observation seams. The candidate still
+            # computes readiness and generates the command through its own CLI.
+            ready_calls = scratch / 'setup-ready-calls.jsonl'
+            ready_preload = scratch / 'setup-ready-preload.cjs'
+            ready_preload.write_text(
+                'const Module=require("node:module"),fs=require("node:fs"),path=require("node:path");\n'
+                'const root=' + json.dumps(str(root)) + ',marker=' + json.dumps(str(ready_calls)) + ';\n'
+                'const seen=(name)=>fs.appendFileSync(marker,JSON.stringify(name)+"\\n");\n'
+                'const targets={\n'
+                ' [path.join(root,"src/core/runner/host.ts")]:{engine:async()=>{seen("engine");'
+                'return {kind:"docker",cpus:8,memBytes:16*1024**3,kernel:"6.6.0"};}},\n'
+                ' [path.join(root,"src/core/kube/tools.ts")]:{which:(name)=>{'
+                'if(!["docker","kubectl","helm","kind"].includes(name))throw new Error("Unexpected ready tool probe");'
+                'seen("which:"+name);return name==="kind"?"":path.join(root,"controlled-tools",name);}},\n'
+                ' [path.join(root,"src/core/kube/cluster.ts")]:{ownedRuntimeState:async()=>{'
+                'seen("ownedRuntimeState");return "ready";}}};\n'
+                'const load=Module._load;Module._load=function(request,parent,isMain){'
+                'const file=Module._resolveFilename(request,parent,isMain);'
+                'const value=load.apply(this,arguments);'
+                'return Object.hasOwn(targets,file)?{...value,...targets[file]}:value;};\n'
+            )
+            retain_provenance('setup-ready-preload.cjs', ready_preload.read_text())
+            ready = run('setup-ready', ['onboard', '--show', '--json'], schema='houston.onboard.v1',
+                        overrides={'NODE_OPTIONS': '--require=' + json.dumps(str(ready_preload))})['data']
+            ready_after = read_bounded_file(config_file)
+            require(ready_after == after, 'Ready setup preview wrote answers')
+            calls = [strict_json_loads(line) for line in read_bounded_file(ready_calls).decode().splitlines()]
+            retain_provenance('setup-ready-observations.json', json.dumps({
+                'calls': calls, 'scope': 'controlled read-only engine, tool and owned-runtime observations; no live runtime',
+                'preload_sha256': hash_file(ready_preload)}, indent=2) + '\n')
+            require(set(calls) == {'engine', 'which:docker', 'which:kubectl', 'which:helm',
+                                   'which:kind', 'ownedRuntimeState'}, 'Ready setup observation seams were not applied')
+            require(isinstance(ready, dict) and ready.get('schema') == 'houston.setup.v1',
+                    'Invalid setup inner schema: setup-ready')
+            environment = ready.get('environment', {})
+            capacity = ready.get('capacity', {})
+            expected_environment = {'tools': {'docker': True, 'kubectl': True, 'helm': True, 'kind': False},
+                'docker_ready': True, 'engine_provider': 'docker', 'engine_cpus': 8, 'engine_memory_gib': 16,
+                'engine_kernel_version': '6.6.0', 'missing_kubernetes_tools': [],
+                'owned_kubernetes_runtime': 'ready', 'microservices_ready': True,
+                'kubernetes_provisioning_available': False}
+            expected_capacity = {'applicable': True, 'ready': True, 'status': 'ready', 'code': '',
+                'observed_cpu': 8, 'observed_memory_gib': 16, 'required_cpu': 4, 'required_memory_gib': 6,
+                'supported_action': None}
+            require(isinstance(environment, dict) and isinstance(capacity, dict)
+                    and all(type(environment.get(key)) is type(value) and environment[key] == value
+                            if isinstance(value, bool) else environment.get(key) == value
+                            for key, value in expected_environment.items())
+                    and all(type(capacity.get(key)) is type(value) and capacity[key] == value
+                            if isinstance(value, bool) else capacity.get(key) == value
+                            for key, value in expected_capacity.items())
+                    and all(type(environment['tools'].get(key)) is bool for key in expected_environment['tools']),
+                    'Ready setup observation facts differ')
+            require(ready.get('selection') == saved['selection'] and ready.get('actions') == []
+                    and ready.get('persisted', {}).get('grants', {}).get('owned_cluster') is False,
+                    'Ready setup changed saved choices or authority')
+            require(isinstance(ready.get('first_run_command'), str) and ready['first_run_command'].strip(),
+                    'Ready setup must generate a first-run command')
+            require_saved_topology_command(ready['first_run_command'])
+            summary['setup_ready'] = {'result': 'PASS', 'controlled_observations': True,
+                                      'config_unchanged': True, 'config_before_sha256': hashlib.sha256(after).hexdigest(),
+                                      'config_after_sha256': hashlib.sha256(ready_after).hexdigest(),
+                                      'coverage': 'ready command grammar; no live runtime'}
             repeated = run('setup-readback', ['onboard', '--show', '--json'],
                            schema='houston.onboard.v1')['data']
             require(isinstance(repeated, dict) and repeated.get('schema') == 'houston.setup.v1',
@@ -2087,6 +2157,7 @@ def main():
                     and read_bounded_file(config_file) == after,
                     'Accepting redundant defaults rewrote answered choices or granted authority')
             human = run('setup-human', ['onboard', '--show'])
+            require(read_bounded_file(config_file) == after, 'Human setup preview wrote answers')
             # humanLines in src/cli/handlers/setup.ts prints the selected value
             # on its own line. Engine readiness text also mentions microservices.
             deployments = re.findall(r'^deployment[ \t]+([^\r\n]+)', human, re.MULTILINE)

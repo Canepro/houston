@@ -34,11 +34,25 @@ observations must be finite nonnegative numbers matching the environment facts,
 with literal readiness/applicability booleans and status/code consistent with the
 committed engine floor of 4 CPUs and 6 GiB. Never treat a ready runtime with
 sufficient capacity, or usable Kind provisioning, as justification for a blank.
-An unexplained empty command fails. Keep a separate supported ready-command drive
-and mutation controls so the blocked path cannot replace grammar coverage. Human output must
+An unexplained empty command fails. The helper also runs a separate `onboard --show --json` process with a temporary
+Node preload on the candidate's existing `host.engine`, `tools.which` and
+`cluster.ownedRuntimeState` observation seams. It supplies a Docker engine with
+8 CPUs, 16 GiB and kernel 6.6.0, present Docker/kubectl/Helm tools, absent Kind,
+and a ready owned runtime. The candidate computes readiness and generates the
+command itself. Require those exact reported facts, sufficient capacity, unchanged
+saved choices and authority, no actions, and a nonempty command with the grammar
+above. Require evidence that every controlled observation was called. Config
+bytes must remain identical. Retain `setup-ready.stdout`, its stderr, the preload,
+`setup-ready-observations.json` and before/after config hashes in the summary.
+The preload applies only to this preview process. It does not implement setup,
+invoke a cluster client, grant permission or establish real runtime readiness.
+Keep blank-command, malformed-command, false-fact and config-write controls so
+the blocked path cannot replace ready-command coverage. Human output must
 show exactly one `deployment  <selected value>` line matching the saved selection,
 as rendered by `humanLines` in `src/cli/handlers/setup.ts`, and the authority gate.
 Incidental deployment names in engine or options text do not establish the selection.
+Immediately after the human preview, compare exact config bytes with the saved
+snapshot before parsing YAML or deriving the interactive expectation.
 Persisted YAML must retain unknown fields
 and legacy denials. Receipts are `setup-*`, `setup-persisted.json`, and
 `commands.json`.
