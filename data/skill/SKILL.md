@@ -149,7 +149,7 @@ guess. New keys may appear in `data` or `warnings`; ignore ones you do not know.
 
 ### Presets
 
-`capabilities.presets` lists what this build has: `airgapped`, `default`, `e2ee`, `email`, `ldap`, `livechat`, `minio-multi`, `oidc`, `s3_minio`, `saml`. A preset starts the side
+`capabilities.presets` lists what this build has: `airgapped`, `default`, `e2ee`, `email`, `ldap`, `livechat`, `oidc`, `s3_minio`, `saml`. A preset starts the side
 service, wires Rocket.Chat to it and turns the feature on, so it is ready when you
 arrive: an `ldap` workspace has users, an `email` one catches every message Rocket.Chat
 sends, `airgapped` has no route to Rocket.Chat Cloud. `houston presets` prints each
