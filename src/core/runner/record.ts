@@ -70,13 +70,17 @@ export interface Metadata {
  * Compose too.
  */
 export function hasComposeInstancePorts(meta: Pick<Metadata, 'extra'>): boolean {
+  const runtime = extraBag(meta).runtime;
+  const normalized = typeof runtime === 'string' ? runtime.trim().toLowerCase() : '';
+  return normalized === '' || normalized === 'docker';
+}
+
+/** Legacy or hand-edited extra values are not necessarily an object bag at runtime. */
+export function extraBag(meta: Pick<Metadata, 'extra'>): Record<string, unknown> {
   const extra: unknown = meta.extra;
-  const bag =
-    typeof extra === 'object' && extra !== null && !Array.isArray(extra)
-      ? (extra as Record<string, unknown>)
-      : {};
-  const runtime = typeof bag.runtime === 'string' ? bag.runtime.trim().toLowerCase() : '';
-  return runtime === '' || runtime === 'docker';
+  return typeof extra === 'object' && extra !== null && !Array.isArray(extra)
+    ? (extra as Record<string, unknown>)
+    : {};
 }
 
 /**

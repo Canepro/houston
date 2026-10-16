@@ -97,7 +97,9 @@ const ROOT = path.resolve(__dirname, '..');
 // replica counts across the CLI, inspection, and recorded-port consumers.
 // Thirty-three R4 cases cover runtime-aware preflight, legacy recovery, truthful origin
 // advice, malformed extra bags, and unforwarded client loopback URLs. Collection: 4560.
-const FLOOR = 4560;
+// Four R5 cases retain malformed-neighbor host claims across runner and lifecycle scans.
+// Measured collection: 4564.
+const FLOOR = 4564;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

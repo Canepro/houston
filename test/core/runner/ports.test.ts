@@ -1,4 +1,5 @@
 import * as net from 'node:net';
+import * as fs from 'node:fs';
 
 import { EventEmitter } from 'node:events';
 
@@ -11,6 +12,7 @@ import {
 } from '../../../src/core/runner/ports';
 import type * as PortsNS from '../../../src/core/runner/ports';
 import { metadata, writeRecord } from '../../../src/core/runner/record';
+import { workspace } from '../../../src/core/runner/paths';
 
 const servers: net.Server[] = [];
 
@@ -51,8 +53,8 @@ describe('which ports a workspace has claimed', () => {
     });
     await record('sided', 5000, {
       sidecar_ports: [8082, '8083'],
-      monitoring_ports: [9090, 5050],
-      tls_ports: [443],
+      monitoring_ports: [9090, '5050'],
+      tls_ports: ['443'],
     });
 
     const claimed = await usedPorts();
@@ -65,6 +67,29 @@ describe('which ports a workspace has claimed', () => {
     expect([4500, 8025, 9090].every((port) => claimed.has(port))).toBe(true);
     expect([4501, 4502, 4503].every((port) => !claimed.has(port))).toBe(true);
     expect([5000, 8082, 8083, 9090, 5050, 443].every((port) => claimed.has(port))).toBe(true);
+  });
+
+  it.each([null, []])('retains host claims beside malformed extra %j', async (extra) => {
+    try {
+      await record('malformed', 6100);
+      const file = `${workspace('malformed')}/repro.json`;
+      const doc = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+      fs.writeFileSync(file, JSON.stringify({ ...doc, extra }));
+      await record('normal', 6200, {
+        instances: 2,
+        sidecar_ports: [8025, '8082'],
+        monitoring_ports: [9090, '5050'],
+        tls_ports: [443, '8443'],
+      });
+      const claimed = await usedPorts();
+      expect([...claimed]).toEqual(
+        expect.arrayContaining([6100, 6200, 6201, 6202, 8025, 8082, 9090, 5050, 443, 8443]),
+      );
+      expect([6101, 6102, 6203].some((port) => claimed.has(port))).toBe(false);
+    } finally {
+      fs.rmSync(workspace('malformed'), { recursive: true, force: true });
+      fs.rmSync(workspace('normal'), { recursive: true, force: true });
+    }
   });
 
   it('ignores a record it cannot read rather than failing the whole question', async () => {

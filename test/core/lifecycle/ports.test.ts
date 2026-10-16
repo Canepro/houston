@@ -1,6 +1,9 @@
 /**
  * `core/lifecycle/ports`: which host port a workspace gets, and what its record says it is.
  */
+import * as fs from 'node:fs';
+
+import { workspace } from '../../../src/core/runner/paths';
 import type * as ErrorsNS from '../../../src/lib/errors';
 import { nullEmit } from '../../../src/lib/events';
 import { emptyPreset } from '../../../src/lib/presets/types';
@@ -44,6 +47,44 @@ describe('picking a host port', () => {
 });
 
 describe('recorded port claims', () => {
+  it.each([null, []])('keeps malformed extra %j in home-wide conflict checks', async (extra) => {
+    const record = require('../../../src/core/runner/record') as typeof RecordNS;
+    const ports = require('../../../src/core/lifecycle/ports') as typeof PortsNS;
+    try {
+      await record.writeRecord('malformed', record.metadata({ name: 'malformed', hostPort: 9090 }));
+      const file = `${workspace('malformed')}/repro.json`;
+      const doc = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+      fs.writeFileSync(file, JSON.stringify({ ...doc, extra }));
+      expect(await ports.ownPorts('malformed')).toEqual(new Set([9090]));
+      expect(await ports.sidecarHolder([9090])).toEqual({ name: 'malformed', ports: [9090] });
+      await expect(ports.checkMonitorPorts()).rejects.toThrow(
+        "already used by repro 'malformed' - delete it first",
+      );
+      await record.writeRecord(
+        'ordinary',
+        record.metadata({
+          name: 'ordinary',
+          hostPort: 6300,
+          extra: {
+            instances: 2,
+            sidecar_ports: [8025, '8082'],
+            monitoring_ports: [9090, '5050'],
+            tls_ports: [443, '8443'],
+          },
+        }),
+      );
+      expect(await ports.ownPorts('ordinary')).toEqual(
+        new Set([6300, 6301, 6302, 8025, 8082, 9090, 5050, 443, 8443]),
+      );
+      await expect(ports.pickHostPort(9090, emptyPreset('default'))).rejects.toThrow(
+        'already claimed by another repro',
+      );
+    } finally {
+      fs.rmSync(workspace('malformed'), { recursive: true, force: true });
+      fs.rmSync(workspace('ordinary'), { recursive: true, force: true });
+    }
+  });
+
   it('does not turn Kubernetes replicas into Compose host-port claims', async () => {
     const record = require('../../../src/core/runner/record') as typeof RecordNS;
     const ports = require('../../../src/core/lifecycle/ports') as typeof PortsNS;
