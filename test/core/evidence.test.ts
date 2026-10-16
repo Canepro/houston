@@ -1665,8 +1665,28 @@ describe('the bundle', () => {
         '  timeheredoc:',
         '    image: example',
         '    command: ["sh", "-c", "timeout 5 bash <<EOF\\nclient --password TimeoutHeredocSentinel\\nEOF"]',
+        '  ansiunicode:',
+        '    image: example',
+        `    command: bash -c "client --password $'Ansi\\u0055nicodeSentinel'"`,
+        '  quoteddollar:',
+        '    image: example',
+        `    command: ["sh", "-c", "curl -H 'Authorization: Bearer $QuotedDollarSentinel' https://x"]`,
+        '  envprintf:',
+        '    image: example',
+        `    command: ["sh", "-c", "env printf '%s' sh <<EOF\\nclient --password EnvPrintfData\\nEOF"]`,
+        '  kubeliteral:',
+        '    image: example',
+        '    command: kubectl create secret generic example --from-literal=key1=KubeLiteralSentinel',
+        '  sshlogin:',
+        '    image: example',
+        '    command: sshpass -p SshpassSentinel ssh user@host',
         'x-copy: QuotedSentinel',
         'x-split-copy: SplitSentinel',
+        'x-dup-ansi-unicode: AnsiUnicodeSentinel',
+        'x-dup-quoted-dollar: $QuotedDollarSentinel',
+        'x-env-printf: EnvPrintfData',
+        'x-dup-kube-literal: KubeLiteralSentinel',
+        'x-dup-ssh-login: SshpassSentinel',
         'x-dup-sudo-heredoc: SudoHeredocSentinel',
         'x-dup-timeout-heredoc: TimeoutHeredocSentinel',
         'x-dup-json-shell: JsonShellSentinel',
@@ -1742,6 +1762,10 @@ describe('the bundle', () => {
       '987654321',
       'SudoHeredocSentinel',
       'TimeoutHeredocSentinel',
+      'AnsiUnicodeSentinel',
+      'QuotedDollarSentinel',
+      'KubeLiteralSentinel',
+      'SshpassSentinel',
     ]) {
       expect(compose).not.toContain(sentinel);
     }
@@ -1772,6 +1796,8 @@ describe('the bundle', () => {
     // A short credential masks whole values only, not every place its letters appear.
     expect(parsed['x-short-copy']).toBe('********');
     expect(parsed['x-short-word']).toBe('cabbage');
+    // `env` runs `printf` here, and `sh` is only its argument.
+    expect(parsed['x-env-printf']).toBe('EnvPrintfData');
     // `printf` names `sh` as data, so its heredoc is data too.
     expect(parsed['x-printf-heredoc']).toBe('PrintfHeredocData');
     // A heredoc fed to `cat` is data, and `--sort-keys` sorts: their values stay readable.

@@ -748,19 +748,57 @@ interface ShellWord {
 }
 
 /**
- * Whether a command reads its heredoc as a shell program. Its program decides: a shell does,
- * `cat` or `printf` does not. A wrapper (`env`, `sudo -n`, `timeout 5`) hands it on, and its
- * options vary by wrapper, so then any shell word among its arguments counts.
+ * Wrappers that run the program named after their options, with the options that take a value
+ * and how many operands come before the program (`timeout 5 sh`, `chroot /root sh`).
+ */
+const HEREDOC_WRAPPERS: Readonly<Record<string, { values: RegExp; operands: number }>> = {
+  env: { values: /^(?:-[uCS]|--unset|--chdir|--split-string)$/u, operands: 0 },
+  sudo: {
+    values:
+      /^(?:-[ugCDhprtUT]|--(?:user|group|chdir|host|prompt|role|type|other-user|close-from))$/u,
+    operands: 0,
+  },
+  doas: { values: /^-[uC]$/u, operands: 0 },
+  exec: { values: /^-a$/u, operands: 0 },
+  nice: { values: /^(?:-n|--adjustment)$/u, operands: 0 },
+  ionice: { values: /^-[cnp]$/u, operands: 0 },
+  timeout: { values: /^(?:-[sk]|--signal|--kill-after)$/u, operands: 1 },
+  time: { values: /^-[fo]$/u, operands: 0 },
+  command: { values: /^$/u, operands: 0 },
+  nohup: { values: /^$/u, operands: 0 },
+  setsid: { values: /^$/u, operands: 0 },
+  stdbuf: { values: /^-[ioe]$/u, operands: 0 },
+  chroot: { values: /^--(?:userspec|groups)$/u, operands: 1 },
+  flock: { values: /^-[wE]$/u, operands: 1 },
+};
+
+/**
+ * Whether a command reads its heredoc as a shell program: whether the program it runs, past
+ * `NAME=value` assignments and the wrappers above with their options, is a shell. `env sh` and
+ * `sudo -n sh` do; `env printf '%s' sh` runs `printf`. `su` and `runuser` start a shell.
  */
 function heredocRunsShell(command: readonly ShellWord[]): boolean {
-  const name = (word: ShellWord | undefined): string => (word?.text ?? '').split('/').pop() ?? '';
-  const shell = (word: ShellWord): boolean => /^(?:sh|bash|zsh|dash|ash|ksh)$/u.test(name(word));
-  const first = command.find((word) => !/^[A-Za-z_]\w*=/u.test(word.text));
-  if (first === undefined) return false;
-  if (shell(first)) return true;
-  const wrapper =
-    /^(?:env|sudo|doas|exec|nohup|command|time|nice|ionice|timeout|setsid|stdbuf|chroot|su|runuser|flock|xargs|unbuffer|chpst|setpriv|nsenter|unshare)$/u;
-  return wrapper.test(name(first)) && command.some(shell);
+  let wrapper: { values: RegExp; operands: number } | undefined;
+  let operands = 0;
+  for (let index = 0; index < command.length; index += 1) {
+    const word = (command[index] as ShellWord).text;
+    const name = word.split('/').pop() ?? '';
+    if (wrapper === undefined && /^[A-Za-z_]\w*=/u.test(word)) continue;
+    if (wrapper !== undefined && word.startsWith('-') && word !== '-') {
+      if (wrapper.values.test(word)) index += 1;
+      continue;
+    }
+    if (wrapper !== undefined && /^[A-Za-z_]\w*=/u.test(word)) continue;
+    if (wrapper !== undefined && operands > 0) {
+      operands -= 1;
+      continue;
+    }
+    if (/^(?:sh|bash|zsh|dash|ash|ksh|su|runuser)$/u.test(name)) return true;
+    wrapper = HEREDOC_WRAPPERS[name];
+    if (wrapper === undefined) return false;
+    operands = wrapper.operands;
+  }
+  return false;
 }
 
 /** Bash's single-character ANSI-C escapes; any other escaped character stands for itself. */
@@ -819,9 +857,15 @@ function shellCommands(text: string): ShellWord[][] {
           word += inner;
           continue;
         }
-        const escape = /^(?:x([0-9A-Fa-f]{1,2})|([0-7]{1,3})|(.))/su.exec(text.slice(index + 1));
-        const [match, hex, octal, single] = escape ?? ['', undefined, undefined, undefined];
+        const escape =
+          /^(?:x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|c(.)|([0-7]{1,3})|(.))/su.exec(
+            text.slice(index + 1),
+          );
+        const [match = '', hex, unicode, wide, control, octal, single] = escape ?? [];
+        const point = parseInt(unicode ?? wide ?? '', 16);
         if (hex !== undefined) word += String.fromCharCode(parseInt(hex, 16));
+        else if (!Number.isNaN(point) && point <= 0x10ffff) word += String.fromCodePoint(point);
+        else if (control !== undefined) word += String.fromCharCode(control.charCodeAt(0) & 0x1f);
         else if (octal !== undefined) word += String.fromCharCode(parseInt(octal, 8));
         else if (single !== undefined) word += ANSI_C_ESCAPES[single] ?? single;
         index += match.length;
@@ -926,7 +970,10 @@ function discoverCommandText(text: string, add: (value: string) => void, depth =
     for (const password of shortOptionPasswords(texts)) spellings(password);
     // `-H 'Authorization: Bearer token'`: the header's credential, not the whole header line.
     for (const header of authorizationHeaders(command.map((word) => word.text))) {
-      for (const credential of authorizationCredentials(header, true)) spellings(credential);
+      // `$TOKEN` expands, but `'Bearer $x'` and `\$x` pass the dollar literally.
+      const holder = command.find((word) => word.text.includes(header));
+      const literal = holder !== undefined && /^'|\\\$/u.test(holder.raw);
+      for (const credential of authorizationCredentials(header, !literal)) spellings(credential);
     }
     for (let index = 0; index < command.length; index += 1) {
       const word = command[index] as ShellWord;

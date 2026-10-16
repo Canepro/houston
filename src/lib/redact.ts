@@ -304,7 +304,8 @@ export function userArgument(word: string): boolean {
 
 /**
  * The passwords a client's short option carries: MySQL's attached `-pS3cret`, the only form in
- * which its `-p` takes a value, `redis-cli -a S3cret` and `docker login -p S3cret`. Elsewhere `-pX` and `-a` mean other
+ * which its `-p` takes a value, `redis-cli -a S3cret`, `docker login -p S3cret`, `sshpass -p S3cret`
+ * and the values of `kubectl create secret ... --from-literal=key=S3cret`. Elsewhere `-pX` and `-a` mean other
  * things (`mkdir -pv`, `cp -a`), so the program decides.
  */
 export function shortOptionPasswords(words: readonly string[]): string[] {
@@ -316,10 +317,24 @@ export function shortOptionPasswords(words: readonly string[]): string[] {
   const dockerLogin =
     words.some((word) => /^docker(?:\.exe)?$/iu.test(word.split(/[/\\]/u).pop() ?? '')) &&
     words.includes('login');
+  const sshpass = words.some((word) =>
+    /^sshpass(?:\.exe)?$/iu.test(word.split(/[/\\]/u).pop() ?? ''),
+  );
+  // `kubectl create secret generic x --from-literal=key=value`: every literal is the secret.
+  const secretLiterals =
+    words.some((word) => /^(?:kubectl|oc)(?:\.exe)?$/iu.test(word.split(/[/\\]/u).pop() ?? '')) &&
+    words.includes('secret');
   const values: string[] = [];
   words.forEach((word, index) => {
     const attached = /^-p(.+)$/su.exec(word)?.[1];
-    if (mysql && attached !== undefined) values.push(attached);
+    if ((mysql || sshpass) && attached !== undefined) values.push(attached);
+    if (sshpass && word === '-p' && (words[index + 1] ?? '') !== '')
+      values.push(words[index + 1] ?? '');
+    const literal = /^--from-literal=[^=]*=(.+)$/su.exec(word)?.[1];
+    if (secretLiterals && literal !== undefined) values.push(literal);
+    const separate = /^[^=]*=(.+)$/su.exec(words[index + 1] ?? '')?.[1];
+    if (secretLiterals && word === '--from-literal' && separate !== undefined)
+      values.push(separate);
     const next = words[index + 1] ?? '';
     if (redis && word === '-a' && next !== '') values.push(next);
     if (dockerLogin && word === '-p' && next !== '' && !next.startsWith('-')) values.push(next);
