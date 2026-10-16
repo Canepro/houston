@@ -52,6 +52,20 @@ def regular_file(path):
         return False
 
 
+def path_absent(path):
+    # lstat the directory entry. A dangling symlink is still an entry.
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return True
+    return False
+
+
+def require_absent_capture_bundle(bundle_path, marker_path):
+    require(path_absent(bundle_path) and not marker_path.exists(),
+            'Missing workspace capture wrote a bundle or launched a browser')
+
+
 def require_regular_file(path, message):
     require(regular_file(path), message)
 
@@ -69,6 +83,15 @@ def no_synthetic_secret(secret, paths):
     for path in paths:
         require_regular_file(path, f'Expected retained regular file: {path}')
         require(secret.encode() not in path.read_bytes(), f'Synthetic secret leaked: {path.name}')
+
+
+def retained_regular_files(root):
+    paths = sorted(root.rglob('*'), key=lambda item: str(item.relative_to(root)))
+    return [path for path in paths if regular_file(path)]
+
+
+def scan_retained_regular_files(secret, root):
+    no_synthetic_secret(secret, retained_regular_files(root))
 
 
 def require_unknown_panels(human, panels):
@@ -1061,8 +1084,7 @@ def main():
                                     'VERIFY_CAPTURE_MARKER': str(capture_marker),
                                     'VERIFY_CAPTURE_FAKE': str(fake_playwright)})
             require(absent['error']['code'] == 'NOT_FOUND', 'Capture missing name must be NOT_FOUND')
-            require(not absent_bundle.exists() and not capture_marker.exists(),
-                    'Missing workspace capture wrote a bundle or launched a browser')
+            require_absent_capture_bundle(absent_bundle, capture_marker)
             summary['features']['capture'] = 'PASS: missing workspace refused before bundle or browser launch; browser capture pending'
         detail = run('access-discovery', ['info', '--name', access_workspace.name, '--json'],
                      schema='houston.info.v1')['data']
@@ -1367,6 +1389,10 @@ def main():
             }
         except Exception as error:
             cleanup_errors.append(f'Final command receipt scan failed: {error}')
+        try:
+            scan_retained_regular_files(sentinel, out)
+        except Exception as error:
+            cleanup_errors.append(f'Retained evidence scan failed: {error}')
         if cleanup_errors:
             summary['cleanup_errors'] = cleanup_errors
             if failure is None:
