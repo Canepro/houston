@@ -20,6 +20,7 @@ import type * as KubeClusterNS from '../core/kube/cluster';
 import type * as KubeReachabilityNS from '../core/kube/reachability';
 import type * as KubeStatusNS from '../core/kube/status';
 import type * as KubeNamesNS from '../core/kube/names';
+import type * as AccessNS from '../core/lifecycle/access';
 import type * as AdminNS from '../core/lifecycle/admin';
 import type * as CreateDockerNS from '../core/lifecycle/create-docker';
 import type * as DestroyNS from '../core/lifecycle/destroy';
@@ -40,6 +41,7 @@ import type * as NotesNS from '../core/lifecycle/notes';
 import type * as RcapiNS from '../core/rcapi';
 import type * as RunnerEngineNS from '../core/runner/engine';
 import type * as RunnerQueriesNS from '../core/runner/queries';
+import type * as RunnerPathsNS from '../core/runner/paths';
 import type * as LocksNS from '../core/runner/locks';
 import type * as RecordNS from '../core/runner/record';
 import type * as ScaleseedNS from '../core/scaleseed';
@@ -788,6 +790,126 @@ async function confirmDestruction(
   }
 }
 
+/**
+ * Docker reuse keeps the recorded bind, including legacy Compose recovery. Kubernetes
+ * resolves its bind afresh on every up. Unknown reused binds cannot produce a handoff.
+ * Resolve typed-name ownership just as create does before reading the existing record.
+ */
+/**
+ * The side ports an `up` is known to publish before it runs: its presets' services,
+ * monitoring when asked for, and an explicit `--port`'s replica ports. A port allocated
+ * during the create is checked by the handoff afterwards.
+ */
+async function portsKnownBeforeUp(o: Values): Promise<number[]> {
+  const presets = require('../lib/presets') as typeof PresetsNS;
+  const config = require('../lib/config') as typeof ConfigNS;
+  const topology = require('../core/topology') as typeof TopologyNS;
+  const normalized = (value: string): string => {
+    try {
+      return topology.normalize(value);
+    } catch {
+      return value; // An invalid name is the create's refusal to make.
+    }
+  };
+  // Only a NEW workspace whose request is plainly Docker is checked here. A Kubernetes
+  // request, a microservices deployment, a context, or a re-up (whose recorded runtime,
+  // ports and settings win) is checked by the handoff after create instead.
+  // The deployment as Docker would read it; any spelling Docker cannot host (`micro`,
+  // `Microservices`) or does not know leaves the decision to create.
+  let deployment: string;
+  try {
+    deployment = topology.normalizeDeployment(text(o.deployment), topology.DOCKER);
+  } catch {
+    return [];
+  }
+  if (
+    normalized(text(o.runtime)) === topology.KUBERNETES ||
+    text(o.context).trim() !== '' ||
+    (await upTargetsExistingWorkspace(o))
+  ) {
+    return [];
+  }
+  const names = strings(o.preset);
+  const ports: number[] = [];
+  for (const name of names) {
+    try {
+      ports.push(...presets.load(name).ports);
+    } catch {
+      // An unknown preset is the create's refusal to make, with its own message.
+    }
+  }
+  if (bool(o.monitor)) ports.push(...config.MONITOR_PORTS);
+  const port = number(o.port);
+  const multi = deployment === topology.MULTI_INSTANCE || names.includes('multi-instance');
+  // A multi-instance deployment without --replicas runs its default of two.
+  const replicas = number(o.replicas) || (multi ? 2 : 0);
+  if (port > 0 && replicas > 1) {
+    for (let at = 1; at <= replicas; at += 1) ports.push(port + at);
+  }
+  return ports.filter((value) => Number.isSafeInteger(value) && value > 0);
+}
+
+/** Whether `up` names a workspace that already has a record, as create resolves the name. */
+async function upTargetsExistingWorkspace(o: Values): Promise<boolean> {
+  const types = require('../core/lifecycle/types') as typeof LifecycleTypesNS;
+  const audit = require('../core/audit') as typeof AuditNS;
+  const naming = require('../core/lifecycle/naming') as typeof NamingNS;
+  const ownership = require('../core/lifecycle/ownership') as typeof OwnershipNS;
+  const paths = require('../core/runner/paths') as typeof RunnerPathsNS;
+  const req = types.createReq({
+    version: text(o.version),
+    preset: strings(o.preset).length > 0 ? compositeName(strings(o.preset)) : '',
+    runtime: text(o.runtime),
+    context: text(o.context),
+    name: text(o.name),
+    actor: audit.actor(),
+    bind: text(o.bind),
+  });
+  await ownership.claimTypedName(req);
+  const name = naming.deriveFor(req);
+  return name !== '' && (await paths.exists(name));
+}
+
+async function handoffBindForUp(o: Values): Promise<string | null> {
+  const types = require('../core/lifecycle/types') as typeof LifecycleTypesNS;
+  const request = require('../core/lifecycle/request') as typeof RequestNS;
+  const audit = require('../core/audit') as typeof AuditNS;
+  const req = types.createReq({
+    version: text(o.version),
+    preset: strings(o.preset).length > 0 ? compositeName(strings(o.preset)) : '',
+    runtime: text(o.runtime),
+    context: text(o.context),
+    name: text(o.name),
+    actor: audit.actor(),
+    bind: text(o.bind),
+  });
+  const requested = request.requestedBindHost(req);
+  if (bool(o.force) || bool(o.fresh)) return requested;
+
+  const naming = require('../core/lifecycle/naming') as typeof NamingNS;
+  const ownership = require('../core/lifecycle/ownership') as typeof OwnershipNS;
+  const paths = require('../core/runner/paths') as typeof RunnerPathsNS;
+  const record = require('../core/runner/record') as typeof RecordNS;
+  const topology = require('../core/topology') as typeof TopologyNS;
+  const payload = require('../core/lifecycle/payload') as typeof PayloadNS;
+  await ownership.claimTypedName(req);
+  const name = naming.deriveFor(req);
+  if (!name || !(await paths.exists(name))) return requested;
+  let meta: RecordNS.Metadata;
+  try {
+    meta = await record.readMeta(name);
+  } catch {
+    return null;
+  }
+  // The create front door carries context before inferring runtime. An explicit runtime
+  // wins; otherwise an explicit or carried context selects Kubernetes before the locked
+  // axes step can fall back to the recorded runtime.
+  req.context ||= text(topology.axesOfMeta(meta).context);
+  const runtime = topology.normalize(request.inferRuntime(req) || topology.ofMeta(meta));
+  if (runtime === topology.KUBERNETES) return requested;
+  return (await payload.bindHostOf(meta)) || null;
+}
+
 /** Name every destructive target before asking once. */
 async function confirmPrune(
   io: CliIo,
@@ -845,8 +967,21 @@ async function dispatch(
   switch (invocation.spec.path) {
     case 'capabilities':
       return capabilities();
-    case 'up':
+    case 'up': {
+      // Only human output consumes a handoff. Refuse invalid overrides before creating
+      // its loopback workspace, but leave JSON automation independent of tunnel advice.
+      if (!active()) {
+        const bind = await handoffBindForUp(o);
+        if (bind !== null) {
+          (require('../core/lifecycle/access') as typeof AccessNS).validateEnvironment(
+            process.env,
+            bind,
+            await portsKnownBeforeUp(o),
+          );
+        }
+      }
       return await runUp(invocation, io);
+    }
     case 'ready': {
       const ready = require('../core/lifecycle/ready') as typeof ReadyNS;
       // `requireEngine` BEFORE the first poll. Without it a stopped daemon went straight
@@ -988,7 +1123,16 @@ async function dispatch(
         return withMeta({}, await record.readMeta(name));
       }
       const payload = require('../core/lifecycle/payload') as typeof PayloadNS;
-      return await payload.detail(name);
+      const record = require('../core/runner/record') as typeof RecordNS;
+      const access = require('../core/lifecycle/access') as typeof AccessNS;
+      // One snapshot for both: a second read of the record during a rebuild could
+      // advertise one port and forward another.
+      const meta = await record.readMeta(name);
+      const d = await payload.detailOf(name, meta);
+      // Advice for THIS session: `detail()` also serves the GUI, where the server's own
+      // environment says nothing about the browser's, so the handoff is computed here.
+      d.access = access.handoff(meta, process.env, String(d.bind_host));
+      return d;
     }
     case 'evidence': {
       const evidence = require('../core/evidence') as typeof EvidenceNS;
@@ -2316,7 +2460,9 @@ function tlsLabel(meta: RecordNS.Metadata): string {
     acme: "Let's Encrypt",
     own: 'supplied certificate',
   };
-  const kind = isTruthy(meta.extra.tls) ? toTextAny(meta.extra.tls) : '';
+  const record = require('../core/runner/record') as typeof RecordNS;
+  const extra = record.extraBag(meta);
+  const kind = isTruthy(extra.tls) ? toTextAny(extra.tls) : '';
   return Object.hasOwn(labels, kind) ? (labels[kind] as string) : 'enabled';
 }
 
@@ -2339,7 +2485,8 @@ function summaryPanel(
 ): void {
   const record = require('../core/runner/record') as typeof RecordNS;
   const topology = require('../core/topology') as typeof TopologyNS;
-  const managedBy = meta.extra.mongo_managed_by ?? '';
+  const extra = record.extraBag(meta);
+  const managedBy = extra.mongo_managed_by ?? '';
   const mongo = isTruthy(managedBy)
     ? `${meta.mongoTag} (via the ${toTextAny(managedBy)})`
     : `${meta.mongoTag} (${meta.mongoFlavor})`;
@@ -2352,7 +2499,7 @@ function summaryPanel(
     ['URL', record.externalUrl(meta)],
     ['Login', `admin / ${record.adminPass(meta)}`],
   ];
-  const owner = meta.extra.created_by ?? '';
+  const owner = extra.created_by ?? '';
   if (isTruthy(owner)) rows.push(['Owner', toTextAny(owner)]);
   if (isTruthy(meta.publicUrl)) {
     rows.push(['TLS', tlsLabel(meta)]);
@@ -2360,14 +2507,35 @@ function summaryPanel(
   }
   rows.push(...extraRows);
   writePanel(io, meta.name, rows);
-  const instances = meta.extra.instances;
-  if (isTruthy(instances)) {
+  const instances = extra.instances;
+  if (record.hasComposeInstancePorts(meta) && isTruthy(instances)) {
     io.writeOut(`  instances (${toTextAny(instances)}, load-balanced by Traefik):\n`);
     const count = toInt(instances);
     for (let at = 1; at <= count; at += 1) {
       io.writeOut(`    rocketchat-${String(at)}: http://localhost:${String(meta.hostPort + at)}\n`);
     }
   }
+}
+
+/** Print a tunnel only when the current SSH session cannot open the server's loopback URL. */
+async function printAccessHandoff(meta: RecordNS.Metadata, io: CliIo): Promise<void> {
+  const access = require('../core/lifecycle/access') as typeof AccessNS;
+  const payload = require('../core/lifecycle/payload') as typeof PayloadNS;
+  let handoff: AccessNS.AccessHandoff | null;
+  try {
+    handoff = access.handoff(meta, process.env, await payload.bindHostOf(meta));
+  } catch (error) {
+    // Advice only: a session override that cannot make a command must not turn a create
+    // that completed into a failure. `up` refuses the override before creating anything.
+    if (!(error instanceof ValidationError)) throw error;
+    io.writeErr(`  remote access: ${error.message}\n`);
+    return;
+  }
+  if (handoff === null || handoff.tunnel_command === null) return;
+  io.writeOut('  remote access (workspace is loopback-only on the server):\n');
+  io.writeOut(`    tunnel : ${handoff.tunnel_command}\n`);
+  io.writeOut(`    browser: ${handoff.browser_url}\n`);
+  if (handoff.note !== null) io.writeOut(`    note   : ${handoff.note}\n`);
 }
 
 /**
@@ -2396,7 +2564,9 @@ export async function printNotes(meta: RecordNS.Metadata, io: CliIo): Promise<vo
   let groups: { title: unknown; rows: unknown; body: unknown; commands: unknown }[] =
     await notes.noteGroupsOf(meta);
   if (groups.length === 0) {
-    const flat = Array.isArray(meta.extra.notes) ? meta.extra.notes : [];
+    const record = require('../core/runner/record') as typeof RecordNS;
+    const extra = record.extraBag(meta);
+    const flat = Array.isArray(extra.notes) ? extra.notes : [];
     if (flat.length === 0) return;
     groups = [{ title: '', rows: [], body: flat, commands: [] }];
   }
@@ -3041,10 +3211,12 @@ export async function renderHuman(
             ? []
             : [['Booted in', fmtDuration(Number(booted))]],
         );
+        await printAccessHandoff(meta, io);
         io.writeOut(`  next: houston logs --name ${meta.name} -f\n`);
       } else {
         io.writeOut('✓ starting\n');
         summaryPanel(meta, io);
+        await printAccessHandoff(meta, io);
         io.writeOut(`  ready when serving : houston ready --name ${meta.name}\n`);
         io.writeOut(`  follow logs        : houston logs --name ${meta.name} -f\n`);
       }
@@ -3055,6 +3227,7 @@ export async function renderHuman(
       const meta = metaOf(value);
       io.writeOut('✓ ready\n');
       summaryPanel(meta, io, [['Booted in', fmtDuration(Number(result.booted_s))]]);
+      await printAccessHandoff(meta, io);
       io.writeOut(`  next: houston logs --name ${meta.name} -f\n`);
       await printNotes(meta, io);
       return;
@@ -3189,6 +3362,7 @@ export async function renderHuman(
     case 'info': {
       const meta = metaOf(value);
       summaryPanel(meta, io);
+      await printAccessHandoff(meta, io);
       io.writeOut(`  api  : houston api --name ${meta.name} GET /api/v1/me\n`);
       io.writeOut(`  curl : ${meta.rootUrl}/api/info\n`);
       await printNotes(meta, io);

@@ -132,7 +132,11 @@ const ROOT = path.resolve(__dirname, '..');
 // One more masks a credential flag inside a command string: total 4647.
 // Inspect adds twenty cases on top of the evidence base: total 4647.
 // Credential arguments (19) and command strings (1) add twenty over 4647: total 4667.
-const FLOOR = 4667;
+// SSH access adds ninety-eight cases over the inspect base: total 4745.
+// One more passes a bracketed IPv6 SSH host bare: total 4746.
+// One more refuses a tunnel port a preset or monitoring will publish, before create: 4747.
+// Credential arguments add twenty over the SSH access base of 4747: total 4767.
+const FLOOR = 4767;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

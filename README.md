@@ -70,6 +70,22 @@ it, `down` keeps the data, and running the same `up` again brings the workspace 
 A workspace only listens on `127.0.0.1`, so nobody else on your network can reach it.
 Keep it that way: every workspace uses the same well-known passwords.
 
+### Remote access over SSH
+
+A browser on your laptop cannot open the remote server's `localhost`. When `up`, `ready`, or
+human-readable `info` runs inside an SSH session for a loopback-only workspace, houston prints
+an `ssh -N -L` command and a client-side browser URL. Run that command on your laptop, then open
+the printed `http://127.0.0.1:<port>` URL there.
+
+Houston does not open a firewall, create public ingress, change the workspace bind, or execute
+SSH for this handoff. `houston info --json` exposes the same structured instructions at
+`data.access`. Set `HOUSTON_SSH_HOST` or `HOUSTON_SSH_USER` before the remote command when its
+suggested destination is wrong. If the suggested laptop port is occupied, set
+`HOUSTON_SSH_LOCAL_PORT` before running `up`, `ready`, or `info`; the suggested tunnel preserves
+the workspace's remote port. The command explicitly binds the laptop listener to `127.0.0.1`,
+even when an SSH client configuration enables `GatewayPorts`, and ends SSH option parsing before
+the selected destination.
+
 ## Day to day
 
 | To | Run |

@@ -57,8 +57,10 @@ entry-point utilities are initially on the CLI child's PATH. The onboarding refu
 drive adds a disposable kubectl trap and requires it never to be invoked. It passes no inherited credentials, engine sockets, kubeconfig,
 proxy variables, or Houston overrides. The setup-ready preview alone adds a temporary Node preload for the named
 read-only observation seams, retains their call evidence and requires unchanged
-config bytes. Do not add real engine tools or broaden other commands to make a
-check pass.
+config bytes. The missing-workspace capture drive adds its own preload. Both
+preload paths enter `NODE_OPTIONS` quoted for Node's parser, so a temporary
+directory with spaces, quotes, backslashes or non-ASCII characters still loads them.
+Do not add real engine tools or broaden other commands to make a check pass.
 
 Each CLI process has a 60-second timeout and completes before the next command.
 The runner retains at most 4 MiB from each of stdout and stderr. Output beyond
@@ -107,11 +109,18 @@ its actual executable digest. The resolved dispatcher must remain in the checkou
 including parent-directory links, must resolve to regular, nonignored files already
 in the source manifest; their target path and bytes are hashed as well as the link.
 Within the source manifest, escaping, relocated, directory or ignored-target
-links fail before CLI execution. A separate bounded structural check resolves
-every tracked symlink across the checkout and refuses escaping, dangling, cyclic,
-special-file or ignored targets. In-tree, nonignored directory targets outside the
-source manifest are allowed, including `legacy/houston/data -> ../../data`. This
-structural check does not hash every possible import or contain arbitrary code.
+links fail before CLI execution. A separate bounded structural check inspects every
+tracked path on disk, whatever its index mode. A tracked regular file replaced by a
+link, and a tracked path under a linked parent directory, are links to it. It
+refuses escaping, dangling, cyclic, special-file or ignored targets, and any target
+equal to or under the root `.git`, the resolved Git directory or the common
+directory, because no fingerprint covers Git metadata. A tracked path missing from
+the worktree is skipped; `git diff` records the deletion. In-tree, nonignored
+directory targets outside the source manifest are allowed, including
+`legacy/houston/data -> ../../data`. This structural check does not hash every
+possible import or contain arbitrary code. Links inside the manifest paths must also
+point at a regular, manifested file, so a link to a directory or to a tracked file
+outside those paths fails with `Unsafe candidate source link`.
 A file link within `bin/` to a manifested, nonignored file is supported.
 Both `src/cli/entry.ts` and `tools/cli.js` must be manifested files. Installed-package
 `dist/` fallback and ignored source dispatchers are outside this checkout verifier.

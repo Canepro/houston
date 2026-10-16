@@ -291,22 +291,25 @@ describe('the detail panel', () => {
     await expect(payload.bindHostOf(unresolved)).resolves.toBe('');
   });
 
-  it('reads a record whose extra is null as having no recorded env, as earlier releases do', async () => {
-    // Earlier releases read the recorded env only out of an extra that is an object, where
-    // `meta.extra.env` read through the null and `info --json` was a TypeError stack.
-    await write(
-      'bare',
-      'services:\n  rocketchat:\n    image: i\n    environment:\n      ROOT_URL: x\n',
-      sampleMeta('bare'),
-    );
-    const file = path.join(config.reprosDir(), 'bare', 'repro.json');
-    const blob = JSON.parse(fs.readFileSync(file, 'utf8')) as object;
-    fs.writeFileSync(file, JSON.stringify({ ...blob, extra: null }));
-    // What earlier releases' detail showed as the env of that record, docker down, recorded.
-    const recorded = [{ key: 'ROOT_URL', value: 'x', override: false }];
-    const { payload } = load(false);
-    expect((await payload.detail('bare')).env).toEqual(recorded);
-  });
+  it.each([null, []])(
+    'reads malformed extra %j as having no recorded env, as earlier releases do',
+    async (extra) => {
+      // Earlier releases read the recorded env only out of an extra that is an object, where
+      // `meta.extra.env` read through the null and `info --json` was a TypeError stack.
+      await write(
+        'bare',
+        'services:\n  rocketchat:\n    image: i\n    environment:\n      ROOT_URL: x\n',
+        sampleMeta('bare'),
+      );
+      const file = path.join(config.reprosDir(), 'bare', 'repro.json');
+      const blob = JSON.parse(fs.readFileSync(file, 'utf8')) as object;
+      fs.writeFileSync(file, JSON.stringify({ ...blob, extra }));
+      // What earlier releases' detail showed as the env of that record, docker down, recorded.
+      const recorded = [{ key: 'ROOT_URL', value: 'x', override: false }];
+      const { payload } = load(false);
+      expect((await payload.detail('bare')).env).toEqual(recorded);
+    },
+  );
 
   it('carries the HTTPS fields the panel keys its row and its check off', async () => {
     // The list carried public_url/tls and the detail did not, so the whole feature was

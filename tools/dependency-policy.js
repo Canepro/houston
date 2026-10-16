@@ -212,9 +212,10 @@ const RANKS = [
   // nearly all of it. Collapsing any two adjacent tiers would permit exactly the
   // sideways edge the tiers forbid.
   //
-  // `admin`, `notes` and `types` have no lifecycle imports at all; they share the bottom
-  // rank with the modules whose only edges are to `types`.
+  // `access`, `admin`, `notes` and `types` have no lifecycle imports at all; they share the
+  // bottom rank with modules whose dependencies are strictly lower layers.
   [
+    '^src/core/lifecycle/access\\.ts$',
     '^src/core/lifecycle/types\\.ts$',
     '^src/core/lifecycle/notes\\.ts$',
     '^src/core/lifecycle/admin\\.ts$',

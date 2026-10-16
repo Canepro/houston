@@ -47,9 +47,20 @@ bytes must remain identical. Retain `setup-ready.stdout`, its stderr, the preloa
 The preload applies only to this preview process. It does not implement setup,
 invoke a cluster client, grant permission or establish real runtime readiness.
 Keep blank-command, malformed-command, false-fact and config-write controls so
-the blocked path cannot replace ready-command coverage. Human output must
+the blocked path cannot replace ready-command coverage. Require the ready response's
+`gates` to hold exactly one `GATE_OWNED_CLUSTER` grant gate with its `houston onboard grant owned-cluster` approval, and none of
+`KUBERNETES_TOOLS_MISSING`, `CAPACITY_BELOW_FLOOR`, `CAPACITY_UNKNOWN`,
+`OWNED_KUBERNETES_UNAVAILABLE`, `OWNED_KUBERNETES_UNKNOWN` or `GATE_NOT_ONBOARDED`.
+Those blockers contradict the controlled observations and completed onboarding.
+Before saving anything, the first JSON preview must show the legacy fixture's answers:
+deployment `monolith` for the saved `default`, no scenarios, seed profile `small` and
+retention off. Compare those four fields one by one. The real `selection` also holds
+`topology` and `kubernetes_target`. Human output must
 show exactly one `deployment  <selected value>` line matching the saved selection,
-as rendered by `humanLines` in `src/cli/handlers/setup.ts`, and the authority gate.
+as rendered by `humanLines` in `src/cli/handlers/setup.ts`. That renderer prints one
+`  CODE: message` row per gate between its `seed deferred` and `first run` lines. The
+rows must equal the gates of the JSON readback that ran just before, in order, so a
+code or message mentioned elsewhere does not count and a changed denial text fails.
 Incidental deployment names in engine or options text do not establish the selection.
 Immediately after the human preview, compare exact config bytes with the saved
 snapshot before parsing YAML or deriving the interactive expectation.

@@ -341,6 +341,21 @@ describe('the links a workspace publishes', () => {
     });
   });
 
+  it('does not turn Kubernetes replicas into Docker instance links or URLs', async () => {
+    const meta = metadata({
+      name: 'kube-replicas',
+      project: 'houston-kube-replicas',
+      rootUrl: 'http://localhost:3310',
+      hostPort: 3310,
+      extra: { runtime: 'kubernetes', deployment: 'microservices', instances: 3 },
+    });
+
+    expect(reproLinks(meta).some((link) => link.label.startsWith('instance '))).toBe(false);
+    const described = await summary(meta);
+    expect(described).not.toHaveProperty('instances');
+    expect(described).not.toHaveProperty('instance_urls');
+  });
+
   it.each([
     ['docker', 'local', 'https://h', 'https://h/grafana'],
     ['docker', 'acme', 'https://h', 'https://h/grafana'],
