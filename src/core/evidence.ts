@@ -38,6 +38,8 @@ import { ValidationError } from '../lib/errors';
 import { isTruthy, quotedText, toText } from '../lib/format';
 import { pathExpandUser } from '../lib/home';
 import {
+  ARGUMENT_LIST_KEYS,
+  credentialFlag,
   credentialKey,
   discoverTextSecrets,
   type KnownSecret,
@@ -735,6 +737,17 @@ function discoverArtifactSecrets(
       wholeSecrets.add(YAML.stringify(numeric.contents.value).replace(/\n$/u, ''));
     } else (whole ? wholeSecrets : secrets).add(text);
   };
+  // The item after a credential flag is its value, as in `--flag=value`; neither item names
+  // a credential on its own, so classify it here, before any scalar renders.
+  const discoverArguments = (list: YAML.YAMLSeq): void => {
+    let afterFlag = false;
+    for (const item of list.items) {
+      if (afterFlag) visit(item, true);
+      const flag = YAML.isAlias(item) ? item.resolve(doc) : item;
+      afterFlag =
+        YAML.isScalar(flag) && typeof flag.value === 'string' && credentialFlag(flag.value);
+    }
+  };
   if (YAML.isAlias(node)) {
     visit(node.resolve(doc));
   } else if (YAML.isScalar(node)) {
@@ -767,6 +780,8 @@ function discoverArtifactSecrets(
       const key = YAML.isAlias(pair.key) ? pair.key.resolve(doc) : pair.key;
       const text = YAML.isScalar(key) ? String(key.value) : '';
       visit(pair.value, secret || credentialKey(text) || (text === 'value' && named));
+      const list = YAML.isAlias(pair.value) ? pair.value.resolve(doc) : pair.value;
+      if (ARGUMENT_LIST_KEYS.includes(text) && YAML.isSeq(list)) discoverArguments(list);
     }
   }
 }

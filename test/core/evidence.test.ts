@@ -1317,6 +1317,313 @@ describe('the bundle', () => {
     expect(parsed['x-pair']).toEqual({ name: 'DB_PASSWORD', value: '********' });
   });
 
+  /** Write `doc` as the workspace's Compose file and collect a bundle from it. */
+  async function bundledCompose(
+    name: string,
+    doc: string,
+  ): Promise<{ compose: string; everything: string }> {
+    await workspaceNamed(name, {}, {}, doc);
+    const dest = path.join(workspace(name), 'out', 'bundle');
+    await collect(name, { bundle: dest });
+    return {
+      compose: fs.readFileSync(path.join(dest, 'docker-compose.yml'), 'utf8'),
+      everything: fs
+        .readdirSync(dest)
+        .map((file) => fs.readFileSync(path.join(dest, file), 'utf8'))
+        .join('\n'),
+    };
+  }
+
+  function pick(value: unknown, ...keys: string[]): unknown {
+    return keys.reduce<unknown>((node, key) => (node as Record<string, unknown>)[key], value);
+  }
+
+  it.each([
+    {
+      id: 'first',
+      origin: 'a credential name first, an ordinary name last',
+      json: '{"name":"Authorization","value":"Bearer DupJsonFirstSentinel","name":"ordinary","keep":1.50}',
+      masked: '{"name":"Authorization","value":"********","name":"ordinary","keep":1.50}',
+      sentinel: 'DupJsonFirstSentinel',
+      copy: 'DupJsonFirstSentinel',
+    },
+    {
+      id: 'last',
+      origin: 'an ordinary name first, a credential name last',
+      json: '{"name":"ordinary","value":"Bearer DupJsonLastSentinel","name":"Authorization","keep":1.50}',
+      masked: '{"name":"ordinary","value":"********","name":"Authorization","keep":1.50}',
+      sentinel: 'DupJsonLastSentinel',
+      copy: 'DupJsonLastSentinel',
+    },
+    {
+      id: 'single',
+      origin: 'a single credential name',
+      json: '{"name":"Authorization","value":"Bearer DupJsonSingleSentinel","keep":1.50}',
+      masked: '{"name":"Authorization","value":"********","keep":1.50}',
+      sentinel: 'DupJsonSingleSentinel',
+      copy: 'DupJsonSingleSentinel',
+    },
+    {
+      id: 'direct',
+      origin: 'duplicate direct Authorization members',
+      json: '{"Authorization":"Bearer DupJsonDirectSentinel","Authorization":"ordinary","keep":1.50}',
+      masked: '{"Authorization":"********","Authorization":"********","keep":1.50}',
+      sentinel: 'DupJsonDirectSentinel',
+      copy: 'DupJsonDirectSentinel',
+    },
+    {
+      id: 'middle',
+      origin: 'a credential name between ordinary names, with a value on each side',
+      json: '{"value":"DupJsonEarlySentinel","name":"ordinary","name":"DB_PASSWORD","name":"other","value":"DupJsonLateSentinel","keep":1.50}',
+      masked:
+        '{"value":"********","name":"ordinary","name":"DB_PASSWORD","name":"other","value":"********","keep":1.50}',
+      sentinel: 'DupJsonLateSentinel',
+      copy: 'DupJsonEarlySentinel',
+    },
+    {
+      id: 'numeric',
+      origin: 'a numeric credential value beside duplicate names',
+      json: '{"name":"DB_PASSWORD","value":4.50,"name":"ordinary","keep":27017}',
+      masked: '{"name":"DB_PASSWORD","value":"********","name":"ordinary","keep":27017}',
+      sentinel: null,
+      copy: '4.5',
+    },
+  ])(
+    'discovers duplicate embedded JSON names before rendering copies: $origin',
+    async ({ id, json, masked, sentinel, copy }) => {
+      const name = `e7-dup-json-${id}`;
+      const { compose, everything } = await bundledCompose(
+        name,
+        [
+          `x-before: ${copy}`,
+          `x-json: '${json}'`,
+          `x-after: ${copy}`,
+          'x-port: 27017',
+          'x-control: readable',
+          '',
+        ].join('\n'),
+      );
+      if (sentinel !== null) expect(everything).not.toContain(sentinel);
+      if (sentinel !== null && copy !== sentinel) expect(everything).not.toContain(copy);
+      const parsed = YAML.parse(compose) as Record<string, unknown>;
+      expect(parsed['x-json']).toBe(masked);
+      expect(parsed['x-before']).toBe('********');
+      expect(parsed['x-after']).toBe('********');
+      expect(parsed['x-port']).toBe(27017);
+      expect(parsed['x-control']).toBe('readable');
+    },
+  );
+
+  it('keeps duplicate JSON names that name no credential readable', async () => {
+    const ordinary =
+      '{"name":"service","value":"KeepOrdinaryJsonSentinel","name":"label","keep":1.50}';
+    const { compose } = await bundledCompose(
+      'e7-dup-json-ordinary',
+      [`x-json: '${ordinary}'`, 'x-port: 27017', 'x-control: readable', ''].join('\n'),
+    );
+    const parsed = YAML.parse(compose) as Record<string, unknown>;
+    expect(parsed['x-json']).toBe(ordinary);
+    expect(parsed['x-port']).toBe(27017);
+  });
+
+  it.each(
+    ['command', 'entrypoint', 'args', 'test'].flatMap((field) =>
+      ['--password', '--reg-token'].map((flag) => ({ field, flag })),
+    ),
+  )(
+    'discovers the $flag value in a $field list before rendering copies',
+    async ({ field, flag }) => {
+      const secret = `Argv_${field}_${flag.slice(2).replace('-', '_')}_Sentinel`;
+      const list = `[client, ${flag}, ${secret}, --port, "27017"]`;
+      const { compose, everything } = await bundledCompose(
+        `e7-argv-${field}-${flag.slice(2)}`,
+        [
+          `x-before: ${secret}`,
+          'services:',
+          '  rocketchat:',
+          '    image: example',
+          ...(field === 'test'
+            ? ['    healthcheck:', `      test: ${list}`]
+            : [`    ${field}: ${list}`]),
+          `x-after: ${secret}`,
+          'x-port: 27017',
+          'x-replica: rocketchat-1',
+          'x-controls:',
+          '  authorizationEnabled: true',
+          '  authHeaderCount: 2',
+          'x-control: readable',
+          '',
+        ].join('\n'),
+      );
+      expect(everything).not.toContain(secret);
+      const parsed = YAML.parse(compose) as Record<string, unknown>;
+      const rocketchat = pick(parsed, 'services', 'rocketchat');
+      expect(
+        field === 'test' ? pick(rocketchat, 'healthcheck', 'test') : pick(rocketchat, field),
+      ).toEqual(['client', flag, '********', '--port', '27017']);
+      expect(parsed['x-before']).toBe('********');
+      expect(parsed['x-after']).toBe('********');
+      expect(parsed['x-port']).toBe(27017);
+      expect(parsed['x-replica']).toBe('rocketchat-1');
+      expect(parsed['x-controls']).toEqual({ authorizationEnabled: true, authHeaderCount: 2 });
+      expect(parsed['x-control']).toBe('readable');
+    },
+  );
+
+  it('does not let a credential flag mask an argument it does not precede', async () => {
+    const { compose } = await bundledCompose(
+      'e7-argv-equals',
+      [
+        'x-before: EqualsArgumentSentinel',
+        'services:',
+        '  rocketchat:',
+        '    image: example',
+        '    command: [client, --password=EqualsArgumentSentinel, EqualsNeighborSentinel, --port, "27017", --name, rocketchat-1, --verbose, --password]',
+        '    args: [--password, ArgsSentinelOne, --port, "27017"]',
+        'x-notes:',
+        '  - --password',
+        '  - NotListSentinel',
+        'x-port: 27017',
+        'x-control: readable',
+        '',
+      ].join('\n'),
+    );
+    expect(compose).not.toContain('EqualsArgumentSentinel');
+    expect(compose).not.toContain('ArgsSentinelOne');
+    const parsed = YAML.parse(compose) as Record<string, unknown>;
+    expect(pick(parsed, 'services', 'rocketchat', 'command')).toEqual([
+      'client',
+      '--password=********',
+      'EqualsNeighborSentinel',
+      '--port',
+      '27017',
+      '--name',
+      'rocketchat-1',
+      '--verbose',
+      '--password',
+    ]);
+    expect(pick(parsed, 'services', 'rocketchat', 'args')).toEqual([
+      '--password',
+      '********',
+      '--port',
+      '27017',
+    ]);
+    // A list under any other key is data, not an argument sequence.
+    expect(parsed['x-notes']).toEqual(['--password', 'NotListSentinel']);
+    expect(parsed['x-before']).toBe('********');
+    expect(parsed['x-port']).toBe(27017);
+    expect(parsed['x-control']).toBe('readable');
+  });
+
+  it('discovers credential arguments in embedded JSON argument arrays', async () => {
+    const embedded =
+      '{"command":["client","--password","JsonArgumentSentinel","--port","27017"],"entrypoint":["client","--reg-token","JsonRegArgumentSentinel"],"args":["client","--password","JsonArgsSentinel"],"healthcheck":{"test":["CMD","client","--password","JsonTestSentinel"]},"keep":1.50,"notes":["--password","NotCommandSentinel"]}';
+    const masked =
+      '{"command":["client","--password","********","--port","27017"],"entrypoint":["client","--reg-token","********"],"args":["client","--password","********"],"healthcheck":{"test":["CMD","client","--password","********"]},"keep":1.50,"notes":["--password","NotCommandSentinel"]}';
+    const { compose } = await bundledCompose(
+      'e7-argv-json',
+      [
+        'x-before-json: JsonArgumentSentinel',
+        'x-before-reg: JsonRegArgumentSentinel',
+        'x-before-args: JsonArgsSentinel',
+        'x-before-test: JsonTestSentinel',
+        `x-json: '${embedded}'`,
+        'x-port: 27017',
+        'x-replica: rocketchat-1',
+        'x-control: readable',
+        '',
+      ].join('\n'),
+    );
+    for (const secret of [
+      'JsonArgumentSentinel',
+      'JsonRegArgumentSentinel',
+      'JsonArgsSentinel',
+      'JsonTestSentinel',
+    ])
+      expect(compose).not.toContain(secret);
+    const parsed = YAML.parse(compose) as Record<string, unknown>;
+    expect(parsed['x-json']).toBe(masked);
+    expect(parsed['x-port']).toBe(27017);
+    expect(parsed['x-replica']).toBe('rocketchat-1');
+    expect(compose).toContain('NotCommandSentinel');
+  });
+
+  it('discovers a credential argument reached through a YAML alias', async () => {
+    const { compose } = await bundledCompose(
+      'e7-argv-alias',
+      [
+        'x-before: AliasArgumentSentinel',
+        'x-argv: &argv [client, --password, AliasArgumentSentinel]',
+        'services:',
+        '  rocketchat:',
+        '    image: example',
+        '    command: *argv',
+        'x-after: AliasArgumentSentinel',
+        'x-port: 27017',
+        'x-control: readable',
+        '',
+      ].join('\n'),
+    );
+    expect(compose).not.toContain('AliasArgumentSentinel');
+    const parsed = YAML.parse(compose) as Record<string, unknown>;
+    // The anchor renders as a list; its second appearance is masked whole as a repeated object.
+    expect(parsed['x-argv']).toEqual(['client', '--password', '********']);
+    expect(parsed['x-port']).toBe(27017);
+    expect(parsed['x-control']).toBe('readable');
+  });
+
+  it('keeps a numeric credential argument whole, never erasing ports or replica suffixes', async () => {
+    const { compose } = await bundledCompose(
+      'e7-argv-numeric',
+      [
+        'x-before: 7',
+        'x-lexical-before: "4.50"',
+        'x-lexical-canonical: 4.5',
+        'services:',
+        '  rocketchat:',
+        '    image: example',
+        '    command:',
+        '      - client',
+        '      - --password',
+        '      - 7',
+        '      - --port',
+        '      - 27017',
+        '    entrypoint: [client, --reg-token, "4.50", --port, "27017"]',
+        'x-port: 27017',
+        'x-replica: rocketchat-7',
+        'x-lexical-replica: rocketchat-4.50',
+        'x-embedded: \'{ "keep":27017, "decimal":1.50, "copy":"7", "lexical":"4.50" }\'',
+        'x-control: readable',
+        '',
+      ].join('\n'),
+    );
+    const parsed = YAML.parse(compose) as Record<string, unknown>;
+    expect(pick(parsed, 'services', 'rocketchat', 'command')).toEqual([
+      'client',
+      '--password',
+      '********',
+      '--port',
+      27017,
+    ]);
+    expect(pick(parsed, 'services', 'rocketchat', 'entrypoint')).toEqual([
+      'client',
+      '--reg-token',
+      '********',
+      '--port',
+      '27017',
+    ]);
+    expect(parsed['x-before']).toBe('********');
+    expect(parsed['x-lexical-before']).toBe('********');
+    expect(parsed['x-lexical-canonical']).toBe('********');
+    expect(parsed['x-port']).toBe(27017);
+    expect(parsed['x-replica']).toBe('rocketchat-7');
+    expect(parsed['x-lexical-replica']).toBe('rocketchat-4.50');
+    expect(parsed['x-embedded']).toBe(
+      '{ "keep":27017, "decimal":1.50, "copy":"********", "lexical":"********" }',
+    );
+    expect(parsed['x-control']).toBe('readable');
+  });
+
   it.each(['yaml', 'assignment', 'json', 'named', 'alias', 'nested-json'])(
     'keeps numeric text credentials whole through %s discovery in actual bundles',
     async (origin) => {

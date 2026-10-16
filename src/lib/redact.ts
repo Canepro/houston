@@ -61,6 +61,29 @@ export function credentialKey(key: string): boolean {
 }
 
 /**
+ * Keys whose list value is an argument sequence: a Compose or Kubernetes `command`,
+ * `entrypoint` or `args`, and a Compose healthcheck `test`. In such a list a credential flag
+ * and the argument after it are separate items, so neither item names its own credential.
+ */
+export const ARGUMENT_LIST_KEYS: readonly string[] = Object.freeze([
+  'command',
+  'entrypoint',
+  'args',
+  'test',
+]);
+
+/**
+ * Whether an argument item is a flag whose NEXT item is its credential value: `--password` or
+ * `--reg-token`, named by the same words `credentialKey` reads. `--flag=value` carries its own
+ * value and is read as an assignment instead; `--port` and a plain argument are not flags of this
+ * kind.
+ */
+export function credentialFlag(item: string): boolean {
+  const flag = /^--?([A-Za-z][^=\s]*)$/u.exec(item)?.[1];
+  return flag !== undefined && credentialKey(flag);
+}
+
+/**
  * The whitespace of `STRIP_CHARS`, as the inside of a character class.
  *
  * NOT JavaScript's `\s`, which the pattern below used to be written with: JavaScript's
@@ -137,16 +160,18 @@ function jsonValueEnd(text: string, at: number, ends: ReadonlyMap<number, number
 }
 
 /**
- * Whether the object at `at` has a `name` member naming a credential, in any member position;
- * the last one counts, as for `JSON.parse`. Its `value` member is then the credential, as the
- * same object in YAML is (`{name: DB_PASSWORD, value: ...}`).
+ * Whether the object at `at` has a `name` member naming a credential, in any member position.
+ * `JSON.parse` keeps only the last duplicate `name`, but the retained bytes hold every member and
+ * a reader may take the first, so ANY credential name counts, as for duplicate YAML names. Every
+ * `value` member of the object is then the credential, as the same object in YAML is
+ * (`{name: DB_PASSWORD, value: ...}`).
  */
 function namesCredential(text: string, at: number, ends: ReadonlyMap<number, number>): boolean {
-  let name = '';
+  let named = false;
   let i = at + 1;
   for (;;) {
     i += jsonToken(JSON_SPACE, text, i).length;
-    if (text[i] === '}' || i >= text.length) return credentialKey(name);
+    if (text[i] === '}' || i >= text.length) return named;
     if (text[i] === ',') {
       i += 1;
       continue;
@@ -158,7 +183,7 @@ function namesCredential(text: string, at: number, ends: ReadonlyMap<number, num
     const end = jsonValueEnd(text, i, ends);
     if ((JSON.parse(key) as string) === 'name') {
       const value = text.slice(i, end);
-      name = value.startsWith('"') ? (JSON.parse(value) as string) : value;
+      named ||= credentialKey(value.startsWith('"') ? (JSON.parse(value) as string) : value);
     }
     i = end;
   }
@@ -197,7 +222,7 @@ export function discoverTextSecrets(
   }
   if (valid) {
     const ends = jsonEnds(text);
-    const walk = (at: number, secret: boolean, level: number): number => {
+    const walk = (at: number, secret: boolean, level: number, argv = false): number => {
       if (level > 100) throw new RangeError('artifact credential nesting exceeds limit');
       const open = text[at];
       if (open === '"') {
@@ -216,6 +241,8 @@ export function discoverTextSecrets(
         return at + token.length;
       }
       const named = open === '{' && namesCredential(text, at, ends);
+      // In an argument array, the item after a credential flag is its value.
+      let afterFlag = false;
       let i = at + 1;
       for (;;) {
         i += jsonToken(JSON_SPACE, text, i).length;
@@ -224,17 +251,25 @@ export function discoverTextSecrets(
           i += 1;
           continue;
         }
-        let member = secret;
+        let member = secret || afterFlag;
+        let list = false;
         if (open === '{') {
           const token = jsonToken(JSON_STRING, text, i);
           const key = JSON.parse(token) as string;
           discoverTextSecrets(key, add, level + 1);
           member ||= credentialKey(key) || (key === 'value' && named);
+          list = ARGUMENT_LIST_KEYS.includes(key);
           i += token.length;
           i += jsonToken(JSON_SPACE, text, i).length + 1;
           i += jsonToken(JSON_SPACE, text, i).length;
         }
-        i = walk(i, member, level + 1);
+        const itemAt = i;
+        i = walk(i, member, level + 1, list);
+        if (argv && open === '[') {
+          afterFlag =
+            text[itemAt] === '"' &&
+            credentialFlag(JSON.parse(jsonToken(JSON_STRING, text, itemAt)) as string);
+        }
       }
     };
     walk(jsonToken(JSON_SPACE, text, 0).length, false, depth);

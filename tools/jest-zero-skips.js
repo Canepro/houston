@@ -125,7 +125,11 @@ const ROOT = path.resolve(__dirname, '..');
 // Seven bundle regressions cover duplicate YAML names and six numeric-text discovery routes.
 // Three more cover authorization copies, a failed licence write and an external kill during
 // that write. Existing complete-licence and Compose-kill cases are extended, not recounted.
-const FLOOR = 4627;
+// Nineteen more cover duplicate embedded JSON names (six table cases and an ordinary-name
+// control) and credential arguments in command, entrypoint, args and healthcheck lists (eight
+// table cases, an equals-form and neighbour control, embedded JSON arrays, an alias and numeric
+// arguments).
+const FLOOR = 4646;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [
