@@ -264,6 +264,27 @@ describe('the detail panel', () => {
     expect((await payload.detail('old')).bind_host).toBe('0.0.0.0');
   });
 
+  it('recovers a complete legacy IPv6 bind and leaves malformed port maps unknown', async () => {
+    const compose = (port: string) =>
+      'services:\n  rocketchat:\n    image: i\n    ports:\n' +
+      `    - '${port}'\n` +
+      '    environment:\n      ROOT_URL: x\n';
+    const bracketed = sampleMeta('bracketed', { hostPort: 3001 });
+    const malformed = sampleMeta('malformed', { hostPort: 3002 });
+    const recorded = sampleMeta('recorded', {
+      hostPort: 3003,
+      extra: { bind_host: '127.0.0.1' },
+    });
+    await write('bracketed', compose('[::1]:3001:3000'), bracketed);
+    await write('malformed', compose('[::1:3002:3000'), malformed);
+    await write('recorded', compose('[::1:3003:3000'), recorded);
+
+    const { payload } = load(false);
+    await expect(payload.bindHostOf(bracketed)).resolves.toBe('::1');
+    await expect(payload.bindHostOf(malformed)).resolves.toBe('');
+    await expect(payload.bindHostOf(recorded)).resolves.toBe('127.0.0.1');
+  });
+
   it('reads a record whose extra is null as having no recorded env, as earlier releases do', async () => {
     // Earlier releases read the recorded env only out of an extra that is an object, where
     // `meta.extra.env` read through the null and `info --json` was a TypeError stack.

@@ -141,8 +141,16 @@ export async function bindHostOf(meta: Metadata): Promise<string> {
   const rc = bag(services.rocketchat ?? services['rocketchat-1']);
   const ports = Array.isArray(rc.ports) ? rc.ports : [];
   for (const port of ports) {
-    const parts = String(port).split(':');
-    if (parts.length >= 3 && parts[0]) return parts[0] as string;
+    if (typeof port !== 'string') continue;
+    // The two rightmost fields are the ports. A legacy IPv6 address can be bracketed or
+    // bare, but a malformed bracketed address must remain unknown rather than becoming `[`.
+    const published = port.replace(/\/(?:tcp|udp|sctp)$/iu, '');
+    const parts = published.split(':');
+    if (parts.length < 3) continue;
+    const address = parts.slice(0, -2).join(':');
+    const bracketed = address.startsWith('[') && address.endsWith(']') ? address.slice(1, -1) : '';
+    if (bracketed !== '' && !bracketed.includes('[') && !bracketed.includes(']')) return bracketed;
+    if (address !== '' && !address.includes('[') && !address.includes(']')) return address;
   }
   return '';
 }
