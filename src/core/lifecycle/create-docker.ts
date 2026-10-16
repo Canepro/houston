@@ -135,6 +135,8 @@ export interface CreatePlan {
   adminPassword: string;
   spec: compose.Spec | null;
   doc: compose.ComposeDoc | null;
+  /** `buildDocument`: the final Rocket.Chat environment or licence file supplies one. */
+  effectiveLicense: boolean;
   /** `buildRecord` */
   meta: record.Metadata | null;
   /** The record a rebuild replaces, read by `buildDocument`; null on a first create. */
@@ -165,6 +167,7 @@ export function createPlan(
     adminPassword: '',
     spec: null,
     doc: null,
+    effectiveLicense: false,
     meta: null,
     previousMeta: null,
     files: [],
@@ -679,7 +682,7 @@ export async function claimPorts(plan: CreatePlan): Promise<void> {
   // ...on the address the port is published on, which is loopback unless one other
   // address was asked for (`request.callHost`).
   plan.root = `http://${request.callHost(plan.bindHost)}:${String(plan.hostPort)}`;
-  plan.token = plan.req.regToken || toText(plan.cfg.reg_token);
+  plan.token = (plan.req.regToken || toText(plan.cfg.reg_token)).trim();
   plan.tlsspec = await tlsplan.resolveTls(
     plan.req,
     plan.reproName,
@@ -936,25 +939,79 @@ export async function buildDocument(plan: CreatePlan): Promise<void> {
     envOverrides: plan.envOverrides,
   });
   plan.spec.adminPassword = plan.adminPassword;
-  const premium = request.premiumAuthWarning(
-    [(plan.pre as Preset).name],
-    resolved.rcVersion,
-    plan.spec.licensed,
-    plan.token,
-  );
-  if (premium !== '') warn(plan.emit, premium, { phase: 'create' });
-  const samlEmail = request.samlEmailWarning(
-    plan.pre as Preset,
-    resolved.rcVersion,
-    new Set(Object.keys(plan.envOverrides)),
-  );
-  if (samlEmail !== '') warn(plan.emit, samlEmail, { phase: 'create' });
   try {
     plan.doc = compose.build(plan.spec);
   } catch (error) {
     // e.g. a preset naming an entry_service it doesn't define.
     throw new ValidationError(error instanceof Error ? error.message : String(error));
   }
+  // The completed document is the source of truth: a preset's service and Rocket.Chat
+  // patches apply after the base environment, so an earlier token or licence is not enough.
+  const projectDirectory = paths.workspace(plan.reproName);
+  const fileLicenses = new Map<string, boolean | null>();
+  const fileTokens = new Map<string, boolean | null>();
+  for (const name of compose.rcServiceNames((plan.pre as Preset).instances)) {
+    for (const file of compose.licenseEnvFiles(plan.doc.services[name], projectDirectory)) {
+      const key = JSON.stringify([file.path, file.raw, file.optional]);
+      if (fileLicenses.has(key)) continue;
+      if (file.path === '') {
+        fileLicenses.set(key, false);
+        fileTokens.set(key, false);
+        continue;
+      }
+      try {
+        const found = compose.credentialsInEnvFile(await fs.readFile(file.path, 'utf8'), file.raw);
+        fileLicenses.set(key, found.license);
+        fileTokens.set(key, found.token);
+      } catch (error) {
+        const missing =
+          file.optional && (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : false;
+        fileLicenses.set(key, missing);
+        fileTokens.set(key, missing);
+      }
+    }
+  }
+  // The file on disk is read above. This flag is only the licence this run will write.
+  const supplyingLicense = plan.req.license !== '';
+  const effectiveCredential = compose.hasEffectiveCredential(
+    plan.doc,
+    (plan.pre as Preset).instances,
+    supplyingLicense,
+    projectDirectory,
+    fileLicenses,
+    fileTokens,
+  )
+    ? 'present'
+    : '';
+  plan.effectiveLicense = compose.hasEffectiveLicense(
+    plan.doc,
+    (plan.pre as Preset).instances,
+    supplyingLicense,
+    projectDirectory,
+    fileLicenses,
+  );
+  const premium = request.premiumAuthWarning(
+    [(plan.pre as Preset).name],
+    resolved.rcVersion,
+    plan.effectiveLicense,
+    effectiveCredential,
+  );
+  if (premium !== '') warn(plan.emit, premium, { phase: 'create' });
+  const unlicensed = request.licenceAbsentWarning(
+    plan.pre as Preset,
+    false,
+    plan.effectiveLicense,
+    effectiveCredential,
+  );
+  if (unlicensed !== '') {
+    warn(plan.emit, unlicensed, { phase: 'create', code: request.LICENSE_ABSENT_EE_PRESET });
+  }
+  const samlEmail = request.samlEmailWarning(
+    plan.pre as Preset,
+    resolved.rcVersion,
+    new Set(Object.keys(plan.envOverrides)),
+  );
+  if (samlEmail !== '') warn(plan.emit, samlEmail, { phase: 'create' });
 }
 
 /** `repro.json`: everything a later command needs that the compose file does not say. */
@@ -1001,7 +1058,7 @@ export function buildRecord(plan: CreatePlan): void {
   if (Object.keys(pre.extra).length > 0) Object.assign(plan.meta.extra, pre.extra);
   if (pre.ports.length > 0) plan.meta.extra.sidecar_ports = pre.ports;
   if (Object.keys(plan.envOverrides).length > 0) plan.meta.extra.env = plan.envOverrides;
-  if (spec.licensed) plan.meta.extra.licensed = true;
+  if (plan.effectiveLicense) plan.meta.extra.licensed = true;
   if (plan.req.actor) {
     // Who owns this. Shown by `list` and the GUI card.
     plan.meta.extra.created_by = plan.req.actor;

@@ -130,9 +130,67 @@ export function premiumAuthWarning(
   if (kinds.length === 0) return '';
   return (
     `Rocket.Chat 9.0 is set to require a Premium plan for ${kinds.join(' and ')} login, and ` +
-    `this workspace has neither --license nor --reg-token: logins through the ` +
+    `this workspace has no effective licence or registration token: logins through the ` +
     `${names.filter((name) => name in PREMIUM_AUTH_PRESETS).join(' and ')} preset may be ` +
-    'refused. Add --license <file> or --reg-token <token> to test with one.'
+    'refused. A supplied credential may be masked by a preset, service, or --env override; ' +
+    'remove or change the conflicting override, or supply --license <file> or --reg-token <token>.'
+  );
+}
+
+/** The stable code of `licenceAbsentWarning`; scripts branch on it, not on the words. */
+export const LICENSE_ABSENT_EE_PRESET = 'LICENSE_ABSENT_EE_PRESET';
+
+/**
+ * Whether the presets named need a licence, read from the catalog each name resolves to
+ * (a user file, a scenario's default adapter, or the built-in YAML), never from a
+ * runtime adapter. The Kubernetes LDAP adapter sets `requiresLicense` as a marker of the
+ * microservices topology it once always ran on, so asking it would call LDAP itself an
+ * Enterprise feature on a monolith. The deployment is the caller's to pass separately.
+ */
+export function presetLicensing(
+  names: readonly string[],
+): Pick<Preset, 'name' | 'requiresLicense'> {
+  let requiresLicense = false;
+  for (const name of names) {
+    try {
+      requiresLicense ||= presets.load(name).requiresLicense;
+    } catch {
+      // A name the catalog refuses is reported by the create itself; it is not a licence.
+    }
+  }
+  return { name: names.join('+'), requiresLicense };
+}
+
+/**
+ * Warn when an Enterprise preset or the microservices deployment is created with neither a
+ * licence nor a registration token, or ''. Unlike `premiumAuthWarning` this is not tied to
+ * a Rocket.Chat version: `requires_license` on a preset says the feature does not work
+ * unlicensed on any version, and microservices stop every replica after the first without
+ * one. Said at create time rather than only in the notes afterwards, because by then the
+ * workspace has been built and the agent reading `--json` has moved on. A warning, not a
+ * refusal: a licence can be added after the workspace is up.
+ */
+export function licenceAbsentWarning(
+  pre: Pick<Preset, 'name' | 'requiresLicense'>,
+  microservices: boolean,
+  licensed: boolean,
+  regToken: string,
+): string {
+  if (licensed || regToken.trim() !== '') return '';
+  const what = pre.requiresLicense
+    ? `the '${pre.name}' preset is an Enterprise feature`
+    : microservices
+      ? 'microservices are an Enterprise feature'
+      : '';
+  if (what === '') return '';
+  return (
+    `${what} and this workspace has no effective licence or registration token: it will run, but ` +
+    (microservices
+      ? 'Rocket.Chat replicas after the first stop ("Enterprise license not found"). '
+      : 'the feature may not work as licensed. ') +
+    'A supplied credential may be masked by a preset, service, or --env override; remove or change ' +
+    'the conflicting override, or supply --license <file> or --reg-token <token>, or a license later under ' +
+    'Workspace > Subscription.'
   );
 }
 

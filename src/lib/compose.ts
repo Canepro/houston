@@ -18,6 +18,7 @@
  */
 
 import { isIP } from 'node:net';
+import * as path from 'node:path';
 
 import {
   ADMIN_EMAIL,
@@ -143,6 +144,255 @@ function deepMerge(
 /** A deep copy, matching `copy.deepcopy` for the JSON-shaped values used here. */
 function clone<T>(value: T): T {
   return structuredClone(value);
+}
+
+interface EnvironmentEntry {
+  present: boolean;
+  value: unknown;
+}
+
+/** The final explicit value for one Compose environment name, if it has one. */
+function environmentEntry(environment: unknown, name: string): EnvironmentEntry {
+  if (isPlainObject(environment)) {
+    return Object.prototype.hasOwnProperty.call(environment, name)
+      ? { present: true, value: environment[name] }
+      : { present: false, value: undefined };
+  }
+  if (!Array.isArray(environment)) return { present: false, value: undefined };
+  // Compose also accepts `environment: [NAME=value]`. A bare name inherits an ambient host
+  // value, which is not a value Houston can claim it supplied.
+  let result: EnvironmentEntry = { present: false, value: undefined };
+  for (const item of environment) {
+    if (typeof item !== 'string') return { present: true, value: undefined };
+    if (item === name) result = { present: true, value: undefined };
+    else if (item.startsWith(`${name}=`)) {
+      result = { present: true, value: item.slice(name.length + 1) };
+    }
+  }
+  return result;
+}
+
+/**
+ * Compose resolves unescaped `$NAME` and `${NAME}` only when it starts the service. Houston
+ * deliberately does not inherit ambient values into its warning path, so only a known literal
+ * can suppress a missing-token or missing-licence warning. `$$` is Compose's literal-dollar
+ * escape and remains a supplied value.
+ */
+function isKnownNonBlankComposeValue(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  const text = String(value).trim();
+  if (text === '') return false;
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] !== '$') continue;
+    if (text[index + 1] === '$') {
+      index += 1;
+      continue;
+    }
+    const next = text[index + 1] ?? '';
+    if (next === '{' || /[A-Za-z_]/u.test(next)) return false;
+  }
+  return true;
+}
+
+/** Trim an explicit registration token in its final Compose environment. */
+function normalizeRegToken(environment: unknown): void {
+  if (isPlainObject(environment)) {
+    const token = environment.REG_TOKEN;
+    if (token !== null && token !== undefined) environment.REG_TOKEN = String(token).trim();
+    return;
+  }
+  if (!Array.isArray(environment)) return;
+  for (let index = 0; index < environment.length; index += 1) {
+    const entry = environment[index];
+    if (typeof entry === 'string' && entry.startsWith('REG_TOKEN=')) {
+      environment[index] = `REG_TOKEN=${entry.slice('REG_TOKEN='.length).trim()}`;
+    }
+  }
+}
+
+/** One final env_file reference, without consulting the host environment. */
+export function licenseEnvFiles(
+  service: Service | undefined,
+  projectDirectory: string,
+): {
+  path: string;
+  raw: boolean;
+  optional: boolean;
+}[] {
+  const files = service?.env_file;
+  const entries = Array.isArray(files) ? files : files === undefined ? [] : [files];
+  return entries.map((entry) => {
+    const file = isPlainObject(entry) ? entry.path : entry;
+    return {
+      path:
+        typeof file === 'string' && isKnownNonBlankComposeValue(file)
+          ? path.resolve(projectDirectory, file.replace(/\$\$/gu, '$'))
+          : '',
+      raw: isPlainObject(entry) && entry.format === 'raw',
+      optional: isPlainObject(entry) && entry.required === false,
+    };
+  });
+}
+
+/** Presence only. null means the file leaves that key unchanged. */
+export interface EnvFileCredentials {
+  readonly license: boolean | null;
+  readonly token: boolean | null;
+}
+
+/**
+ * Presence only: no credential text leaves this parser. Unsupported or interpolated
+ * input cannot establish a licence or a registration token. null means the file leaves
+ * that key unchanged.
+ */
+export function credentialsInEnvFile(text: string, raw: boolean): EnvFileCredentials {
+  let license: boolean | null = null;
+  let token: boolean | null = null;
+  const lines = text.split(/\r?\n/u);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? '';
+    if (/^\s*(?:#.*)?$/u.test(line)) continue;
+    const entry = /^\s*(?:export\s+)?([A-Za-z0-9_.\-[\]]+)(?:\s*([=:])\s*(.*))?$/u.exec(line);
+    if (entry === null) return { license: false, token: false };
+    const key = entry[1];
+    let value = entry[3] ?? '';
+    let literal = raw;
+    if (!raw) {
+      const quote = value[0];
+      if (quote === "'" || quote === '"') {
+        // Consume quoted multiline values together, including unrelated keys. Their
+        // contents must never be mistaken for subsequent assignments.
+        const pattern = /^(?:'((?:[^'\\]|\\[\s\S])*)'|"((?:[^"\\]|\\[\s\S])*)")\s*(?:#.*)?$/u;
+        while (!pattern.test(value) && index + 1 < lines.length) {
+          index += 1;
+          value += `\n${lines[index] ?? ''}`;
+        }
+        const quoted = pattern.exec(value);
+        if (quoted === null) return { license: false, token: false };
+        value = quoted[1] ?? quoted[2] ?? '';
+        literal = quote === "'";
+        if (!literal)
+          value = value.replace(/\\([abfnrtv$"\\]|0[0-9]{0,3})/gu, (match, code: string) => {
+            if (code.startsWith('0')) {
+              // compose-go accepts one to three octal digits after the leading 0.
+              // \040 is a space. Requiring three digits kept that text and cleared only \0040.
+              const octal = code.slice(1);
+              const number = Number.parseInt(octal, 8);
+              return /^[0-7]{1,3}$/u.test(octal) && number <= 255
+                ? String.fromCharCode(number)
+                : match;
+            }
+            return (
+              {
+                a: '\x07',
+                b: '\b',
+                f: '\f',
+                n: '\n',
+                r: '\r',
+                t: '\t',
+                v: '\v',
+                $: '$$',
+                '"': '"',
+                '\\': '\\',
+              }[code] ?? match
+            );
+          });
+      } else value = value.replace(/\s+#.*$/u, '').trim();
+    }
+    const present = literal ? value.trim() !== '' : isKnownNonBlankComposeValue(value);
+    if (key === 'ROCKETCHAT_LICENSE') license = present;
+    else if (key === 'REG_TOKEN') token = present;
+  }
+  return { license, token };
+}
+
+/** Presence only: no licence text leaves this parser. null means the file leaves the key unchanged. */
+export function licenseInEnvFile(text: string, raw: boolean): boolean | null {
+  return credentialsInEnvFile(text, raw).license;
+}
+
+/**
+ * Env files apply in order. A later known assignment replaces any earlier state.
+ * null leaves the earlier state. An optional file with no recorded state is one Compose
+ * skips, including a missing `.license.env` this run is not writing.
+ */
+function assignmentFromFiles(
+  service: Service | undefined,
+  projectDirectory: string,
+  states: ReadonlyMap<string, boolean | null>,
+  supplyingLicense: boolean,
+): boolean {
+  const licenseFile = path.resolve(projectDirectory, LICENSE_ENV_FILE);
+  let present = false;
+  for (const file of licenseEnvFiles(service, projectDirectory)) {
+    if (supplyingLicense && file.path === licenseFile) {
+      present = true;
+      continue;
+    }
+    const state = states.get(JSON.stringify([file.path, file.raw, file.optional]));
+    if (state === undefined) {
+      if (file.optional) continue;
+      present = false;
+      continue;
+    }
+    if (state !== null) present = state;
+  }
+  return present;
+}
+
+function serviceHasLicense(
+  service: Service | undefined,
+  licensed: boolean,
+  projectDirectory: string,
+  fileLicenses: ReadonlyMap<string, boolean | null>,
+): boolean {
+  const entry = environmentEntry(service?.environment, 'ROCKETCHAT_LICENSE');
+  return entry.present
+    ? isKnownNonBlankComposeValue(entry.value)
+    : assignmentFromFiles(service, projectDirectory, fileLicenses, licensed);
+}
+
+/** An explicit REG_TOKEN wins, including a blank one. Otherwise the ordered env files apply. */
+function serviceHasToken(
+  service: Service | undefined,
+  projectDirectory: string,
+  fileTokens: ReadonlyMap<string, boolean | null>,
+): boolean {
+  const entry = environmentEntry(service?.environment, 'REG_TOKEN');
+  return entry.present
+    ? isKnownNonBlankComposeValue(entry.value)
+    : assignmentFromFiles(service, projectDirectory, fileTokens, false);
+}
+
+/** Whether every final Rocket.Chat service gets a known licence from its environment or file. */
+export function hasEffectiveLicense(
+  doc: ComposeDoc,
+  instances: number,
+  licensed: boolean,
+  projectDirectory: string,
+  fileLicenses: ReadonlyMap<string, boolean | null> = new Map(),
+): boolean {
+  return rcServiceNames(instances).every((name) =>
+    serviceHasLicense(doc.services[name], licensed, projectDirectory, fileLicenses),
+  );
+}
+
+/** Every replica needs a credential, but replicas may use different credential types. */
+export function hasEffectiveCredential(
+  doc: ComposeDoc,
+  instances: number,
+  licensed: boolean,
+  projectDirectory: string,
+  fileLicenses: ReadonlyMap<string, boolean | null> = new Map(),
+  fileTokens: ReadonlyMap<string, boolean | null> = new Map(),
+): boolean {
+  return rcServiceNames(instances).every((name) => {
+    const service = doc.services[name];
+    return (
+      serviceHasToken(service, projectDirectory, fileTokens) ||
+      serviceHasLicense(service, licensed, projectDirectory, fileLicenses)
+    );
+  });
 }
 
 function rcEnvironment(s: Spec): Record<string, string> {
@@ -555,6 +805,9 @@ export function build(s: Spec): ComposeDoc {
     if (Object.keys(s.preset.rocketchat).length > 0) deepMerge(svc, clone(s.preset.rocketchat));
     addDepends(svc, s.preset.dependsOn);
   }
+  // Presets and `--env` can win over the flag-derived token. Trim that final value before
+  // Compose reads it, so the deployed token and the create-time warning describe one state.
+  for (const name of rcServiceNames(n)) normalizeRegToken(doc.services[name]?.environment);
 
   publishThroughEntryService(doc, rcServices, s);
 

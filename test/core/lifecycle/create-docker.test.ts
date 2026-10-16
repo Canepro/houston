@@ -20,6 +20,8 @@ import { createPlan } from '../../../src/core/lifecycle/create-docker';
 
 import type * as CreateDockerNS from '../../../src/core/lifecycle/create-docker';
 import type * as CreateK8sNS from '../../../src/core/lifecycle/create-k8s';
+import type * as InspectNS from '../../../src/core/lifecycle/inspect';
+import type * as RecordNS from '../../../src/core/runner/record';
 import { MODE_ACME, tlsSpec } from '../../../src/core/tls';
 import { createReq } from '../../../src/core/lifecycle/types';
 import * as users from '../../../src/core/users';
@@ -307,6 +309,472 @@ describe('the create path end to end, stopped at the write seam', () => {
     expect(seen.yaml).toContain('admin123');
   });
 
+  it('renders final registration and licence environment consistently with create warnings', async () => {
+    // The flag and the box-wide config are trimmed; a preset's env, `--env`, or either
+    // final Compose patch can supply or remove the token. The final winning value is
+    // normalised before Compose sees it; an unresolved Compose variable cannot hide a
+    // warning because only the engine knows its ambient value. Both licence warnings use the
+    // final document rather than an earlier input to it.
+    const cases = [
+      { label: 'config spaces', config: '   ', expected: '' },
+      { label: 'flag spaces', flag: '   ', expected: '' },
+      { label: 'flag padded', flag: '  registration-fixture  ', expected: 'registration-fixture' },
+      { label: 'preset env', presetEnv: 'preset-token', expected: 'preset-token' },
+      { label: 'preset env padded', presetEnv: '  preset-token  ', expected: 'preset-token' },
+      { label: 'user env', env: { REG_TOKEN: 'user-token' }, expected: 'user-token' },
+      { label: 'user env padded', env: { REG_TOKEN: '  user-token  ' }, expected: 'user-token' },
+      {
+        label: 'flag removed by env',
+        flag: 'flag-token',
+        env: { REG_TOKEN: null },
+        expected: '',
+        preset: 'ldap+token-licensed',
+        version: '9.0.0',
+      },
+      { label: 'service patch removes flag', flag: 'flag-token', servicePatch: '', expected: '' },
+      {
+        label: 'service patch padded',
+        servicePatch: '  service-token  ',
+        expected: 'service-token',
+      },
+      {
+        label: 'Rocket.Chat patch supplies token',
+        rocketchatPatch: 'patch-token',
+        expected: 'patch-token',
+      },
+      {
+        label: 'Rocket.Chat patch padded',
+        rocketchatPatch: '  patch-token  ',
+        expected: 'patch-token',
+      },
+      {
+        label: 'final environment licence',
+        env: { ROCKETCHAT_LICENSE: 'fixture-license' },
+        expected: '',
+        license: 'fixture-license',
+        preset: 'ldap+token-licensed',
+        version: '9.0.0',
+      },
+      {
+        label: 'empty final licence overrides file',
+        env: { ROCKETCHAT_LICENSE: '' },
+        expected: '',
+        license: 'fixture-license',
+        expectedLicense: '',
+        licensed: false,
+        warns: true,
+        preset: 'ldap+token-licensed',
+        version: '9.0.0',
+      },
+      {
+        label: 'unresolved token interpolation',
+        env: { REG_TOKEN: '${UNSET_REG_TOKEN}' },
+        expected: '${UNSET_REG_TOKEN}',
+        warns: true,
+      },
+    ] as const;
+    for (const one of cases) {
+      config.updateConfig((cfg) => {
+        cfg.reg_token = 'config' in one ? one.config : '';
+      });
+      fs.mkdirSync(config.presetDir(), { recursive: true });
+      fs.writeFileSync(
+        path.join(config.presetDir(), 'token-licensed.yaml'),
+        'name: token-licensed\nrequires_license: true\n' +
+          ('presetEnv' in one ? `env:\n  REG_TOKEN: ${JSON.stringify(one.presetEnv)}\n` : '') +
+          ('servicePatch' in one
+            ? `services:\n  rocketchat:\n    environment:\n      REG_TOKEN: ${JSON.stringify(one.servicePatch)}\n`
+            : '') +
+          ('rocketchatPatch' in one
+            ? `rocketchat:\n  environment:\n    REG_TOKEN: ${JSON.stringify(one.rocketchatPatch)}\n`
+            : ''),
+      );
+      const { seen, createDocker } = capture();
+      const codes: string[] = [];
+      const messages: string[] = [];
+      await expect(
+        createDocker.createRepro(
+          createReq({
+            version: 'version' in one ? one.version : '8.5.1',
+            name: `token-${one.label.replace(/ /gu, '-')}`,
+            preset: 'preset' in one ? one.preset : 'token-licensed',
+            regToken: 'flag' in one ? one.flag : '',
+            license: 'license' in one ? one.license : '',
+            env: 'env' in one ? one.env : {},
+            wait: false,
+            offline: true,
+          }),
+          (event) => {
+            codes.push(event.code);
+            messages.push(event.message);
+          },
+        ),
+      ).rejects.toThrow('stopped at the write seam');
+      const doc = YAML.parse(seen.yaml as string) as {
+        services: { rocketchat: { environment: Record<string, string> } };
+      };
+      expect([one.label, doc.services.rocketchat.environment.REG_TOKEN ?? '']).toEqual([
+        one.label,
+        one.expected,
+      ]);
+      expect(doc.services.rocketchat.environment.ROCKETCHAT_LICENSE ?? '').toBe(
+        'expectedLicense' in one ? one.expectedLicense : 'license' in one ? one.license : '',
+      );
+      const licensed = 'licensed' in one ? one.licensed : 'license' in one;
+      const warns = 'warns' in one ? one.warns : one.expected === '' && !licensed;
+      expect(seen.meta?.extra.licensed === true).toBe(licensed);
+      expect([one.label, codes.includes('LICENSE_ABSENT_EE_PRESET')]).toEqual([one.label, warns]);
+      if (warns && ('flag' in one || 'license' in one)) {
+        const warnings = messages.filter(
+          (message) =>
+            message.includes('Enterprise feature') ||
+            message.includes('Premium plan for LDAP login'),
+        );
+        expect(warnings.length).toBeGreaterThanOrEqual(1);
+        for (const message of warnings) {
+          expect(message).toContain('no effective licence or registration token');
+          expect(message).toContain('override');
+          expect(message).toMatch(/remove or change/iu);
+          expect(message).not.toContain('neither --license nor --reg-token');
+        }
+        if ('version' in one) expect(warnings).toHaveLength(2);
+      }
+      if (!warns) {
+        expect(messages.some((message) => message.includes('Premium plan for LDAP login'))).toBe(
+          false,
+        );
+      }
+    }
+  });
+
+  it('checks each replica for either credential while keeping licence metadata separate', async () => {
+    const file = path.join(config.presetDir(), 'ldap.yaml');
+    const cases = [
+      {
+        label: 'mixed literals',
+        first: { ROCKETCHAT_LICENSE: 'fixture-license' },
+        second: { REG_TOKEN: '  fixture-token  ' },
+        warns: false,
+        licensed: false,
+      },
+      {
+        label: 'blank second token',
+        first: { ROCKETCHAT_LICENSE: 'fixture-license' },
+        second: { REG_TOKEN: '   ' },
+        warns: true,
+        licensed: false,
+      },
+      {
+        label: 'unresolved second token',
+        first: { ROCKETCHAT_LICENSE: 'fixture-license' },
+        second: { REG_TOKEN: '${UNSET_REG_TOKEN}' },
+        warns: true,
+        licensed: false,
+      },
+      {
+        label: 'file and masked licence rescued by token',
+        first: {},
+        second: { ROCKETCHAT_LICENSE: '', REG_TOKEN: 'fixture-token' },
+        license: 'file-license',
+        warns: false,
+        licensed: false,
+      },
+      {
+        label: 'blank overrides file',
+        first: {},
+        second: { ROCKETCHAT_LICENSE: '', REG_TOKEN: '' },
+        license: 'file-license',
+        warns: true,
+        licensed: false,
+      },
+      {
+        label: 'unresolved licence overrides file',
+        first: {},
+        second: { ROCKETCHAT_LICENSE: '${UNSET_LICENSE}' },
+        license: 'file-license',
+        warns: true,
+        licensed: false,
+      },
+      {
+        label: 'detached file',
+        first: {},
+        second: {},
+        license: 'file-license',
+        detached: true,
+        warns: true,
+        licensed: false,
+      },
+      {
+        label: 'all file licensed',
+        first: {},
+        second: {},
+        license: 'file-license',
+        warns: false,
+        licensed: true,
+      },
+    ] as const;
+    config.updateConfig((cfg) => {
+      delete cfg.reg_token;
+    });
+    fs.mkdirSync(config.presetDir(), { recursive: true });
+    try {
+      for (const one of cases) {
+        fs.writeFileSync(
+          file,
+          YAML.stringify({
+            name: 'ldap',
+            requires_license: true,
+            instances: 2,
+            services: {
+              'rocketchat-1': { environment: one.first },
+              'rocketchat-2': {
+                environment: one.second,
+                ...('detached' in one ? { env_file: [] } : {}),
+              },
+            },
+          }),
+        );
+        const { seen, createDocker } = capture();
+        const codes: string[] = [];
+        const messages: string[] = [];
+        await expect(
+          createDocker.createRepro(
+            createReq({
+              version: '9.0.0',
+              name: 'replica-credentials',
+              preset: 'ldap',
+              license: 'license' in one ? one.license : '',
+              wait: false,
+              offline: true,
+            }),
+            (event) => {
+              codes.push(event.code);
+              messages.push(event.message);
+            },
+          ),
+        ).rejects.toThrow('stopped at the write seam');
+        const doc = YAML.parse(seen.yaml as string) as {
+          services: Record<string, { environment: Record<string, string>; env_file?: string[] }>;
+        };
+        expect(Object.keys(doc.services)).toEqual(
+          expect.arrayContaining(['rocketchat-1', 'rocketchat-2']),
+        );
+        if ('REG_TOKEN' in one.second && !one.warns)
+          expect(doc.services['rocketchat-2']?.environment.REG_TOKEN).toBe('fixture-token');
+        if ('license' in one)
+          expect(doc.services['rocketchat-1']?.env_file).toContain('.license.env');
+        expect([one.label, codes.includes('LICENSE_ABSENT_EE_PRESET')]).toEqual([
+          one.label,
+          one.warns,
+        ]);
+        expect([
+          one.label,
+          messages.some((message) => message.includes('Premium plan for LDAP login')),
+        ]).toEqual([one.label, one.warns]);
+        expect([one.label, seen.meta?.extra.licensed === true]).toEqual([one.label, one.licensed]);
+      }
+    } finally {
+      fs.rmSync(file, { force: true });
+      config.updateConfig((cfg) => {
+        delete cfg.reg_token;
+      });
+    }
+  });
+
+  it('recognizes equivalent project licence files without trusting other files or masked entries', async () => {
+    const file = path.join(config.presetDir(), 'ldap.yaml');
+    const cases = [
+      { label: 'short string', envFile: './.license.env', licensed: true },
+      { label: 'short list', envFile: ['./.license.env'], licensed: true },
+      {
+        label: 'long path',
+        envFile: [{ path: './.license.env', required: false }],
+        licensed: true,
+      },
+      { label: 'normalized relative', envFile: ['sub/../.license.env'], licensed: true },
+      { label: 'absolute project file', envFile: [], absolute: true, licensed: true },
+      { label: 'later blank', envFile: [], later: 'ROCKETCHAT_LICENSE=\n', licensed: false },
+      {
+        label: 'generated last',
+        envFile: [],
+        later: 'ROCKETCHAT_LICENSE=\n',
+        reverse: true,
+        licensed: true,
+      },
+      { label: 'later unrelated', envFile: [], later: 'OTHER=value\n', licensed: true },
+      {
+        label: 'later literal',
+        envFile: [],
+        later: "ROCKETCHAT_LICENSE='other-synthetic'\n",
+        licensed: true,
+      },
+      {
+        label: 'later unresolved',
+        envFile: [],
+        later: 'ROCKETCHAT_LICENSE=${UNSET_LICENSE}\n',
+        licensed: false,
+      },
+      {
+        label: 'later multiline unrelated',
+        envFile: [],
+        later: "OTHER='first\nROCKETCHAT_LICENSE=\nlast'\n",
+        licensed: true,
+      },
+      {
+        label: 'later multiline blank',
+        envFile: [],
+        later: "ROCKETCHAT_LICENSE=' \n \n'\n",
+        licensed: false,
+      },
+      {
+        label: 'later double escaped blank',
+        envFile: [],
+        later: 'ROCKETCHAT_LICENSE="\\t\\n\\f\\v\\0040"\n',
+        licensed: false,
+      },
+      {
+        // compose-go turns \040, \011 and \012 into whitespace. \0040 already did.
+        label: 'later double quoted octal space',
+        envFile: [],
+        later: 'ROCKETCHAT_LICENSE="\\011\\012\\040"\n',
+        licensed: false,
+      },
+      {
+        label: 'later single quoted octal space',
+        envFile: [],
+        later: "ROCKETCHAT_LICENSE='\\040'\n",
+        licensed: true,
+      },
+      {
+        label: 'later octal space beside a character',
+        envFile: [],
+        later: 'ROCKETCHAT_LICENSE="x\\040"\n',
+        licensed: true,
+      },
+      {
+        label: 'later single quoted dollars',
+        envFile: [],
+        later: "ROCKETCHAT_LICENSE='${LITERAL}'\n",
+        licensed: true,
+      },
+      {
+        label: 'later escaped dollars',
+        envFile: [],
+        later: 'ROCKETCHAT_LICENSE="\\$LITERAL"\n',
+        licensed: true,
+      },
+      {
+        label: 'literal dollar path',
+        envFile: [],
+        later: 'ROCKETCHAT_LICENSE=\n',
+        dollar: true,
+        licensed: false,
+      },
+      { label: 'later unset', envFile: [], later: 'ROCKETCHAT_LICENSE\n', licensed: false },
+      {
+        label: 'explicit wins',
+        envFile: [],
+        later: 'ROCKETCHAT_LICENSE=\n',
+        env: { ROCKETCHAT_LICENSE: 'explicit-synthetic' },
+        licensed: true,
+      },
+      {
+        label: 'raw literal',
+        envFile: [],
+        later: 'ROCKETCHAT_LICENSE=${LITERAL}\n',
+        raw: true,
+        licensed: true,
+      },
+      { label: 'optional missing', envFile: [], missing: true, licensed: true },
+      { label: 'different file', envFile: ['other.env'], licensed: false },
+      { label: 'parent file', envFile: ['../.license.env'], licensed: false },
+      {
+        label: 'unresolved path',
+        envFile: ['${UNSET_LICENSE_DIR}/../.license.env'],
+        licensed: false,
+      },
+      {
+        label: 'blank env masks file',
+        envFile: ['./.license.env'],
+        env: { ROCKETCHAT_LICENSE: '' },
+        licensed: false,
+      },
+      {
+        label: 'unresolved env masks file',
+        envFile: [{ path: './.license.env' }],
+        env: { ROCKETCHAT_LICENSE: '${UNSET_LICENSE}' },
+        licensed: false,
+      },
+    ] as const;
+    config.updateConfig((cfg) => {
+      delete cfg.reg_token;
+    });
+    fs.mkdirSync(config.presetDir(), { recursive: true });
+    const observed: unknown[] = [];
+    try {
+      for (const [index, one] of cases.entries()) {
+        const name = `file-licence-${String(index)}`;
+        let envFile: unknown =
+          'absolute' in one ? path.join(config.reprosDir(), name, '.license.env') : one.envFile;
+        if ('later' in one || 'missing' in one) {
+          const later = path.join(
+            config.presetDir(),
+            `synthetic-${'dollar' in one ? '$literal-' : ''}${String(index)}.env`,
+          );
+          if ('later' in one) fs.writeFileSync(later, one.later);
+          const entry = {
+            path: later.replace(/\$/gu, '$$$$'),
+            ...('raw' in one ? { format: 'raw' } : {}),
+            required: false,
+          };
+          envFile =
+            'reverse' in one ? [entry, './.license.env'] : [{ path: 'sub/../.license.env' }, entry];
+        }
+        fs.writeFileSync(
+          file,
+          YAML.stringify({
+            name: 'ldap',
+            requires_license: true,
+            rocketchat: { env_file: envFile, environment: 'env' in one ? one.env : {} },
+          }),
+        );
+        const { seen, createDocker } = capture();
+        const events: { code: string; message: string }[] = [];
+        await expect(
+          createDocker.createRepro(
+            createReq({
+              version: '9.0.0',
+              name,
+              preset: 'ldap',
+              license: 'synthetic-file-licence',
+              wait: false,
+              offline: true,
+            }),
+            (event) => events.push(event),
+          ),
+        ).rejects.toThrow('stopped at the write seam');
+        // Persist the actual lifecycle record, then use the same summary as info/GUI.
+        await writeRecord(name, seen.meta as Metadata);
+        const record = require('../../../src/core/runner/record') as typeof RecordNS;
+        const inspect = require('../../../src/core/lifecycle/inspect') as typeof InspectNS;
+        const meta = await record.readMeta(name);
+        observed.push([
+          one.label,
+          events.some((event) => event.code === 'LICENSE_ABSENT_EE_PRESET'),
+          events.some((event) => event.message.includes('Premium plan for LDAP login')),
+          meta.extra.licensed === true,
+          (await inspect.summary(meta)).licensed,
+        ]);
+        expect(JSON.stringify(meta)).not.toContain('synthetic-file-licence');
+      }
+      expect(observed).toEqual(
+        cases.map((one) => [one.label, !one.licensed, !one.licensed, one.licensed, one.licensed]),
+      );
+    } finally {
+      fs.rmSync(file, { force: true });
+    }
+  });
+
   it('warns that Rocket.Chat 9 may refuse an unlicensed LDAP login', async () => {
     // An earlier case leaves a box-wide token, which rightly silences the warning.
     config.updateConfig((cfg) => {
@@ -557,6 +1025,174 @@ describe('the create path end to end, stopped at the write seam', () => {
       context.runWithContext({ actor: 'mem' }, () => createDocker.createReproLocked(req)),
     ).rejects.toThrow('g3 belongs to alice');
     expect(seen.meta).toBeUndefined();
+  });
+
+  it('keeps an earlier licence when Compose will skip a missing licence file', async () => {
+    // An optional .license.env that is not on disk was treated as a blank assignment, so
+    // it cleared the licence an earlier env file had already set. A file that is present
+    // still counts only for the assignment it actually contains.
+    const preset = path.join(config.presetDir(), 'env-licence.yaml');
+    const earlier = path.join(config.presetDir(), 'synthetic-earlier-licence.env');
+    const earlierText = 'synthetic-earlier-licence';
+    const presentText = 'synthetic-present-licence';
+    const cases = [
+      {
+        label: 'optional missing keeps earlier',
+        license: '',
+        licensed: true,
+        writeEarlier: true,
+        writeLicenseFile: false,
+        licenseBody: '',
+      },
+      {
+        label: 'present blank clears',
+        license: '',
+        licensed: false,
+        writeEarlier: false,
+        writeLicenseFile: true,
+        licenseBody: 'ROCKETCHAT_LICENSE=\n',
+      },
+      {
+        label: 'present assignment sets',
+        license: '',
+        licensed: true,
+        writeEarlier: false,
+        writeLicenseFile: true,
+        licenseBody: `ROCKETCHAT_LICENSE=${presentText}\n`,
+      },
+    ];
+    config.updateConfig((cfg) => {
+      delete cfg.reg_token;
+    });
+    fs.mkdirSync(config.presetDir(), { recursive: true });
+    fs.writeFileSync(earlier, `ROCKETCHAT_LICENSE=${earlierText}\n`);
+    const observed: unknown[] = [];
+    try {
+      for (const [index, one] of cases.entries()) {
+        const name = `env-licence-${String(index)}`;
+        const licenseFile = path.join(config.reprosDir(), name, '.license.env');
+        fs.rmSync(path.dirname(licenseFile), { recursive: true, force: true });
+        if (one.writeLicenseFile) {
+          fs.mkdirSync(path.dirname(licenseFile), { recursive: true });
+          fs.writeFileSync(licenseFile, one.licenseBody, { mode: 0o600 });
+        }
+        const envFile = one.writeEarlier
+          ? [earlier, { path: './.license.env', required: false }]
+          : [{ path: './.license.env', required: false }];
+        fs.writeFileSync(
+          preset,
+          YAML.stringify({
+            name: 'env-licence',
+            requires_license: true,
+            rocketchat: { env_file: envFile },
+          }),
+        );
+        const { seen, createDocker } = capture();
+        const codes: string[] = [];
+        await expect(
+          createDocker.createRepro(
+            createReq({
+              version: '8.5.1',
+              name,
+              preset: 'env-licence',
+              license: one.license,
+              wait: false,
+              offline: true,
+            }),
+            (event) => codes.push(event.code),
+          ),
+        ).rejects.toThrow('stopped at the write seam');
+        const meta = seen.meta as Metadata;
+        observed.push([
+          one.label,
+          codes.includes('LICENSE_ABSENT_EE_PRESET'),
+          meta.extra.licensed === true,
+        ]);
+        const stored = JSON.stringify(meta);
+        expect(stored).not.toContain(earlierText);
+        expect(stored).not.toContain(presentText);
+      }
+      expect(observed).toEqual(cases.map((one) => [one.label, !one.licensed, one.licensed]));
+    } finally {
+      fs.rmSync(preset, { force: true });
+      fs.rmSync(earlier, { force: true });
+    }
+  });
+
+  it('counts a registration token that arrives only through an env file', async () => {
+    // REG_TOKEN was read from the explicit environment and not from the same ordered env
+    // files as a licence, so a registered container still warned that no credential existed.
+    const preset = path.join(config.presetDir(), 'token-file.yaml');
+    const tokenFile = path.join(config.presetDir(), 'synthetic-token.env');
+    const blankFile = path.join(config.presetDir(), 'synthetic-token-blank.env');
+    const token = 'synthetic-reg-token';
+    const cases = [
+      {
+        label: 'file token',
+        envFile: [tokenFile],
+        env: {},
+        warns: false,
+      },
+      {
+        label: 'blank file',
+        envFile: [blankFile],
+        env: {},
+        warns: true,
+      },
+      {
+        label: 'explicit blank wins',
+        envFile: [tokenFile],
+        env: { REG_TOKEN: '' },
+        warns: true,
+      },
+      {
+        label: 'later blank file',
+        envFile: [tokenFile, blankFile],
+        env: {},
+        warns: true,
+      },
+    ];
+    config.updateConfig((cfg) => {
+      delete cfg.reg_token;
+    });
+    fs.mkdirSync(config.presetDir(), { recursive: true });
+    fs.writeFileSync(tokenFile, `REG_TOKEN=${token}\n`);
+    fs.writeFileSync(blankFile, 'REG_TOKEN=\n');
+    const observed: unknown[] = [];
+    try {
+      for (const [index, one] of cases.entries()) {
+        fs.writeFileSync(
+          preset,
+          YAML.stringify({
+            name: 'token-file',
+            requires_license: true,
+            rocketchat: { env_file: one.envFile, environment: one.env },
+          }),
+        );
+        const { seen, createDocker } = capture();
+        const codes: string[] = [];
+        await expect(
+          createDocker.createRepro(
+            createReq({
+              version: '8.5.1',
+              name: `token-file-${String(index)}`,
+              preset: 'token-file',
+              wait: false,
+              offline: true,
+            }),
+            (event) => codes.push(event.code),
+          ),
+        ).rejects.toThrow('stopped at the write seam');
+        observed.push([one.label, codes.includes('LICENSE_ABSENT_EE_PRESET')]);
+        const stored = `${JSON.stringify(seen.meta)}\n${String(seen.yaml)}`;
+        expect(stored).not.toContain(token);
+      }
+      expect(observed).toEqual(cases.map((one) => [one.label, one.warns]));
+    } finally {
+      fs.rmSync(preset, { force: true });
+      fs.rmSync(tokenFile, { force: true });
+      fs.rmSync(blankFile, { force: true });
+    }
   });
 });
 
