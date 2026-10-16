@@ -215,17 +215,7 @@ function normalizeRegToken(environment: unknown): void {
   }
 }
 
-/**
- * Whether every final Rocket.Chat service gets a registration token. This reads the completed
- * document because a preset's services or rocketchat patch runs after the base environment.
- */
-export function hasEffectiveRegToken(doc: ComposeDoc, instances: number): boolean {
-  return rcServiceNames(instances).every((name) =>
-    environmentHasKnownValue(doc.services[name]?.environment, 'REG_TOKEN'),
-  );
-}
-
-/** Whether an explicit final Compose environment entry overrides the private licence file. */
+/** Whether the supplied private licence file remains attached to this service. */
 function hasLicenseFile(service: Service | undefined, licensed: boolean): boolean {
   if (!licensed) return false;
   const files = service?.env_file;
@@ -236,18 +226,34 @@ function hasLicenseFile(service: Service | undefined, licensed: boolean): boolea
   );
 }
 
+function serviceHasLicense(service: Service | undefined, licensed: boolean): boolean {
+  const entry = environmentEntry(service?.environment, 'ROCKETCHAT_LICENSE');
+  return entry.present
+    ? isKnownNonBlankComposeValue(entry.value)
+    : hasLicenseFile(service, licensed);
+}
+
 /** Whether every final Rocket.Chat service gets a known licence from its environment or file. */
 export function hasEffectiveLicense(
   doc: ComposeDoc,
   instances: number,
   licensed: boolean,
 ): boolean {
+  return rcServiceNames(instances).every((name) => serviceHasLicense(doc.services[name], licensed));
+}
+
+/** Every replica needs a credential, but replicas may use different credential types. */
+export function hasEffectiveCredential(
+  doc: ComposeDoc,
+  instances: number,
+  licensed: boolean,
+): boolean {
   return rcServiceNames(instances).every((name) => {
     const service = doc.services[name];
-    const entry = environmentEntry(service?.environment, 'ROCKETCHAT_LICENSE');
-    return entry.present
-      ? isKnownNonBlankComposeValue(entry.value)
-      : hasLicenseFile(service, licensed);
+    return (
+      environmentHasKnownValue(service?.environment, 'REG_TOKEN') ||
+      serviceHasLicense(service, licensed)
+    );
   });
 }
 

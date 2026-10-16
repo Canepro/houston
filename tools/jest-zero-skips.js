@@ -97,7 +97,8 @@ const ROOT = path.resolve(__dirname, '..');
 // the bind-enforcement base. One chart-consumer regression covers the winning Kubernetes token,
 // and one covers final Kubernetes licence precedence and warning presence.
 // R5 adds one workspace-owner credential promotion regression; collection measures 4538.
-const FLOOR = 4538;
+// R6 adds one mixed-replica credential lifecycle regression; collection measures 4539.
+const FLOOR = 4539;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

@@ -445,6 +445,140 @@ describe('the create path end to end, stopped at the write seam', () => {
     }
   });
 
+  it('checks each replica for either credential while keeping licence metadata separate', async () => {
+    const file = path.join(config.presetDir(), 'ldap.yaml');
+    const cases = [
+      {
+        label: 'mixed literals',
+        first: { ROCKETCHAT_LICENSE: 'fixture-license' },
+        second: { REG_TOKEN: '  fixture-token  ' },
+        warns: false,
+        licensed: false,
+      },
+      {
+        label: 'blank second token',
+        first: { ROCKETCHAT_LICENSE: 'fixture-license' },
+        second: { REG_TOKEN: '   ' },
+        warns: true,
+        licensed: false,
+      },
+      {
+        label: 'unresolved second token',
+        first: { ROCKETCHAT_LICENSE: 'fixture-license' },
+        second: { REG_TOKEN: '${UNSET_REG_TOKEN}' },
+        warns: true,
+        licensed: false,
+      },
+      {
+        label: 'file and masked licence rescued by token',
+        first: {},
+        second: { ROCKETCHAT_LICENSE: '', REG_TOKEN: 'fixture-token' },
+        license: 'file-license',
+        warns: false,
+        licensed: false,
+      },
+      {
+        label: 'blank overrides file',
+        first: {},
+        second: { ROCKETCHAT_LICENSE: '', REG_TOKEN: '' },
+        license: 'file-license',
+        warns: true,
+        licensed: false,
+      },
+      {
+        label: 'unresolved licence overrides file',
+        first: {},
+        second: { ROCKETCHAT_LICENSE: '${UNSET_LICENSE}' },
+        license: 'file-license',
+        warns: true,
+        licensed: false,
+      },
+      {
+        label: 'detached file',
+        first: {},
+        second: {},
+        license: 'file-license',
+        detached: true,
+        warns: true,
+        licensed: false,
+      },
+      {
+        label: 'all file licensed',
+        first: {},
+        second: {},
+        license: 'file-license',
+        warns: false,
+        licensed: true,
+      },
+    ] as const;
+    config.updateConfig((cfg) => {
+      delete cfg.reg_token;
+    });
+    fs.mkdirSync(config.presetDir(), { recursive: true });
+    try {
+      for (const one of cases) {
+        fs.writeFileSync(
+          file,
+          YAML.stringify({
+            name: 'ldap',
+            requires_license: true,
+            instances: 2,
+            services: {
+              'rocketchat-1': { environment: one.first },
+              'rocketchat-2': {
+                environment: one.second,
+                ...('detached' in one ? { env_file: [] } : {}),
+              },
+            },
+          }),
+        );
+        const { seen, createDocker } = capture();
+        const codes: string[] = [];
+        const messages: string[] = [];
+        await expect(
+          createDocker.createRepro(
+            createReq({
+              version: '9.0.0',
+              name: 'replica-credentials',
+              preset: 'ldap',
+              license: 'license' in one ? one.license : '',
+              wait: false,
+              offline: true,
+            }),
+            (event) => {
+              codes.push(event.code);
+              messages.push(event.message);
+            },
+          ),
+        ).rejects.toThrow('stopped at the write seam');
+        const doc = YAML.parse(seen.yaml as string) as {
+          services: Record<string, { environment: Record<string, string>; env_file?: string[] }>;
+        };
+        expect(Object.keys(doc.services)).toEqual(
+          expect.arrayContaining(['rocketchat-1', 'rocketchat-2']),
+        );
+        if ('REG_TOKEN' in one.second && !one.warns)
+          expect(doc.services['rocketchat-2']?.environment.REG_TOKEN).toBe('fixture-token');
+        if ('license' in one)
+          expect(doc.services['rocketchat-1']?.env_file).toContain('.license.env');
+        expect([one.label, codes.includes('LICENSE_ABSENT_EE_PRESET')]).toEqual([
+          one.label,
+          one.warns,
+        ]);
+        expect([
+          one.label,
+          messages.some((message) => message.includes('Premium plan for LDAP login')),
+        ]).toEqual([one.label, one.warns]);
+        expect([one.label, seen.meta?.extra.licensed === true]).toEqual([one.label, one.licensed]);
+      }
+    } finally {
+      fs.rmSync(file, { force: true });
+      config.updateConfig((cfg) => {
+        delete cfg.reg_token;
+      });
+    }
+  });
+
   it('warns that Rocket.Chat 9 may refuse an unlicensed LDAP login', async () => {
     // An earlier case leaves a box-wide token, which rightly silences the warning.
     config.updateConfig((cfg) => {

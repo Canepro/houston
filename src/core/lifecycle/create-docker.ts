@@ -947,7 +947,11 @@ export async function buildDocument(plan: CreatePlan): Promise<void> {
   }
   // The completed document is the source of truth: a preset's service and Rocket.Chat
   // patches apply after the base environment, so an earlier token or licence is not enough.
-  const effectiveToken = compose.hasEffectiveRegToken(plan.doc, (plan.pre as Preset).instances)
+  const effectiveCredential = compose.hasEffectiveCredential(
+    plan.doc,
+    (plan.pre as Preset).instances,
+    plan.spec.licensed,
+  )
     ? 'present'
     : '';
   plan.effectiveLicense = compose.hasEffectiveLicense(
@@ -959,14 +963,14 @@ export async function buildDocument(plan: CreatePlan): Promise<void> {
     [(plan.pre as Preset).name],
     resolved.rcVersion,
     plan.effectiveLicense,
-    effectiveToken,
+    effectiveCredential,
   );
   if (premium !== '') warn(plan.emit, premium, { phase: 'create' });
   const unlicensed = request.licenceAbsentWarning(
     plan.pre as Preset,
     false,
     plan.effectiveLicense,
-    effectiveToken,
+    effectiveCredential,
   );
   if (unlicensed !== '') {
     warn(plan.emit, unlicensed, { phase: 'create', code: request.LICENSE_ABSENT_EE_PRESET });
