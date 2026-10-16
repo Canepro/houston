@@ -453,6 +453,23 @@ export async function carryRecordedAxes(req: CreateReq, name: string): Promise<v
   req.monitor ||= isTruthy(meta.extra.monitoring);
 }
 
+/**
+ * A workspace this flagless request already has, once the saved scenario suffix is applied.
+ *
+ * `up --version 8.6.1` derives `rc8-6-1` before saved selectors run. The record can exist
+ * only as `rc8-6-1-email`. That is the same workspace, and its recorded axes win. Treating
+ * the miss as a new workspace set `implicitOwnedLocal`, and `planClusterStep` then refused
+ * the recorded remote context.
+ */
+async function savedScenarioRecord(
+  req: CreateReq,
+  saved: ReturnType<typeof savedSelectors>,
+): Promise<string> {
+  const derived = naming.deriveFor({ ...req, preset: compositeName(saved.scenarios) });
+  if (!derived || derived === naming.deriveFor(req) || !(await paths.exists(derived))) return '';
+  return derived;
+}
+
 /** Saved defaults must be applied before the front door derives its lock/journal name. */
 async function applySavedSelectors(req: CreateReq): Promise<void> {
   const existing = naming.deriveFor(req);
@@ -467,6 +484,12 @@ async function applySavedSelectors(req: CreateReq): Promise<void> {
   ) {
     const saved = savedSelectors();
     if (saved.answered_deployment || saved.answered_scenarios) {
+      const recorded = await savedScenarioRecord(req, saved);
+      if (recorded !== '') {
+        req.name = recorded;
+        await carryRecordedAxes(req, recorded);
+        return;
+      }
       req.deployment = saved.deployment;
       req.preset = compositeName(saved.scenarios);
       req.implicitOwnedLocal = saved.deployment === 'microservices';
@@ -485,9 +508,11 @@ export async function resolveAxesStep(plan: CreatePlan): Promise<void> {
   // `docker compose up` against a workspace with no compose file.
   //
   // Read BEFORE resolveAxes: it normalises an empty --runtime to "docker", after which
-  // `!req.runtime` is never true and this could not fire.
-  const existing = naming.deriveFor(plan.req);
+  // `!req.runtime` is never true and this could not fire. Read AFTER saved selectors too:
+  // a record visible only with the saved scenario suffix is the workspace whose runtime
+  // and axes are kept.
   await applySavedSelectors(plan.req);
+  const existing = naming.deriveFor(plan.req);
   if (!plan.req.runtime && existing && (await paths.exists(existing))) {
     plan.req.runtime = await topology.ofRepro(existing);
   }
