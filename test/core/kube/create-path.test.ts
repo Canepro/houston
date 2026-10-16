@@ -474,9 +474,9 @@ describe('a Kubernetes create', () => {
     const presetPath = path.join(config.presetDir(), 'ldap.yaml');
     try {
       for (const [index, literal, license, warned] of [
-        [0, 'synthetic-preset-license', '', false],
+        [0, '  synthetic-preset-license  ', '', false],
         [1, ' \t ', '', true],
-        [2, '', 'synthetic-file-license', false],
+        [2, '', '  synthetic-file-license  ', false],
         [3, 'synthetic-preset-license', 'synthetic-file-license', false],
       ] as const) {
         await fs.writeFile(
@@ -511,7 +511,7 @@ describe('a Kubernetes create', () => {
         expect(meta.extra.licensed === true).toBe(!warned);
         expect(JSON.stringify(meta)).not.toContain('synthetic-preset-license');
         expect(JSON.stringify(meta)).not.toContain('synthetic-file-license');
-        expect(mockCreated.at(-1)?.license).toBe(license || (literal.trim() === '' ? '' : literal));
+        expect(mockCreated.at(-1)?.license).toBe(license.trim() || literal.trim());
         if (index === 0) {
           await createKubernetes(
             createReq({

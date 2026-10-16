@@ -7,7 +7,7 @@
  */
 import * as crypto from 'node:crypto';
 
-import { MissingRecordError, PreflightError } from '../../lib/errors';
+import { ConflictError, MissingRecordError, PreflightError } from '../../lib/errors';
 import { info, nullEmit, warn, type Emit } from '../../lib/events';
 import { presetsLabel } from '../../lib/presets/composite';
 import { publicPathsOf } from '../../lib/presets/public';
@@ -439,6 +439,38 @@ async function noteNamespace(name: string, receipt: NamespaceReceipt): Promise<v
   }
 }
 
+/** A successful install may outlive connection setup and its provisional record. */
+async function noteInstalledLicense(
+  name: string,
+  namespace: string,
+  context: string,
+  receipt: NamespaceReceipt,
+): Promise<void> {
+  try {
+    await updateMeta(name, (meta) => {
+      if (
+        meta.name !== name ||
+        meta.project !== namespace ||
+        meta.extra.namespace !== namespace ||
+        meta.extra.context !== context ||
+        meta.extra.runtime !== 'kubernetes' ||
+        meta.extra.namespace_uid !== receipt.uid ||
+        meta.extra.namespace_owner !== receipt.owner ||
+        receipt.uid === ''
+      ) {
+        throw new ConflictError(
+          'workspace identity changed before licence installation could be recorded',
+        );
+      }
+      meta.extra.licensed = true;
+      meta.extra.retained_license = true;
+    });
+  } catch (error) {
+    // Direct workspace callers can operate without a lifecycle write-ahead record.
+    if (!(error instanceof MissingRecordError)) throw error;
+  }
+}
+
 /** Wait for TLS, establish the forwards, persist the manifests, and return the metadata. */
 async function connectWorkspace(options: ConnectOptions): Promise<Record<string, unknown>> {
   const { name, namespace, context, hostPort, bindHost, tlsHost, emit } = options;
@@ -622,6 +654,7 @@ export async function createWorkspace({
       chartVersion,
       emit,
     });
+    if (license !== '') await noteInstalledLicense(name, namespace, context, receipt);
   } catch (error) {
     // A failed create must not leave anything a user cannot see. No repro.json is written
     // until this returns, so a surviving namespace would be invisible to `list` and to

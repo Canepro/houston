@@ -216,33 +216,121 @@ function normalizeRegToken(environment: unknown): void {
   }
 }
 
-/** Whether the supplied private licence file remains attached to this service. */
+/** One final env_file reference, without consulting the host environment. */
+export function licenseEnvFiles(
+  service: Service | undefined,
+  projectDirectory: string,
+): {
+  path: string;
+  raw: boolean;
+  optional: boolean;
+}[] {
+  const files = service?.env_file;
+  const entries = Array.isArray(files) ? files : files === undefined ? [] : [files];
+  return entries.map((entry) => {
+    const file = isPlainObject(entry) ? entry.path : entry;
+    return {
+      path:
+        typeof file === 'string' && isKnownNonBlankComposeValue(file)
+          ? path.resolve(projectDirectory, file.replace(/\$\$/gu, '$'))
+          : '',
+      raw: isPlainObject(entry) && entry.format === 'raw',
+      optional: isPlainObject(entry) && entry.required === false,
+    };
+  });
+}
+
+/**
+ * Presence only: no credential text leaves this parser. Unsupported or interpolated
+ * input cannot establish a licence. null means the file leaves the key unchanged.
+ */
+export function licenseInEnvFile(text: string, raw: boolean): boolean | null {
+  let result: boolean | null = null;
+  const lines = text.split(/\r?\n/u);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? '';
+    if (/^\s*(?:#.*)?$/u.test(line)) continue;
+    const entry = /^\s*(?:export\s+)?([A-Za-z0-9_.\-[\]]+)(?:\s*([=:])\s*(.*))?$/u.exec(line);
+    if (entry === null) return false;
+    const key = entry[1];
+    let value = entry[3] ?? '';
+    let literal = raw;
+    if (!raw) {
+      const quote = value[0];
+      if (quote === "'" || quote === '"') {
+        // Consume quoted multiline values together, including unrelated keys. Their
+        // contents must never be mistaken for subsequent assignments.
+        const pattern = /^(?:'((?:[^'\\]|\\[\s\S])*)'|"((?:[^"\\]|\\[\s\S])*)")\s*(?:#.*)?$/u;
+        while (!pattern.test(value) && index + 1 < lines.length) {
+          index += 1;
+          value += `\n${lines[index] ?? ''}`;
+        }
+        const quoted = pattern.exec(value);
+        if (quoted === null) return false;
+        value = quoted[1] ?? quoted[2] ?? '';
+        literal = quote === "'";
+        if (!literal)
+          value = value.replace(/\\([abfnrtv$"\\]|0[0-9]{0,3})/gu, (match, code: string) => {
+            if (code.startsWith('0')) {
+              const octal = code.slice(1);
+              const number = Number.parseInt(octal, 8);
+              return /^[0-7]{3}$/u.test(octal) && number <= 255
+                ? String.fromCharCode(number)
+                : match;
+            }
+            return (
+              {
+                a: '\x07',
+                b: '\b',
+                f: '\f',
+                n: '\n',
+                r: '\r',
+                t: '\t',
+                v: '\v',
+                $: '$$',
+                '"': '"',
+                '\\': '\\',
+              }[code] ?? match
+            );
+          });
+      } else value = value.replace(/\s+#.*$/u, '').trim();
+    }
+    if (key === 'ROCKETCHAT_LICENSE') {
+      result = literal ? value.trim() !== '' : isKnownNonBlankComposeValue(value);
+    }
+  }
+  return result;
+}
+
+/** Env files apply in order; a later known assignment replaces any earlier state. */
 function hasLicenseFile(
   service: Service | undefined,
   licensed: boolean,
   projectDirectory: string,
+  fileLicenses: ReadonlyMap<string, boolean | null>,
 ): boolean {
-  if (!licensed) return false;
   const licenseFile = path.resolve(projectDirectory, LICENSE_ENV_FILE);
-  const referencesLicenseFile = (file: unknown): boolean =>
-    typeof file === 'string' &&
-    isKnownNonBlankComposeValue(file) &&
-    path.resolve(projectDirectory, file) === licenseFile;
-  const files = service?.env_file;
-  if (typeof files === 'string') return referencesLicenseFile(files);
-  if (!Array.isArray(files)) return false;
-  return files.some((file) => referencesLicenseFile(isPlainObject(file) ? file.path : file));
+  let present = false;
+  for (const file of licenseEnvFiles(service, projectDirectory)) {
+    if (file.path === licenseFile && licensed) present = true;
+    else {
+      const state = fileLicenses.get(JSON.stringify([file.path, file.raw, file.optional]));
+      if (state !== null) present = state ?? false;
+    }
+  }
+  return present;
 }
 
 function serviceHasLicense(
   service: Service | undefined,
   licensed: boolean,
   projectDirectory: string,
+  fileLicenses: ReadonlyMap<string, boolean | null>,
 ): boolean {
   const entry = environmentEntry(service?.environment, 'ROCKETCHAT_LICENSE');
   return entry.present
     ? isKnownNonBlankComposeValue(entry.value)
-    : hasLicenseFile(service, licensed, projectDirectory);
+    : hasLicenseFile(service, licensed, projectDirectory, fileLicenses);
 }
 
 /** Whether every final Rocket.Chat service gets a known licence from its environment or file. */
@@ -251,9 +339,10 @@ export function hasEffectiveLicense(
   instances: number,
   licensed: boolean,
   projectDirectory: string,
+  fileLicenses: ReadonlyMap<string, boolean | null> = new Map(),
 ): boolean {
   return rcServiceNames(instances).every((name) =>
-    serviceHasLicense(doc.services[name], licensed, projectDirectory),
+    serviceHasLicense(doc.services[name], licensed, projectDirectory, fileLicenses),
   );
 }
 
@@ -263,12 +352,13 @@ export function hasEffectiveCredential(
   instances: number,
   licensed: boolean,
   projectDirectory: string,
+  fileLicenses: ReadonlyMap<string, boolean | null> = new Map(),
 ): boolean {
   return rcServiceNames(instances).every((name) => {
     const service = doc.services[name];
     return (
       environmentHasKnownValue(service?.environment, 'REG_TOKEN') ||
-      serviceHasLicense(service, licensed, projectDirectory)
+      serviceHasLicense(service, licensed, projectDirectory, fileLicenses)
     );
   });
 }

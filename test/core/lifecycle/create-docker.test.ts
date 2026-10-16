@@ -593,6 +593,80 @@ describe('the create path end to end, stopped at the write seam', () => {
       },
       { label: 'normalized relative', envFile: ['sub/../.license.env'], licensed: true },
       { label: 'absolute project file', envFile: [], absolute: true, licensed: true },
+      { label: 'later blank', envFile: [], later: 'ROCKETCHAT_LICENSE=\n', licensed: false },
+      {
+        label: 'generated last',
+        envFile: [],
+        later: 'ROCKETCHAT_LICENSE=\n',
+        reverse: true,
+        licensed: true,
+      },
+      { label: 'later unrelated', envFile: [], later: 'OTHER=value\n', licensed: true },
+      {
+        label: 'later literal',
+        envFile: [],
+        later: "ROCKETCHAT_LICENSE='other-synthetic'\n",
+        licensed: true,
+      },
+      {
+        label: 'later unresolved',
+        envFile: [],
+        later: 'ROCKETCHAT_LICENSE=${UNSET_LICENSE}\n',
+        licensed: false,
+      },
+      {
+        label: 'later multiline unrelated',
+        envFile: [],
+        later: "OTHER='first\nROCKETCHAT_LICENSE=\nlast'\n",
+        licensed: true,
+      },
+      {
+        label: 'later multiline blank',
+        envFile: [],
+        later: "ROCKETCHAT_LICENSE=' \n \n'\n",
+        licensed: false,
+      },
+      {
+        label: 'later double escaped blank',
+        envFile: [],
+        later: 'ROCKETCHAT_LICENSE="\\t\\n\\f\\v\\0040"\n',
+        licensed: false,
+      },
+      {
+        label: 'later single quoted dollars',
+        envFile: [],
+        later: "ROCKETCHAT_LICENSE='${LITERAL}'\n",
+        licensed: true,
+      },
+      {
+        label: 'later escaped dollars',
+        envFile: [],
+        later: 'ROCKETCHAT_LICENSE="\\$LITERAL"\n',
+        licensed: true,
+      },
+      {
+        label: 'literal dollar path',
+        envFile: [],
+        later: 'ROCKETCHAT_LICENSE=\n',
+        dollar: true,
+        licensed: false,
+      },
+      { label: 'later unset', envFile: [], later: 'ROCKETCHAT_LICENSE\n', licensed: false },
+      {
+        label: 'explicit wins',
+        envFile: [],
+        later: 'ROCKETCHAT_LICENSE=\n',
+        env: { ROCKETCHAT_LICENSE: 'explicit-synthetic' },
+        licensed: true,
+      },
+      {
+        label: 'raw literal',
+        envFile: [],
+        later: 'ROCKETCHAT_LICENSE=${LITERAL}\n',
+        raw: true,
+        licensed: true,
+      },
+      { label: 'optional missing', envFile: [], missing: true, licensed: true },
       { label: 'different file', envFile: ['other.env'], licensed: false },
       { label: 'parent file', envFile: ['../.license.env'], licensed: false },
       {
@@ -621,8 +695,22 @@ describe('the create path end to end, stopped at the write seam', () => {
     try {
       for (const [index, one] of cases.entries()) {
         const name = `file-licence-${String(index)}`;
-        const envFile =
+        let envFile: unknown =
           'absolute' in one ? path.join(config.reprosDir(), name, '.license.env') : one.envFile;
+        if ('later' in one || 'missing' in one) {
+          const later = path.join(
+            config.presetDir(),
+            `synthetic-${'dollar' in one ? '$literal-' : ''}${String(index)}.env`,
+          );
+          if ('later' in one) fs.writeFileSync(later, one.later);
+          const entry = {
+            path: later.replace(/\$/gu, '$$$$'),
+            ...('raw' in one ? { format: 'raw' } : {}),
+            required: false,
+          };
+          envFile =
+            'reverse' in one ? [entry, './.license.env'] : [{ path: 'sub/../.license.env' }, entry];
+        }
         fs.writeFileSync(
           file,
           YAML.stringify({

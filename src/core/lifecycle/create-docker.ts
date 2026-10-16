@@ -947,11 +947,39 @@ export async function buildDocument(plan: CreatePlan): Promise<void> {
   }
   // The completed document is the source of truth: a preset's service and Rocket.Chat
   // patches apply after the base environment, so an earlier token or licence is not enough.
+  const projectDirectory = paths.workspace(plan.reproName);
+  const fileLicenses = new Map<string, boolean | null>();
+  for (const name of compose.rcServiceNames((plan.pre as Preset).instances)) {
+    for (const file of compose.licenseEnvFiles(plan.doc.services[name], projectDirectory)) {
+      const key = JSON.stringify([file.path, file.raw, file.optional]);
+      if (
+        fileLicenses.has(key) ||
+        file.path === joinPath(projectDirectory, compose.LICENSE_ENV_FILE)
+      )
+        continue;
+      if (file.path === '') {
+        fileLicenses.set(key, false);
+        continue;
+      }
+      try {
+        fileLicenses.set(
+          key,
+          compose.licenseInEnvFile(await fs.readFile(file.path, 'utf8'), file.raw),
+        );
+      } catch (error) {
+        fileLicenses.set(
+          key,
+          file.optional && (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : false,
+        );
+      }
+    }
+  }
   const effectiveCredential = compose.hasEffectiveCredential(
     plan.doc,
     (plan.pre as Preset).instances,
     plan.spec.licensed,
-    paths.workspace(plan.reproName),
+    projectDirectory,
+    fileLicenses,
   )
     ? 'present'
     : '';
@@ -959,7 +987,8 @@ export async function buildDocument(plan: CreatePlan): Promise<void> {
     plan.doc,
     (plan.pre as Preset).instances,
     plan.spec.licensed,
-    paths.workspace(plan.reproName),
+    projectDirectory,
+    fileLicenses,
   );
   const premium = request.premiumAuthWarning(
     [(plan.pre as Preset).name],

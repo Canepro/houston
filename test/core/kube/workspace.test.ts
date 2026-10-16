@@ -522,7 +522,7 @@ describe('the values the release is installed with', () => {
       { label: 'preset', overrides: {}, token: 'preset-token', license: 'preset-license' },
       {
         label: 'override',
-        overrides: { REG_TOKEN: '  override-token  ', ROCKETCHAT_LICENSE: 'override-license' },
+        overrides: { REG_TOKEN: '  override-token  ', ROCKETCHAT_LICENSE: '  override-license  ' },
         token: 'override-token',
         license: 'override-license',
       },
@@ -542,7 +542,7 @@ describe('the values the release is installed with', () => {
         label: 'dedicated',
         overrides: { REG_TOKEN: null, ROCKETCHAT_LICENSE: null },
         directToken: '  direct-token  ',
-        directLicense: 'direct-license',
+        directLicense: '  direct-license  ',
         token: 'direct-token',
         license: 'direct-license',
       },
@@ -554,7 +554,9 @@ describe('the values the release is installed with', () => {
         license: '',
       },
     ];
+    const observed: unknown[] = [];
     for (const one of cases) {
+      await paths.remove('tk');
       harness();
       mocked(manifests.recordRendered).mockImplementation(
         (jest.requireActual('../../../src/core/kube/manifests') as typeof manifests).recordRendered,
@@ -567,7 +569,7 @@ describe('the values the release is installed with', () => {
           ).emptyPreset('credentials'),
           env: {
             REG_TOKEN: '  preset-token  ',
-            ROCKETCHAT_LICENSE: 'preset-license',
+            ROCKETCHAT_LICENSE: '  preset-license  ',
             UNRELATED: 'kept',
           },
         },
@@ -580,7 +582,7 @@ describe('the values the release is installed with', () => {
       const docs = applied();
       const token = docs.find((doc) => doc.includes('name: houston-reg-token'));
       const license = docs.find((doc) => doc.includes('name: houston-license'));
-      expect([
+      observed.push([
         one.label,
         token === undefined
           ? ''
@@ -588,7 +590,8 @@ describe('the values the release is installed with', () => {
         license === undefined
           ? ''
           : (YAML.parse(license) as { stringData: { license: string } }).stringData.license,
-      ]).toEqual([one.label, one.token, one.license]);
+      ]);
+      await expect(readMeta('tk')).rejects.toThrow('no repro.json');
       const env = valuesOf().extraEnv as chart.ChartEnvEntry[];
       for (const [key, secret, present] of [
         ['REG_TOKEN', 'houston-reg-token', one.token !== ''],
@@ -631,9 +634,15 @@ describe('the values the release is installed with', () => {
         expect(persisted).not.toContain(raw);
       }
     }
+    expect(observed).toEqual(cases.map((one) => [one.label, one.token, one.license]));
   });
 
-  it.each(['unknown namespace', 'failed namespace cleanup'])(
+  it.each([
+    'unknown namespace',
+    'failed namespace cleanup',
+    'post-install connection',
+    'failed licence apply',
+  ])(
     'retries real provisional preset credentials after %s and retains only completed Secrets',
     async (failure) => {
       const presetPath = path.join(config.presetDir(), 'retry-credentials.yaml');
@@ -642,8 +651,11 @@ describe('the values the release is installed with', () => {
       const changedLicense = 'synthetic-new-preset-license';
       const events: Event[] = [];
       const inputs: { argv: string[]; input: string }[] = [];
+      let initial = true;
+      const postInstall = failure === 'post-install connection';
       const req = () =>
         createReq({
+          license: initial && postInstall ? license : '',
           version: '8.5.1',
           name: 'tk',
           preset: 'retry-credentials',
@@ -685,6 +697,9 @@ describe('the values the release is installed with', () => {
         mocked(release.apply).mockImplementation(
           (jest.requireActual('../../../src/core/kube/release') as typeof release).apply,
         );
+        mocked(release.install).mockImplementation(
+          (jest.requireActual('../../../src/core/kube/release') as typeof release).install,
+        );
         const run = kube.run;
         kube.run = (argv, options) => {
           if (options?.input !== undefined) inputs.push({ argv: [...argv], input: options.input });
@@ -697,7 +712,9 @@ describe('the values the release is installed with', () => {
           YAML.stringify({
             name: 'retry-credentials',
             requires_license: true,
-            env: { ROCKETCHAT_LICENSE: value, REG_TOKEN: `  ${token}  ` },
+            env: postInstall
+              ? {}
+              : { ROCKETCHAT_LICENSE: `  ${value}  `, REG_TOKEN: `  ${token}  ` },
           }),
         );
       };
@@ -723,6 +740,9 @@ describe('the values the release is installed with', () => {
         ]);
         for (const raw of [license, token, changedLicense]) expect(visible).not.toContain(raw);
         for (const call of inputs) {
+          if (call.argv[0] === 'helm')
+            for (const raw of [license, token, changedLicense])
+              expect(call.input).not.toContain(raw);
           expect(call.argv).not.toEqual(expect.arrayContaining([expect.stringContaining(license)]));
           expect(call.argv).not.toEqual(expect.arrayContaining([expect.stringContaining(token)]));
         }
@@ -734,16 +754,24 @@ describe('the values the release is installed with', () => {
       await fs.mkdir(config.presetDir(), { recursive: true });
       try {
         await writePreset(license);
-        prepare(failure === 'unknown namespace' ? ['houston-tk'] : []);
+        prepare(
+          failure === 'unknown namespace' || failure === 'failed licence apply'
+            ? ['houston-tk']
+            : [],
+        );
         const run = kube.run;
         kube.run = (argv, options) => {
           if (
             (failure === 'unknown namespace' &&
               argv.includes('get') &&
               argv.includes('namespace')) ||
-            (failure === 'failed namespace cleanup' && argv.includes('delete'))
+            (failure === 'failed namespace cleanup' && argv.includes('delete')) ||
+            (failure === 'failed licence apply' &&
+              options?.input?.includes('name: houston-license'))
           ) {
             ran.push([...argv]);
+            if (options?.input !== undefined)
+              inputs.push({ argv: [...argv], input: options.input });
             return Promise.resolve({
               argv,
               returncode: 1,
@@ -753,14 +781,37 @@ describe('the values the release is installed with', () => {
           }
           return run(argv, options);
         };
-        mocked(replicaset.initReplicaSet).mockRejectedValueOnce(new Interrupted());
-        await expect(createKubernetes(req(), (event) => events.push(event))).rejects.toBeInstanceOf(
-          Interrupted,
-        );
+        if (postInstall) mocked(forward.portForward).mockRejectedValueOnce(new Interrupted());
+        else if (failure !== 'failed licence apply')
+          mocked(replicaset.initReplicaSet).mockRejectedValueOnce(new Interrupted());
+        const attempt = createKubernetes(req(), (event) => events.push(event));
+        if (failure === 'failed licence apply')
+          await expect(attempt).rejects.toThrow('kubectl apply failed: stated transport failure');
+        else await expect(attempt).rejects.toBeInstanceOf(Interrupted);
+        initial = false;
         const provisional = await readMeta('tk');
         expect(provisional.extra.incomplete).toBe(true);
         expect(provisional.extra.licensed).toBe(true);
-        expect(appliedLicense()).toHaveLength(0);
+        expect(appliedLicense()).toHaveLength(
+          postInstall || failure === 'failed licence apply' ? 1 : 0,
+        );
+        expect(mocked(release.install).mock.calls.length).toBe(postInstall ? 1 : 0);
+        if (postInstall) {
+          expect(
+            (YAML.parse(appliedLicense()[0]?.input ?? '') as { stringData: { license: string } })
+              .stringData.license,
+          ).toBe(license);
+          const helm = inputs.filter(
+            (call) => call.argv[0] === 'helm' && call.argv.includes('upgrade'),
+          );
+          expect(helm).toHaveLength(1);
+          expect(
+            (JSON.parse(helm[0]?.input ?? '') as { extraEnv: unknown[] }).extraEnv,
+          ).toContainEqual({
+            name: 'ROCKETCHAT_LICENSE',
+            valueFrom: { secretKeyRef: { name: 'houston-license', key: 'license' } },
+          });
+        }
         if (failure === 'failed namespace cleanup')
           expect(ran.some((argv) => argv.includes('delete'))).toBe(true);
         await assertPrivate(null);
@@ -773,7 +824,7 @@ describe('the values the release is installed with', () => {
             (call) =>
               (YAML.parse(call.input) as { stringData: { license: string } }).stringData.license,
           ),
-        ).toEqual([license]);
+        ).toEqual(postInstall ? [] : [license]);
         const tokenDoc = inputs
           .flatMap((call) =>
             YAML.parseAllDocuments(call.input).map(
@@ -785,7 +836,7 @@ describe('the values the release is installed with', () => {
             ),
           )
           .find((doc) => doc.metadata?.name === 'houston-reg-token');
-        expect(tokenDoc?.stringData?.token).toBe(token);
+        expect(tokenDoc?.stringData?.token).toBe(postInstall ? undefined : token);
         const values = mocked(release.install).mock.calls[0]?.[0].values as Record<string, unknown>;
         expect(values.license).toBeUndefined();
         expect(values.extraEnv).toEqual(
@@ -794,12 +845,17 @@ describe('the values the release is installed with', () => {
               name: 'ROCKETCHAT_LICENSE',
               valueFrom: { secretKeyRef: { name: 'houston-license', key: 'license' } },
             },
-            {
-              name: 'REG_TOKEN',
-              valueFrom: { secretKeyRef: { name: 'houston-reg-token', key: 'token' } },
-            },
+            ...(postInstall
+              ? []
+              : [
+                  {
+                    name: 'REG_TOKEN',
+                    valueFrom: { secretKeyRef: { name: 'houston-reg-token', key: 'token' } },
+                  },
+                ]),
           ]),
         );
+        expect(provisional.extra.retained_license).toBe(postInstall);
         for (const call of appliedLicense())
           expect(call.argv.slice(-3)).toEqual(['apply', '-f', '-']);
         expect((await readMeta('tk')).extra.incomplete).toBeUndefined();
@@ -825,12 +881,48 @@ describe('the values the release is installed with', () => {
         expect(appliedLicense()).toHaveLength(0);
         expect((await readMeta('tk')).extra.effective_license).toBe(true);
         await assertPrivate(null);
+        // An explicit new payload still replaces the retained Secret on either API path.
+        inputs.length = 0;
+        prepare(['houston-tk']);
+        await createKubernetes({ ...req(), license: `  ${changedLicense}  ` }, (event) =>
+          events.push(event),
+        );
+        expect(
+          appliedLicense().map(
+            (call) =>
+              (YAML.parse(call.input) as { stringData: { license: string } }).stringData.license,
+          ),
+        ).toEqual([changedLicense]);
+        await assertPrivate(null);
       } finally {
         await fs.rm(presetPath, { force: true });
         await paths.remove('tk');
       }
     },
   );
+
+  it('does not retain a licence against a different workspace identity', async () => {
+    harness({ held: ['houston-tk'] });
+    const meta = metadata({ name: 'tk', project: 'houston-tk' });
+    Object.assign(meta.extra, {
+      runtime: 'kubernetes',
+      namespace: 'houston-tk',
+      context: 'another-cluster',
+      incomplete: true,
+      licensed: true,
+      retained_license: false,
+    });
+    await writeRecord('tk', meta);
+    try {
+      await expect(create({ license: 'synthetic-foreign-record' })).rejects.toThrow(
+        'workspace identity changed',
+      );
+      expect(mocked(release.install)).toHaveBeenCalledTimes(1);
+      expect((await readMeta('tk')).extra.retained_license).toBe(false);
+    } finally {
+      await paths.remove('tk');
+    }
+  });
 
   it('gives the chart a host OR a root_url, never both', async () => {
     // Two entries for ROOT_URL is a server-side-apply conflict, not an override -- so a

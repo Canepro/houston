@@ -263,10 +263,9 @@ export function credentialInputs(
   };
   // Dedicated inputs and a retained licence Secret win over preset/override literals.
   const token = regToken.trim() || effective('REG_TOKEN').trim();
-  const suppliedLicense = license.trim() === '' ? '' : license;
-  const presetLicense = effective('ROCKETCHAT_LICENSE');
-  const payload =
-    suppliedLicense || (retainedLicense || presetLicense.trim() === '' ? '' : presetLicense);
+  const suppliedLicense = license.trim();
+  const presetLicense = effective('ROCKETCHAT_LICENSE').trim();
+  const payload = suppliedLicense || (retainedLicense ? '' : presetLicense);
   return { regToken: token, license: payload, licensed: retainedLicense || payload !== '' };
 }
 
