@@ -674,6 +674,45 @@ describe('up --json', () => {
     jest.dontMock('../../src/core/lifecycle/create-docker');
   });
 
+  it.each(['HOUSTON_SSH_LOCAL_PORT', 'HOUSTON_SSH_PORT'])(
+    'ignores unused %s overrides for JSON creation while human creation refuses them',
+    async (key) => {
+      const saved = { tty: process.env.SSH_TTY, override: process.env[key] };
+      const create = jest.fn(async () => ({ name: 'alpha', status: 'created' }));
+      jest.doMock('../../src/core/lifecycle/create-docker', () => ({
+        ...jest.requireActual<typeof CreateDockerNS>('../../src/core/lifecycle/create-docker'),
+        createRepro: create,
+      }));
+      try {
+        process.env.SSH_TTY = '/dev/ttys001';
+        process.env[key] = 'not-a-port';
+        const argv = [
+          'up',
+          '--version',
+          '8.5.1',
+          '--offline',
+          '--name',
+          'alpha',
+          '--bind',
+          '127.0.0.1',
+        ];
+        const human = await run(argv);
+        expect(human.code).toBe(2);
+        expect(human.stderr).toContain(key);
+        expect(create).not.toHaveBeenCalled();
+        const json = await run([...argv, '--json']);
+        expect(json.code).toBe(0);
+        expect(json.envelope.data).toEqual({ name: 'alpha', status: 'created' });
+        expect(create).toHaveBeenCalledTimes(1);
+      } finally {
+        if (saved.tty === undefined) delete process.env.SSH_TTY;
+        else process.env.SSH_TTY = saved.tty;
+        if (saved.override === undefined) delete process.env[key];
+        else process.env[key] = saved.override;
+      }
+    },
+  );
+
   it('leaves compose on the terminal: none of its lines becomes an NDJSON boot event', async () => {
     // Earlier releases do not stream compose's output under --json either, so compose draws
     // on the terminal (its stdout on stderr in JSON mode) and the stream carries houston's

@@ -147,7 +147,9 @@ describe('SSH access handoff', () => {
       'ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:3123:127.0.0.1:3123 ' +
         '-L 127.0.0.1:8025:127.0.0.1:8025 -L 127.0.0.1:8081:127.0.0.1:8081 -- operator@203.0.113.8',
     );
-    expect(answer?.note).toContain('side services are forwarded on their own ports (8025, 8081)');
+    expect(answer?.note).toContain(
+      'side services and instances are forwarded on their own ports (8025, 8081)',
+    );
   });
 
   it("forwards monitoring's ports too, and refuses an override that lands on a side port", () => {
@@ -165,6 +167,24 @@ describe('SSH access handoff', () => {
         HOUSTON_SSH_LOCAL_PORT: '8081',
       }),
     ).toThrow("HOUSTON_SSH_LOCAL_PORT 8081 is one of this workspace's side ports");
+  });
+
+  it('forwards every recorded instance and refuses a primary-port collision with one', () => {
+    const meta = workspace({ extra: { instances: 3, sidecar_ports: [3125, 8025] } });
+    const env = { SSH_TTY: '/dev/ttys001', USER: 'operator', HOUSTON_SSH_HOST: 'server' };
+    const answer = handoff(meta, env);
+    expect(answer?.side_ports).toEqual([3124, 3125, 3126, 8025]);
+    expect(answer?.tunnel_command).toBe(
+      'ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:3123:127.0.0.1:3123 ' +
+        '-L 127.0.0.1:3124:127.0.0.1:3124 -L 127.0.0.1:3125:127.0.0.1:3125 ' +
+        '-L 127.0.0.1:3126:127.0.0.1:3126 -L 127.0.0.1:8025:127.0.0.1:8025 -- operator@server',
+    );
+    for (const port of ['3124', '3125', '3126']) {
+      expect(() => handoff(meta, { ...env, HOUSTON_SSH_LOCAL_PORT: port })).toThrow(
+        `HOUSTON_SSH_LOCAL_PORT ${port} is one of this workspace's side ports`,
+      );
+    }
+    expect(handoff(workspace({ extra: { instances: 1 } }), env)?.side_ports).toEqual([]);
   });
 
   it('validates a session override only for a workspace that will be loopback-bound', () => {

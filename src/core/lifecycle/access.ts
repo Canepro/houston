@@ -17,7 +17,7 @@ export interface AccessHandoff {
   readonly bind: 'loopback';
   readonly host_port: number;
   readonly local_port: number;
-  /** The preset's browser-facing side services, forwarded on the same port numbers. */
+  /** Browser-facing side services and instances, forwarded on their own port numbers. */
   readonly side_ports: readonly number[];
   readonly browser_url: string;
   /** The HTTPS address the shared edge serves for this workspace, when it has one. */
@@ -171,7 +171,8 @@ function bindOf(meta: AccessRecord, resolvedBindHost: string): string {
 
 /**
  * The workspace's recorded browser-facing side ports, as numbers: the preset's
- * (phpLDAPadmin, Keycloak, Mailpit) and monitoring's (Prometheus, Grafana), whose URLs
+ * (phpLDAPadmin, Keycloak, Mailpit), monitoring's (Prometheus, Grafana), and the
+ * individual Rocket.Chat instances behind the load balancer, whose URLs
  * `info` advertises and which a tunnel that forwards Rocket.Chat alone leaves unreachable.
  */
 function sidePorts(meta: AccessRecord, remotePort: number): number[] {
@@ -179,6 +180,14 @@ function sidePorts(meta: AccessRecord, remotePort: number): number[] {
   const recorded = [extra.sidecar_ports, extra.monitoring_ports].flatMap((value) =>
     Array.isArray(value) ? value : [],
   );
+  // A single instance uses the primary port; multi-instance Compose publishes each
+  // replica at hostPort + 1..N, matching the URLs in the CLI summary.
+  const instances = Number(extra.instances);
+  if (Number.isSafeInteger(instances) && instances > 1) {
+    for (let at = 1; at <= instances && remotePort + at <= 65535; at += 1) {
+      recorded.push(remotePort + at);
+    }
+  }
   const ports = recorded
     .map((value) => Number(value))
     .filter(
@@ -247,7 +256,7 @@ export function handoff(
   const notes = [REMOTE_NOTE];
   if (sides.length > 0) {
     notes.push(
-      `The preset's side services are forwarded on their own ports (${sides.join(', ')}), ` +
+      `The preset's side services and instances are forwarded on their own ports (${sides.join(', ')}), ` +
         'so their printed URLs work through the tunnel.',
     );
   }

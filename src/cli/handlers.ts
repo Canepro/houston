@@ -846,17 +846,17 @@ async function dispatch(
     case 'capabilities':
       return capabilities();
     case 'up': {
-      // A session override that cannot make a working tunnel is refused here, before the
-      // create, rather than reported over a workspace that already exists. Only for a
-      // workspace that will be loopback-bound: the flag, else the box-wide setting, else
-      // the default, which is loopback.
-      const bindAsked =
-        text(o.bind) ||
-        toText((require('../lib/config') as typeof ConfigNS).loadConfig().bind_host);
-      (require('../core/lifecycle/access') as typeof AccessNS).validateEnvironment(
-        process.env,
-        bindAsked,
-      );
+      // Only human output consumes a handoff. Refuse invalid overrides before creating
+      // its loopback workspace, but leave JSON automation independent of tunnel advice.
+      if (!active()) {
+        const bindAsked =
+          text(o.bind) ||
+          toText((require('../lib/config') as typeof ConfigNS).loadConfig().bind_host);
+        (require('../core/lifecycle/access') as typeof AccessNS).validateEnvironment(
+          process.env,
+          bindAsked,
+        );
+      }
       return await runUp(invocation, io);
     }
     case 'ready': {
