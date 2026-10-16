@@ -36,6 +36,15 @@ export const REDACTED = '********';
  */
 const JOINED_KEY_HINTS: readonly string[] = ['privatekey', 'sshkey'];
 
+const HEADER_KEY = /^(?:(?:proxy|http)_)?(?:authorization(?:_?headers?)?|auth_?headers?)$/u;
+
+/**
+ * A credential word, alone or ending a joined option name (`--accesstoken`, `--rootpassword`).
+ * `pass` counts only as a whole word: `bypass` and `compass` end with it.
+ */
+const CREDENTIAL_WORD =
+  /^pass$|(?:password|passwd|passphrase|secret|token|apikey|credential|privatekey|sshkey)s?$/u;
+
 /**
  * Whether a key names a credential, for an artifact a person attaches. The hints are written in
  * environment spelling (`_key`, `rocketchat_license`), and an artifact also holds keys spelled
@@ -44,43 +53,75 @@ const JOINED_KEY_HINTS: readonly string[] = ['privatekey', 'sshkey'];
  * hide a hint it already held. `keycloakUrl` and `monkeyPatch` hold no word `key`.
  */
 export function credentialKey(key: string): boolean {
-  const words = key
-    .replace(/(\p{Lu})(\p{Lu}\p{Ll})/gu, '$1_$2')
-    .replace(/(\p{Ll}|\p{Nd})(\p{Lu})/gu, '$1_$2')
-    .replace(/[^\p{L}\p{Nd}]/gu, '_')
-    .toLowerCase();
+  const words = keyWords(key);
   const lowered = key.toLowerCase();
   // Header names are credentials; nearby policy/count fields are not. Match complete
   // normalized names so authorizationEnabled and authHeaderCount remain readable.
   return (
-    /^(?:(?:proxy|http)_)?(?:authorization(?:_?headers?)?|auth_?headers?)$/u.test(words) ||
+    HEADER_KEY.test(words) ||
     [...SECRET_KEY_HINTS, ...JOINED_KEY_HINTS].some(
       (hint) => lowered.includes(hint) || words.includes(hint),
     )
   );
 }
 
+/** A key's words lower-cased and joined by `_`, at each case change and non-alphanumeric. */
+function keyWords(key: string): string {
+  return key
+    .replace(/(\p{Lu})(\p{Lu}\p{Ll})/gu, '$1_$2')
+    .replace(/(\p{Ll}|\p{Nd})(\p{Lu})/gu, '$1_$2')
+    .replace(/[^\p{L}\p{Nd}]/gu, '_')
+    .toLowerCase();
+}
+
 /**
  * Keys whose list value is an argument sequence: a Compose or Kubernetes `command`,
- * `entrypoint` or `args`, and a Compose healthcheck `test`. In such a list a credential flag
- * and the argument after it are separate items, so neither item names its own credential.
+ * `entrypoint` or `args`. In such a list a credential flag and the argument after it are
+ * separate items, so neither item names its own credential. A healthcheck `test` is one too, but
+ * only under its parent: see `argumentListKey`.
  */
 export const ARGUMENT_LIST_KEYS: readonly string[] = Object.freeze([
   'command',
   'entrypoint',
   'args',
-  'test',
 ]);
 
 /**
+ * Whether `key`, inside an object held under `parent`, is an argument list. `test` is one only
+ * in a healthcheck (`healthcheck`, or an extension field such as `x-healthcheck` that an anchor
+ * shares); anywhere else it is arbitrary data, such as a chart value, and masking it would
+ * erase whatever it holds from the whole bundle.
+ */
+export function argumentListKey(key: string, parent = ''): boolean {
+  return ARGUMENT_LIST_KEYS.includes(key) || (key === 'test' && /health[-_]?check/iu.test(parent));
+}
+
+/**
  * Whether an argument item is a flag whose NEXT item is its credential value: `--password` or
- * `--reg-token`, named by the same words `credentialKey` reads. `--flag=value` carries its own
- * value and is read as an assignment instead; `--port` and a plain argument are not flags of this
- * kind.
+ * `--reg-token`. `--flag=value` carries its own value and is read as an assignment instead;
+ * `--port` and a plain argument are not flags of this kind. The flag's own words decide:
+ * `--proxy-bypass-list` holds the letters `pass` and no credential word.
  */
 export function credentialFlag(item: string): boolean {
   const flag = /^--?([A-Za-z][^=\s]*)$/u.exec(item)?.[1];
-  return flag !== undefined && credentialKey(flag);
+  if (flag === undefined) return false;
+  const words = keyWords(flag);
+  return (
+    HEADER_KEY.test(words) ||
+    /(?:^|_)rocketchat_license(?:_|$)/u.test(words) ||
+    words
+      .split('_')
+      .some((word, index) => CREDENTIAL_WORD.test(word) || (index > 0 && word === 'key'))
+  );
+}
+
+/**
+ * Whether the text before an `=` names a credential: a key (`DB_PASSWORD`), or the last word of
+ * a command line, which is a flag when it starts with `-` and is judged as one.
+ */
+function assignsCredential(before: string): boolean {
+  const last = before.split(/\s+/u).pop() ?? '';
+  return last.startsWith('-') ? credentialFlag(last) : credentialKey(before);
 }
 
 /** Whether a flag hands its credential to the NEXT argument, rather than switching a mode. */
@@ -102,11 +143,7 @@ export function credentialFlagWord(word: string): boolean {
 export function commandCarriesCredential(text: string): boolean {
   const words = text.split(/[\s'"`;&|()<>\\]+/u).filter((word) => word !== '');
   if (words.some(credentialFlagWord)) return true;
-  return (
-    (words.includes('-p') &&
-      words.some((word) => /^(?:-u.*|--user(?:name)?(?:=.*)?)$/u.test(word))) ||
-    httpUserPassword(words)
-  );
+  return (words.includes('-p') && words.some(userArgument)) || httpUserPassword(words);
 }
 
 /** `curl -u user:pass` and wget's `--user=user:pass` carry a password in the user value. */
@@ -116,6 +153,81 @@ export function httpUserPassword(words: readonly string[]): boolean {
     /^(?:-u|--user)$/u.test(word)
       ? (words[index + 1] ?? '').includes(':')
       : /^(?:-u|--user=).*:/u.test(word),
+  );
+}
+
+/** A `user:password` value of a curl or wget command, and the word that holds it. */
+export interface HttpUser {
+  readonly value: string;
+  readonly password: string;
+  /** Index of the word holding the value; `attached` when it follows `-u` or `--user=` there. */
+  readonly index: number;
+  readonly attached: boolean;
+}
+
+/**
+ * The `user:password` values after a curl or wget in `words`: `-u v`, `--user v`, `--user=v` and
+ * `-uv`. Only words after the program count, so `docker run -u root:root curlimage/curl` names
+ * a user and group, not a password. A value without a colon has no password in it.
+ */
+export function httpUsers(words: readonly string[]): HttpUser[] {
+  const program = words.findIndex((word) => /(?:^|\/)(?:curl|wget)$/u.test(word));
+  if (program < 0) return [];
+  const users: HttpUser[] = [];
+  for (let index = program + 1; index < words.length; index += 1) {
+    const word = words[index] ?? '';
+    const separate = /^(?:-u|--user)$/u.test(word);
+    const attached = separate ? undefined : /^(?:--user=|-u)(.*)$/su.exec(word)?.[1];
+    const next = words[index + 1] ?? '';
+    const value = separate ? next : attached;
+    const colon = value?.indexOf(':') ?? -1;
+    if (value === undefined || colon < 0) continue;
+    users.push({
+      value,
+      password: value.slice(colon + 1),
+      index: separate ? index + 1 : index,
+      attached: !separate,
+    });
+  }
+  return users;
+}
+
+/** Whether one argument names a user: `-u x`, `-ux`, `--user[=x]`, `--username[=x]`. */
+export function userArgument(word: string): boolean {
+  return /^(?:-u.*|--user(?:name)?(?:=.*)?)$/u.test(word);
+}
+
+/**
+ * `8080`, `8080:80`, `8000-8010:80/udp`, `127.0.0.1:8080:80`, `[::1]:8080:80`, `0.0.0.0::80`:
+ * every part a port number or range, after an optional bind address and before an optional
+ * protocol, which `-p` publishes rather than hides.
+ */
+export function portSpelling(value: string): boolean {
+  const bound = value.replace(/^(?:[0-9]{1,3}(?:\.[0-9]{1,3}){3}|\[[0-9A-Fa-f:.]+\]):/u, '');
+  const parts = bound.replace(/\/(?:tcp|udp|sctp)$/u, '').split(':');
+  const maximum = bound === value ? 3 : 2;
+  return (
+    parts.length <= maximum &&
+    parts.every((part, index) =>
+      part === ''
+        ? bound !== value && index === 0 && parts.length === 2
+        : /^[0-9]{1,5}(?:-[0-9]{1,5})?$/u.test(part) &&
+          part.split('-').every((port) => Number(port) <= 65535),
+    )
+  );
+}
+
+/**
+ * Whether `flag` takes `value` as a credential: a long credential flag (`--password`), or `-p`
+ * in a command that also names a user, as `mongosh -u x -p` and `mysql -p -u x` write it.
+ * Elsewhere `-p` is a port or `mkdir -p`, and masking those would erase evidence.
+ */
+export function credentialArgument(flag: string, value: string, userGiven: boolean): boolean {
+  // A value may start with `-`; only a bare long option is the next argument instead.
+  if (valueTakingCredentialFlag(flag)) return value !== '' && !/^--[A-Za-z][\w-]*$/u.test(value);
+  // A following option or a port is the next argument, not a password `-p` was asked for.
+  return (
+    flag === '-p' && userGiven && value !== '' && !value.startsWith('-') && !portSpelling(value)
   );
 }
 
@@ -258,7 +370,34 @@ export function discoverTextSecrets(
   }
   if (valid) {
     const ends = jsonEnds(text);
-    const walk = (at: number, secret: boolean, level: number, argv = false): number => {
+    /** The decoded strings of the array at `at`, and `''` for any other item. */
+    const itemsOf = (at: number): string[] => {
+      const items: string[] = [];
+      let i = at + 1;
+      for (;;) {
+        i += jsonToken(JSON_SPACE, text, i).length;
+        if (text[i] === ']' || i >= text.length) return items;
+        if (text[i] === ',') {
+          i += 1;
+          continue;
+        }
+        const end = jsonValueEnd(text, i, ends);
+        items.push(text[i] === '"' ? (JSON.parse(text.slice(i, end)) as string) : '');
+        i = end;
+      }
+    };
+    /** An argument as its flag logic reads it: a string's text, a number's spelling, else `''`. */
+    const argumentText = (at: number): string => {
+      if (text[at] === '"') return JSON.parse(jsonToken(JSON_STRING, text, at)) as string;
+      return text[at] === '{' || text[at] === '[' ? '' : jsonToken(JSON_LITERAL, text, at);
+    };
+    const walk = (
+      at: number,
+      secret: boolean,
+      level: number,
+      argv = false,
+      parent = '',
+    ): number => {
       if (level > 100) throw new RangeError('artifact credential nesting exceeds limit');
       const open = text[at];
       if (open === '"') {
@@ -284,7 +423,13 @@ export function discoverTextSecrets(
       }
       const named = open === '{' && namesCredential(text, at, ends);
       // In an argument array, the item after a credential flag is its value.
-      let afterFlag = false;
+      const items = argv && open === '[' ? itemsOf(at) : [];
+      const userGiven = items.some(userArgument);
+      for (const user of httpUsers(items)) {
+        add(user.value);
+        add(user.password);
+      }
+      let flag = '';
       let i = at + 1;
       for (;;) {
         i += jsonToken(JSON_SPACE, text, i).length;
@@ -293,26 +438,25 @@ export function discoverTextSecrets(
           i += 1;
           continue;
         }
-        let member = secret || afterFlag;
+        let member = secret;
         let list = false;
+        let key = '';
         if (open === '{') {
           const token = jsonToken(JSON_STRING, text, i);
-          const key = JSON.parse(token) as string;
+          key = JSON.parse(token) as string;
           discoverTextSecrets(key, add, level + 1);
           member ||= credentialKey(key) || (key === 'value' && named);
-          list = ARGUMENT_LIST_KEYS.includes(key);
+          list = argumentListKey(key, parent);
           i += token.length;
           i += jsonToken(JSON_SPACE, text, i).length + 1;
           i += jsonToken(JSON_SPACE, text, i).length;
         }
-        const itemAt = i;
+        const item = argumentText(i);
+        const isString = text[i] === '"';
+        if (flag !== '') member ||= credentialArgument(flag, item, userGiven);
         // The items of an argument array are argument strings too: `["sh", "-c", "..."]`.
-        i = walk(i, member, level + 1, open === '[' ? argv : list);
-        if (argv && open === '[') {
-          afterFlag =
-            text[itemAt] === '"' &&
-            credentialFlag(JSON.parse(jsonToken(JSON_STRING, text, itemAt)) as string);
-        }
+        i = walk(i, member, level + 1, open === '[' ? argv : list, key);
+        flag = argv && open === '[' && isString ? item : '';
       }
     };
     walk(jsonToken(JSON_SPACE, text, 0).length, false, depth);
@@ -325,7 +469,7 @@ export function discoverTextSecrets(
     // `--password-file=/run/secrets/x` names where a secret is, not the secret.
     const lastWord = text.slice(0, equals).split(/\s+/u).pop() ?? '';
     const modeSwitch = credentialFlag(lastWord) && !valueTakingCredentialFlag(lastWord);
-    if (credentialKey(text.slice(0, equals)) && !modeSwitch) add(value);
+    if (assignsCredential(text.slice(0, equals)) && !modeSwitch) add(value);
     discoverTextSecrets(value, add, depth + 1);
     return;
   }
@@ -358,7 +502,7 @@ export function redactAssignedText(
   const urlRedacted = redactAllUserinfo(value, knownSecrets);
   // A URL password or query can contain `=`, so the user info goes first.
   const equals = urlRedacted.indexOf('=');
-  if (equals > 0 && credentialKey(urlRedacted.slice(0, equals))) {
+  if (equals > 0 && assignsCredential(urlRedacted.slice(0, equals))) {
     return `${urlRedacted.slice(0, equals + 1)}${REDACTED}`;
   }
   return redactKnownValues(urlRedacted, knownSecrets);

@@ -38,10 +38,13 @@ import { ValidationError } from '../lib/errors';
 import { isTruthy, quotedText, toText } from '../lib/format';
 import { pathExpandUser } from '../lib/home';
 import {
-  ARGUMENT_LIST_KEYS,
+  argumentListKey,
   commandCarriesCredential,
+  credentialArgument,
   credentialFlagWord,
   httpUserPassword,
+  httpUsers,
+  userArgument,
   valueTakingCredentialFlag,
   credentialKey,
   discoverTextSecrets,
@@ -673,6 +676,7 @@ function redactArtifactValue(
   knownSecrets: readonly KnownSecret[],
   secret = false,
   seen = new WeakSet<object>(),
+  parentKey = '',
 ): unknown {
   if (typeof value === 'string') return redactArtifactText(value, secret, knownSecrets);
   if (typeof value === 'number' || typeof value === 'boolean' || value === null) {
@@ -692,7 +696,7 @@ function redactArtifactValue(
     const safeKey = redactArtifactText(key, false, knownSecrets);
     // A command that names a credential flag is withheld whole: the flag's value can be
     // spelled in more ways than this reader can follow, and a partial mask would show it.
-    if (ARGUMENT_LIST_KEYS.includes(key) && argumentsCarryCredential(item)) {
+    if (argumentListKey(key, parentKey) && argumentsCarryCredential(item)) {
       out[safeKey] = REDACTED;
       continue;
     }
@@ -701,6 +705,7 @@ function redactArtifactValue(
       knownSecrets,
       secret || safeKey !== key || credentialKey(key) || (key === 'value' && namedSecret),
       seen,
+      key,
     );
   }
   return out;
@@ -715,33 +720,6 @@ function argumentsCarryCredential(value: unknown): boolean {
     words.some((word) => credentialFlagWord(word) || commandCarriesCredential(word)) ||
     (words.includes('-p') && words.some(userArgument)) ||
     httpUserPassword(words)
-  );
-}
-
-/** Whether one argument names a user: `-u x`, `-ux`, `--user[=x]`, `--username[=x]`. */
-function userArgument(word: string): boolean {
-  return /^(?:-u.*|--user(?:name)?(?:=.*)?)$/u.test(word);
-}
-
-/**
- * Whether `flag` takes `value` as a credential: a long credential flag (`--password`), or `-p`
- * in a command that also names a user, as `mongosh -u x -p` and `mysql -p -u x` write it.
- * Elsewhere `-p` is a port or `mkdir -p`, and masking those would erase evidence.
- */
-function credentialArgument(flag: string, value: string, userGiven: boolean): boolean {
-  // A value may start with `-`; only a bare long option is the next argument instead.
-  if (valueTakingCredentialFlag(flag)) return value !== '' && !/^--[A-Za-z][\w-]*$/u.test(value);
-  // A following option or a port is the next argument, not a password `-p` was asked for.
-  return (
-    flag === '-p' && userGiven && value !== '' && !value.startsWith('-') && !portSpelling(value)
-  );
-}
-
-/** `8080` or `8080:80`: every part a port number, which `-p` publishes rather than hides. */
-function portSpelling(value: string): boolean {
-  return (
-    /^[0-9]{1,5}(?::[0-9]{1,5})*$/u.test(value) &&
-    value.split(':').every((part) => Number(part) <= 65535)
   );
 }
 
@@ -796,7 +774,10 @@ function shellCommands(text: string): ShellWord[][] {
       for (index += 1; index < text.length && text[index] !== '"'; index += 1) {
         const inner = text[index] ?? '';
         const next = text[index + 1] ?? '';
-        if (inner === '\\' && '"\\$`'.includes(next) && next !== '') {
+        if (inner === '\\' && next === '\n') {
+          // A line continuation inside double quotes joins the lines as well.
+          index += 1;
+        } else if (inner === '\\' && '"\\$`'.includes(next) && next !== '') {
           word += next;
           index += 1;
         } else word += inner;
@@ -826,6 +807,23 @@ function discoverCommandText(text: string, add: (value: string) => void, depth =
   if (depth > 8) return;
   for (const command of shellCommands(text)) {
     const userGiven = command.some((word) => userArgument(word.text));
+    // The artifact spells a quoted or escaped value as written; mask that spelling too, without
+    // its outer quotes, which stay to show where the value was. Inside an outer double-quoted
+    // string the artifact also escapes `"`, `\`, `$` and backticks.
+    const spellings = (value: string, raw?: string): void => {
+      add(value);
+      if (raw !== undefined) add(raw.replace(/^(['"])(.*)\1$/su, '$2'));
+      if (depth > 0) {
+        add(value.replace(/["\\$`]/gu, '\\$&'));
+        if (raw !== undefined) add(raw.replace(/["\\$`]/gu, '\\$&'));
+      }
+    };
+    // `curl -u user:password`: the user value as a whole and its password are both credentials.
+    for (const user of httpUsers(command.map((word) => word.text))) {
+      const word = command[user.index] as ShellWord;
+      spellings(user.value, user.attached ? word.raw.replace(/^(?:--user=|-u)/u, '') : word.raw);
+      spellings(user.password);
+    }
     for (let index = 0; index < command.length; index += 1) {
       const word = command[index] as ShellWord;
       // `--password=value` carries its own value.
@@ -834,17 +832,6 @@ function discoverCommandText(text: string, add: (value: string) => void, depth =
         add(word.text.slice(equals + 1));
       }
       const next = command[index + 1];
-      const spellings = (value: string, raw: string): void => {
-        add(value);
-        // The artifact spells a quoted or escaped value as written; mask that spelling too,
-        // without its outer quotes, which stay to show where the value was. Inside an outer
-        // double-quoted string the artifact also escapes `"`, `\`, `$` and backticks.
-        add(raw.replace(/^(['"])(.*)\1$/su, '$2'));
-        if (depth > 0) {
-          add(value.replace(/["\\$`]/gu, '\\$&'));
-          add(raw.replace(/["\\$`]/gu, '\\$&'));
-        }
-      };
       if (next !== undefined && credentialArgument(word.text, next.text, userGiven)) {
         spellings(next.text, next.raw);
       }
@@ -862,14 +849,15 @@ function discoverArtifactSecrets(
   secret = false,
   seen = new WeakMap<object, boolean>(),
   depth = 0,
+  parentKey = '',
 ): void {
   if (typeof node !== 'object' || node === null) return;
   // A benign alias visited first must still be revisited under a credential key.
   if (seen.has(node) && (seen.get(node) === true || !secret)) return;
   if (depth > 100) throw new RangeError('artifact credential nesting exceeds limit');
   seen.set(node, secret);
-  const visit = (child: unknown, credential = secret): void =>
-    discoverArtifactSecrets(child, doc, secrets, wholeSecrets, credential, seen, depth + 1);
+  const visit = (child: unknown, credential = secret, key = ''): void =>
+    discoverArtifactSecrets(child, doc, secrets, wholeSecrets, credential, seen, depth + 1, key);
   const add = (text: string, whole = false): void => {
     if (text === '') return;
     // Once a header value is known to be a credential, its bare token is a credential
@@ -897,9 +885,14 @@ function discoverArtifactSecrets(
   // a credential on its own, so classify it here, before any scalar renders.
   const discoverArguments = (list: YAML.YAMLSeq): void => {
     const items = list.items.map((item) => (YAML.isAlias(item) ? item.resolve(doc) : item));
+    const words = items.map((item) => (YAML.isScalar(item) ? String(item.value) : ''));
     const userGiven = items.some(
       (item) => YAML.isScalar(item) && typeof item.value === 'string' && userArgument(item.value),
     );
+    for (const user of httpUsers(words)) {
+      add(user.value);
+      add(user.password);
+    }
     for (let index = 0; index < items.length; index += 1) {
       const flag = items[index];
       if (!YAML.isScalar(flag) || typeof flag.value !== 'string') continue;
@@ -911,7 +904,7 @@ function discoverArtifactSecrets(
     }
   };
   if (YAML.isAlias(node)) {
-    visit(node.resolve(doc));
+    visit(node.resolve(doc), secret, parentKey);
   } else if (YAML.isScalar(node)) {
     const value: unknown = node.value;
     if (typeof value === 'string') {
@@ -941,10 +934,10 @@ function discoverArtifactSecrets(
       visit(pair.key, false);
       const key = YAML.isAlias(pair.key) ? pair.key.resolve(doc) : pair.key;
       const text = YAML.isScalar(key) ? String(key.value) : '';
-      visit(pair.value, secret || credentialKey(text) || (text === 'value' && named));
+      visit(pair.value, secret || credentialKey(text) || (text === 'value' && named), text);
       const list = YAML.isAlias(pair.value) ? pair.value.resolve(doc) : pair.value;
-      if (ARGUMENT_LIST_KEYS.includes(text) && YAML.isSeq(list)) discoverArguments(list);
-      if (ARGUMENT_LIST_KEYS.includes(text) && YAML.isScalar(list)) {
+      if (argumentListKey(text, parentKey) && YAML.isSeq(list)) discoverArguments(list);
+      if (argumentListKey(text, parentKey) && YAML.isScalar(list)) {
         if (typeof list.value === 'string') discoverCommandText(list.value, add);
       }
     }

@@ -136,7 +136,8 @@ const ROOT = path.resolve(__dirname, '..');
 // One more passes a bracketed IPv6 SSH host bare: total 4746.
 // One more refuses a tunnel port a preset or monitoring will publish, before create: 4747.
 // Credential arguments add twenty over the SSH access base of 4747: total 4767.
-const FLOOR = 4767;
+// Six more cover the PR 64 round-two findings, one case each: total 4773.
+const FLOOR = 4773;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [
