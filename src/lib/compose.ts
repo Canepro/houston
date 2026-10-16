@@ -31,7 +31,7 @@ import {
 import { ValidationError } from './errors';
 import * as monitoring from './monitoring';
 import type { Preset } from './presets/types';
-import { toTextYaml } from './format';
+import { toText, toTextYaml } from './format';
 import { safeDump, type ImplicitResolver } from './yaml-dump';
 
 /** A compose service body. Deliberately open: presets merge arbitrary keys into it. */
@@ -118,8 +118,27 @@ export function rcServiceNames(instances: number): string[] {
   return Array.from({ length: n }, (_v, i) => `rocketchat-${i + 1}`);
 }
 
+/** Whether this is one of the service names Compose generation gives Rocket.Chat. */
+export function isRocketChatServiceName(name: string): boolean {
+  return name === 'rocketchat' || /^rocketchat-[1-9][0-9]*$/u.test(name);
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** Whether an effective Compose environment provides a nonblank registration token. */
+export function hasEffectiveRegToken(environment: unknown): boolean {
+  if (Array.isArray(environment)) {
+    let token: string | null = null;
+    for (const entry of environment) {
+      const text = toText(entry);
+      if (!text.startsWith('REG_TOKEN=')) continue;
+      token = text.slice('REG_TOKEN='.length);
+    }
+    return token !== null && token.trim() !== '';
+  }
+  return isPlainObject(environment) && toText(environment.REG_TOKEN).trim() !== '';
 }
 
 /** Recursively merge `patch` into `base` (patch wins), returning `base`. */

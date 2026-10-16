@@ -343,12 +343,14 @@ describe('the create path end to end, stopped at the write seam', () => {
       regToken = '',
       env = {},
       presetEnv = {},
+      rocketchat = {},
       instances = 1,
     }: {
       name: string;
       regToken?: string;
       env?: Record<string, string | null>;
       presetEnv?: Record<string, string>;
+      rocketchat?: Record<string, unknown>;
       instances?: number;
     }) => {
       const preset =
@@ -360,7 +362,11 @@ describe('the create path end to end, stopped at the write seam', () => {
         emit: nullEmit,
         reproName: name,
         resolved: versions.resolve('8.5.1', { offline: true }),
-        pre: { ...preset, env: { ...preset.env, ...presetEnv } },
+        pre: {
+          ...preset,
+          env: { ...preset.env, ...presetEnv },
+          rocketchat: { ...preset.rocketchat, ...rocketchat },
+        },
         hostPort: 3000,
         root: 'http://localhost:3000',
         bindHost: '127.0.0.1',
@@ -375,11 +381,19 @@ describe('the create path end to end, stopped at the write seam', () => {
         .filter(
           ([service]) => service === 'rocketchat' || /^rocketchat-[1-9][0-9]*$/u.test(service),
         )
-        .map(([, service]) => (service.environment ?? {}) as Record<string, unknown>);
+        .map(([, service]) => service.environment ?? {});
       return { environments, evidence: await evidenceRecord(name) };
     };
 
-    for (const example of [
+    const examples: Array<{
+      name: string;
+      regToken?: string;
+      env?: Record<string, string | null>;
+      presetEnv?: Record<string, string>;
+      rocketchat?: Record<string, unknown>;
+      supplied: boolean;
+      instances: number;
+    }> = [
       {
         name: 'token-removed',
         regToken: 'request-token',
@@ -406,12 +420,33 @@ describe('the create path end to end, stopped at the write seam', () => {
         env: { REG_TOKEN: 'override-token' },
         supplied: true,
       },
-    ]) {
+      {
+        name: 'token-list-whitespace',
+        rocketchat: { environment: ['REG_TOKEN=  list-token  '] },
+        supplied: true,
+        instances: 2,
+      },
+      {
+        name: 'token-list-blank',
+        rocketchat: { environment: ['REG_TOKEN=  \t'] },
+        supplied: false,
+        instances: 2,
+      },
+    ];
+
+    for (const example of examples) {
       const { environments, evidence } = await planAndEvidence(example);
       expect(environments).toHaveLength(example.instances);
-      expect(
-        environments.map((environment) => String(environment.REG_TOKEN ?? '').trim() !== ''),
-      ).toEqual(Array(example.instances).fill(example.supplied));
+      if (Array.isArray(example.rocketchat?.environment)) {
+        expect(environments).toEqual(Array(example.instances).fill(example.rocketchat.environment));
+      } else {
+        expect(
+          environments.map(
+            (environment) =>
+              String((environment as Record<string, unknown>).REG_TOKEN ?? '').trim() !== '',
+          ),
+        ).toEqual(Array(example.instances).fill(example.supplied));
+      }
       expect((evidence.license as Record<string, unknown>).supplied).toBe(example.supplied);
     }
   });

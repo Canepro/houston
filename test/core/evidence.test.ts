@@ -91,10 +91,11 @@ async function workspaceNamed(
   name: string,
   extra: Record<string, unknown> = {},
   fields: Partial<ReturnType<typeof metadata>> = {},
+  compose = COMPOSE,
 ): Promise<void> {
   await write(
     name,
-    COMPOSE,
+    compose,
     metadata({
       name,
       project: `houston-${name}`,
@@ -293,6 +294,52 @@ describe('the record', () => {
       supplied: true,
       source: 'license',
     });
+  });
+
+  it('reads a legacy Compose token only from supported Rocket.Chat environments', async () => {
+    const examples: Array<{
+      name: string;
+      extra?: Record<string, unknown>;
+      services: Record<string, { environment: Record<string, unknown> | string[] }>;
+      supplied: boolean;
+    }> = [
+      {
+        name: 'e3-legacy-sidecar-only',
+        services: {
+          rocketchat: { environment: { PORT: '3000' } },
+          'registration-helper': { environment: { REG_TOKEN: 'sidecar-only-token' } },
+        },
+        supplied: false,
+      },
+      {
+        name: 'e3-legacy-multi-list',
+        extra: { deployment: 'multi-instance', instances: 2 },
+        services: {
+          'rocketchat-1': { environment: ['PORT=3000', 'REG_TOKEN=  multi-list-token'] },
+          'rocketchat-2': { environment: ['PORT=3000'] },
+        },
+        supplied: true,
+      },
+      {
+        name: 'e3-legacy-list-blank',
+        services: { rocketchat: { environment: ['REG_TOKEN=  \t'] } },
+        supplied: false,
+      },
+    ];
+
+    for (const example of examples) {
+      await workspaceNamed(
+        example.name,
+        example.extra,
+        {},
+        YAML.stringify({ services: example.services }),
+      );
+      expect((await record(example.name)).license).toEqual({
+        required: false,
+        supplied: example.supplied,
+        source: example.supplied ? 'reg_token' : null,
+      });
+    }
   });
 
   it('reports an unknown requirement when a legacy preset is no longer available', async () => {

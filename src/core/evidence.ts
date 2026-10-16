@@ -27,7 +27,7 @@ import * as path from 'node:path';
 import * as YAML from 'yaml';
 
 import { renderMarkdown as renderBundleMarkdown } from '../lib/capture-render';
-import { imageRef } from '../lib/compose';
+import { hasEffectiveRegToken, imageRef, isRocketChatServiceName } from '../lib/compose';
 import * as config from '../lib/config';
 import { ValidationError } from '../lib/errors';
 import { isTruthy, quotedText, toText } from '../lib/format';
@@ -289,11 +289,8 @@ async function tokenInCompose(meta: Metadata): Promise<boolean | null> {
   } catch {
     return null;
   }
-  for (const service of Object.values(bag(doc.services))) {
-    const environment = bag(service).environment;
-    if (Array.isArray(environment)) {
-      if (environment.some((entry) => /^REG_TOKEN=\S/u.test(String(entry)))) return true;
-    } else if (toText(bag(environment).REG_TOKEN).trim() !== '') {
+  for (const [name, service] of Object.entries(bag(doc.services))) {
+    if (isRocketChatServiceName(name) && hasEffectiveRegToken(bag(service).environment)) {
       return true;
     }
   }

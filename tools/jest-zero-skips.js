@@ -92,8 +92,8 @@ const ROOT = path.resolve(__dirname, '..');
 // runtime-correct artifact selection, registration-token provenance, normalized presets,
 // public URL plus byte-preserved cleanup rendering, artifact URL and scalar redaction,
 // metadata-only Docker records, legacy catalogue uncertainty in both licence-output paths,
-// and provisional licensing.
-const FLOOR = 4544;
+// provisional licensing, Compose-list token propagation and legacy sidecar attribution.
+const FLOOR = 4545;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

@@ -1006,11 +1006,8 @@ export function buildRecord(plan: CreatePlan): void {
   // or remove REG_TOKEN after the request token was normalized; the record keeps presence only.
   plan.meta.extra.reg_token_supplied = compose
     .rcServiceNames(pre.instances)
-    .some(
-      (name) =>
-        toText(
-          bag(bag((plan.doc as compose.ComposeDoc).services[name]).environment).REG_TOKEN,
-        ).trim() !== '',
+    .some((name) =>
+      compose.hasEffectiveRegToken((plan.doc as compose.ComposeDoc).services[name]?.environment),
     );
   // What the preset said at create time, so evidence does not re-ask a catalog that may
   // have changed since.
