@@ -96,7 +96,7 @@ describe('the Docker inspection rows', () => {
     });
   });
 
-  it('keeps valid partial bindings and warns when Compose cannot describe a container or port', async () => {
+  it('keeps valid partial bindings and warns when Compose cannot describe a container or binding', async () => {
     compose.mockResolvedValue(
       result({
         stdout: JSON.stringify([
@@ -120,7 +120,11 @@ describe('the Docker inspection rows', () => {
             State: 'running',
             Status: 'Up 1 minute',
             Publishers: [
-              { URL: '127.0.0.1', PublishedPort: 3001, TargetPort: 3001 },
+              { URL: '0.0.0.0', PublishedPort: 3001, TargetPort: 3001, Protocol: 'tcp' },
+              { URL: '::1', PublishedPort: 3002, TargetPort: 3002, Protocol: 'udp' },
+              { URL: '127.0.0.1', PublishedPort: 3003, TargetPort: 3003, Protocol: 'sctp' },
+              { URL: 'not-an-ip', PublishedPort: 3004, TargetPort: 3004, Protocol: 'tcp' },
+              { URL: '127.0.0.1', PublishedPort: 3005, TargetPort: 3005, Protocol: 'ICMP' },
               { URL: '127.0.0.1', PublishedPort: 'not-a-port', TargetPort: 3002 },
               // Out of range on either side is unreachable, so it is malformed, not known.
               { URL: '127.0.0.1', PublishedPort: 65536, TargetPort: 3003 },
@@ -153,7 +157,11 @@ describe('the Docker inspection rows', () => {
           name: 'ticket-sidecar',
           state: 'running',
           status: 'Up 1 minute',
-          ports: [{ host_ip: '127.0.0.1', host_port: 3001, container_port: 3001, protocol: 'tcp' }],
+          ports: [
+            { host_ip: '0.0.0.0', host_port: 3001, container_port: 3001, protocol: 'tcp' },
+            { host_ip: '::1', host_port: 3002, container_port: 3002, protocol: 'udp' },
+            { host_ip: '127.0.0.1', host_port: 3003, container_port: 3003, protocol: 'sctp' },
+          ],
         },
       ],
       warning: 'Docker returned invalid container JSON',

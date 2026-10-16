@@ -2915,10 +2915,14 @@ function renderInspection(io: CliIo, result: Bag): void {
       'nodes',
       bags(kube.nodes).map((node) => {
         const roles = Array.isArray(node.roles) ? node.roles.map(toTextAny).join(',') : '';
+        const internalIp = display(node.internal_ip, 'unknown');
+        const externalIp = display(node.external_ip);
         return [
           display(node.name),
           `${display(node.version)}  ${isTruthy(node.ready) ? 'Ready' : 'NotReady'}` +
             `${roles === '' ? '' : `  ${roles}`}` +
+            `  INTERNAL-IP=${internalIp}` +
+            `${externalIp === '' ? '' : `  EXTERNAL-IP=${externalIp}`}` +
             `  cpu=${display(node.allocatable_cpu, '?')} memory=${display(node.allocatable_memory, '?')}`,
         ];
       }),

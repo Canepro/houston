@@ -8,6 +8,8 @@
  * here preserves the difference between `[]` and an unreadable daemon. A person choosing a
  * route to a workspace must not see "no published ports" when Docker did not answer at all.
  */
+import { isIP } from 'node:net';
+
 import { stripText } from '../../lib/float-text';
 import { splitTextLines } from '../../lib/format';
 import { JsonSyntaxError, loads } from '../../lib/json-text';
@@ -97,6 +99,13 @@ function portNumber(value: unknown): number | null {
   return Number.isInteger(port) ? port : null;
 }
 
+function transportOf(value: unknown): string | null {
+  if (value === undefined || value === null) return 'tcp';
+  if (typeof value !== 'string') return null;
+  const transport = value.toLowerCase();
+  return transport === 'tcp' || transport === 'udp' || transport === 'sctp' ? transport : null;
+}
+
 function parsedBindings(publishers: unknown): ParsedBindings {
   // Compose omits Publishers for stopped containers and can emit null for a container with no
   // published ports. Both are known empty values, unlike any other non-array value.
@@ -115,9 +124,10 @@ function parsedBindings(publishers: unknown): ParsedBindings {
     if (published === 0) continue;
     const target = portNumber(entry.TargetPort);
     const host = entry.URL;
-    const protocol = entry.Protocol;
+    const protocol = transportOf(entry.Protocol);
     // A port above 65535 cannot be reached, so a binding that names one is a malformed
-    // read, marked unknown like a non-numeric port, never a known reachable route.
+    // read. A publisher also names an IP binding and a port transport, so an arbitrary URL
+    // or unsupported protocol is unknown too, never a known reachable route.
     if (
       published === null ||
       published < 0 ||
@@ -126,9 +136,8 @@ function parsedBindings(publishers: unknown): ParsedBindings {
       target <= 0 ||
       target > 65535 ||
       typeof host !== 'string' ||
-      host === '' ||
-      (protocol !== undefined && protocol !== null && typeof protocol !== 'string') ||
-      protocol === ''
+      isIP(host) === 0 ||
+      protocol === null
     ) {
       malformed = true;
       continue;
@@ -137,7 +146,7 @@ function parsedBindings(publishers: unknown): ParsedBindings {
       host_ip: host,
       host_port: published,
       container_port: target,
-      protocol: protocol ?? 'tcp',
+      protocol,
     });
   }
   return {

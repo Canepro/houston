@@ -19,7 +19,7 @@ const knownInventory: KubernetesInventory = {
       version: 'v1.37.0',
       ready: true,
       internal_ip: '10.0.0.7',
-      external_ip: '',
+      external_ip: '198.51.100.7',
       os_image: 'Ubuntu',
       kernel_version: '6.8.0',
       container_runtime: 'containerd://2.0.0',
@@ -34,7 +34,7 @@ const knownInventory: KubernetesInventory = {
       type: 'ClusterIP',
       cluster_ip: '10.96.0.12',
       external_ips: [],
-      ports: [{ name: 'web', protocol: 'TCP', port: 3000, target_port: 'http', node_port: null }],
+      ports: [{ name: 'web', protocol: 'TCP', port: 3000, target_port: 'http', node_port: 32000 }],
     },
   ],
   pods: [
@@ -178,6 +178,25 @@ describe('inspect through the CLI', () => {
       expect(ran.stdout).not.toContain(secret);
     }
     expect(fs.existsSync(path.join(String(home), 'repros', 'ticket', 'repro.json'))).toBe(true);
+  });
+
+  it('renders observed node addresses and a NodePort in the known Kubernetes inventory', async () => {
+    await writeKubernetesWorkspace();
+
+    const known = await runInspect([]);
+    expect(known.code).toBe(0);
+    expect(known.stdout).toContain('INTERNAL-IP=10.0.0.7');
+    expect(known.stdout).toContain('EXTERNAL-IP=198.51.100.7');
+    expect(known.stdout).toContain('nodePort=32000');
+
+    const withoutInternalAddress: KubernetesInventory = {
+      ...knownInventory,
+      nodes: knownInventory.nodes.map((node) => ({ ...node, internal_ip: '', external_ip: '' })),
+    };
+    const unknown = await runInspect([], withoutInternalAddress);
+    expect(unknown.code).toBe(0);
+    expect(unknown.stdout).toContain('INTERNAL-IP=unknown');
+    expect(unknown.stdout).not.toContain('EXTERNAL-IP=');
   });
 
   it('renders refused resource reads as unknown instead of none', async () => {
