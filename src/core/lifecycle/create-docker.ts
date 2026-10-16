@@ -1002,9 +1002,16 @@ export function buildRecord(plan: CreatePlan): void {
   if (pre.ports.length > 0) plan.meta.extra.sidecar_ports = pre.ports;
   if (Object.keys(plan.envOverrides).length > 0) plan.meta.extra.env = plan.envOverrides;
   if (spec.licensed) plan.meta.extra.licensed = true;
-  // The record proves a token was consumed without retaining a credential from the request or
-  // generated Compose document. The normalized value is the one deployment actually used.
-  plan.meta.extra.reg_token_supplied = plan.token !== '';
+  // Stamp only the final Compose environment. Presets and explicit overrides can add, blank,
+  // or remove REG_TOKEN after the request token was normalized; the record keeps presence only.
+  plan.meta.extra.reg_token_supplied = compose
+    .rcServiceNames(pre.instances)
+    .some(
+      (name) =>
+        toText(
+          bag(bag((plan.doc as compose.ComposeDoc).services[name]).environment).REG_TOKEN,
+        ).trim() !== '',
+    );
   // What the preset said at create time, so evidence does not re-ask a catalog that may
   // have changed since.
   plan.meta.extra.license_required = pre.requiresLicense === true;

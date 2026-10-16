@@ -188,7 +188,7 @@ describe('the record', () => {
 
   it('keeps a Docker record attachable when a killed create wrote only metadata', async () => {
     const name = 'e1-metadata-only';
-    await workspaceNamed(name);
+    await workspaceNamed(name, { bind_host: '0.0.0.0' });
     fs.unlinkSync(path.join(workspace(name), 'docker-compose.yml'));
     const detail = lifecyclePayload.detail as jest.MockedFunction<typeof lifecyclePayload.detail>;
     detail.mockClear();
@@ -198,7 +198,7 @@ describe('the record', () => {
     expect(rec.repro).toMatchObject({
       runtime: 'docker',
       deployment: 'monolith',
-      bind_host: '',
+      bind_host: '0.0.0.0',
     });
     expect(rec.runtime).toEqual({
       state: '?',
@@ -394,13 +394,24 @@ describe('the record', () => {
     });
   });
 
-  it('ignores a retain_runs preference, which nothing enforces, and keeps the pin', async () => {
-    // `prune` skips pinned workspaces and reads no preference, so a config key that says
-    // "retain" would be evidence of a policy that does not exist.
+  it('records a literal retained-run preference without claiming prune enforces it', async () => {
+    // The preference selects the retention evidence. `prune` still enforces only the pin,
+    // so an explicit false wins for an unpinned workspace and the pin test above stays separate.
     await workspaceNamed('e3-preference');
     try {
       config.updateConfig((cfg) => {
         cfg.preferences = { retain_runs: true };
+      });
+      expect((await record('e3-preference')).retention).toMatchObject({
+        retained: true,
+        reason: 'persisted preference',
+      });
+      expect((await record('e3-preference', { retained: false })).retention).toMatchObject({
+        retained: false,
+        reason: null,
+      });
+      config.updateConfig((cfg) => {
+        cfg.preferences = { retain_runs: 'true' };
       });
       expect((await record('e3-preference')).retention).toMatchObject({
         retained: false,

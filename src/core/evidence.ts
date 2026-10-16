@@ -327,11 +327,17 @@ function retentionOf(
   meta: Metadata,
   requested: { retained?: boolean | null; reason?: string },
 ): { retained: boolean; reason: string | null } {
-  // The pin is the one persisted state `prune` honours, so it is the one persisted
-  // retention evidence may claim. A config key nothing enforces is not a policy.
   const selected = resolveRetention(requested);
-  if (selected.retained || !isTruthy(meta.pinned)) return selected;
-  return { retained: true, reason: 'persisted preference' };
+  // This records selection, not enforcement: prune preserves a pin, while an unpinned
+  // preference remains a request for the current evidence task. An explicit false wins
+  // unless that existing pin keeps the workspace.
+  if (selected.retained) return selected;
+  if (isTruthy(meta.pinned)) return { retained: true, reason: 'persisted preference' };
+  if (requested.retained === false) return selected;
+  if (bag(config.loadConfig(false).preferences).retain_runs === true) {
+    return { retained: true, reason: 'persisted preference' };
+  }
+  return selected;
 }
 
 function servicesOf(containers: unknown): { service: string; state: string; status: string }[] {
@@ -444,15 +450,21 @@ async function snapshotOf(
   const runtime = topology.ofMeta(meta);
   const axes = topology.axesOfMeta(meta);
   const artifact = await artifactOf(meta);
+  const extra = bag(meta.extra);
   // `write()` makes repro.json visible before docker-compose.yml. That incomplete but valid
   // workspace still has attachable metadata; do not call detail(), whose Docker path reads the
-  // absent file. A present artifact still takes the normal detail path, including every error.
+  // absent file. The record already holds the create-time bind, while runtime and artifact stay
+  // unknown. A present artifact still takes the normal detail path, including every error.
   const d =
     runtime === topology.DOCKER && artifact.bytes === null
-      ? { deployment: toText(axes.deployment), bind_host: '', state: '?', containers: [] }
+      ? {
+          deployment: toText(axes.deployment),
+          bind_host: toText(extra.bind_host),
+          state: '?',
+          containers: [],
+        }
       : await detail(target);
   const deployment = toText(d.deployment) || toText(axes.deployment);
-  const extra = bag(meta.extra);
 
   let engine: Record<string, unknown>;
   if (runtime === topology.KUBERNETES) {

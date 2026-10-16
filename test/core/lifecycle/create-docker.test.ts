@@ -15,8 +15,14 @@ import type * as PolicyNS from '../../testsetup-policy';
 import type * as ContextNS from '../../../src/lib/context';
 import { openEntries } from '../../../src/core/journal';
 import { type Metadata, adminPass, metadata, writeRecord } from '../../../src/core/runner/record';
+import { record as evidenceRecord } from '../../../src/core/evidence';
 
-import { createPlan } from '../../../src/core/lifecycle/create-docker';
+import {
+  buildDocument,
+  buildRecord,
+  createPlan,
+  writeTheWorkspace,
+} from '../../../src/core/lifecycle/create-docker';
 
 import type * as CreateDockerNS from '../../../src/core/lifecycle/create-docker';
 import type * as CreateK8sNS from '../../../src/core/lifecycle/create-k8s';
@@ -328,6 +334,86 @@ describe('the create path end to end, stopped at the write seam', () => {
     expect(seen.meta?.extra.reg_token_supplied).toBe(true);
     expect(JSON.stringify(seen.meta)).not.toContain(token);
     expect(document.services.rocketchat.environment.REG_TOKEN).toBe(token);
+  });
+
+  it('carries final Rocket.Chat token presence from create into evidence', async () => {
+    const versions = require('../../../src/lib/versions') as typeof VersionsNS;
+    const planAndEvidence = async ({
+      name,
+      regToken = '',
+      env = {},
+      presetEnv = {},
+      instances = 1,
+    }: {
+      name: string;
+      regToken?: string;
+      env?: Record<string, string | null>;
+      presetEnv?: Record<string, string>;
+      instances?: number;
+    }) => {
+      const preset =
+        instances === 1
+          ? presets.load('default', {})
+          : presets.load('multi-instance', { instances: String(instances) });
+      const plan = createPlan({
+        req: createReq({ version: '8.5.1', name, preset: preset.name, regToken, env }),
+        emit: nullEmit,
+        reproName: name,
+        resolved: versions.resolve('8.5.1', { offline: true }),
+        pre: { ...preset, env: { ...preset.env, ...presetEnv } },
+        hostPort: 3000,
+        root: 'http://localhost:3000',
+        bindHost: '127.0.0.1',
+      });
+      // This owner-boundary drive begins after `claimPorts` has normalized the request.
+      // The regression is that later Compose overrides must decide the recorded presence.
+      plan.token = regToken.trim();
+      await buildDocument(plan);
+      buildRecord(plan);
+      await writeTheWorkspace(plan);
+      const environments = Object.entries(plan.doc?.services ?? {})
+        .filter(
+          ([service]) => service === 'rocketchat' || /^rocketchat-[1-9][0-9]*$/u.test(service),
+        )
+        .map(([, service]) => (service.environment ?? {}) as Record<string, unknown>);
+      return { environments, evidence: await evidenceRecord(name) };
+    };
+
+    for (const example of [
+      {
+        name: 'token-removed',
+        regToken: 'request-token',
+        env: { REG_TOKEN: null },
+        supplied: false,
+        instances: 2,
+      },
+      {
+        name: 'token-blank',
+        regToken: 'request-token',
+        env: { REG_TOKEN: '  ' },
+        supplied: false,
+        instances: 2,
+      },
+      {
+        name: 'token-preset',
+        presetEnv: { REG_TOKEN: 'preset-token' },
+        supplied: true,
+        instances: 2,
+      },
+      {
+        name: 'token-override',
+        instances: 2,
+        env: { REG_TOKEN: 'override-token' },
+        supplied: true,
+      },
+    ]) {
+      const { environments, evidence } = await planAndEvidence(example);
+      expect(environments).toHaveLength(example.instances);
+      expect(
+        environments.map((environment) => String(environment.REG_TOKEN ?? '').trim() !== ''),
+      ).toEqual(Array(example.instances).fill(example.supplied));
+      expect((evidence.license as Record<string, unknown>).supplied).toBe(example.supplied);
+    }
   });
 
   it('warns that Rocket.Chat 9 may refuse an unlicensed LDAP login', async () => {

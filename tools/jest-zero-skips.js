@@ -88,12 +88,12 @@ const ROOT = path.resolve(__dirname, '..');
 // The final re-verification's fixes: up resolving a name the actor may act on, a rebuild's
 // monitoring, pin and port, the operator password off every argv, the operator's memory and
 // PodMonitor, serve's shutdown, and the usage and wording answers it found untrue.
-// Eighteen evidence-closeout regressions cover bundle help, Kubernetes ownership proof,
+// Evidence-closeout regressions cover bundle help, Kubernetes ownership proof,
 // runtime-correct artifact selection, registration-token provenance, normalized presets,
 // public URL plus byte-preserved cleanup rendering, artifact URL and scalar redaction,
 // metadata-only Docker records, legacy catalogue uncertainty in both licence-output paths,
 // and provisional licensing.
-const FLOOR = 4540;
+const FLOOR = 4544;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [
