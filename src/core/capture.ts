@@ -462,13 +462,18 @@ function recordedTarget(step: Step, root: string): string {
     // percent-encoded nested URLs. This does not inspect selectors or expand placeholders.
     let decoded = display;
     for (let depth = 0; depth < 4; depth += 1) {
+      // Check before decoding: an encoded slash, space, ?, # or backslash can be
+      // part of userinfo and must not become an authority terminator before this test.
+      // Recognize encoded URL punctuation too, since it can be escaped independently.
+      const normalized = decoded.replaceAll('\t', '').replaceAll('\r', '').replaceAll('\n', '');
+      if (
+        /(?:[a-z][a-z0-9+.-]*(?::|%3a)(?:[/\\]|%2f|%5c)*|(?:[/\\]|%2f|%5c){2})[^/\\?\s#]*(?:@|%40)/iu.test(
+          normalized,
+        )
+      )
+        return REDACTED;
       const next = decodeURIComponent(decoded);
-      if (next === decoded) {
-        const normalized = decoded.replaceAll('\t', '').replaceAll('\r', '').replaceAll('\n', '');
-        return /(?:[a-z][a-z0-9+.-]*:[/\\]*|[/\\]{2})[^/\\?\s#]*@/iu.test(normalized)
-          ? REDACTED
-          : display;
-      }
+      if (next === decoded) return display;
       decoded = next;
     }
     return REDACTED;

@@ -283,6 +283,47 @@ describe('scripted browser capture', () => {
         'https://workspace.test/#next=https://user@idp.example.test',
       ],
     ];
+    for (const root of ['http://workspace.test', 'https://workspace.test', '']) {
+      for (const delimiter of ['%2F', '%3F', '%23', '%5C', '%20']) {
+        const nested = `https://user:synthetic${delimiter}key@idp.example.test/callback`;
+        for (const part of ['query', 'path', 'fragment']) {
+          for (let depth = 0; depth < 3; depth += 1) {
+            let encoded = nested;
+            for (let layer = 0; layer < depth; layer += 1) encoded = encodeURIComponent(encoded);
+            const target =
+              part === 'query'
+                ? `/?next=${encoded}`
+                : part === 'path'
+                  ? `/${encoded}`
+                  : `/#next=${encoded}`;
+            cases.push([root, target, REDACTED, `${root}${target}`]);
+          }
+        }
+        // URL punctuation can be encoded independently of the password's delimiter.
+        for (const encoded of [
+          nested.replace('@', '%40'),
+          nested.replace('https://', 'https%3A%2F%2F').replace('@', '%40'),
+        ]) {
+          const target = `/?next=${encoded}`;
+          cases.push([root, target, REDACTED, `${root}${target}`]);
+        }
+      }
+    }
+    for (const target of [
+      '/?next=https://idp.example.test/callback%2Fsafe',
+      '/path/person@example.test',
+      '/?next=https%3A%2F%2Fidp.example.test%2Fcallback',
+    ]) {
+      cases.push(['https://workspace.test', target, target, `https://workspace.test${target}`]);
+    }
+    for (const target of [
+      '/?percent=%invalid',
+      `/?next=${encodeURIComponent(encodeURIComponent(encodeURIComponent(encodeURIComponent(encodeURIComponent('https://user:key@idp.example.test')))))}`,
+    ]) {
+      cases.push(['https://workspace.test', target, REDACTED, `https://workspace.test${target}`]);
+    }
+    const recordings: { target: string; recorded: string }[] = [];
+    const expected: { target: string; recorded: string }[] = [];
     for (const [index, row] of cases.entries()) {
       const [root, target, recorded, navigated] = row as [string, string, string, string];
       const dest = path.join(config.home(), `recorded-target-${String(index)}`);
@@ -295,10 +336,12 @@ describe('scripted browser capture', () => {
         { root_url: root, next: contextURL, admin_pass: 'context-password' },
       );
       expect(goto.mock.calls).toEqual([[navigated, 15000]]);
-      expect(manifest.steps[0]!.target).toBe(recorded);
+      recordings.push({ target, recorded: manifest.steps[0]!.target });
+      expected.push({ target, recorded });
       expect(JSON.stringify(manifest)).not.toContain('context-value');
       expect(manifest.privacy.visual_review_required).toBe(true);
     }
+    expect(recordings).toEqual(expected);
   });
 
   test('renders artifact-only failure with its actual cause and no invented failed step', async () => {

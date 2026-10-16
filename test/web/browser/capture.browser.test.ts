@@ -546,6 +546,9 @@ describe('scripted capture in a real browser', () => {
     'mismatched-failed',
     'nested-query',
     'reverse-failed',
+    'nested-delimiter',
+    'nested-encoded-failed',
+    'nested-harmless',
   ])('keeps authored URL credentials out of retained outputs for %s navigation', async (mode) => {
     const requests: string[] = [];
     const fails = mode.endsWith('failed');
@@ -555,7 +558,7 @@ describe('scripted capture in a real browser', () => {
     let authorized = false;
     server = createServer((request, response) => {
       requests.push(request.url ?? '');
-      if (request.url === '/unavailable') {
+      if (request.url?.startsWith('/unavailable') === true) {
         response.destroy();
         return;
       }
@@ -585,12 +588,23 @@ describe('scripted capture in a real browser', () => {
         : mode === 'nested-query'
           ? `${origin}/nested?next=https://${credentials}/callback`
           : `http://${credentials}/destination`;
-    const targets = [origin, target];
+    const nested = `https://${user}:${password}%2Fkey@idp.example.test/callback`;
+    const encodedTarget =
+      mode === 'nested-delimiter'
+        ? `${origin}/nested?next=${nested}`
+        : mode === 'nested-encoded-failed'
+          ? `${origin}/unavailable?next=${encodeURIComponent(nested)}`
+          : mode === 'nested-harmless'
+            ? `${origin}/nested?next=https%3A%2F%2Fidp.example.test%2Fcallback%252Fsafe`
+            : target;
+    const targets = [origin, encodedTarget];
     if (fails)
       targets.push(
         `http:${credentials}/skipped`,
         `http://${credentials}/skipped-canonical`,
         `${origin}/?next=https://${credentials}/skip`,
+        `${origin}/?next=${nested}`,
+        `${origin}/?next=${encodeURIComponent(nested)}`,
       );
     const source = [
       'steps:',
@@ -625,7 +639,16 @@ describe('scripted capture in a real browser', () => {
     fs.writeFileSync(path.join(dest, 'narrations.json'), JSON.stringify(narrations));
     fs.writeFileSync(
       path.join(dest, 'navigation-proof.json'),
-      JSON.stringify({ mode, root, requests, authorized, failure: String(failure), address }),
+      JSON.stringify({
+        mode,
+        root,
+        requests,
+        authorized,
+        target: encodedTarget,
+        workload_unchanged: fs.readFileSync(sourceFile, 'utf8') === source,
+        failure: String(failure),
+        address,
+      }),
     );
     // Decode the retained media before checking text so a RED failure keeps visual proof.
     const decoded = await inspectVideo(dest);
@@ -633,9 +656,19 @@ describe('scripted capture in a real browser', () => {
     if (fails) {
       expect(failure).toBeInstanceOf(Error);
       expect((failure as Error).message).toContain('navigation failed');
+      if (mode === 'nested-encoded-failed') {
+        expect(requests).toContain(encodedTarget.slice(origin.length));
+        expect(manifest.steps[1]!.target).toBe('REDACTED');
+      }
+      expect(manifest.steps.slice(-3, -1).map((step) => step.target)).toEqual([
+        'REDACTED',
+        'REDACTED',
+      ]);
       expect(manifest.steps.map((step) => step.outcome)).toEqual([
         'ok',
         'failed',
+        'skipped',
+        'skipped',
         'skipped',
         'skipped',
         'skipped',
@@ -644,14 +677,19 @@ describe('scripted capture in a real browser', () => {
     } else {
       expect(failure).toBeUndefined();
       expect(manifest.status).toBe('ok');
-      if (mode === 'nested-query')
+      if (mode === 'nested-delimiter' || mode === 'nested-harmless') {
+        expect(requests).toContain(encodedTarget.slice(origin.length));
+        expect(manifest.steps[1]!.target).toBe(
+          mode === 'nested-harmless' ? encodedTarget : 'REDACTED',
+        );
+      } else if (mode === 'nested-query')
         expect(requests).toContain(`/nested?next=https://${credentials}/callback`);
       else {
         expect(requests).toContain('/destination');
         expect(authorized).toBe(true);
       }
     }
-    expect(workload.steps[1]!.target).toBe(target);
+    expect(workload.steps[1]!.target).toBe(encodedTarget);
     expect(fs.readFileSync(sourceFile, 'utf8')).toBe(source);
     for (const text of [JSON.stringify(narrations), manifestText, readme, String(failure)]) {
       expect(text).not.toContain(user);

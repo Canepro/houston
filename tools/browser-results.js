@@ -9,8 +9,9 @@
 // proof extend the 178 baseline.
 // Two initial capture privacy regressions extend 218; four lifetime and authored-URL
 // regressions bring the browser total to 224. Four URL scheme, failure and nested-userinfo
-// cases bring the measured browser total to 228.
-const EXPECTED = 228;
+// cases bring the browser total to 228. Encoded-delimiter success/failure and harmless
+// nested-URL navigation bring the measured browser total to 231.
+const EXPECTED = 231;
 
 module.exports = (results) => {
   const wanted = process.env.BROWSER_GATE_PROBE === 'count' ? EXPECTED + 1 : EXPECTED;
