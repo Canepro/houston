@@ -63,14 +63,28 @@ async function render(
 }
 
 describe('explicit human command renderers', () => {
-  test('all 40 routable paths have a renderer and none falls back to object JSON', async () => {
-    expect(COMMAND_SPECS).toHaveLength(40);
+  test('all 41 routable paths have a renderer and none falls back to object JSON', async () => {
+    expect(COMMAND_SPECS).toHaveLength(41);
     for (const spec of COMMAND_SPECS) {
       const action = ['users', 'edge', 'config', 'cluster'].includes(spec.path) ? 'status' : '';
       const result = await render(spec.path, { sentinel: 'must-not-be-a-json-dump' }, action);
       expect(result.out).not.toContain('"sentinel"');
       expect(result.out).not.toContain('{\n');
     }
+  });
+
+  test('evidence leaves an unreconstructable licence requirement unknown', async () => {
+    const out = (
+      await render('evidence', {
+        repro: { name: 'legacy', rc_version: '8.5.1', runtime: 'docker' },
+        runtime: { state: '?' },
+        artifact: { name: '', sha256: '' },
+        license: { required: null, supplied: false },
+        retention: { retained: false, cleanup: 'houston down --name legacy --volumes --yes' },
+      })
+    ).out;
+
+    expect(out).toContain('licensed  required=unknown supplied=false');
   });
 
   test('list preserves the empty guidance and the stable human columns', async () => {

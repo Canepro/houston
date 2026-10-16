@@ -17,6 +17,7 @@
  * every workspace earlier releases made holds.
  */
 
+import { promises as fs } from 'node:fs';
 import { isIP } from 'node:net';
 import * as path from 'node:path';
 
@@ -121,6 +122,11 @@ export function rcServiceNames(instances: number): string[] {
   return Array.from({ length: n }, (_v, i) => `rocketchat-${i + 1}`);
 }
 
+/** Whether this is one of the service names Compose generation gives Rocket.Chat. */
+export function isRocketChatServiceName(name: string): boolean {
+  return name === 'rocketchat' || /^rocketchat-[1-9][0-9]*$/u.test(name);
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -146,9 +152,13 @@ function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
+/** Unknown is unresolved Compose input; null in an env file means no assignment. */
+export type CredentialPresence = boolean | 'unknown';
+
 interface EnvironmentEntry {
   present: boolean;
   value: unknown;
+  ambient?: boolean;
 }
 
 /** The final explicit value for one Compose environment name, if it has one. */
@@ -163,8 +173,8 @@ function environmentEntry(environment: unknown, name: string): EnvironmentEntry 
   // value, which is not a value Houston can claim it supplied.
   let result: EnvironmentEntry = { present: false, value: undefined };
   for (const item of environment) {
-    if (typeof item !== 'string') return { present: true, value: undefined };
-    if (item === name) result = { present: true, value: undefined };
+    if (typeof item !== 'string') return { present: true, value: undefined, ambient: true };
+    if (item === name) result = { present: true, value: undefined, ambient: true };
     else if (item.startsWith(`${name}=`)) {
       result = { present: true, value: item.slice(name.length + 1) };
     }
@@ -178,7 +188,7 @@ function environmentEntry(environment: unknown, name: string): EnvironmentEntry 
  * can suppress a missing-token or missing-licence warning. `$$` is Compose's literal-dollar
  * escape and remains a supplied value.
  */
-function isKnownNonBlankComposeValue(value: unknown): boolean {
+function composeValuePresence(value: unknown): CredentialPresence {
   if (value === null || value === undefined) return false;
   const text = String(value).trim();
   if (text === '') return false;
@@ -189,9 +199,13 @@ function isKnownNonBlankComposeValue(value: unknown): boolean {
       continue;
     }
     const next = text[index + 1] ?? '';
-    if (next === '{' || /[A-Za-z_]/u.test(next)) return false;
+    if (next === '{' || /[A-Za-z_]/u.test(next)) return 'unknown';
   }
   return true;
+}
+
+function isKnownNonBlankComposeValue(value: unknown): boolean {
+  return composeValuePresence(value) === true;
 }
 
 /** Trim an explicit registration token in its final Compose environment. */
@@ -236,24 +250,24 @@ export function licenseEnvFiles(
 
 /** Presence only. null means the file leaves that key unchanged. */
 export interface EnvFileCredentials {
-  readonly license: boolean | null;
-  readonly token: boolean | null;
+  readonly license: CredentialPresence | null;
+  readonly token: CredentialPresence | null;
 }
 
 /**
  * Presence only: no credential text leaves this parser. Unsupported or interpolated
- * input cannot establish a licence or a registration token. null means the file leaves
+ * input leaves presence unknown. null means the file leaves
  * that key unchanged.
  */
 export function credentialsInEnvFile(text: string, raw: boolean): EnvFileCredentials {
-  let license: boolean | null = null;
-  let token: boolean | null = null;
+  let license: CredentialPresence | null = null;
+  let token: CredentialPresence | null = null;
   const lines = text.split(/\r?\n/u);
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index] ?? '';
     if (/^\s*(?:#.*)?$/u.test(line)) continue;
     const entry = /^\s*(?:export\s+)?([A-Za-z0-9_.\-[\]]+)(?:\s*([=:])\s*(.*))?$/u.exec(line);
-    if (entry === null) return { license: false, token: false };
+    if (entry === null) return { license: 'unknown', token: 'unknown' };
     const key = entry[1];
     let value = entry[3] ?? '';
     let literal = raw;
@@ -268,7 +282,7 @@ export function credentialsInEnvFile(text: string, raw: boolean): EnvFileCredent
           value += `\n${lines[index] ?? ''}`;
         }
         const quoted = pattern.exec(value);
-        if (quoted === null) return { license: false, token: false };
+        if (quoted === null) return { license: 'unknown', token: 'unknown' };
         value = quoted[1] ?? quoted[2] ?? '';
         literal = quote === "'";
         if (!literal)
@@ -299,15 +313,63 @@ export function credentialsInEnvFile(text: string, raw: boolean): EnvFileCredent
           });
       } else value = value.replace(/\s+#.*$/u, '').trim();
     }
-    const present = literal ? value.trim() !== '' : isKnownNonBlankComposeValue(value);
+    const present = literal ? value.trim() !== '' : composeValuePresence(value);
     if (key === 'ROCKETCHAT_LICENSE') license = present;
     else if (key === 'REG_TOKEN') token = present;
   }
   return { license, token };
 }
 
+/** Presence states per env_file reference, keyed as the effective-credential readers expect. */
+export interface EnvFileStates {
+  readonly fileLicenses: ReadonlyMap<string, CredentialPresence | null>;
+  readonly fileTokens: ReadonlyMap<string, CredentialPresence | null>;
+}
+
+/**
+ * Read every env_file the named services reference, presence only. An unreadable or
+ * unresolvable file leaves presence unknown; a missing optional file leaves earlier state unchanged.
+ * `pending` holds files a create is about to write, as [relative path, content]; they replace
+ * whatever is on disk, so they are read instead of it.
+ */
+export async function readEnvFileStates(
+  doc: ComposeDoc,
+  names: readonly string[],
+  projectDirectory: string,
+  pending: readonly (readonly [string, string])[] = [],
+): Promise<EnvFileStates> {
+  const generated = new Map(
+    pending.map(([relative, content]) => [path.resolve(projectDirectory, relative), content]),
+  );
+  const fileLicenses = new Map<string, CredentialPresence | null>();
+  const fileTokens = new Map<string, CredentialPresence | null>();
+  for (const name of names) {
+    for (const file of licenseEnvFiles(doc.services[name], projectDirectory)) {
+      const key = JSON.stringify([file.path, file.raw, file.optional]);
+      if (fileLicenses.has(key)) continue;
+      if (file.path === '') {
+        fileLicenses.set(key, 'unknown');
+        fileTokens.set(key, 'unknown');
+        continue;
+      }
+      try {
+        const text = generated.get(file.path) ?? (await fs.readFile(file.path, 'utf8'));
+        const found = credentialsInEnvFile(text, file.raw);
+        fileLicenses.set(key, found.license);
+        fileTokens.set(key, found.token);
+      } catch (error) {
+        const missing =
+          file.optional && (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : 'unknown';
+        fileLicenses.set(key, missing);
+        fileTokens.set(key, missing);
+      }
+    }
+  }
+  return { fileLicenses, fileTokens };
+}
+
 /** Presence only: no licence text leaves this parser. null means the file leaves the key unchanged. */
-export function licenseInEnvFile(text: string, raw: boolean): boolean | null {
+export function licenseInEnvFile(text: string, raw: boolean): CredentialPresence | null {
   return credentialsInEnvFile(text, raw).license;
 }
 
@@ -319,11 +381,11 @@ export function licenseInEnvFile(text: string, raw: boolean): boolean | null {
 function assignmentFromFiles(
   service: Service | undefined,
   projectDirectory: string,
-  states: ReadonlyMap<string, boolean | null>,
+  states: ReadonlyMap<string, CredentialPresence | null>,
   supplyingLicense: boolean,
-): boolean {
+): CredentialPresence {
   const licenseFile = path.resolve(projectDirectory, LICENSE_ENV_FILE);
-  let present = false;
+  let present: CredentialPresence = false;
   for (const file of licenseEnvFiles(service, projectDirectory)) {
     if (supplyingLicense && file.path === licenseFile) {
       present = true;
@@ -332,7 +394,7 @@ function assignmentFromFiles(
     const state = states.get(JSON.stringify([file.path, file.raw, file.optional]));
     if (state === undefined) {
       if (file.optional) continue;
-      present = false;
+      present = 'unknown';
       continue;
     }
     if (state !== null) present = state;
@@ -344,24 +406,28 @@ function serviceHasLicense(
   service: Service | undefined,
   licensed: boolean,
   projectDirectory: string,
-  fileLicenses: ReadonlyMap<string, boolean | null>,
-): boolean {
+  fileLicenses: ReadonlyMap<string, CredentialPresence | null>,
+): CredentialPresence {
   const entry = environmentEntry(service?.environment, 'ROCKETCHAT_LICENSE');
-  return entry.present
-    ? isKnownNonBlankComposeValue(entry.value)
-    : assignmentFromFiles(service, projectDirectory, fileLicenses, licensed);
+  return entry.ambient === true
+    ? 'unknown'
+    : entry.present
+      ? composeValuePresence(entry.value)
+      : assignmentFromFiles(service, projectDirectory, fileLicenses, licensed);
 }
 
 /** An explicit REG_TOKEN wins, including a blank one. Otherwise the ordered env files apply. */
 function serviceHasToken(
   service: Service | undefined,
   projectDirectory: string,
-  fileTokens: ReadonlyMap<string, boolean | null>,
-): boolean {
+  fileTokens: ReadonlyMap<string, CredentialPresence | null>,
+): CredentialPresence {
   const entry = environmentEntry(service?.environment, 'REG_TOKEN');
-  return entry.present
-    ? isKnownNonBlankComposeValue(entry.value)
-    : assignmentFromFiles(service, projectDirectory, fileTokens, false);
+  return entry.ambient === true
+    ? 'unknown'
+    : entry.present
+      ? composeValuePresence(entry.value)
+      : assignmentFromFiles(service, projectDirectory, fileTokens, false);
 }
 
 /** Whether every final Rocket.Chat service gets a known licence from its environment or file. */
@@ -370,12 +436,98 @@ export function hasEffectiveLicense(
   instances: number,
   licensed: boolean,
   projectDirectory: string,
-  fileLicenses: ReadonlyMap<string, boolean | null> = new Map(),
+  fileLicenses: ReadonlyMap<string, CredentialPresence | null> = new Map(),
 ): boolean {
-  return rcServiceNames(instances).every((name) =>
-    serviceHasLicense(doc.services[name], licensed, projectDirectory, fileLicenses),
+  return rcServiceNames(instances).every(
+    (name) =>
+      serviceHasLicense(doc.services[name], licensed, projectDirectory, fileLicenses) === true,
   );
 }
+
+/**
+ * Whether any named Rocket.Chat service gets a known registration token, by the same rule
+ * the create warnings use. Presence only; the evidence record never holds the value.
+ */
+export function suppliesRegToken(
+  doc: ComposeDoc,
+  names: readonly string[],
+  projectDirectory: string,
+  fileTokens: ReadonlyMap<string, CredentialPresence | null>,
+): boolean {
+  return tokenPresence(doc, names, projectDirectory, fileTokens) === true;
+}
+
+/**
+ * Whether every named Rocket.Chat service gets a known licence from its environment or an env
+ * file already on disk, by the rule the create warnings use. Presence only.
+ */
+export function suppliesLicense(
+  doc: ComposeDoc,
+  names: readonly string[],
+  projectDirectory: string,
+  fileLicenses: ReadonlyMap<string, CredentialPresence | null>,
+): boolean {
+  return licensePresence(doc, names, projectDirectory, fileLicenses) === true;
+}
+
+/** A known token on any replica proves token presence; otherwise uncertainty survives. */
+export function tokenPresence(
+  doc: ComposeDoc,
+  names: readonly string[],
+  projectDirectory: string,
+  files: ReadonlyMap<string, CredentialPresence | null>,
+): CredentialPresence {
+  const states = names.map((name) => serviceHasToken(doc.services[name], projectDirectory, files));
+  return states.includes(true) ? true : states.includes('unknown') ? 'unknown' : false;
+}
+
+/** A licence must reach every replica. One known absence disproves that requirement. */
+export function licensePresence(
+  doc: ComposeDoc,
+  names: readonly string[],
+  projectDirectory: string,
+  files: ReadonlyMap<string, CredentialPresence | null>,
+  licensed = false,
+): CredentialPresence {
+  const states = names.map((name) =>
+    serviceHasLicense(doc.services[name], licensed, projectDirectory, files),
+  );
+  return states.length === 0 || states.includes(false)
+    ? false
+    : states.includes('unknown')
+      ? 'unknown'
+      : true;
+}
+
+/**
+ * What a written document hands Rocket.Chat: whether every Rocket.Chat service gets a known
+ * licence, and whether any gets a known registration token, env files on disk included. A
+ * sidecar's credential was never Rocket.Chat's, so it does not count. Presence only.
+ */
+export async function suppliedCredentials(
+  doc: ComposeDoc,
+  projectDirectory: string,
+): Promise<{ license: CredentialPresence; token: CredentialPresence }> {
+  const compose = {
+    ...doc,
+    services: isPlainObject(doc.services) ? doc.services : {},
+  } as ComposeDoc;
+  const names = Object.keys(compose.services).filter(isRocketChatServiceName);
+  const { fileLicenses, fileTokens } = await readEnvFileStates(compose, names, projectDirectory);
+  return {
+    license: licensePresence(compose, names, projectDirectory, fileLicenses),
+    token: tokenPresence(compose, names, projectDirectory, fileTokens),
+  };
+}
+
+/**
+ * The record key `env` sets when it changes whether the Compose file hands Rocket.Chat a licence
+ * or a registration token. Until every Rocket.Chat service is recreated from the file, the file
+ * says what is configured and a running container can still have the previous one. Only
+ * `recreateRocketChat` (`core/lifecycle/ready`) removes it, for `env`, `upgrade`, its rollback
+ * and an `up` that starts a stopped workspace.
+ */
+export const CREDENTIALS_PENDING = 'credentials_pending';
 
 /** Every replica needs a credential, but replicas may use different credential types. */
 export function hasEffectiveCredential(
@@ -383,14 +535,14 @@ export function hasEffectiveCredential(
   instances: number,
   licensed: boolean,
   projectDirectory: string,
-  fileLicenses: ReadonlyMap<string, boolean | null> = new Map(),
-  fileTokens: ReadonlyMap<string, boolean | null> = new Map(),
+  fileLicenses: ReadonlyMap<string, CredentialPresence | null> = new Map(),
+  fileTokens: ReadonlyMap<string, CredentialPresence | null> = new Map(),
 ): boolean {
   return rcServiceNames(instances).every((name) => {
     const service = doc.services[name];
     return (
-      serviceHasToken(service, projectDirectory, fileTokens) ||
-      serviceHasLicense(service, licensed, projectDirectory, fileLicenses)
+      serviceHasToken(service, projectDirectory, fileTokens) === true ||
+      serviceHasLicense(service, licensed, projectDirectory, fileLicenses) === true
     );
   });
 }

@@ -18,18 +18,18 @@ Every command also explains itself: `houston <command> --help`.
 
 ## Commands at a glance
 
-| Group | Commands |
-|---|---|
-| lifecycle | `up` `start` `stop` `restart` `down` `prune` |
-| inspect | `list` `info` `logs` `ready` `stats` |
-| settings | `use` `config` `env` |
-| data | `seed` `config-import` `backup` `backups` `restore` `upgrade` |
-| performance (Docker only) | `loadtest` `capacity` |
-| REST | `token` `api` `pat` |
-| web GUI and accounts | `serve` `users` `audit` `chown` |
-| HTTPS | `edge` `trust-ca` `tls-status` |
-| cloud clusters | `cluster` (`cluster overview` for what exists and what it costs; see [EKS](eks.md)) |
-| other | `monitor` `presets` `versions` `doctor` `capabilities` `skill` |
+| Group                     | Commands                                                                            |
+| ------------------------- | ----------------------------------------------------------------------------------- |
+| lifecycle                 | `up` `start` `stop` `restart` `down` `prune`                                        |
+| inspect                   | `list` `info` `logs` `ready` `stats` `evidence`                                     |
+| settings                  | `use` `config` `env`                                                                |
+| data                      | `seed` `config-import` `backup` `backups` `restore` `upgrade`                       |
+| performance (Docker only) | `loadtest` `capacity`                                                               |
+| REST                      | `token` `api` `pat`                                                                 |
+| web GUI and accounts      | `serve` `users` `audit` `chown`                                                     |
+| HTTPS                     | `edge` `trust-ca` `tls-status`                                                      |
+| cloud clusters            | `cluster` (`cluster overview` for what exists and what it costs; see [EKS](eks.md)) |
+| other                     | `monitor` `presets` `versions` `doctor` `capabilities` `skill`                      |
 
 ---
 
@@ -45,14 +45,14 @@ houston ready --name ticket-1234      # wait until Rocket.Chat is serving
 A workspace can live as long as the ticket does. Pause and resume it instead of
 creating it again:
 
-| Command | What it does |
-|---|---|
-| `up` | creates a workspace, or brings a stopped one back with its data |
-| `stop` / `start` | pauses and resumes it in seconds |
-| `restart` | restarts Rocket.Chat |
-| `down` | removes the containers but **keeps** the data and the record |
-| `down --volumes` | deletes the data too, after asking |
-| `prune` | **deletes** every workspace that is `down`, with its data and record, except pinned and running ones |
+| Command          | What it does                                                                                         |
+| ---------------- | ---------------------------------------------------------------------------------------------------- |
+| `up`             | creates a workspace, or brings a stopped one back with its data                                      |
+| `stop` / `start` | pauses and resumes it in seconds                                                                     |
+| `restart`        | restarts Rocket.Chat                                                                                 |
+| `down`           | removes the containers but **keeps** the data and the record                                         |
+| `down --volumes` | deletes the data too, after asking                                                                   |
+| `prune`          | **deletes** every workspace that is `down`, with its data and record, except pinned and running ones |
 
 The commands that delete data ask first, and `prune` lists what it will remove. Add
 `--yes` to skip the question in a script.
@@ -89,17 +89,17 @@ houston presets                                                  # what exists
 houston up --version 8.5.1 --name ticket-1234 --preset ldap --wait
 ```
 
-| Preset | Starts | Use it for |
-|---|---|---|
-| `default` | Rocket.Chat and MongoDB | anything |
-| `airgapped` | no route to Rocket.Chat Cloud | offline or disconnected workspaces |
-| `ldap` | OpenLDAP with users and a group | LDAP login and sync |
-| `saml` | a Keycloak identity provider (SAML) | SAML single sign-on |
-| `oidc` | a Keycloak identity provider (OpenID Connect) | OIDC / OAuth single sign-on |
-| `email` | Mailpit, catching every mail Rocket.Chat sends | invites, password resets, verification, 2FA codes |
-| `s3_minio` | MinIO as the file-upload store | uploads, previews, presigned URLs |
-| `livechat` | Omnichannel, an agent and a demo page with the widget | the widget, CORS, routing |
-| `e2ee` | end-to-end encryption switched on, and three test users | encrypted DMs, rooms and files ([guide](e2ee.md)) |
+| Preset      | Starts                                                  | Use it for                                        |
+| ----------- | ------------------------------------------------------- | ------------------------------------------------- |
+| `default`   | Rocket.Chat and MongoDB                                 | anything                                          |
+| `airgapped` | no route to Rocket.Chat Cloud                           | offline or disconnected workspaces                |
+| `ldap`      | OpenLDAP with users and a group                         | LDAP login and sync                               |
+| `saml`      | a Keycloak identity provider (SAML)                     | SAML single sign-on                               |
+| `oidc`      | a Keycloak identity provider (OpenID Connect)           | OIDC / OAuth single sign-on                       |
+| `email`     | Mailpit, catching every mail Rocket.Chat sends          | invites, password resets, verification, 2FA codes |
+| `s3_minio`  | MinIO as the file-upload store                          | uploads, previews, presigned URLs                 |
+| `livechat`  | Omnichannel, an agent and a demo page with the widget   | the widget, CORS, routing                         |
+| `e2ee`      | end-to-end encryption switched on, and three test users | encrypted DMs, rooms and files ([guide](e2ee.md)) |
 
 For `ldap`, `saml` and `oidc`, sign in as **`user1` / `user1`**. `houston info` lists
 each preset's consoles and logins.
@@ -133,6 +133,7 @@ Things to know:
   turns it on. Two values neither presets treat as a default are refused until you choose
   one with `--setting` or `--env`. `saml` and `oidc` each run their own Keycloak and cannot
   be combined yet.
+
 - **Parameters of combined presets** take the preset's name, `--set ldap.users=500`; a
   single preset accepts that spelling too. A plain `--set users=500` works when only one
   of the presets takes `users`.
@@ -147,7 +148,7 @@ Things to know:
 - **Several Rocket.Chat instances is a deployment, not a preset.** Use
   `--deployment multi-instance --replicas 3` on Docker. It starts the instances behind
   a load balancer, with NATS and one MongoDB. The old spelling, `--preset
-  multi-instance`, still works and prints a hint. A preset combines with it: every
+multi-instance`, still works and prints a hint. A preset combines with it: every
   instance gets the preset's settings. Messages reach the other instances live only
   with an Enterprise license, Rocket.Chat's scalability module; without one they show
   after a reload.
@@ -161,7 +162,7 @@ the same name. `--preset` always takes a name, never a path.
 name: my-scenario
 description: What this reproduces.
 env:
-  OVERWRITE_SETTING_Some_Setting: "true"
+  OVERWRITE_SETTING_Some_Setting: 'true'
 services:
   my-sidecar: { image: some/image:tag }
 depends_on: [my-sidecar]
@@ -195,7 +196,10 @@ names and never holds; on Kubernetes into a Secret the pod reads it from. `env`,
 
 Rocket.Chat 8.8 and 8.9 announce that LDAP, SAML and Custom OAuth login will need a Premium
 plan from 9.0. On Rocket.Chat 9 and later, `up` warns when an `ldap`, `saml` or `oidc`
-workspace has neither `--license` nor `--reg-token`.
+workspace has no effective licence or registration token in its final configuration.
+Overrides can blank either credential. When Compose must resolve an interpolated value or
+an inherited host variable, Houston reports unknown presence until that input is resolved.
+Evidence preserves that uncertainty and does not read ambient host credentials.
 
 ---
 
@@ -211,11 +215,11 @@ houston seed --name ticket-1234 --users 30 --channels 10 --messages 40
 houston seed --name ticket-1234 --profile small --scenario room-states --scenario permissions --history-days 180 --verify-seed
 ```
 
-| Profile | Users | Rooms | Main messages | Thread replies | Files | Total content |
-|---|---|---|---|---|---|---|
-| `small` (default) | 5 | 12 | 38 | 24 | 4 | 68 |
-| `standard` | 20 | 25 | 253 | 162 | 12 | 431 |
-| `large` | 100 | 60 | 2620 | 2620 | 24 | 5270 |
+| Profile           | Users | Rooms | Main messages | Thread replies | Files | Total content |
+| ----------------- | ----- | ----- | ------------- | -------------- | ----- | ------------- |
+| `small` (default) | 5     | 12    | 38            | 24             | 4     | 68            |
+| `standard`        | 20    | 25    | 253           | 162            | 12    | 431           |
+| `large`           | 100   | 60    | 2620          | 2620           | 24    | 5270          |
 
 Total content includes file messages and the opening messages of newly created
 discussions. The existing `messages` summary counts main messages plus thread
@@ -327,18 +331,21 @@ Most Rocket.Chat configuration is a **setting**, the thing you change in the adm
 UI. From the environment, a setting only takes effect with the `OVERWRITE_SETTING_`
 prefix, and without it Rocket.Chat ignores the variable silently:
 
-| Environment variable | Effect on `Accounts_ShowFormLogin` |
-|---|---|
-| `Accounts_ShowFormLogin=false` | none |
-| `OVERWRITE_SETTING_Accounts_ShowFormLogin=false` | applied |
+| Environment variable                             | Effect on `Accounts_ShowFormLogin` |
+| ------------------------------------------------ | ---------------------------------- |
+| `Accounts_ShowFormLogin=false`                   | none                               |
+| `OVERWRITE_SETTING_Accounts_ShowFormLogin=false` | applied                            |
 
 `--setting Id=value` adds the prefix for you. `--set` is for real environment
 variables; give it a setting's name and houston points you to the prefixed form.
 
 - An `OVERWRITE_SETTING_` value is applied at every boot. The admin UI can still change
   it while Rocket.Chat runs, and the next restart puts it back.
-- A change recreates only the Rocket.Chat container. MongoDB keeps running.
-  `--no-restart` saves the change for the next `up`.
+- A change recreates only the Rocket.Chat containers, every replica. MongoDB keeps running.
+  `--no-restart` writes the change without applying it. A stopped workspace gets it at
+  its next `houston up --name X`; a running one keeps its environment until the same
+  `houston env --name X --set KEY=<value> --unset OTHER_KEY` change is run again without
+  `--no-restart`. Repeat your actual set and unset keys, supplying the set values again.
 - Your overrides are kept with the workspace and win over the preset's.
 - You may override `MONGO_URL`, `PORT`, `ROOT_URL` or `TRANSPORTER` to reproduce a
   broken configuration. houston warns what each one will break.
@@ -372,6 +379,9 @@ houston upgrade --name ticket-1234 --rollback
   LDAP entries or Mailpit mail.
 - `upgrade` needs the workspace running, because Rocket.Chat migrates its database when
   it starts. `--dry-run` shows the plan without changing anything.
+  `--rollback` also works when the workspace is stopped: it starts the project, including
+  MongoDB, and recreates every Rocket.Chat replica on the old image before restoring.
+  A failed startup or recreation stops the rollback before it restores the database.
 - An upgrade keeps the workspace's MongoDB when the new Rocket.Chat still runs on it, as
   7.13 runs on 7.0. One that needs a new major MongoDB version is refused: MongoDB majors
   have to be upgraded one step at a time.
@@ -401,13 +411,13 @@ The email is remembered (`houston config set acme.email <address>`). Rocket.Chat
 A preset's own pages are served on the same name and certificate, on both runtimes, so
 they work from any browser, not only on this machine:
 
-| Path | What |
-|---|---|
-| `/mailpit/` | Mailpit, every email Rocket.Chat sends (`email`) |
-| `/keycloak/` | Keycloak, for sign-in and its admin console (`saml`, `oidc`, ldap's `idp`). SSO needs no `idp_host` and no hosts entry. |
+| Path              | What                                                                                                                                    |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `/mailpit/`       | Mailpit, every email Rocket.Chat sends (`email`)                                                                                        |
+| `/keycloak/`      | Keycloak, for sign-in and its admin console (`saml`, `oidc`, ldap's `idp`). SSO needs no `idp_host` and no hosts entry.                 |
 | `/livechat-demo/` | the livechat demo page. It is the same origin as Rocket.Chat there, so cross-origin problems (CORS, framing) show only on its own port. |
-| `/minio/` | the MinIO console, to watch uploads land in the bucket (`s3_minio`) |
-| `/phpldapadmin/` | phpLDAPadmin, to browse and edit the directory (`ldap`, OpenLDAP and AD) |
+| `/minio/`         | the MinIO console, to watch uploads land in the bucket (`s3_minio`)                                                                     |
+| `/phpldapadmin/`  | phpLDAPadmin, to browse and edit the directory (`ldap`, OpenLDAP and AD)                                                                |
 
 `houston info` and the GUI link to them. Grafana is at `/grafana/` (see [Monitoring](#monitoring)).
 
@@ -452,7 +462,7 @@ houston monitor --name ticket-1234 --off
 - **Grafana** on a Docker loopback workspace is at `http://localhost:5050` (`admin` / `admin`, anonymous Viewer on),
   with the Rocket.Chat, MongoDB and Node Exporter dashboards.
 - **Prometheus** is at `http://localhost:9090`.
-- Container logs go to **Loki**, readable in the *Rocket.Chat Logs* dashboard.
+- Container logs go to **Loki**, readable in the _Rocket.Chat Logs_ dashboard.
 
 On Docker, log collection covers only that workspace. On Kubernetes, one shared stack
 runs in the `houston-system` namespace, and `--off` leaves it running while another

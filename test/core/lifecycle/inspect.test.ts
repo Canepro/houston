@@ -832,6 +832,13 @@ describe('what the record alone says', () => {
     });
     expect(staleSecretMarker.rows).toHaveProperty('License');
     expect(staleSecretMarker.licensed).toBe(false);
+    const unknown = await report({
+      deployment: 'microservices',
+      licensed: true,
+      effective_license: null,
+    });
+    expect(unknown.licensed).toBe(false);
+    expect(unknown.rows).toHaveProperty('License');
     expect((await report({ deployment: 'monolith' })).rows).not.toHaveProperty('License');
   });
 

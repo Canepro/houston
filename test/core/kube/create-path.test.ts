@@ -35,7 +35,7 @@ import { describe as describeWorkspace } from '../../../src/core/lifecycle/inspe
 import { createReq } from '../../../src/core/lifecycle/types';
 import { exists, remove } from '../../../src/core/runner/paths';
 import { usedPorts } from '../../../src/core/runner/ports';
-import { readMeta } from '../../../src/core/runner/record';
+import { readMeta, updateMeta } from '../../../src/core/runner/record';
 import * as topology from '../../../src/core/topology';
 
 import { register, routeHost } from '../../../src/core/edge/routes';
@@ -310,6 +310,162 @@ describe('a Kubernetes create', () => {
     await createKubernetes(req(''));
     expect([mockCreated[1]?.license, mockCreated[1]?.licensed]).toEqual(['', true]);
     expect((await readMeta('klic')).extra.effective_license).toBe(true);
+  });
+
+  it('records only deployed registration-token presence before and after Kubernetes create', async () => {
+    const token = 'EVIDENCE-REGISTRATION-TOKEN-SENTINEL';
+    let provisional: Record<string, unknown> | undefined;
+    let interrupt = false;
+    mockCreate = async (options) => {
+      provisional = (await readMeta(String(options.name))).extra;
+      if (interrupt) throw new Error('killed before the token Secret and Helm');
+      return {
+        context: CONTEXT,
+        namespace: `houston-${String(options.name)}`,
+        chart_version: '7.0.0',
+        release: 'rocketchat',
+        port_forward_pid: 0,
+        bind_host: '',
+        microservices: false,
+      };
+    };
+    const up = (regToken: string) =>
+      createKubernetes(
+        createReq({
+          version: '8.5.1',
+          name: 'ktoken-evidence',
+          runtime: 'kubernetes',
+          regToken,
+          offline: true,
+        }),
+      );
+    const observed: unknown[] = [];
+    const step = async (label: string, regToken: string) => {
+      await up(regToken).catch(() => undefined);
+      const record = (await readMeta('ktoken-evidence')).extra;
+      expect(JSON.stringify(provisional)).not.toContain(token);
+      expect(JSON.stringify(record)).not.toContain(token);
+      observed.push([label, provisional?.reg_token_supplied, record.reg_token_supplied]);
+    };
+
+    // A first create has deployed nothing when its write-ahead record is written.
+    await step('first create with a token', `  ${token}  `);
+    expect(mockCreated.at(-1)?.regToken).toBe(token);
+    // A re-up's write-ahead record carries the release still running until Helm replaces it.
+    await step('re-up without a token', '');
+    // Killed before the Secret and Helm: the old tokenless release is what still runs.
+    interrupt = true;
+    await step('killed re-up with a token', token);
+    // A record from before the marker existed cannot say what runs, so neither can this one.
+    await updateMeta('ktoken-evidence', (meta) => {
+      delete meta.extra.reg_token_supplied;
+    });
+    await step('killed re-up from a record with no marker', token);
+
+    expect(observed).toEqual([
+      ['first create with a token', false, true],
+      ['re-up without a token', true, false],
+      ['killed re-up with a token', false, false],
+      ['killed re-up from a record with no marker', undefined, undefined],
+    ]);
+  });
+
+  it('records a preset-only Kubernetes registration token the chart deploys', async () => {
+    const preset = 'preset-token';
+    const presetFile = path.join(config.presetDir(), `${preset}.yaml`);
+    await fs.mkdir(config.presetDir(), { recursive: true });
+    const provisionals: Record<string, unknown>[] = [];
+    mockCreate = async (options) => {
+      provisionals.push((await readMeta(String(options.name))).extra);
+      return {
+        context: CONTEXT,
+        namespace: `houston-${String(options.name)}`,
+        chart_version: '7.0.0',
+        release: 'rocketchat',
+        port_forward_pid: 0,
+        bind_host: '',
+        microservices: false,
+      };
+    };
+    const observed: unknown[] = [];
+    try {
+      for (const example of [
+        { name: 'kpreset-token', presetToken: '  PRESET-TOKEN-SENTINEL  ', regToken: '' },
+        { name: 'kpreset-blank', presetToken: '  ', regToken: '' },
+        { name: 'kpreset-dedicated', presetToken: 'PRESET-TOKEN-SENTINEL', regToken: 'DEDICATED' },
+      ]) {
+        await fs.writeFile(
+          presetFile,
+          `name: ${preset}\nenv:\n  REG_TOKEN: ${JSON.stringify(example.presetToken)}\n`,
+        );
+        await createKubernetes(
+          createReq({
+            version: '8.5.1',
+            name: example.name,
+            runtime: 'kubernetes',
+            preset,
+            regToken: example.regToken,
+            offline: true,
+          }),
+        );
+        const provisional = provisionals.at(-1);
+        const final = (await readMeta(example.name)).extra;
+        observed.push([
+          example.name,
+          mockCreated.at(-1)?.regToken,
+          provisional?.reg_token_supplied,
+          final.reg_token_supplied,
+        ]);
+        expect(JSON.stringify(provisional)).not.toContain('PRESET-TOKEN-SENTINEL');
+        expect(JSON.stringify(final)).not.toContain('PRESET-TOKEN-SENTINEL');
+      }
+    } finally {
+      await fs.rm(presetFile, { force: true });
+    }
+    expect(observed).toEqual([
+      ['kpreset-token', 'PRESET-TOKEN-SENTINEL', false, true],
+      ['kpreset-blank', '', false, false],
+      ['kpreset-dedicated', 'DEDICATED', false, true],
+    ]);
+  });
+
+  it('captures a catalog licence requirement before a Kubernetes create can change it', async () => {
+    const preset = 'provisional-license';
+    const presetFile = path.join(config.presetDir(), `${preset}.yaml`);
+    await fs.mkdir(config.presetDir(), { recursive: true });
+    await fs.writeFile(presetFile, `name: ${preset}\nrequires_license: true\n`);
+    let provisional: Record<string, unknown> | undefined;
+    mockCreate = async (options) => {
+      provisional = (await readMeta(String(options.name))).extra;
+      await fs.rm(presetFile);
+      return {
+        context: CONTEXT,
+        namespace: `houston-${String(options.name)}`,
+        chart_version: '7.0.0',
+        release: 'rocketchat',
+        port_forward_pid: 0,
+        bind_host: '',
+        microservices: false,
+      };
+    };
+
+    try {
+      await createRepro(
+        createReq({
+          version: '8.5.1',
+          name: 'kprovisional-license',
+          preset,
+          runtime: 'kubernetes',
+          deployment: 'monolith',
+          offline: true,
+        }),
+      );
+    } finally {
+      await fs.rm(presetFile, { force: true });
+    }
+
+    expect(provisional?.license_required).toBe(true);
+    expect((await readMeta('kprovisional-license')).extra.license_required).toBe(true);
   });
 
   it('retires its own forwards on a re-up, and keeps them findable while it runs', async () => {

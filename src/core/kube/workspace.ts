@@ -343,13 +343,14 @@ async function installChart(options: ChartInstall): Promise<Record<string, unkno
     { phase: 'boot', pct: 60 },
   );
   await install({ namespace, context, values, chartVersion, emit });
-  // An adopted namespace is not deleted when later work fails, so the licence Helm just
-  // accepted has to be recorded before the tools Ingress can throw. A namespace this run
-  // created is deleted by that failure, Secret included, so its marker waits until the
-  // Ingress has succeeded and is still written before this function returns.
-  if (options.license !== '' && options.receipt.createdUid === '') {
-    await noteInstalledLicense(name, namespace, context, options.receipt);
-  }
+  // RECORDED AT ONCE, whoever made the namespace: from here the release carries exactly this
+  // run's licence and token, or none, and a create killed before its final record leaves this
+  // record to describe it. A namespace this run created is deleted, Secret and release with it,
+  // only by a rollback that succeeds, and that rollback takes the markers back
+  // (`forgetInstalledCredentials`). Waiting for the tools Ingress left a create killed between
+  // the two with a live release whose token the record denied.
+  const installed = { license: options.license !== '', regToken: regToken !== '' };
+  await noteInstalledCredentials(name, namespace, context, options.receipt, installed);
   // The preset's own UIs at paths of the same name (Mailpit, Keycloak, the demo page).
   const tools = options.preset === null ? [] : publicPathsOf(options.preset.extra);
   if (tlsHost !== '' && tools.length > 0) {
@@ -365,9 +366,6 @@ async function installChart(options: ChartInstall): Promise<Record<string, unkno
       }),
       { namespace, context },
     );
-  }
-  if (options.license !== '' && options.receipt.createdUid !== '') {
-    await noteInstalledLicense(name, namespace, context, options.receipt);
   }
   return values;
 }
@@ -396,6 +394,7 @@ async function rollbackCreate(
       expectedUid: receipt.createdUid,
       emit,
     });
+    if (gone) await forgetInstalledCredentials(name, namespace, context, receipt, emit);
     if (gone && !hadCluster) await deleteCluster({ emit });
   } catch {
     // The ORIGINAL failure is what matters; a rollback that fails must not replace it.
@@ -472,23 +471,30 @@ function recordsThisInstall(
 }
 
 /**
- * Helm has accepted a release that references this run's licence Secret.
+ * Helm has accepted a release with this run's credentials.
  * Inspect reads `effective_license` and ignores `incomplete`, so that boolean becomes
  * true here, together with `retained_license`, and not when the Secret alone exists.
+ * `reg_token_supplied` becomes whether this release carries a token, for the same reason.
+ * Only a licence refuses a changed workspace identity: a token marker is presence only, and
+ * a record that is not this install's keeps whatever it said.
  */
-async function noteInstalledLicense(
+async function noteInstalledCredentials(
   name: string,
   namespace: string,
   context: string,
   receipt: NamespaceReceipt,
+  installed: { license: boolean; regToken: boolean },
 ): Promise<void> {
   try {
     await updateMeta(name, (meta) => {
       if (!recordsThisInstall(meta, name, namespace, context, receipt)) {
+        if (!installed.license) return;
         throw new ConflictError(
           'workspace identity changed before licence installation could be recorded',
         );
       }
+      meta.extra.reg_token_supplied = installed.regToken;
+      if (!installed.license) return;
       meta.extra.licensed = true;
       meta.extra.retained_license = true;
       meta.extra.effective_license = true;
@@ -496,6 +502,39 @@ async function noteInstalledLicense(
   } catch (error) {
     // Direct workspace callers can operate without a lifecycle write-ahead record.
     if (!(error instanceof MissingRecordError)) throw error;
+  }
+}
+
+/**
+ * The namespace this run created is gone, and the licence and token Secrets and the release
+ * with it, so this install's record no longer describes a release that carries them. Only after
+ * a delete that succeeded: one that failed, or never ran, leaves the release the markers name.
+ * `licensed` stays as the provisional record had it, this run's intent, which with
+ * `retained_license` false keeps no licence for the next re-up. A failure here is reported,
+ * not thrown, so it cannot replace the failure that caused the rollback.
+ */
+async function forgetInstalledCredentials(
+  name: string,
+  namespace: string,
+  context: string,
+  receipt: NamespaceReceipt,
+  emit: Emit,
+): Promise<void> {
+  try {
+    await updateMeta(name, (meta) => {
+      if (!recordsThisInstall(meta, name, namespace, context, receipt)) return;
+      meta.extra.reg_token_supplied = false;
+      meta.extra.retained_license = false;
+      meta.extra.effective_license = false;
+    });
+  } catch (error) {
+    if (error instanceof MissingRecordError) return;
+    warn(
+      emit,
+      `namespace ${namespace} was removed, but its record still names the credentials of the ` +
+        `removed release: ${error instanceof Error ? error.message : String(error)}`,
+      { phase: 'teardown' },
+    );
   }
 }
 

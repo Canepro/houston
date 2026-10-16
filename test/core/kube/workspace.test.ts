@@ -933,6 +933,87 @@ describe('the values the release is installed with', () => {
     }
   });
 
+  it('records the token Helm accepted when the tools Ingress fails on a re-up', async () => {
+    // The write-ahead record states the release still running. Once Helm accepts this run's
+    // release, the marker has to follow it even if the create stops before its final record.
+    const TOKEN = 'synthetic-reup-token';
+    let failHelm = false;
+    let failTools = false;
+    let useTls = false;
+    const req = (regToken: string) =>
+      createReq({
+        version: '8.5.1',
+        name: 'tk',
+        preset: 'email',
+        runtime: 'kubernetes',
+        offline: true,
+        wait: false,
+        regToken,
+      });
+    harness({ held: ['houston-tk'] });
+    mocked(sizing.checkCapacity).mockResolvedValue(undefined);
+    mocked(lifecyclePorts.pickHostPort).mockResolvedValue(3000);
+    mocked(lifecyclePorts.checkSidecarPorts).mockResolvedValue(undefined);
+    mocked(tlsplan.resolveTls).mockImplementation(() =>
+      Promise.resolve(useTls ? ({ mode: 'local', host: 'rc.example.test' } as never) : null),
+    );
+    mocked(tlsplan.kubernetesTlsPlan).mockResolvedValue({
+      host: 'rc.example.test',
+      ingressClass: 'traefik',
+      endpoint: { address: '127.0.0.1', port: 443, source: 'stated' },
+      context: 'prod',
+      issuer: { mode: 'local' },
+      clusterOwns443: true,
+    } as never);
+    mocked(tlsplan.routeKubernetesName).mockResolvedValue(undefined);
+    mocked(release.apply).mockImplementation((body: unknown) =>
+      failTools && String(body).includes('houston-tools')
+        ? Promise.reject(new CreateFailedError('kubectl apply failed: tools ingress refused'))
+        : Promise.resolve(),
+    );
+    mocked(release.install).mockImplementation(() =>
+      failHelm
+        ? Promise.reject(new CreateFailedError('helm install failed: refused'))
+        : Promise.resolve(),
+    );
+    const observed: unknown[] = [];
+    const marker = async (label: string) => {
+      const meta = await readMeta('tk');
+      expect(JSON.stringify(meta)).not.toContain(TOKEN);
+      observed.push([label, meta.extra.incomplete === true, meta.extra.reg_token_supplied]);
+    };
+    try {
+      await paths.remove('tk');
+      await createKubernetes(req(''));
+      await marker('tokenless create');
+
+      failHelm = true;
+      await expect(createKubernetes(req(TOKEN))).rejects.toThrow('helm install failed: refused');
+      await marker('Helm refused the token');
+
+      failHelm = false;
+      failTools = true;
+      useTls = true;
+      await expect(createKubernetes(req(TOKEN))).rejects.toThrow(
+        'kubectl apply failed: tools ingress refused',
+      );
+      await marker('Helm accepted the token, tools Ingress failed');
+
+      await expect(createKubernetes(req(''))).rejects.toThrow(
+        'kubectl apply failed: tools ingress refused',
+      );
+      await marker('Helm accepted no token, tools Ingress failed');
+    } finally {
+      await paths.remove('tk');
+    }
+    expect(observed).toEqual([
+      ['tokenless create', false, false],
+      ['Helm refused the token', true, false],
+      ['Helm accepted the token, tools Ingress failed', true, true],
+      ['Helm accepted no token, tools Ingress failed', true, false],
+    ]);
+  });
+
   it('keeps the licence Helm accepted when the tools Ingress fails on a re-up', async () => {
     // Helm had accepted values that reference houston-license, then the tools Ingress apply
     // threw before noteInstalledLicense. Rollback left the adopted namespace and its Secret,
@@ -1059,12 +1140,22 @@ describe('the values the release is installed with', () => {
     }
   });
 
-  it('does not keep a licence when rollback deletes the namespace this run created', async () => {
+  it('records what Helm accepted in a namespace it created until a rollback removes it', async () => {
     // Helm accepted the release, then the tools Ingress failed. The namespace was one
     // this run created, so rollback deleted it and the Secret. The markers had already
     // been written, the record survived, and the next empty payload referenced a Secret
-    // that was gone.
+    // that was gone. A create killed between Helm and the Ingress has no rollback at all, so
+    // the record already says what the live release carries.
     const LICENSE = 'synthetic-created-namespace-license';
+    const TOKEN = 'synthetic-created-namespace-token';
+    const markers = (extra: Record<string, unknown>) => ({
+      retained_license: extra.retained_license,
+      effective_license: extra.effective_license,
+      reg_token_supplied: extra.reg_token_supplied,
+    });
+    const accepted = { retained_license: true, effective_license: true, reg_token_supplied: true };
+    let beforeTools: unknown = null;
+    let replaceNamespace = false;
     const licenseRef = {
       name: 'ROCKETCHAT_LICENSE',
       valueFrom: { secretKeyRef: { name: 'houston-license', key: 'license' } },
@@ -1073,7 +1164,7 @@ describe('the values the release is installed with', () => {
     const helmValues: Record<string, unknown>[] = [];
     let failTools = false;
     let useTls = false;
-    const req = (license: string) =>
+    const req = (license: string, regToken = '') =>
       createReq({
         version: '8.5.1',
         name: 'tk',
@@ -1082,6 +1173,7 @@ describe('the values the release is installed with', () => {
         offline: true,
         wait: false,
         license,
+        regToken,
       });
     const refOf = (values: Record<string, unknown> | undefined) =>
       (values?.extraEnv as unknown[] | undefined) ?? [];
@@ -1101,18 +1193,20 @@ describe('the values the release is installed with', () => {
       clusterOwns443: true,
     } as never);
     mocked(tlsplan.routeKubernetesName).mockResolvedValue(undefined);
-    mocked(release.apply).mockImplementation((body: unknown) => {
+    mocked(release.apply).mockImplementation(async (body: unknown) => {
       const text = String(body);
       if (text.includes('name: houston-license')) events.push('secret');
       if (text.includes('houston-tools')) {
         events.push('tools');
-        if (failTools) {
-          return Promise.reject(
-            new CreateFailedError('kubectl apply failed: tools ingress refused'),
-          );
+        // What a create killed here would leave.
+        beforeTools = markers((await readMeta('tk')).extra);
+        // Another namespace now holds the name, so the rollback's delete is refused.
+        if (replaceNamespace) {
+          namespaceUid = 'namespace-tk-replacement';
+          namespacePresent = true;
         }
+        if (failTools) throw new CreateFailedError('kubectl apply failed: tools ingress refused');
       }
-      return Promise.resolve();
     });
     mocked(release.install).mockImplementation((options: { values: Record<string, unknown> }) => {
       events.push('helm');
@@ -1126,18 +1220,23 @@ describe('the values the release is installed with', () => {
       failTools = true;
       useTls = true;
       const toolsAt = events.length;
-      await expect(createKubernetes(req(LICENSE))).rejects.toThrow(
+      await expect(createKubernetes(req(LICENSE, TOKEN))).rejects.toThrow(
         'kubectl apply failed: tools ingress refused',
       );
       const toolsPhase = events.slice(toolsAt);
       expect(toolsPhase.indexOf('secret')).toBeGreaterThanOrEqual(0);
       expect(toolsPhase.indexOf('secret')).toBeLessThan(toolsPhase.indexOf('helm'));
       expect(toolsPhase.indexOf('helm')).toBeLessThan(toolsPhase.indexOf('tools'));
+      expect(beforeTools).toEqual(accepted);
       const removed = await readMeta('tk');
-      expect(removed.extra.retained_license).toBe(false);
-      expect(removed.extra.effective_license).toBe(false);
+      expect(markers(removed.extra)).toEqual({
+        retained_license: false,
+        effective_license: false,
+        reg_token_supplied: false,
+      });
       expect(removed.extra.incomplete).toBe(true);
       expect(JSON.stringify(removed)).not.toContain(LICENSE);
+      expect(JSON.stringify(removed)).not.toContain(TOKEN);
       expect(ran.some((argv) => argv.includes('delete'))).toBe(true);
 
       failTools = false;
@@ -1145,6 +1244,18 @@ describe('the values the release is installed with', () => {
       await createKubernetes(req(''));
       expect(refOf(helmValues.at(-1))).not.toContainEqual(licenseRef);
       expect(JSON.stringify(helmValues.at(-1))).not.toContain(LICENSE);
+
+      // A rollback that could not remove the namespace leaves the release Helm accepted, and
+      // the record goes on saying what it carries.
+      failTools = true;
+      useTls = true;
+      replaceNamespace = true;
+      await expect(createKubernetes(req(LICENSE, TOKEN))).rejects.toThrow(
+        'kubectl apply failed: tools ingress refused',
+      );
+      // The harness clears this on a delete that succeeds.
+      expect(namespacePresent).toBe(true);
+      expect(markers((await readMeta('tk')).extra)).toEqual(accepted);
     } finally {
       await paths.remove('tk');
     }
