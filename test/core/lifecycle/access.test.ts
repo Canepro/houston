@@ -38,6 +38,7 @@ describe('SSH access handoff', () => {
   });
 
   it('gives an SSH operator a loopback tunnel without changing the workspace bind', () => {
+    expect(handoff(workspace(), { SSH_TTY: '/synthetic' })?.note).toContain(REMOTE_NOTE);
     expect(
       handoff(workspace(), {
         SSH_CONNECTION: '198.51.100.20 55100 203.0.113.8 22',
@@ -53,8 +54,19 @@ describe('SSH access handoff', () => {
       tunnel_command:
         'ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:3123:127.0.0.1:3123 -- operator@203.0.113.8',
       public_url: null,
-      note: REMOTE_NOTE,
+      note: expect.stringContaining("rather than the tunnel's http://127.0.0.1:3123"),
     });
+  });
+
+  it('rejects unmatched IPv6 brackets instead of inventing a valid forward target', () => {
+    for (const bind_host of ['[::1', '::1]', '[127.0.0.1]', '[localhost]']) {
+      expect(handoff(workspace({ extra: { bind_host } }), { SSH_TTY: '/synthetic' })).toBeNull();
+    }
+    for (const bind_host of ['::1', '[::1]']) {
+      expect(
+        handoff(workspace({ extra: { bind_host } }), { SSH_TTY: '/synthetic' })?.tunnel_command,
+      ).toContain('127.0.0.1:3123:[::1]:3123');
+    }
   });
 
   it('honours the documented overrides, forwards IPv6 loopback, and quotes a destination as one shell word', () => {

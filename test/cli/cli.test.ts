@@ -320,6 +320,67 @@ describe("a multi-instance workspace's info", () => {
 });
 
 describe('SSH loopback guidance', () => {
+  it('renders human info for malformed extra bags without rewriting the stored record', async () => {
+    const record = require('../../src/core/runner/record') as typeof RecordNS;
+    const paths = require('../../src/core/runner/paths') as typeof PathsNS;
+    const keys = [
+      'SSH_CONNECTION',
+      'SSH_CLIENT',
+      'SSH_TTY',
+      'HOUSTON_SSH_LOCAL_PORT',
+      'HOUSTON_SSH_PORT',
+    ] as const;
+    const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    try {
+      for (const extra of [null, []]) {
+        const name = extra === null ? 'null-extra' : 'array-extra';
+        await record.writeRecord(
+          name,
+          record.metadata({
+            name,
+            rcVersion: '8.5.1',
+            rootUrl: 'http://localhost:3123',
+            hostPort: 3123,
+            publicUrl: 'https://chat.example.test',
+          }),
+        );
+        const filename = `${paths.workspace(name)}/repro.json`;
+        const data = JSON.parse(fs.readFileSync(filename, 'utf8')) as Record<string, unknown>;
+        data.extra = extra;
+        const bytes = JSON.stringify(data);
+        fs.writeFileSync(filename, bytes);
+        fs.writeFileSync(
+          `${paths.workspace(name)}/docker-compose.yml`,
+          'services:\n  rocketchat:\n    ports: ["127.0.0.1:3123:3000"]\n',
+        );
+        for (const remote of [false, true]) {
+          for (const key of keys) delete process.env[key];
+          if (remote) process.env.SSH_CLIENT = '198.51.100.20 55100 2222';
+          let stdout = '';
+          let stderr = '';
+          const io = {
+            writeOut: (text: string) => void (stdout += text),
+            writeErr: (text: string) => void (stderr += text),
+          };
+          const handlers = require('../../src/cli/handlers') as typeof HandlersNS;
+          expect(
+            await runCli(['info', '--name', name], { execute: handlers.createExecutor(io), io }),
+          ).toBe(0);
+          expect(stderr).toBe('');
+          expect(stdout).toContain('Rocket.Chat');
+          expect(stdout).toContain('enabled');
+          expect(stdout.includes('tunnel :')).toBe(remote);
+          expect(fs.readFileSync(filename, 'utf8')).toBe(bytes);
+        }
+      }
+    } finally {
+      for (const key of keys) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
+    }
+  });
+
   it.each([
     { label: 'recorded wildcard', recorded: '0.0.0.0', configured: '127.0.0.1', fail: false },
     {

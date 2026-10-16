@@ -211,7 +211,9 @@ describe('a command that fails', () => {
           'The workspace listens on loopback on the remote host only. Run the tunnel command on your ' +
           'machine, then open the browser URL there. Credentials stay private to that tunnel. If the ' +
           'local port is occupied, set HOUSTON_SSH_LOCAL_PORT on the remote command and request the ' +
-          'handoff again.',
+          'handoff again. ' +
+          "Rocket.Chat's ROOT_URL is http://localhost:3001: absolute links (invitations, password resets, " +
+          "OAuth callbacks) use that origin rather than the tunnel's http://127.0.0.1:3001.",
       });
     } finally {
       if (saved.connection === undefined) delete process.env.SSH_CONNECTION;
@@ -262,7 +264,10 @@ describe('a command that fails', () => {
           'The workspace listens on loopback on the remote host only. Run the tunnel command on your ' +
           'machine, then open the browser URL there. Credentials stay private to that tunnel. If the ' +
           'local port is occupied, set HOUSTON_SSH_LOCAL_PORT on the remote command and request the ' +
-          'handoff again. The tunnel listens on client 127.0.0.1 only. Absolute links, redirects, callbacks, and ' +
+          'handoff again. ' +
+          "Rocket.Chat's ROOT_URL is http://localhost:3001: absolute links (invitations, password resets, " +
+          "OAuth callbacks) use that origin rather than the tunnel's http://127.0.0.1:3001." +
+          ' The tunnel listens on client 127.0.0.1 only. Absolute links, redirects, callbacks, and ' +
           'printed side-service URLs using ::1 cannot use this handoff.',
       });
     } finally {

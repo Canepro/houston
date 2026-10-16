@@ -2360,7 +2360,9 @@ function tlsLabel(meta: RecordNS.Metadata): string {
     acme: "Let's Encrypt",
     own: 'supplied certificate',
   };
-  const kind = isTruthy(meta.extra.tls) ? toTextAny(meta.extra.tls) : '';
+  const record = require('../core/runner/record') as typeof RecordNS;
+  const extra = record.extraBag(meta);
+  const kind = isTruthy(extra.tls) ? toTextAny(extra.tls) : '';
   return Object.hasOwn(labels, kind) ? (labels[kind] as string) : 'enabled';
 }
 
@@ -2383,7 +2385,8 @@ function summaryPanel(
 ): void {
   const record = require('../core/runner/record') as typeof RecordNS;
   const topology = require('../core/topology') as typeof TopologyNS;
-  const managedBy = meta.extra.mongo_managed_by ?? '';
+  const extra = record.extraBag(meta);
+  const managedBy = extra.mongo_managed_by ?? '';
   const mongo = isTruthy(managedBy)
     ? `${meta.mongoTag} (via the ${toTextAny(managedBy)})`
     : `${meta.mongoTag} (${meta.mongoFlavor})`;
@@ -2396,7 +2399,7 @@ function summaryPanel(
     ['URL', record.externalUrl(meta)],
     ['Login', `admin / ${record.adminPass(meta)}`],
   ];
-  const owner = meta.extra.created_by ?? '';
+  const owner = extra.created_by ?? '';
   if (isTruthy(owner)) rows.push(['Owner', toTextAny(owner)]);
   if (isTruthy(meta.publicUrl)) {
     rows.push(['TLS', tlsLabel(meta)]);
@@ -2404,7 +2407,7 @@ function summaryPanel(
   }
   rows.push(...extraRows);
   writePanel(io, meta.name, rows);
-  const instances = meta.extra.instances;
+  const instances = extra.instances;
   if (record.hasComposeInstancePorts(meta) && isTruthy(instances)) {
     io.writeOut(`  instances (${toTextAny(instances)}, load-balanced by Traefik):\n`);
     const count = toInt(instances);
@@ -2461,7 +2464,9 @@ export async function printNotes(meta: RecordNS.Metadata, io: CliIo): Promise<vo
   let groups: { title: unknown; rows: unknown; body: unknown; commands: unknown }[] =
     await notes.noteGroupsOf(meta);
   if (groups.length === 0) {
-    const flat = Array.isArray(meta.extra.notes) ? meta.extra.notes : [];
+    const record = require('../core/runner/record') as typeof RecordNS;
+    const extra = record.extraBag(meta);
+    const flat = Array.isArray(extra.notes) ? extra.notes : [];
     if (flat.length === 0) return;
     groups = [{ title: '', rows: [], body: flat, commands: [] }];
   }

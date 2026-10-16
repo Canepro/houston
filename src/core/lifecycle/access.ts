@@ -56,11 +56,14 @@ function extraOf(meta: AccessRecord): Record<string, unknown> {
     : {};
 }
 
+/** Brackets are valid only around the supported IPv6 literal, never as independent ends. */
+function normalizedHost(value: string): string {
+  const host = value.trim().toLowerCase();
+  return host === '[::1]' ? '::1' : host;
+}
+
 export function loopback(value: string): boolean {
-  const host = value
-    .trim()
-    .replace(/^\[|\]$/gu, '')
-    .toLowerCase();
+  const host = normalizedHost(value);
   if (host === 'localhost' || host === '::1') return true;
   const match = /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/u.exec(host);
   return match !== null && match.slice(1).every((octet) => Number(octet) <= 255);
@@ -181,10 +184,7 @@ export function validateEnvironment(env: AccessEnvironment = process.env, bind =
 }
 
 function forwardTarget(bind: string): string {
-  const host = bind
-    .trim()
-    .replace(/^\[|\]$/gu, '')
-    .toLowerCase();
+  const host = normalizedHost(bind);
   if (host === '::1') return '[::1]';
   // `localhost` resolves on the server to whichever family its resolver prefers; the
   // IPv4 loopback is what Docker published on. Any other loopback address is kept as
@@ -297,7 +297,7 @@ export function handoff(
     );
   }
   const rootUrl = advertisedUrl ?? (meta.rootUrl || `http://localhost:${String(remotePort)}`);
-  if (!sameOrigin(rootUrl, browserUrl) && (advertisedUrl !== null || selectedPort !== remotePort)) {
+  if (!sameOrigin(rootUrl, browserUrl)) {
     notes.push(
       `Rocket.Chat's ROOT_URL is ${rootUrl}: absolute links (invitations, password resets, ` +
         `OAuth callbacks) use that origin rather than the tunnel's ${browserUrl}.`,

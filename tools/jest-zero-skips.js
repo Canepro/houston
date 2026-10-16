@@ -99,7 +99,9 @@ const ROOT = path.resolve(__dirname, '..');
 // advice, malformed extra bags, and unforwarded client loopback URLs. Collection: 4560.
 // Four R5 cases retain malformed-neighbor host claims across runner and lifecycle scans.
 // Measured collection: 4564.
-const FLOOR = 4564;
+// Two R6 cases cover human malformed-record rendering and invalid recorded IPv6 brackets.
+// Measured nonexecuting collection: 4566.
+const FLOOR = 4566;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [
