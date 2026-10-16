@@ -274,9 +274,11 @@ export function discoverTextSecrets(
           const words = decoded.split(/[\s'"`;&|()<>]+/u).filter((word) => word !== '');
           words.forEach((word, index) => {
             const next = words[index + 1] ?? '';
+            // Only a plain value: a split this naive cannot read quoting or `$(...)`, and a
+            // fragment such as `$` or one letter would be masked across the whole bundle.
             if (
               valueTakingCredentialFlag(word) &&
-              next !== '' &&
+              /^[^\s$`'"(){}<>;&|\\]{4,}$/u.test(next) &&
               !/^--[A-Za-z][\w-]*$/u.test(next)
             ) {
               add(next);

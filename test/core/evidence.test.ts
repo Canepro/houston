@@ -1557,6 +1557,9 @@ describe('the bundle', () => {
         '  embeddedlist:',
         '    image: example',
         `    environment: { SPEC: '{"command":["sh","-c","client --password EmbeddedListSentinel"]}' }`,
+        '  embeddedsubst:',
+        '    image: example',
+        `    environment: { SPEC: '{"command":["sh","-c","client --password \\"$(cat /run/secrets/x)\\""]}' }`,
         '  dash:',
         '    image: example',
         '    command: client --password -DashSentinel',
@@ -1578,6 +1581,7 @@ describe('the bundle', () => {
         'x-dash-copy: -DashSentinel',
         'x-embedded-copy: EmbeddedListSentinel',
         'x-mount-path: /run/secrets/db',
+        "x-dollar: 'cost $5 each'",
         'x-port: 8080:80',
         'x-control: readable',
         '',
@@ -1612,6 +1616,8 @@ describe('the bundle', () => {
     expect(parsed['x-registry']).toBe('registry.example.test');
     // A mode switch in `--flag=value` form names a path, not a secret.
     expect(parsed['x-mount-path']).toBe('/run/secrets/db');
+    // A naive split of `"$(cat ...)"` must not make `$` a secret across the bundle.
+    expect(parsed['x-dollar']).toBe('cost $5 each');
     // A port or an option after -p is the next argument; newlines are never masked.
     // A user flag beside -p withholds the command line, since a short -p value can be either a
     // port or a password; the port spelling elsewhere stays readable.
