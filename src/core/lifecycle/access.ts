@@ -169,6 +169,16 @@ function bindOf(meta: AccessRecord, resolvedBindHost: string): string {
   return text(extraOf(meta).bind_host).trim();
 }
 
+/** Whether this record has the Compose topology that publishes direct instance ports. */
+function composeMultiInstance(extra: Record<string, unknown>): boolean {
+  const runtime = text(extra.runtime).trim().toLowerCase();
+  // An absent runtime/deployment is a pre-topology Compose record. New records carry the
+  // canonical values. Unknown runtimes must not gain forwards from an ambiguous count.
+  if (runtime !== '' && runtime !== 'docker') return false;
+  const deployment = text(extra.deployment).trim().toLowerCase();
+  return deployment === '' || deployment === 'multi-instance';
+}
+
 /**
  * The workspace's recorded browser-facing side ports, as numbers: the preset's
  * (phpLDAPadmin, Keycloak, Mailpit), monitoring's (Prometheus, Grafana), and the
@@ -180,10 +190,11 @@ function sidePorts(meta: AccessRecord, remotePort: number): number[] {
   const recorded = [extra.sidecar_ports, extra.monitoring_ports].flatMap((value) =>
     Array.isArray(value) ? value : [],
   );
-  // A single instance uses the primary port; multi-instance Compose publishes each
-  // replica at hostPort + 1..N, matching the URLs in the CLI summary.
+  // Compose multi-instance publishes each replica at hostPort + 1..N, matching the URLs in
+  // the CLI summary. Kubernetes keeps requested chart replicas in `instances` too, but it
+  // publishes one application port-forward, so only its explicitly recorded ports belong here.
   const instances = Number(extra.instances);
-  if (Number.isSafeInteger(instances) && instances > 1) {
+  if (composeMultiInstance(extra) && Number.isSafeInteger(instances) && instances > 1) {
     for (let at = 1; at <= instances && remotePort + at <= 65535; at += 1) {
       recorded.push(remotePort + at);
     }

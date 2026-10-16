@@ -170,7 +170,14 @@ describe('SSH access handoff', () => {
   });
 
   it('forwards every recorded instance and refuses a primary-port collision with one', () => {
-    const meta = workspace({ extra: { instances: 3, sidecar_ports: [3125, 8025] } });
+    const meta = workspace({
+      extra: {
+        runtime: 'docker',
+        deployment: 'multi-instance',
+        instances: 3,
+        sidecar_ports: [3125, 8025],
+      },
+    });
     const env = { SSH_TTY: '/dev/ttys001', USER: 'operator', HOUSTON_SSH_HOST: 'server' };
     const answer = handoff(meta, env);
     expect(answer?.side_ports).toEqual([3124, 3125, 3126, 8025]);
@@ -185,6 +192,33 @@ describe('SSH access handoff', () => {
       );
     }
     expect(handoff(workspace({ extra: { instances: 1 } }), env)?.side_ports).toEqual([]);
+  });
+
+  it('forwards only recorded Kubernetes side ports when chart replicas exceed one', () => {
+    const meta = workspace({
+      extra: {
+        runtime: 'kubernetes',
+        deployment: 'microservices',
+        instances: 3,
+        sidecar_ports: [9090, 3123, 8025],
+        monitoring_ports: [5050, 9090],
+      },
+    });
+    const answer = handoff(meta, {
+      SSH_TTY: '/dev/ttys001',
+      USER: 'operator',
+      HOUSTON_SSH_HOST: 'server',
+      // 3124 used to be invented from the Kubernetes replica count and therefore refused.
+      HOUSTON_SSH_LOCAL_PORT: '3124',
+    });
+    expect(answer).toMatchObject({
+      local_port: 3124,
+      side_ports: [5050, 8025, 9090],
+      tunnel_command:
+        'ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:3124:127.0.0.1:3123 ' +
+        '-L 127.0.0.1:5050:127.0.0.1:5050 -L 127.0.0.1:8025:127.0.0.1:8025 ' +
+        '-L 127.0.0.1:9090:127.0.0.1:9090 -- operator@server',
+    });
   });
 
   it('validates a session override only for a workspace that will be loopback-bound', () => {
