@@ -7,6 +7,14 @@ import * as config from '../../src/lib/config';
 import { ValidationError } from '../../src/lib/errors';
 import { savedSelectors } from '../../src/lib/setup-selectors';
 import * as host from '../../src/core/runner/host';
+import { humanLines } from '../../src/cli/handlers/setup';
+import { kube, ownedKubeconfig } from '../../src/core/kube/exec';
+import {
+  CLUSTER_NAME,
+  OWNER_LABEL_KEY,
+  OWNER_LABEL_VALUE,
+  CONTEXT,
+} from '../../src/core/kube/names';
 import type * as KubeToolsNS from '../../src/core/kube/tools';
 import type * as PolicyNS from '../testsetup-policy';
 jest.mock('node:fs', () => {
@@ -46,6 +54,25 @@ it('previews a draft without changing durable answers, and rejects invalid patch
     retain_runs: false,
   });
   expect(preview.first_run_command).toBe('');
+  config.saveConfig({ default_deployment: 'broken', default_scenarios: ['email'] });
+  const invalidBefore = fs.readFileSync(file);
+  await expect(setup.snapshot()).rejects.toThrow(/deployment/u);
+  const repairedDraft = await setup.snapshot({ draft: { deployment: 'monolith' } });
+  expect(repairedDraft.selection).toMatchObject({ deployment: 'monolith', scenarios: ['email'] });
+  expect(repairedDraft.persisted).toMatchObject({
+    deployment: null,
+    invalid_deployment: true,
+    answered_deployment: true,
+    scenarios: ['email'],
+  });
+  expect(repairedDraft.first_run_command).toBe('');
+  const replacedBoth = await setup.snapshot({
+    draft: { deployment: 'monolith', scenarios: [] },
+  });
+  expect(replacedBoth.selection.scenarios).toEqual([]);
+  expect(replacedBoth.persisted.scenarios).toEqual(['email']);
+  expect(fs.readFileSync(file)).toEqual(invalidBefore);
+  fs.writeFileSync(file, before);
   for (const patch of [
     { retain_runs: 'false' },
     { grants: { owned_cluster: 'true' } },
@@ -179,7 +206,8 @@ it('reports measured Podman capacity and the current MongoDB kernel boundary wit
     engine.mockResolvedValue({ ...observed, kernel: '7.0.14' });
     const fixed = await setup.snapshot();
     expect(fixed.compatibility.ready).toBe(true);
-    expect(fixed.environment.microservices_ready).toBe(true);
+    expect(fixed.environment.microservices_ready).toBe(false);
+    expect(fixed.environment.kubernetes_provisioning_available).toBe(true);
     expect(fixed.first_run_command).toContain('houston up');
   } finally {
     engine.mockResolvedValue(observed);
@@ -187,24 +215,125 @@ it('reports measured Podman capacity and the current MongoDB kernel boundary wit
   }
 });
 
-it('separates missing Kind provisioning from Kubernetes runtime tools without approving authority', async () => {
+it('distinguishes owned runtime readiness from provisioning and refuses an unusable first run', async () => {
   mockKubernetesToolsAvailable = true;
   mockMissingTools = ['kind'];
+  const cfg = {
+    default_deployment: 'microservices',
+    onboarding: { completed_at: '2026-10-15T00:00:00Z' },
+    grants: { owned_cluster: true },
+  };
   try {
-    const view = await setup.snapshot({ cfg: { default_deployment: 'microservices' } });
-    expect(view.environment.missing_kubernetes_tools).toEqual([]);
-    expect(view.environment.microservices_ready).toBe(true);
-    expect(view.environment).toMatchObject({ kubernetes_provisioning_available: false });
-    expect(view.gates.map((gate) => gate.code)).not.toContain('KUBERNETES_TOOLS_MISSING');
-    expect(view.gates.map((gate) => gate.code)).toContain('GATE_OWNED_CLUSTER');
+    const client = ownedKubeconfig();
+    const cases = [
+      { name: 'missing client', state: 'unavailable', client: false, marker: '', ready: 'ok' },
+      { name: 'absent marker', state: 'unavailable', client: true, marker: '', ready: 'ok' },
+      {
+        name: 'foreign marker',
+        state: 'unknown',
+        client: true,
+        marker: '{"metadata":{}}',
+        ready: 'ok',
+      },
+      { name: 'malformed marker', state: 'unknown', client: true, marker: '{', ready: 'ok' },
+      { name: 'unreachable API', state: 'unknown', client: true, marker: 'owned', ready: '' },
+      { name: 'marked healthy', state: 'ready', client: true, marker: 'owned', ready: 'ok' },
+    ];
+    for (const evidence of cases) {
+      fs.rmSync(path.join(config.home(), 'clients'), { recursive: true, force: true });
+      if (evidence.client) {
+        fs.mkdirSync(path.dirname(client), { recursive: true });
+        fs.writeFileSync(client, 'test owned client');
+      }
+      const before = fs.readdirSync(config.home(), { recursive: true });
+      const run = jest.spyOn(kube, 'run').mockImplementation(async (argv) => {
+        const marker = argv.includes('--ignore-not-found');
+        if (!marker && !argv.includes('/readyz')) throw new Error('unexpected non-read probe');
+        return {
+          argv: [...argv],
+          returncode: marker || evidence.ready === 'ok' ? 0 : 1,
+          stdout: marker
+            ? evidence.marker === 'owned'
+              ? JSON.stringify({
+                  metadata: { labels: { [OWNER_LABEL_KEY]: OWNER_LABEL_VALUE } },
+                  data: { cluster: CLUSTER_NAME },
+                })
+              : evidence.marker
+            : evidence.ready,
+          stderr: '',
+        };
+      });
+      const state = evidence.state;
+      let view: Awaited<ReturnType<typeof setup.snapshot>>;
+      try {
+        view = await setup.snapshot({ cfg });
+        if (!evidence.client) expect(run).not.toHaveBeenCalled();
+        if (state === 'ready') {
+          const ungranted = await setup.snapshot({ cfg: { ...cfg, grants: {} } });
+          expect(ungranted.gates.map((gate) => gate.code)).toContain('GATE_OWNED_CLUSTER');
+          const observed = await host.engine();
+          if (observed === null) throw new Error('the test engine fixture is required');
+          jest.mocked(host.engine).mockResolvedValueOnce({ ...observed, cpus: 1 });
+          const insufficient = await setup.snapshot({ cfg });
+          expect(insufficient.environment.owned_kubernetes_runtime).toBe('ready');
+          expect(insufficient.environment.microservices_ready).toBe(false);
+          expect(insufficient.first_run_command).toBe('');
+          expect(insufficient.gates.some((gate) => gate.kind === 'capacity')).toBe(true);
+          expect(insufficient.gates.some((gate) => gate.kind === 'runtime')).toBe(false);
+        }
+        for (const [argv, options] of run.mock.calls) {
+          expect(options?.env?.KUBECONFIG).toBe(client);
+          expect(argv.slice(0, 3)).toEqual(['kubectl', '--context', CONTEXT]);
+          expect(argv).toContain('get');
+          expect(argv.includes('--ignore-not-found') || argv.includes('/readyz')).toBe(true);
+          expect(argv.some((part) => ['apply', 'create', 'delete', 'export'].includes(part))).toBe(
+            false,
+          );
+        }
+        expect(fs.readdirSync(config.home(), { recursive: true })).toEqual(before);
+        if (evidence.client) expect(fs.readFileSync(client, 'utf8')).toBe('test owned client');
+      } finally {
+        run.mockRestore();
+      }
+      expect(view.environment.missing_kubernetes_tools).toEqual([]);
+      expect(view.environment.microservices_ready).toBe(state === 'ready');
+      expect(view.environment).toMatchObject({
+        owned_kubernetes_runtime: state,
+        microservices_ready: state === 'ready',
+        kubernetes_provisioning_available: false,
+      });
+      expect(view.gates.map((gate) => gate.code)).not.toContain('KUBERNETES_TOOLS_MISSING');
+      const lines = humanLines(view).join('\n');
+      expect(lines).toContain(`owned runtime ${state}`);
+      expect(lines).toContain('Kind provisioning unavailable');
+      if (state === 'ready') {
+        expect(view.first_run_command).toContain('houston up');
+        expect(view.gates).toEqual([]);
+      } else {
+        expect(view.first_run_command).toBe('');
+        expect(view.gates.map((gate) => gate.code)).toContain(
+          `OWNED_KUBERNETES_${state.toUpperCase()}`,
+        );
+        expect(lines).toContain('first run   (blocked)');
+      }
+    }
+    fs.rmSync(path.join(config.home(), 'clients'), { recursive: true, force: true });
+    mockMissingTools = [];
+    const provision = await setup.snapshot({ cfg });
+    expect(provision.environment.kubernetes_provisioning_available).toBe(true);
+    expect(provision.environment.microservices_ready).toBe(false);
+    expect(provision.first_run_command).toContain('houston up');
+    expect(humanLines(provision).join('\n')).toContain('requires provisioning');
     mockMissingTools = ['helm', 'kubectl', 'kind'];
-    const blocked = await setup.snapshot({ cfg: { default_deployment: 'microservices' } });
+    const blocked = await setup.snapshot({ cfg });
     expect(blocked.environment.missing_kubernetes_tools).toEqual(['kubectl', 'helm']);
     expect(blocked.environment.microservices_ready).toBe(false);
     expect(blocked.gates.map((gate) => gate.code)).toContain('KUBERNETES_TOOLS_MISSING');
+    expect(blocked.first_run_command).toBe('');
   } finally {
     mockKubernetesToolsAvailable = false;
     mockMissingTools = [];
+    fs.rmSync(path.join(config.home(), 'clients'), { recursive: true, force: true });
   }
 });
 

@@ -13,6 +13,7 @@ import * as versions from '../lib/versions';
 import * as host from './runner/host';
 import { updateConfigIf } from './runner/locks';
 import { which } from './kube/tools';
+import { ownedRuntimeState } from './kube/cluster';
 import { ENGINE_FLOOR_CPUS, ENGINE_FLOOR_MEMORY_GIB } from './lifecycle/sizing';
 
 export const SECTIONS = [
@@ -191,6 +192,7 @@ export async function detectEnvironment() {
     /* A failed probe is unknown, not a measured zero. */
   }
   const missing = ['kubectl', 'helm'].filter((name) => tools[name] !== true);
+  const ownedRuntime = tools.kubectl === true ? await ownedRuntimeState() : 'unknown';
   const enoughCapacity =
     engine !== null &&
     engine.cpus >= ENGINE_FLOOR_CPUS &&
@@ -211,7 +213,8 @@ export async function detectEnvironment() {
     missing_kubernetes_tools: missing,
     kubernetes_provisioning_available:
       tools.kind === true && missing.length === 0 && enoughCapacity,
-    microservices_ready: engine !== null && missing.length === 0 && enoughCapacity,
+    owned_kubernetes_runtime: ownedRuntime,
+    microservices_ready: ownedRuntime === 'ready' && missing.length === 0 && enoughCapacity,
     engine_resize_supported: false,
   };
 }
@@ -232,7 +235,23 @@ export async function snapshot(
   const cfg = options.cfg ?? config.loadConfig();
   const patch = validatedPatch(options.draft ?? {});
   const view = selection(cfg, patch);
-  const stored = savedSelectors(cfg);
+  let stored: Omit<ReturnType<typeof savedSelectors>, 'deployment'> & {
+    deployment: string | null;
+    invalid_deployment: boolean;
+  };
+  try {
+    stored = { ...savedSelectors(cfg), invalid_deployment: false };
+  } catch (error) {
+    if (!(error instanceof ValidationError) || patch.deployment === undefined) throw error;
+    // Selection already validated the replacement. Keep the invalid durable answer
+    // distinct from both the draft and an unanswered default, without writing it.
+    stored = {
+      ...savedSelectors({ ...cfg, default_deployment: patch.deployment }),
+      deployment: null,
+      invalid_deployment: true,
+      answered_deployment: true,
+    };
+  }
   const state = onboarding.state(cfg);
   const prefs = map(cfg.preferences);
   const section = options.section ?? '';
@@ -388,8 +407,12 @@ export async function snapshot(
     /^[a-zA-Z0-9_./:-]+$/u.test(value) ? value : "'" + value.replaceAll("'", "'\\''") + "'";
   // A flagless command resolves its topology from persisted setup. A draft has not
   // changed those selectors yet, so it must not be presented as an executable first run.
+  const runtimeUsable =
+    environment.microservices_ready || environment.kubernetes_provisioning_available;
   const firstRun =
-    conflict === '' && Object.keys(patch).length === 0 ? commands.map(shell).join(' ') : '';
+    conflict === '' && Object.keys(patch).length === 0 && (!kube || runtimeUsable)
+      ? commands.map(shell).join(' ')
+      : '';
   const gates: { kind: string; code: string; message: string; approve_with: string }[] = [];
   if (conflict !== '')
     gates.push({
@@ -419,6 +442,23 @@ export async function snapshot(
       message: `Missing local cluster tools: ${environment.missing_kubernetes_tools.join(', ')}`,
       approve_with: '',
     });
+  if (
+    kube &&
+    !runtimeUsable &&
+    environment.owned_kubernetes_runtime !== 'ready' &&
+    environment.missing_kubernetes_tools.length === 0
+  )
+    gates.push({
+      kind: 'runtime',
+      code:
+        environment.owned_kubernetes_runtime === 'unavailable'
+          ? 'OWNED_KUBERNETES_UNAVAILABLE'
+          : 'OWNED_KUBERNETES_UNKNOWN',
+      message:
+        `Owned local runtime is ${environment.owned_kubernetes_runtime}; ` +
+        'Kind provisioning is unavailable. Restore the owned client/cluster or install Kind and satisfy the engine capacity prerequisites.',
+      approve_with: '',
+    });
   if (kube && grants.owned_cluster !== true)
     gates.push({
       kind: 'grant',
@@ -432,6 +472,7 @@ export async function snapshot(
     persisted: {
       ...state,
       deployment: stored.deployment,
+      invalid_deployment: stored.invalid_deployment,
       scenarios: stored.scenarios,
       answered_deployment: stored.answered_deployment,
       answered_scenarios: stored.answered_scenarios,

@@ -31,6 +31,13 @@ export function humanLines(view: SetupSnapshot): string[] {
     `engine      ${environment.engine_provider} · ${String(environment.engine_cpus)} CPU · ` +
       `${String(environment.engine_memory_gib)} GiB · microservices ready ` +
       `${environment.microservices_ready ? 'yes' : 'no'}`,
+    `kubernetes  owned runtime ${environment.owned_kubernetes_runtime} · Kind provisioning ` +
+      `${environment.kubernetes_provisioning_available ? 'available' : 'unavailable'}` +
+      (selection.topology === 'kubernetes' &&
+      !environment.microservices_ready &&
+      environment.kubernetes_provisioning_available
+        ? ' · first run requires provisioning'
+        : ''),
     `capacity    ${capacityFact}`,
     `tools       ${tools}`,
     `kernel      ${environment.engine_kernel_version || 'unavailable'} · MongoDB ` +
