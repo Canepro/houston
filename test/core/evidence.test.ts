@@ -1165,6 +1165,68 @@ describe('the bundle', () => {
     );
   });
 
+  it('collects authorization headers and their earlier copies without hiding policy fields', async () => {
+    const name = 'e7-authorization';
+    await workspaceNamed(name);
+    const headers = [
+      'Authorization',
+      'authorization',
+      'AUTHORIZATION',
+      'authHeader',
+      'auth-header',
+      'AUTH_HEADER',
+      'proxyAuthorization',
+      'authorizationHeader',
+    ];
+    const secrets = headers.map((_, index) => `HeaderSentinel${String(index)}END`);
+    const doc = {
+      'x-copies': secrets.map((secret, index) => ({
+        text: `${index % 2 === 0 ? 'Bearer' : 'Basic'} ${secret}`,
+        copyBare: secret,
+      })),
+      'x-controls': {
+        authorizationEnabled: true,
+        authorizationPolicy: 'readable',
+        authorizerUrl: 'https://example.test',
+        authHeaderCount: 2,
+        author: 'support',
+      },
+      services: { rocketchat: { image: 'rocketchat/rocket.chat:8.5.1' } },
+      'x-headers': Object.fromEntries(
+        headers.map((key, index) => [
+          key,
+          `${index % 2 === 0 ? 'Bearer' : 'Basic'} ${secrets[index] ?? ''}`,
+        ]),
+      ),
+      'x-named': { value: 'Bearer NamedHeaderSentinelEND', name: 'AUTH_HEADER' },
+      'x-named-copy': 'NamedHeaderSentinelEND',
+      'x-json': JSON.stringify({
+        before: 'EmbeddedHeaderSentinelEND',
+        authorization: 'Basic EmbeddedHeaderSentinelEND',
+        keep: 'readable',
+      }),
+    };
+    fs.writeFileSync(path.join(workspace(name), 'docker-compose.yml'), YAML.stringify(doc));
+    const dest = path.join(workspace(name), 'out', 'bundle');
+    await collect(name, { bundle: dest });
+    const files = fs.readdirSync(dest);
+    expect(files).toContain('docker-compose.yml');
+    for (const file of files) {
+      const text = fs.readFileSync(path.join(dest, file), 'utf8');
+      for (const secret of [...secrets, 'NamedHeaderSentinelEND', 'EmbeddedHeaderSentinelEND'])
+        expect(text).not.toContain(secret);
+    }
+    const rendered = YAML.parse(
+      fs.readFileSync(path.join(dest, 'docker-compose.yml'), 'utf8'),
+    ) as typeof doc;
+    expect(rendered['x-controls']).toEqual(doc['x-controls']);
+    expect(JSON.parse(rendered['x-json']) as unknown).toEqual({
+      before: '********',
+      authorization: '********',
+      keep: 'readable',
+    });
+  });
+
   it('collects nested JSON, scalar and cross-document credentials without erasing controls', async () => {
     const name = 'e7-deep-credential-copies';
     const cfg =

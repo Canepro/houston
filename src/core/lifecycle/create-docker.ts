@@ -1188,27 +1188,20 @@ export async function replaceExisting(plan: CreatePlan): Promise<void> {
   }
 }
 
-/**
- * This run's licence into the workspace's env file, which the compose document names and never
- * holds. 0600 from the first byte, in the 0700 workspace; a dotfile, so `backup` leaves it out.
- */
-export async function writeLicense(plan: CreatePlan): Promise<void> {
-  if (plan.req.license === '') return;
-  const file = joinPath(paths.workspace(plan.reproName), compose.LICENSE_ENV_FILE);
-  await fs.writeFile(file, `ROCKETCHAT_LICENSE=${plan.req.license}\n`, { mode: 0o600 });
-  await fs.chmod(file, 0o600);
-}
-
 /** Publish the full allocation and generated files while the port lock is held. */
 export async function writeTheWorkspace(plan: CreatePlan): Promise<void> {
   const meta = plan.meta as record.Metadata;
+  // The licence is part of the same fingerprinted replacement as Compose. A failed or
+  // interrupted licence write must leave the record provisional, just like any other file.
+  const files: (readonly [string, string])[] = [...plan.files];
+  if (plan.req.license !== '')
+    files.push([compose.LICENSE_ENV_FILE, `ROCKETCHAT_LICENSE=${plan.req.license}\n`]);
   await record.write(
     plan.reproName,
     compose.toYaml(compose.forEngine(plan.doc as compose.ComposeDoc, await hostEngine())),
     meta,
-    plan.files,
+    files,
   );
-  await writeLicense(plan);
 }
 
 /** Bring up a published workspace, then attach the edge. */

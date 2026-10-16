@@ -123,7 +123,9 @@ const ROOT = path.resolve(__dirname, '..');
 // Five more cover artifact-wide copies, nested JSON/scalars, cyclic aliases, ordered env files
 // and replica uncertainty, and env mutation of unresolved credentials: total 4617.
 // Seven bundle regressions cover duplicate YAML names and six numeric-text discovery routes.
-const FLOOR = 4624;
+// Three more cover authorization copies, a failed licence write and an external kill during
+// that write. Existing complete-licence and Compose-kill cases are extended, not recounted.
+const FLOOR = 4627;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

@@ -714,9 +714,15 @@ function discoverArtifactSecrets(
     discoverArtifactSecrets(child, doc, secrets, wholeSecrets, credential, seen, depth + 1);
   const add = (text: string, whole = false): void => {
     if (text === '') return;
+    // Once a header value is known to be a credential, its bare token is a credential
+    // too. Copies may omit the scheme, including copies encountered before the header.
+    const authorization = /^(?:Bearer|Basic)[ \t]+(\S+)$/iu.exec(text);
+    if (authorization?.[1] !== undefined) add(authorization[1]);
     // Numeric text is still a credential, but its digits must not erase ports or replica
     // suffixes. Use the same core scalar parser as the artifact, including hex and .inf.
-    const numeric = /^[-+.0-9]/u.test(text) ? YAML.parseDocument(text) : null;
+    const numeric = /^[-+.0-9]/u.test(text)
+      ? YAML.parseDocument(text, { uniqueKeys: false })
+      : null;
     if (
       numeric !== null &&
       numeric.errors.length === 0 &&

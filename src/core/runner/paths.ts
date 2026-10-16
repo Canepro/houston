@@ -9,6 +9,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
 import * as config from '../../lib/config';
+import { LICENSE_ENV_FILE } from '../../lib/compose';
 import { joinPath } from '../../lib/home';
 import { pathExists } from '../../lib/format';
 
@@ -35,7 +36,7 @@ export async function atomicWrite(
   const unique = `${String(process.pid)}.${randomBytes(4).toString('hex')}`;
   const temporary = joinPath(path.dirname(target), `${path.basename(target)}.${unique}.tmp`);
   try {
-    await fs.writeFile(temporary, content, { encoding: 'utf8' });
+    await fs.writeFile(temporary, content, { encoding: 'utf8', mode: options.mode });
     if (options.mode !== undefined) await fs.chmod(temporary, options.mode);
     await fs.rename(temporary, target);
   } finally {
@@ -90,11 +91,14 @@ export async function exists(name: string): Promise<boolean> {
  * Keep a workspace's contents away from other local users. Best-effort.
  *
  * The DIRECTORY is what does the work: 0700 means no other user can traverse into the
- * workspace, so nothing inside it is reachable whatever its own mode. Files are left
+ * workspace, so nothing inside it is reachable whatever its own mode. Mounted files stay
  * group/other readable, and that is not a compromise -- it is required. Half of what
  * lives here is bind-mounted INTO a container, and those run as non-root (Prometheus
  * as 65534, Grafana, Loki, the OTel collector), so 0600 made them unreadable and
  * Prometheus crash-looped on "open /etc/prometheus/prometheus.yml: permission denied".
+ *
+ * The Compose licence env file and its unfinished atomic temporaries stay 0600.
+ * Compose reads that file on the host; no non-root container mounts it.
  *
  * Only the ROOT is 0700. Nested directories are 0755, because some volumes mount a
  * DIRECTORY rather than a file and the container then has to list it -- Prometheus
@@ -111,7 +115,13 @@ export async function restrict(root: string): Promise<void> {
     const walk = async (directory: string): Promise<void> => {
       for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
         const absolute = joinPath(directory, entry.name);
-        await fs.chmod(absolute, entry.isDirectory() ? 0o755 : 0o644);
+        // This file is read as an env_file by Compose, never bind-mounted into a
+        // non-root container. Keep it and any interrupted atomic temporary private.
+        const license =
+          directory === root &&
+          (entry.name === LICENSE_ENV_FILE ||
+            (entry.name.startsWith(`${LICENSE_ENV_FILE}.`) && entry.name.endsWith('.tmp')));
+        await fs.chmod(absolute, entry.isDirectory() ? 0o755 : license ? 0o600 : 0o644);
         if (entry.isDirectory()) await walk(absolute);
       }
     };

@@ -3,6 +3,7 @@ import { nullEmit } from '../../../src/lib/events';
 import * as presets from '../../../src/lib/presets/index';
 
 import * as fs from 'node:fs';
+import { spawn } from 'node:child_process';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -2071,11 +2072,120 @@ describe('an Enterprise licence', () => {
     expect(JSON.stringify(doc)).not.toContain(LICENSE);
     expect(JSON.stringify(plan.meta)).not.toContain(LICENSE);
     expect(plan.meta?.extra.licensed).toBe(true);
-    fs.mkdirSync(path.join(config.home(), 'repros', 'lic'), { recursive: true });
-    await createDocker.writeLicense(plan);
+    await createDocker.writeTheWorkspace(plan);
     const file = path.join(config.home(), 'repros', 'lic', '.license.env');
     expect(fs.readFileSync(file, 'utf8')).toBe(`ROCKETCHAT_LICENSE=${LICENSE}\n`);
     expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    expect(fs.statSync(path.dirname(file)).mode & 0o777).toBe(0o700);
+    const record = require('../../../src/core/runner/record') as typeof RecordNS;
+    const meta = await record.readMeta('lic');
+    expect(meta.extra.incomplete).toBeUndefined();
+    expect((await evidenceRecord('lic')).license).toMatchObject({ supplied: true });
+    // A later ordinary metadata/Compose edit must not relax the licence file's mode.
+    await record.write(
+      'lic',
+      fs.readFileSync(path.join(path.dirname(file), 'docker-compose.yml'), 'utf8'),
+      meta,
+    );
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+  });
+
+  it('keeps a failed licence write provisional until the matching replacement succeeds', async () => {
+    const createDocker =
+      require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+    const record = require('../../../src/core/runner/record') as typeof RecordNS;
+    const plan = planFor('license-failed', LICENSE);
+    await createDocker.buildDocument(plan);
+    createDocker.buildRecord(plan);
+    const ws = path.join(config.reprosDir(), plan.reproName);
+    const file = path.join(ws, '.license.env');
+    fs.mkdirSync(file, { recursive: true });
+    await expect(createDocker.writeTheWorkspace(plan)).rejects.toThrow();
+    let meta = await record.readMeta(plan.reproName);
+    expect(meta.extra.incomplete).toBe(true);
+    expect(meta.extra.incomplete_sha256).toMatch(/^[0-9a-f]{64}$/u);
+    expect((await evidenceRecord(plan.reproName)).license).toMatchObject({ supplied: null });
+    expect(fs.readdirSync(ws).filter((entry) => entry.endsWith('.tmp'))).toEqual([]);
+    const compose = fs.readFileSync(path.join(ws, 'docker-compose.yml'), 'utf8');
+    // Writing only the surviving Compose file does not complete the missing licence.
+    await record.write(plan.reproName, compose, meta, plan.files);
+    meta = await record.readMeta(plan.reproName);
+    expect(meta.extra.incomplete).toBe(true);
+    fs.rmdirSync(file);
+    plan.meta = meta;
+    await createDocker.writeTheWorkspace(plan);
+    expect((await record.readMeta(plan.reproName)).extra.incomplete).toBeUndefined();
+    expect((await evidenceRecord(plan.reproName)).license).toMatchObject({ supplied: true });
+    expect(fs.readFileSync(file, 'utf8')).toBe(`ROCKETCHAT_LICENSE=${LICENSE}\n`);
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+  });
+
+  it('keeps a readable provisional record when killed during the licence write', async () => {
+    const record = require('../../../src/core/runner/record') as typeof RecordNS;
+    const name = 'license-killed';
+    const ws = path.join(config.reprosDir(), name);
+    fs.mkdirSync(ws, { recursive: true });
+    const proc = spawn(
+      process.execPath,
+      [
+        path.resolve(__dirname, '../../../tools/license-write-child.js'),
+        name,
+        String(24 * 1024 * 1024),
+      ],
+      {
+        env: { ...process.env, HOUSTON_HOME: config.home() },
+        stdio: 'pipe',
+      },
+    );
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+      (resolve, reject) => {
+        proc.once('error', reject);
+        proc.once('close', (code, signal) => resolve({ code, signal }));
+      },
+    );
+    const temp = new RegExp(`^\\.license\\.env\\.${String(proc.pid)}\\.[0-9a-f]{8}\\.tmp$`, 'u');
+    let observed = '';
+    let observedMode = -1;
+    const observe = (): void => {
+      if (observed !== '') return;
+      const file = fs.readdirSync(ws).find((entry) => entry === '.license.env' || temp.test(entry));
+      if (file === undefined) return;
+      try {
+        observedMode = fs.statSync(path.join(ws, file)).mode & 0o777;
+      } catch {
+        return;
+      }
+      observed = file;
+      proc.kill('SIGKILL');
+    };
+    const watcher = fs.watch(ws, observe);
+    const poll = setInterval(observe, 1);
+    const deadline = setTimeout(() => proc.kill('SIGKILL'), 20_000);
+    try {
+      expect(await exited).toEqual({ code: null, signal: 'SIGKILL' });
+      expect(observed).not.toBe('');
+      expect(observedMode).toBe(0o600);
+      expect(fs.statSync(ws).mode & 0o777).toBe(0o700);
+      expect((await record.readMeta(name)).extra.incomplete).toBe(true);
+      expect((await evidenceRecord(name)).license).toMatchObject({ supplied: null });
+      expect(fs.existsSync(path.join(ws, '.license.env'))).toBe(false);
+      for (const entry of fs.readdirSync(ws)) {
+        if (['repro.json', 'docker-compose.yml'].includes(entry)) continue;
+        expect(entry).toMatch(temp);
+        const stat = fs.lstatSync(path.join(ws, entry));
+        expect(stat.isFile()).toBe(true);
+        expect(stat.mode & 0o777).toBe(0o600);
+      }
+    } finally {
+      clearTimeout(deadline);
+      clearInterval(poll);
+      watcher.close();
+      if (proc.exitCode === null && proc.signalCode === null) {
+        proc.kill('SIGKILL');
+        await exited;
+      }
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
   });
 
   it('is kept by a rebuild that does not name it again', async () => {

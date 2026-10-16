@@ -456,44 +456,64 @@ describe('the write-ahead ordering', () => {
   });
 
   it('leaves the readable half when the writer is killed between the two writes', async () => {
-    // The plan asks for this one to be tested by KILLING between the writes, because
-    // the ordering is only observable from outside the process that does them. The
-    // compose payload is sized so the second write is wide enough to be killed inside.
+    // Observe the real child creating its Compose temporary, then kill it. SIGKILL cannot
+    // run finally cleanup; only the published record and target atomicity are guaranteed.
     const child = path.join(ROOT, 'tools', 'writeahead-child.js');
-    let caught = false;
-
-    for (let attempt = 0; attempt < 8 && !caught; attempt += 1) {
-      const name = `killed-${String(attempt)}`;
-      const ws = paths.workspace(name);
-      const proc = spawn(process.execPath, [child, name, String(24 * 1024 * 1024)], {
-        env: { ...process.env, HOUSTON_HOME: config.home() },
-        stdio: 'pipe',
-      });
-      const exited = new Promise<void>((resolve) => {
-        proc.once('close', () => resolve());
-      });
-      const deadline = Date.now() + 20_000;
-      while (Date.now() < deadline) {
-        if (fs.existsSync(path.join(ws, 'repro.json'))) {
-          proc.kill('SIGKILL');
-          break;
-        }
-        if (proc.exitCode !== null) break;
-        await new Promise((resolve) => setTimeout(resolve, 1));
-      }
-      await exited;
-
-      if (fs.existsSync(path.join(ws, 'docker-compose.yml'))) continue; // too late; retry
-      caught = true;
-      // The half that survived is the one `readMeta` can read and `up` regenerates.
+    const name = 'killed-write';
+    const ws = paths.workspace(name);
+    fs.mkdirSync(ws, { recursive: true });
+    const proc = spawn(process.execPath, [child, name, String(24 * 1024 * 1024)], {
+      env: { ...process.env, HOUSTON_HOME: config.home() },
+      stdio: 'pipe',
+    });
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+      (resolve, reject) => {
+        proc.once('error', reject);
+        proc.once('close', (code, signal) => resolve({ code, signal }));
+      },
+    );
+    const temporary = new RegExp(
+      `^docker-compose\\.yml\\.${String(proc.pid)}\\.[0-9a-f]{8}\\.tmp$`,
+      'u',
+    );
+    let observedTemporary = false;
+    const observe = (): void => {
+      if (observedTemporary || !fs.readdirSync(ws).some((entry) => temporary.test(entry))) return;
+      observedTemporary = true;
+      proc.kill('SIGKILL');
+    };
+    const watcher = fs.watch(ws, observe);
+    // The interval also covers coalesced filesystem events. This is an observation loop,
+    // not a required write duration or a retry of the crash assertion.
+    const poll = setInterval(observe, 1);
+    const deadline = setTimeout(() => proc.kill('SIGKILL'), 20_000);
+    try {
+      const result = await exited;
+      expect(observedTemporary).toBe(true);
+      expect(result).toEqual({ code: null, signal: 'SIGKILL' });
+      expect(fs.existsSync(path.join(ws, 'docker-compose.yml'))).toBe(false);
       expect(await paths.exists(name)).toBe(true);
       expect((await readMeta(name)).name).toBe(name);
-      // And no temp file was left looking like a workspace file.
-      expect(fs.readdirSync(ws).filter((entry) => entry.endsWith('.tmp'))).toEqual([]);
+      expect(fs.statSync(ws).mode & 0o777).toBe(0o700);
+      expect(fs.statSync(path.join(ws, 'repro.json')).mode & 0o777).toBe(0o644);
+      // A leftover must be this child's unique ordinary temporary, never a published
+      // Compose target, symlink, directory or unrelated file.
+      for (const entry of fs.readdirSync(ws)) {
+        if (entry === 'repro.json') continue;
+        expect(entry).toMatch(temporary);
+        expect(fs.lstatSync(path.join(ws, entry)).isFile()).toBe(true);
+      }
+    } finally {
+      clearTimeout(deadline);
+      clearInterval(poll);
+      watcher.close();
+      if (proc.exitCode === null && proc.signalCode === null) {
+        proc.kill('SIGKILL');
+        await exited;
+      }
+      fs.rmSync(ws, { recursive: true, force: true });
     }
-
-    expect(caught).toBe(true);
-  }, 120_000);
+  });
 });
 
 describe('a Kubernetes workspace', () => {

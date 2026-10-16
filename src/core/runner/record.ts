@@ -12,6 +12,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
 import * as config from '../../lib/config';
+import { LICENSE_ENV_FILE } from '../../lib/compose';
 import { MissingRecordError } from '../../lib/errors';
 import { joinPath } from '../../lib/home';
 import {
@@ -379,7 +380,11 @@ export async function write(
     // uses for its own API calls -- always loopback, by contract. Substituting that
     // shipped a livechat demo page that only worked on the machine docker runs on.
     const advertised = String(meta.extra.advertised_url ?? '') || meta.rootUrl;
-    await fs.writeFile(target, content.split('{{ROOT_URL}}').join(advertised), 'utf8');
+    if (relative === LICENSE_ENV_FILE) {
+      // Opaque credential bytes, private from creation and atomically published. Do not
+      // substitute URL placeholders inside a licence supplied by the caller.
+      await paths.atomicWrite(target, content, { mode: 0o600 });
+    } else await fs.writeFile(target, content.split('{{ROOT_URL}}').join(advertised), 'utf8');
   }
   // The caller may pass back the provisional record an earlier interrupted write left. Only
   // the replacement that write was making, or a write proven to undo it, finishes it. `env`,

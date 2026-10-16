@@ -50,8 +50,13 @@ export function credentialKey(key: string): boolean {
     .replace(/[^\p{L}\p{Nd}]/gu, '_')
     .toLowerCase();
   const lowered = key.toLowerCase();
-  return [...SECRET_KEY_HINTS, ...JOINED_KEY_HINTS].some(
-    (hint) => lowered.includes(hint) || words.includes(hint),
+  // Header names are credentials; nearby policy/count fields are not. Match complete
+  // normalized names so authorizationEnabled and authHeaderCount remain readable.
+  return (
+    /^(?:(?:proxy|http)_)?(?:authorization(?:_?headers?)?|auth_?headers?)$/u.test(words) ||
+    [...SECRET_KEY_HINTS, ...JOINED_KEY_HINTS].some(
+      (hint) => lowered.includes(hint) || words.includes(hint),
+    )
   );
 }
 
