@@ -118,15 +118,15 @@ describe('the declarative command foundation', () => {
     },
   );
 
-  test('registers all 43 unique paths and all 189 logical flags from one source', () => {
+  test('registers all 43 unique paths and all 197 logical flags from one source', () => {
     const specs: readonly CommandSpec[] = COMMAND_SPECS;
     const root = buildCli({ execute: async () => null });
     const paths = specs.map((spec) => spec.path);
     expect(paths).toHaveLength(43);
     expect(new Set(paths).size).toBe(43);
-    expect(specs.reduce((total, spec) => total + spec.options.length, 0)).toBe(175);
+    expect(specs.reduce((total, spec) => total + spec.options.length, 0)).toBe(183);
     const described = describeCommands();
-    expect(described.reduce((total, command) => total + command.flags.length, 0)).toBe(189);
+    expect(described.reduce((total, command) => total + command.flags.length, 0)).toBe(197);
     expect(described.filter((command) => command.json)).toHaveLength(15);
     expect(described.filter((command) => command.streams).map((command) => command.name)).toEqual([
       'ready',

@@ -179,6 +179,14 @@ export const ENGINE_FLOOR_CPUS = 4;
 export const ENGINE_FLOOR_MEMORY_GIB = 6.0;
 
 /**
+ * Whether the engine floor binds a create at all: only a Kubernetes one that builds its own
+ * control plane in the container engine. `checkEngineFloor` and the setup snapshot share it.
+ */
+export function engineFloorApplies(runtime: string, provisioning: boolean): boolean {
+  return topology.normalize(runtime) === topology.KUBERNETES && provisioning;
+}
+
+/**
  * Refuse a Kubernetes create the container engine is too small for.
  *
  * Compose is left alone: it runs two containers and works on a 2 GB VM, so a floor there
@@ -190,10 +198,9 @@ export async function checkEngineFloor(
   emit: Emit = nullEmit,
   provisioning = true,
 ): Promise<void> {
-  if (topology.normalize(req.runtime) !== topology.KUBERNETES) return;
   // The floor's whole premise is that the container VM has to hold a control plane. When
   // the cluster is not one houston is about to build in Docker, the premise is void.
-  if (!provisioning) return;
+  if (!engineFloorApplies(req.runtime, provisioning)) return;
   const cap = await host.dockerCapacity();
   if (cap === null) return;
   const [cpus, memBytes] = cap;

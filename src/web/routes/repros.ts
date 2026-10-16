@@ -91,7 +91,9 @@ function createRequest(request: FastifyRequest) {
   const body = requestBody(request.body, true);
   const version = stripText(isTruthy(body.version) ? toTextAny(body.version) : '');
   if (version === '') throw new ValidationError('`version` is required, e.g. {"version": "8.5.1"}');
-  const fields: Record<string, unknown> = { actor: actor(request) };
+  // `createReq` defaults to the explicit `default` preset for legacy callers. A missing API
+  // field is different: it lets the new-workspace planner consume saved setup selectors.
+  const fields: Record<string, unknown> = { actor: actor(request), preset: '' };
   const names: Readonly<Record<string, string>> = {
     version: 'version',
     preset: 'preset',

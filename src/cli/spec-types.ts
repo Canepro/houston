@@ -38,6 +38,11 @@ export interface JsonSpec {
     readonly argument: string;
     readonly byValue: Readonly<Record<string, string>>;
   };
+  /**
+   * Success schemas a handler selects by naming one in its payload's own `schema`. The
+   * envelope then advertises that schema instead of `schema`, which stays the default.
+   */
+  readonly payloadSchemas?: readonly string[];
   readonly streams: boolean;
   readonly option?: { readonly index: number; readonly description: string };
 }

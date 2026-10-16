@@ -8,6 +8,7 @@ import { unsupportedFields } from '../../core/lifecycle/preconditions';
 import { capacity, runtimeCost } from '../../core/lifecycle/sizing';
 import { PRIVILEGED_CREATE_FIELDS } from '../../core/lifecycle/types';
 import { dockerAvailable, dockerKernelVersion } from '../../core/runner/host';
+import * as setup from '../../core/setup';
 import * as topology from '../../core/topology';
 import * as config from '../../lib/config';
 import { ValidationError } from '../../lib/errors';
@@ -77,6 +78,8 @@ async function kubeClusters(): Promise<{
 }
 
 export function register(app: FastifyInstance): void {
+  app.get('/api/setup', async () => await setup.snapshot());
+
   app.get('/api/health', async () => ({ ok: true, docker: await dockerAvailable() }));
 
   app.get('/api/kubernetes', async () => {

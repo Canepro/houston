@@ -565,6 +565,15 @@ export async function planClusterStep(job: KubeCreate): Promise<void> {
     );
   }
   job.plan = await planCluster(request.reqContext(job.req));
+  // A saved setup choice may opt into Houston's local Kind topology, but it cannot make an
+  // ambient or saved remote context an implicit target. Explicit runtime/context choices keep
+  // the established adoption path and arrive here with `implicitOwnedLocal: false`.
+  if (job.req.implicitOwnedLocal && !isOurs(job.plan.context)) {
+    throw new ConflictError(
+      `saved microservices default requires Houston's owned local Kind cluster; ` +
+        `'${job.plan.context}' needs an explicit --context choice.`,
+    );
+  }
   // A BILLABLE CLUSTER AND NO PUBLIC NAME. Warned, not refused, and the distinction
   // matters: a refusal would remove the one way to reach a workspace whose ingress is
   // broken, which is exactly when somebody needs it.

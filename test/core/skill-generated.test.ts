@@ -10,6 +10,8 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import * as config from '../../src/lib/config';
 
 import { capabilities } from '../../src/cli/capabilities';
 
@@ -51,6 +53,21 @@ describe('the shipped skill file', () => {
     });
   });
 
+  it('tells an agent that saved setup choices change a flagless up, and how to pin Docker', () => {
+    // `up` with no selector flags applies the deployment and scenarios `onboard` saved, so
+    // the basic recipe can start a local Kubernetes workspace on a configured machine.
+    const shipped = fs.readFileSync(generator.TARGET, 'utf8');
+    const recipe = shipped.slice(
+      shipped.indexOf('## Requests and the commands they mean'),
+      shipped.indexOf('| The person asks'),
+    );
+    expect(recipe).toContain('`houston onboard --show --json`');
+    expect(recipe).toContain('`capabilities.setup_defaults`');
+    // The key lives in capabilities, not in the --show snapshot.
+    expect(recipe).toContain('`capabilities.setup_defaults.up_without_selectors`');
+    expect(recipe).toMatch(/--deployment monolith --preset default/u);
+  });
+
   it('never tells an agent to attach the admin password', () => {
     // `info --json` carries `data.login.password` (the 1.x payload, which the skill itself
     // reads to tell the person how to log in), generated for any workspace reachable beyond
@@ -90,4 +107,20 @@ describe('the shipped skill file', () => {
     };
     expect(() => generator.render(fewer, template, VERSION)).toThrow(/names gate/u);
   });
+});
+
+it('generates only bundled presets even when the caller home adds or overrides presets', () => {
+  const dir = path.join(config.home(), 'presets');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'hostile-custom.yaml'), 'name: hostile-custom\nenv: {}\n');
+  fs.writeFileSync(path.join(dir, 'email.yaml'), 'name: renamed-email\nenv: {}\n');
+  const script = "const g = require('./tools/skill-generate'); process.stdout.write(g.generate());";
+  const generated = execFileSync(process.execPath, ['-e', script], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, HOUSTON_HOME: config.home() },
+  });
+  expect(generated).not.toContain('`hostile-custom`');
+  expect(generated).not.toContain('`renamed-email`');
+  expect(generated).toBe(fs.readFileSync(generator.TARGET, 'utf8'));
 });
