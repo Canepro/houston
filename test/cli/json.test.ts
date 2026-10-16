@@ -429,6 +429,35 @@ describe('the capabilities document', () => {
       ]),
     );
 
+  it('exposes the saved setup selectors that change what a flagless up does', () => {
+    const cfg = require('../../src/lib/config') as typeof ConfigNS;
+    const saved = () => doc().setup_defaults as Record<string, unknown>;
+    expect(saved()).toMatchObject({
+      deployment: 'monolith',
+      scenarios: [],
+      answered_deployment: false,
+      answered_scenarios: false,
+      up_without_selectors: { runtime: 'docker', deployment: 'monolith', preset: 'default' },
+    });
+    cfg.saveConfig({
+      default_deployment: 'microservices',
+      default_scenarios: ['email'],
+      preferences: { seed_profile: 'standard', retain_runs: true },
+    });
+    expect(saved()).toMatchObject({
+      deployment: 'microservices',
+      scenarios: ['email'],
+      answered_deployment: true,
+      answered_scenarios: true,
+      seed_profile: 'standard',
+      retain_runs: true,
+      invalid: false,
+      up_without_selectors: { runtime: 'kubernetes', deployment: 'microservices', preset: 'email' },
+    });
+    cfg.saveConfig({ default_deployment: 'bogus' });
+    expect(saved()).toMatchObject({ invalid: true, up_without_selectors: null });
+  });
+
   it('carries no pre-rename key, and says so with the wire generation', () => {
     // Removing `rc_repro_version` and `schema_legacy` is a BREAKING change, so it comes
     // with the bump of `contract`: either alone is a bug.
@@ -1213,5 +1242,47 @@ describe('goal-first setup CLI', () => {
     } finally {
       jest.dontMock('../../src/cli/handlers/prompt');
     }
+  });
+  it('asks every question and the confirmation for --reconfigure, with an explicit answer as the default', async () => {
+    const cfg = require('../../src/lib/config') as typeof ConfigNS;
+    cfg.saveConfig({
+      default_deployment: 'monolith',
+      default_scenarios: [],
+      preferences: { seed_profile: 'small', retain_runs: false },
+    });
+    const before = fs.readFileSync(path.join(home, 'config.yaml'));
+    const confirm = jest.fn(async () => false);
+    const setupAnswer = jest.fn(async (_question: string, fallback: string) => fallback);
+    jest.doMock('../../src/cli/handlers/prompt', () => ({
+      ...jest.requireActual('../../src/cli/handlers/prompt'),
+      confirm,
+      setupAnswer,
+    }));
+    try {
+      const result = await run(['onboard', '--reconfigure', '--deployment', 'multi-instance']);
+      expect(result.code).toBe(0);
+      expect(setupAnswer.mock.calls.length).toBeGreaterThan(1);
+      const asked = setupAnswer.mock.calls.find(([question]) => question.includes('deployment'));
+      expect(asked?.[1]).toBe('multi-instance');
+      expect(confirm).toHaveBeenCalledWith('Apply these setup choices?');
+      expect(fs.readFileSync(path.join(home, 'config.yaml'))).toEqual(before);
+    } finally {
+      jest.dontMock('../../src/cli/handlers/prompt');
+    }
+  });
+  it('rejects --reconfigure with an answer when no prompt can be shown', async () => {
+    const cfg = require('../../src/lib/config') as typeof ConfigNS;
+    cfg.saveConfig({ default_deployment: 'monolith' });
+    const before = fs.readFileSync(path.join(home, 'config.yaml'));
+    const result = await run([
+      'onboard',
+      '--reconfigure',
+      '--deployment',
+      'microservices',
+      '--json',
+    ]);
+    expect(result.code).toBe(2);
+    expect(errorOf(result).message).toContain('--reconfigure asks the setup questions');
+    expect(fs.readFileSync(path.join(home, 'config.yaml'))).toEqual(before);
   });
 });

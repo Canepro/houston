@@ -4,11 +4,20 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import * as config from '../lib/config';
+import { currentContext } from '../lib/context';
 import * as onboarding from '../lib/onboarding';
 import { ValidationError } from '../lib/errors';
 import { mongoKernelConflict } from '../lib/mongo-kernel';
 import * as presets from '../lib/presets';
-import { deployment, scenarios, savedSelectors, DEPLOYMENTS } from '../lib/setup-selectors';
+import {
+  deployment,
+  scenarios,
+  savedRetainRuns,
+  savedSeedProfile,
+  savedSelectors,
+  DEPLOYMENTS,
+  SEED_PROFILES,
+} from '../lib/setup-selectors';
 import * as versions from '../lib/versions';
 import * as host from './runner/host';
 import { updateConfigIf } from './runner/locks';
@@ -27,7 +36,8 @@ import type { Tool } from './kube/tools';
 import { tools as toolFloors } from './kube/names';
 import * as paths from './runner/paths';
 import { ownedRuntimeState } from './kube/cluster';
-import { ENGINE_FLOOR_CPUS, ENGINE_FLOOR_MEMORY_GIB } from './lifecycle/sizing';
+import { ownerPrefix } from './lifecycle/naming';
+import { ENGINE_FLOOR_CPUS, ENGINE_FLOOR_MEMORY_GIB, engineFloorApplies } from './lifecycle/sizing';
 
 export const SECTIONS = [
   'deployment',
@@ -37,7 +47,7 @@ export const SECTIONS = [
   'authority',
   'capacity',
 ] as const;
-const PROFILES = ['none', 'small', 'standard', 'large'];
+const PROFILES = SEED_PROFILES;
 
 const PREFERENCES = { retain_runs: false, kubernetes_target: 'owned-local', seed_profile: 'small' };
 const FIRST_VERSION = '8.6.1';
@@ -45,12 +55,20 @@ const FIRST_NAME = 'first-repro';
 const FIRST_NAME_TRIES = 50;
 const REPAIR_COMMAND = 'houston onboard --deployment monolith --scenario none';
 
-/** `first-repro`, else `first-repro-2`, `-3` ... the first not yet a workspace; '' if none is. */
+/**
+ * `first-repro`, else `first-repro-2`, `-3` ... the first that `up --name` would not revive;
+ * '' if none is free. With accounts, `up` stores `<actor>-<name>`, and it takes an existing
+ * bare `<name>` as its own when the actor may act on it, so a name counts as used when either
+ * form exists.
+ */
 async function firstRunName(): Promise<string> {
+  const { actor } = currentContext();
   try {
     for (let n = 1; n <= FIRST_NAME_TRIES; n += 1) {
       const name = n === 1 ? FIRST_NAME : `${FIRST_NAME}-${String(n)}`;
-      if (!(await paths.exists(name))) return name;
+      const forms = new Set([name, ownerPrefix(name, actor)]);
+      const used = await Promise.all([...forms].map((form) => paths.exists(form)));
+      if (!used.includes(true)) return name;
     }
   } catch {
     /* An unreadable workspace directory is not a free name. */
@@ -303,7 +321,8 @@ export async function detectEnvironment() {
     kubernetes_tools_ready: kubernetesReady,
     kubernetes_provisioning_available: canProvision(found) && kubernetesReady && enoughCapacity,
     owned_kubernetes_runtime: ownedRuntime,
-    microservices_ready: ownedRuntime === 'ready' && kubernetesReady && enoughCapacity,
+    // A ready owned runtime is used, not built, so the provisioning floor does not apply.
+    microservices_ready: ownedRuntime === 'ready' && kubernetesReady,
     engine_resize_supported: false,
   };
 }
@@ -349,25 +368,34 @@ export async function snapshot(
     throw new ValidationError(`unknown setup section ${section}`);
   const environment = await detectEnvironment();
   const kube = view.topology === 'kubernetes';
+  // The engine floor sizes a control plane houston would build; a ready owned runtime has one.
+  const floor =
+    kube && engineFloorApplies('kubernetes', environment.owned_kubernetes_runtime !== 'ready');
   const knownCapacity = environment.engine_cpus > 0 && environment.engine_memory_gib > 0;
   const enough =
     knownCapacity &&
     environment.engine_cpus >= ENGINE_FLOOR_CPUS &&
     environment.engine_memory_gib >= ENGINE_FLOOR_MEMORY_GIB;
   const capacity = {
-    applicable: kube,
+    applicable: floor,
     provider: environment.engine_provider,
     observed_cpu: environment.engine_cpus,
     observed_memory_gib: environment.engine_memory_gib,
     required_cpu: ENGINE_FLOOR_CPUS,
     required_memory_gib: ENGINE_FLOOR_MEMORY_GIB,
-    ready: !kube || enough,
-    status: !kube ? 'not_applicable' : enough ? 'ready' : knownCapacity ? 'below_floor' : 'unknown',
-    code: !kube || enough ? '' : knownCapacity ? 'CAPACITY_BELOW_FLOOR' : 'CAPACITY_UNKNOWN',
+    ready: !floor || enough,
+    status: !floor
+      ? 'not_applicable'
+      : enough
+        ? 'ready'
+        : knownCapacity
+          ? 'below_floor'
+          : 'unknown',
+    code: !floor || enough ? '' : knownCapacity ? 'CAPACITY_BELOW_FLOOR' : 'CAPACITY_UNKNOWN',
     supported_action: null,
     side_effects: [],
     remediation:
-      kube && !enough
+      floor && !enough
         ? 'Configure the engine manually, then run houston doctor --json. Automatic engine resizing is not supported.'
         : '',
     verification: 'houston doctor --json',
@@ -542,7 +570,7 @@ export async function snapshot(
         'then run houston doctor --json.',
       approve_with: '',
     });
-  if (kube && !capacity.ready)
+  if (!capacity.ready)
     gates.push({
       kind: 'capacity',
       code: capacity.code,
@@ -620,11 +648,9 @@ export async function snapshot(
         Object.entries(PREFERENCES).map(([key]) => [
           key,
           key === 'seed_profile'
-            ? typeof prefs.seed_profile === 'string' && PROFILES.includes(prefs.seed_profile)
-              ? prefs.seed_profile
-              : PREFERENCES.seed_profile
+            ? savedSeedProfile(cfg)
             : key === 'retain_runs'
-              ? prefs.retain_runs === true
+              ? savedRetainRuns(cfg)
               : typeof prefs.kubernetes_target === 'string' && prefs.kubernetes_target !== ''
                 ? prefs.kubernetes_target
                 : PREFERENCES.kubernetes_target,

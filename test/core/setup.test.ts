@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import * as setup from '../../src/core/setup';
 import * as config from '../../src/lib/config';
 import { ValidationError } from '../../src/lib/errors';
+import { runWithContext } from '../../src/lib/context';
 import { savedSelectors } from '../../src/lib/setup-selectors';
 import * as host from '../../src/core/runner/host';
 import { humanLines } from '../../src/cli/handlers/setup';
@@ -295,11 +296,12 @@ it('distinguishes owned runtime readiness from provisioning and refuses an unusa
           if (observed === null) throw new Error('the test engine fixture is required');
           jest.mocked(host.engine).mockResolvedValueOnce({ ...observed, cpus: 1 });
           const insufficient = await setup.snapshot({ cfg });
+          // The floor sizes a control plane houston would build; a ready runtime exists already.
           expect(insufficient.environment.owned_kubernetes_runtime).toBe('ready');
-          expect(insufficient.environment.microservices_ready).toBe(false);
-          expect(insufficient.first_run_command).toBe('');
-          expect(insufficient.gates.some((gate) => gate.kind === 'capacity')).toBe(true);
-          expect(insufficient.gates.some((gate) => gate.kind === 'runtime')).toBe(false);
+          expect(insufficient.environment.microservices_ready).toBe(true);
+          expect(insufficient.first_run_command).toContain('houston up');
+          expect(insufficient.gates).toEqual([]);
+          expect(insufficient.capacity).toMatchObject({ applicable: false, ready: true });
         }
         for (const [argv, options] of clusterCalls()) {
           expect(options?.env?.KUBECONFIG).toBe(client);
@@ -344,6 +346,13 @@ it('distinguishes owned runtime readiness from provisioning and refuses an unusa
     expect(provision.environment.microservices_ready).toBe(false);
     expect(provision.first_run_command).toContain('houston up');
     expect(humanLines(provision).join('\n')).toContain('requires provisioning');
+    const small = await host.engine();
+    if (small === null) throw new Error('the test engine fixture is required');
+    jest.mocked(host.engine).mockResolvedValueOnce({ ...small, cpus: 1 });
+    const undersized = await setup.snapshot({ cfg });
+    expect(undersized.environment.kubernetes_provisioning_available).toBe(false);
+    expect(undersized.gates.some((gate) => gate.kind === 'capacity')).toBe(true);
+    expect(undersized.first_run_command).toBe('');
     mockMissingTools = ['helm', 'kubectl', 'kind'];
     const blocked = await setup.snapshot({ cfg });
     expect(blocked.environment.missing_kubernetes_tools).toEqual(['kubectl', 'helm']);
@@ -535,6 +544,29 @@ it('chooses an unused first-run name when first-repro already exists', async () 
   expect(await name()).toBe('first-repro-2');
   taken('first-repro-2');
   expect(await name()).toBe('first-repro-3');
+});
+
+it('probes the first-run name as up will materialise it, with the actor prefix', async () => {
+  config.saveConfig({});
+  // The previous test leaves first-repro and first-repro-2 behind.
+  fs.rmSync(path.join(config.home(), 'repros'), { recursive: true, force: true });
+  const taken = (name: string) => {
+    const directory = path.join(config.home(), 'repros', name);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'repro.json'), '{}');
+  };
+  const name = async () => /--name (\S+)/u.exec((await setup.snapshot()).first_run_command)?.[1];
+  await runWithContext({ actor: 'alice' }, async () => {
+    expect(await name()).toBe('first-repro');
+    taken('alice-first-repro');
+    expect(await name()).toBe('first-repro-2');
+    taken('first-repro-2');
+    expect(await name()).toBe('first-repro-3');
+    taken('alice-first-repro-3');
+    expect(await name()).toBe('first-repro-4');
+  });
+  // Without accounts the same directories mean nothing: only the bare name counts.
+  expect(await name()).toBe('first-repro');
 });
 
 it('records whether a person or the defaults completed onboarding, and gates only on a person', async () => {

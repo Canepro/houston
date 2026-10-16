@@ -43,6 +43,12 @@ JSON, no Docker needed, and the authority for **this build**: its commands and w
 `--json` or stream, runtimes and deployments, presets, seed profiles, onboarding state, phases,
 error codes and exit codes. Read it instead of assuming a flag exists.
 
+`setup_defaults` holds the deployment, scenarios, seed profile and cleanup choice that
+`houston onboard` saved, and `up_without_selectors`, the runtime, deployment and preset a
+`houston up` with no `--deployment`, `--preset` or `--runtime` builds from them. On a configured
+machine that can be local Kubernetes, so read it before the first `up`, and add
+`--deployment monolith --preset default` when you need plain Docker.
+
 ## Exit codes
 
 | Code | Meaning | `error.code` | What to do |

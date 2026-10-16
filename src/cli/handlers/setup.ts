@@ -74,17 +74,28 @@ export async function run(invocation: Invocation) {
     return { ...(await setup.snapshot({ section })), action: 'show' };
   }
   const defaults = o.accept_defaults === true;
+  const reconfigure = o.reconfigure === true;
+  // `--reconfigure` is the way to be asked again, so it never skips the questions or the
+  // confirmation. Without a prompt to show, or with answers already filled in by defaults,
+  // it has nothing to ask, and writing silently would be the opposite of what it says.
+  if (reconfigure && (active() || defaults))
+    throw new ValidationError(
+      active()
+        ? '--reconfigure asks the setup questions and a confirmation, which --json cannot show; run it in a terminal, or drop --reconfigure to apply the answers you passed'
+        : '--reconfigure asks the setup questions, so it cannot be combined with --accept-defaults',
+    );
   if (active() && !defaults && Object.keys(patch).length === 0)
     throw new ValidationError(
       'JSON setup requires --show, --accept-defaults, or explicit setup choices',
     );
-  if (!active() && !defaults && Object.keys(patch).length === 0) {
-    // Rebuild after each answer so deployment-dependent questions follow the current draft.
+  if (!active() && !defaults && (reconfigure || Object.keys(patch).length === 0)) {
+    // Rebuild after each answer so deployment-dependent questions follow the current draft;
+    // an answer already given on the command line is the default offered for its question.
     for (const sec of setup.SECTIONS) {
       if (section !== '' && section !== sec) continue;
       const live = await setup.snapshot({ draft: patch, section: sec });
       for (const q of live.questions) {
-        if (q.answered && o.reconfigure !== true && section === '') continue;
+        if (q.answered && !reconfigure && section === '') continue;
         const fallback = Array.isArray(q.value) ? q.value.join(',') : String(q.value);
         const answer = await setupAnswer(
           q.prompt +

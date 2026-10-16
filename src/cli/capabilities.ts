@@ -1,11 +1,14 @@
 import { seedCatalogue } from '../lib/seed-options';
 import { state as skillState } from '../core/skill';
-import { DEPLOYMENTS, DOCKER, REGISTERED } from '../core/topology';
-import { DEFAULT_BIND_HOST } from '../lib/config';
+import { DEPLOYMENTS, DOCKER, REGISTERED, resolveAxes } from '../core/topology';
+import { DEFAULT_BIND_HOST, loadConfig } from '../lib/config';
+import type { Config } from '../lib/config';
 import { errorCodes, EXIT_CODES } from '../lib/errors';
 import { CONTRACT, getHoustonVersion, PHASES } from '../lib/jsonout';
 import { state as onboardingState } from '../lib/onboarding';
 import { listPresets } from '../lib/presets';
+import { compositeName } from '../lib/presets/composite';
+import { savedRetainRuns, savedSeedProfile, savedSelectors } from '../lib/setup-selectors';
 import { compareCodePoints } from '../lib/format';
 import { PROFILES } from '../lib/seed-profiles';
 
@@ -47,6 +50,55 @@ export function describeCommands(
       return result;
     })
     .sort((left, right) => compareCodePoints(left.name, right.name));
+}
+
+/**
+ * What `houston onboard` saved, and what a flagless `houston up` therefore builds.
+ *
+ * `up` applies the saved deployment and scenarios whenever it is given no topology or
+ * preset, so on a configured machine the plain recipe can start local Kubernetes. An agent
+ * reads this, and pins Docker with `--deployment monolith --preset default` when it needs it.
+ * Read from config only, like the rest of discovery: no engine or cluster is asked.
+ */
+export function setupDefaults(): Record<string, unknown> {
+  let cfg: Config = {};
+  try {
+    cfg = loadConfig();
+  } catch {
+    // An unreadable config answers as a fresh machine, as `onboarding` does.
+  }
+  const common = { seed_profile: savedSeedProfile(cfg), retain_runs: savedRetainRuns(cfg) };
+  try {
+    const saved = savedSelectors(cfg);
+    const answered = saved.answered_deployment || saved.answered_scenarios;
+    const axes = resolveAxes(
+      answered ? { deployment: saved.deployment, preset: compositeName(saved.scenarios) } : {},
+    );
+    return {
+      deployment: saved.deployment,
+      scenarios: saved.scenarios,
+      answered_deployment: saved.answered_deployment,
+      answered_scenarios: saved.answered_scenarios,
+      ...common,
+      invalid: false,
+      up_without_selectors: {
+        runtime: axes.runtime,
+        deployment: axes.deployment,
+        preset: axes.preset,
+      },
+    };
+  } catch {
+    // A saved choice that no longer validates: `up` refuses it, so no topology is promised.
+    return {
+      deployment: null,
+      scenarios: [],
+      answered_deployment: true,
+      answered_scenarios: false,
+      ...common,
+      invalid: true,
+      up_without_selectors: null,
+    };
+  }
 }
 
 export function capabilities(): Record<string, unknown> {
@@ -96,5 +148,6 @@ export function capabilities(): Record<string, unknown> {
     default_bind_host: DEFAULT_BIND_HOST,
     skill,
     onboarding,
+    setup_defaults: setupDefaults(),
   };
 }

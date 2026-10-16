@@ -138,7 +138,10 @@ const ROOT = path.resolve(__dirname, '..');
 // Kubernetes tools, the unused first-run name, who completed onboarding (three in the library, one
 // through the setup snapshot), the unknown-action text, the long help, and the force and fresh
 // rebuilds of a one-preset Docker workspace: total 4876.
-const FLOOR = 4876;
+// The eighth adds five: the actor-prefixed first-run name, --reconfigure asking with an explicit
+// answer and rejecting it without a prompt, the saved selectors in capabilities, and the skill's
+// saved-selector recipe: 4876 + 5 = 4881.
+const FLOOR = 4881;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

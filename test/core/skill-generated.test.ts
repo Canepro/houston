@@ -53,6 +53,19 @@ describe('the shipped skill file', () => {
     });
   });
 
+  it('tells an agent that saved setup choices change a flagless up, and how to pin Docker', () => {
+    // `up` with no selector flags applies the deployment and scenarios `onboard` saved, so
+    // the basic recipe can start a local Kubernetes workspace on a configured machine.
+    const shipped = fs.readFileSync(generator.TARGET, 'utf8');
+    const recipe = shipped.slice(
+      shipped.indexOf('## Requests and the commands they mean'),
+      shipped.indexOf('| The person asks'),
+    );
+    expect(recipe).toContain('`houston onboard --show --json`');
+    expect(recipe).toContain('`capabilities.setup_defaults`');
+    expect(recipe).toMatch(/--deployment monolith --preset default/u);
+  });
+
   it('never tells an agent to attach the admin password', () => {
     // `info --json` carries `data.login.password` (the 1.x payload, which the skill itself
     // reads to tell the person how to log in), generated for any workspace reachable beyond

@@ -4,6 +4,7 @@ import { ValidationError } from './errors';
 import { isTruthy } from './format';
 
 export const DEPLOYMENTS = ['monolith', 'multi-instance', 'microservices'];
+export const SEED_PROFILES = ['none', 'small', 'standard', 'large'];
 function map(value: unknown): config.Config {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as config.Config)
@@ -93,4 +94,15 @@ export function savedSelectors(cfg: config.Config = config.loadConfig()): {
     answered_scenarios:
       own(cfg, 'default_scenarios') || own(cfg, 'scenarios') || own(defaults, 'scenarios'),
   };
+}
+
+/** The saved first-run seed dataset; the answer setup records, else its default. */
+export function savedSeedProfile(cfg: config.Config = config.loadConfig()): string {
+  const profile = map(cfg.preferences).seed_profile;
+  return typeof profile === 'string' && SEED_PROFILES.includes(profile) ? profile : 'small';
+}
+
+/** Whether setup saved "retain runs after evidence capture". */
+export function savedRetainRuns(cfg: config.Config = config.loadConfig()): boolean {
+  return map(cfg.preferences).retain_runs === true;
 }
