@@ -50,12 +50,23 @@ DISPATCH_REFUSALS = {
     'dispatch-lib-dangling': 'Unsafe candidate tracked link: lib/adapter.js (unresolved)',
     'dispatch-lib-cyclic': 'Unsafe candidate tracked link: lib/adapter.js (unresolved)',
     'dispatch-lib-gitdir-mutate': 'Unsafe candidate tracked link: lib/adapter.js (Git metadata target)',
+    'dispatch-lib-gitdir-case-mutate': 'Unsafe candidate tracked link: lib/adapter.js (Git metadata target)',
     'dispatch-source-external-mutate': 'Unsafe candidate tracked link: src/adapter.js',
     'dispatch-source-external-typechange-mutate': 'Unsafe candidate tracked link: src/adapter.js',
     'dispatch-source-ignored-mutate': 'Unsafe candidate tracked link: src/adapter.js (ignored target)',
     'dispatch-source-dir-link-mutate': 'Unsafe candidate source link: src/pkg',
     'dispatch-source-unmanifested-mutate': 'Unsafe candidate source link: src/adapter.js (target is not manifested)',
 }
+
+def _case_insensitive_fs():
+    import tempfile
+    with tempfile.TemporaryDirectory() as probe:
+        (Path(probe) / 'Probe').mkdir()
+        return (Path(probe) / 'probe').exists()
+
+
+# A spelling-only bypass of the Git metadata check exists only where spelling is not identity.
+CASE_INSENSITIVE_CASES = ('dispatch-lib-gitdir-case-mutate',) if _case_insensitive_fs() else ()
 
 PROVENANCE = ('candidate-source.json', 'candidate-fingerprint-before.json',
               'fixture-manifest-before.json')
@@ -304,6 +315,8 @@ const base = process.cwd();
                     message='Configure the engine manually, then run houston doctor --json. Automatic engine resizing is not supported.', approve_with=''),
                 'stale-runtime': dict(kind='runtime', code='OWNED_KUBERNETES_UNAVAILABLE',
                     message='Owned local runtime is unavailable; Kind provisioning is unavailable.', approve_with=''),
+                'stale-unknown': dict(kind='runtime', code='NEW_BLOCKER',
+                    message='A blocker this verifier does not know.', approve_with=''),
                 'stale-onboarding': dict(kind='onboarding', code='GATE_NOT_ONBOARDED',
                     message='A person must complete onboarding before local Kind lifecycle operations.', approve_with='houston onboard'),
             }.get(attack.split(':')[1] if attack.startswith('feature-ready:') else '')
@@ -750,7 +763,8 @@ def run_main_case(path, attack, proof_dir=None):
                 subprocess.run(['git', 'init', '-q', str(candidate)], check=True,
                                env={'PATH': os.environ.get('PATH', os.defpath), 'HOME': str(base),
                                     'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull})
-                target_dir = candidate / '.git/hidden'
+                # On a case-insensitive filesystem `.GIT` is the same directory as `.git`.
+                target_dir = candidate / ('.GIT/hidden' if 'gitdir-case' in attack else '.git/hidden')
             if 'ignored' in attack and 'ignored-regular' not in attack:
                 target_dir = candidate / 'ignored-build/source'
             target_dir.mkdir(parents=True, exist_ok=True)
@@ -1186,6 +1200,8 @@ def run_main_case(path, attack, proof_dir=None):
                 assert 'Blank setup first-run command lacks matching' in error, error
             elif attack == 'feature-ready:no-authority':
                 assert 'Ready setup omitted the denied owned-cluster authority gate' in error, error
+            elif attack == 'feature-ready:stale-unknown':
+                assert 'Ready setup reported unexpected gates: NEW_BLOCKER' in error, error
             elif attack.startswith('feature-ready:stale-'):
                 assert 'Ready setup retained contradictory readiness gates' in error, error
             else:
@@ -1461,14 +1477,14 @@ def main():
     attacks = (
         *('feature-ready:' + kind for kind in ('blank', 'grammar', 'facts', 'write', 'blocked-facts', 'clean',
                                                 'no-authority', 'stale-tools', 'stale-capacity',
-                                                'stale-runtime', 'stale-onboarding')),
+                                                'stale-runtime', 'stale-onboarding', 'stale-unknown')),
         *('feature-human-gate:' + kind for kind in ('incidental', 'outside', 'message')),
         *('feature-show-selection:' + field for field in ('seed_profile', 'retain_runs', 'scenarios')),
         *('feature-preload-path:' + kind for kind in ('spaces', 'weird')),
         *('inspect-panel:' + runtime + ':' + kind for runtime in ('docker', 'kubernetes') for kind in ('resource', 'mixed')),
         *('access-note:' + kind for kind in ('true', 'one', 'object', 'blank')),
         'dispatch-lib-external-typechange-mutate', 'dispatch-lib-external-dirswap-mutate',
-        'dispatch-lib-gitdir-mutate', 'dispatch-lib-internal-clean', 'dispatch-tracked-deleted-clean',
+        'dispatch-lib-gitdir-mutate', *CASE_INSENSITIVE_CASES, 'dispatch-lib-internal-clean', 'dispatch-tracked-deleted-clean',
         'dispatch-source-external-typechange-mutate', 'dispatch-source-unmanifested-mutate',
         'dispatch-source-dir-link-mutate',
         *('feature-human-mutate:' + field for field in ('deployment', 'scenarios', 'legacy')),

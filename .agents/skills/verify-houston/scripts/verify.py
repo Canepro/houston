@@ -1012,7 +1012,7 @@ def require_safe_tracked_links(context):
         require(target.is_relative_to(root) and
                 (regular_file(target) or stat.S_ISDIR(target.lstat().st_mode)),
                 f'Unsafe candidate tracked link: {name}')
-        require(not any(target == item or target.is_relative_to(item) for item in metadata),
+        require(not under_metadata(target, metadata),
                 f'Unsafe candidate tracked link: {name} (Git metadata target)')
         ignored = git_evidence_output(
             context, 'candidate tracked link ignore rule',
@@ -1021,6 +1021,29 @@ def require_safe_tracked_links(context):
             accepted_exits=(0, 1),
         )
         require(not ignored, f'Unsafe candidate tracked link: {name} (ignored target)')
+
+
+def under_metadata(target, metadata):
+    """Whether target is a Git metadata directory or inside one, by directory identity.
+
+    Spelling is not identity: on a case-insensitive filesystem `.GIT` is `.git`, so each
+    ancestor of the resolved target is compared to each metadata directory by device and inode.
+    """
+    identities = set()
+    for item in metadata:
+        try:
+            info = item.stat()
+        except OSError:
+            continue
+        identities.add((info.st_dev, info.st_ino))
+    for candidate in (target, *target.parents):
+        try:
+            info = candidate.stat()
+        except OSError:
+            continue
+        if (info.st_dev, info.st_ino) in identities:
+            return True
+    return any(target == item or target.is_relative_to(item) for item in metadata)
 
 
 @bounded_file_work
@@ -2238,6 +2261,9 @@ def main():
                 'KUBERNETES_TOOLS_MISSING', 'CAPACITY_BELOW_FLOOR', 'CAPACITY_UNKNOWN',
                 'OWNED_KUBERNETES_UNAVAILABLE', 'OWNED_KUBERNETES_UNKNOWN', 'GATE_NOT_ONBOARDED'}))
             require(not stale, 'Ready setup retained contradictory readiness gates: ' + ', '.join(stale))
+            # Any other gate, new or renamed, is a blocker this ready state does not explain.
+            extra = sorted({gate['code'] for gate in ready_gates} - {'GATE_OWNED_CLUSTER'})
+            require(not extra, 'Ready setup reported unexpected gates: ' + ', '.join(extra))
             require(isinstance(ready.get('first_run_command'), str) and ready['first_run_command'].strip(),
                     'Ready setup must generate a first-run command')
             require_saved_topology_command(ready['first_run_command'])
