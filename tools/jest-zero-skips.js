@@ -88,7 +88,11 @@ const ROOT = path.resolve(__dirname, '..');
 // The final re-verification's fixes: up resolving a name the actor may act on, a rebuild's
 // monitoring, pin and port, the operator password off every argv, the operator's memory and
 // PodMonitor, serve's shutdown, and the usage and wording answers it found untrue.
-const FLOOR = 4500;
+// Bind enforcement covers protocol preservation, ephemeral long ports and invalid addresses.
+// Compose interpolation brackets an IPv6 bind before variable port fields, and monitoring reads
+// that bind back from both short and long syntax.
+// Whole-value interpolation refusals: 11 cases; IPv6 and long-syntax regressions: 2; total 4525.
+const FLOOR = 4525;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

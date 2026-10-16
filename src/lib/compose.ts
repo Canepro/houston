@@ -17,6 +17,8 @@
  * every workspace earlier releases made holds.
  */
 
+import { isIP } from 'node:net';
+
 import {
   ADMIN_EMAIL,
   ADMIN_NAME,
@@ -574,70 +576,171 @@ export function build(s: Spec): ComposeDoc {
   return doc;
 }
 
-/** "8000-8005:8000-8005", and the single-sided "8000-8005" form. */
-const RANGE_RE = /^\d+-\d+(:\d+(-\d+)?)?$/;
+/** A port or a range of them: "8025", "8000-8005". Either side of a short-syntax entry. */
+const PORT_RE = /^\d+(-\d+)?$/;
 
 /**
- * Prefix every published port with the bind host, unless one is already given. Applied
- * to ALL services in one pass -- RC, multi-instance direct ports, the load balancer, and
- * preset sidecars -- mirroring the official rocketchat-compose
- * `${BIND_IP}:${HOST_PORT}:${PORT}` pattern.
+ * Positions of a separator outside Compose interpolation and bracketed IPv6 literals.
+ *
+ * A port mapping's address and both port fields may use Compose variables. Their default
+ * forms commonly contain `:`, so splitting the string at every colon turns a valid mapping
+ * such as `${BIND_IP:-127.0.0.1}:${HOST_PORT:-8080}:${CONTAINER_PORT:-80}` into nonsense.
+ */
+export function topLevelPositions(text: string, separator: string): number[] {
+  const positions: number[] = [];
+  let interpolationDepth = 0;
+  let bracketDepth = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index] ?? '';
+    if (interpolationDepth > 0) {
+      if (character === '{') interpolationDepth += 1;
+      else if (character === '}') interpolationDepth -= 1;
+      continue;
+    }
+    if (character === '$' && text[index + 1] === '{') {
+      interpolationDepth = 1;
+      index += 1;
+      continue;
+    }
+    if (character === '[') {
+      bracketDepth += 1;
+      continue;
+    }
+    if (character === ']' && bracketDepth > 0) {
+      bracketDepth -= 1;
+      continue;
+    }
+    if (character === separator && bracketDepth === 0) positions.push(index);
+  }
+  return positions;
+}
+
+/** A whole Compose variable expression, including its default or required form. */
+function composeVariable(value: string): boolean {
+  if (/^\$[A-Za-z_][A-Za-z0-9_]*$/u.test(value)) return true;
+  if (!value.startsWith('${')) return false;
+  let depth = 0;
+  let close = -1;
+  for (let index = 1; index < value.length; index += 1) {
+    const character = value[index] ?? '';
+    if (character === '{') depth += 1;
+    else if (character === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        close = index;
+        break;
+      }
+    }
+  }
+  if (close !== value.length - 1) return false;
+  const expression = value.slice(2, -1);
+  const name = /^[A-Za-z_][A-Za-z0-9_]*/u.exec(expression);
+  if (name === null) return false;
+  const suffix = expression.slice(name[0].length);
+  return suffix === '' || /^(?::-|:\?|:\+|-|\?|\+)/u.test(suffix);
+}
+
+function portField(value: string): boolean {
+  return PORT_RE.test(value) || composeVariable(value);
+}
+
+function addressField(value: string): boolean {
+  const ip = value.startsWith('[') && value.endsWith(']') ? value.slice(1, -1) : value;
+  // Docker rejects scope IDs, though Node's isIP accepts them.
+  return composeVariable(value) || (isIP(ip) !== 0 && !ip.includes('%'));
+}
+
+/**
+ * Bind every published port to ONE host address. Applied to ALL services in one pass --
+ * RC, multi-instance direct ports, the load balancer, and preset sidecars -- mirroring the
+ * official rocketchat-compose `${BIND_IP}:${HOST_PORT}:${PORT}` pattern.
+ *
+ * A host address an entry already names is REPLACED, not kept. The bind host is the one
+ * posture `info` reports and `detectBind` reads back, and a custom preset that writes
+ * `0.0.0.0:9000:9000` would otherwise publish a sidecar on every interface of a remote
+ * sandbox while the workspace says it is loopback-bound. Short syntax keeps its host port
+ * (or its absence: `IP::CONTAINER` is an ephemeral host port), its range and its
+ * `/protocol`; long syntax gets `host_ip` even when `published` is omitted for an
+ * ephemeral host port.
  */
 export function bindPorts(doc: ComposeDoc, bind: string): void {
   if (!bind) return;
+  const shortBind = isIP(bind) === 6 ? `[${bind}]` : bind;
   for (const [name, svc] of Object.entries(doc.services)) {
     const ports = svc.ports;
     if (!Array.isArray(ports) || ports.length === 0) continue;
     const out: unknown[] = [];
     for (const p of ports) {
       // THE TYPE CHECK COMES FIRST. Stringifying compose long syntax gives the object's
-      // text containing two colons, which matched the already-IP-qualified branch below
-      // -- the object's text was appended as a ports entry. Any shape that is not a
-      // string has to be recognised before it is stringified.
+      // text containing two colons, which once matched the IP-qualified branch below --
+      // the object's text was appended as a ports entry. Any shape that is not a string
+      // has to be recognised before it is stringified.
       if (isPlainObject(p)) {
         const long = { ...p };
-        if ('published' in long && (long.host_ip ?? '') === '') long.host_ip = bind;
+        long.host_ip = bind;
         out.push(long);
         continue;
       }
-      const str = String(p);
-      const colons = str.split(':').length - 1;
-      const head = str.split(':')[0] ?? '';
-      if (colons >= 2) {
-        // Already IP-qualified ("127.0.0.1:8025:8025") -- prefixing again would produce
-        // a double-IP mapping.
-        out.push(str);
-      } else if (colons === 1 && head !== '' && /^[0-9]+$/.test(head)) {
-        out.push(`${bind}:${str}`); // "8025:8025"
-      } else if (str !== '' && /^[0-9]+$/.test(str)) {
-        // A BARE container port. "127.0.0.1:8025" would be parsed as host:container with
-        // an invalid host port, so use compose's IP::CONTAINER form: an ephemeral host
-        // port, still bound to `bind` rather than every interface.
-        out.push(`${bind}::${str}`);
-      } else if (RANGE_RE.test(str)) {
-        // A PORT RANGE ("8000-8005:8000-8005"). This fell through to the `else` below
-        // and was appended UNCHANGED, so it published on every interface while `info`
-        // and the detail panel both reported the workspace as loopback-bound: a silent
-        // opt-out of the default posture, on a workspace running fixed weak credentials.
-        // Legal Compose, and reachable through the custom presets the README documents.
-        // A one-sided range means CONTAINER ports with ephemeral host ports.
-        // Preserve that with IP::RANGE; IP:RANGE is invalid HOST:CONTAINER.
-        out.push(str.includes(':') ? `${bind}:${str}` : `${bind}::${str}`);
-      } else {
-        // NOT SILENTLY PASSED THROUGH. Everything above is a shape this function
-        // understands; anything else is a published port it would be leaving on every
+      const entry = String(p);
+      const slash = topLevelPositions(entry, '/')[0] ?? entry.length;
+      if (composeVariable(entry.slice(0, slash))) {
+        // The variable can expand to an entire mapping, including a wildcard address.
+        // Its default cannot prove the shape of the value Compose will read later.
+        throw new ValidationError(
+          `whole-value Compose interpolation in port entry ${JSON.stringify(p)} in service ` +
+            `${JSON.stringify(name)} cannot be safely bound to ${bind}. Use Compose ` +
+            'long syntax with separate target and published fields, or resolve the mapping ' +
+            'to literal ports before loading the preset.',
+        );
+      }
+      const parsed = shortPort(entry);
+      if (parsed === null) {
+        // NOT SILENTLY PASSED THROUGH. Everything this function understands is bound
+        // above; anything else is a published port it would be leaving on every
         // interface, which is the one outcome that must never be the default. Named so
         // the preset author can see what to change.
         throw new ValidationError(
           `port entry ${JSON.stringify(p)} in service ${JSON.stringify(name)} is a shape ` +
             `houston cannot bind to ${bind}. Write it as "HOST:CONTAINER", a range, or ` +
-            'compose long syntax with `published:` -- leaving it unbound would publish ' +
+            'compose long syntax -- leaving it unbound would publish ' +
             'it on every interface.',
         );
       }
+      out.push(`${shortBind}:${parsed.host}:${parsed.container}${parsed.protocol}`);
     }
     svc.ports = out;
   }
+}
+
+/**
+ * The host-side and container-side of a compose short-syntax port entry, with its
+ * protocol suffix, and WITHOUT the host address it may name: `[IP:][HOST:]CONTAINER[/PROTO]`,
+ * where HOST and CONTAINER are each a port or a range, and HOST may be empty
+ * (`IP::CONTAINER`). `null` for anything else.
+ *
+ * READ FROM THE RIGHT. The address may be dotted, bracketed IPv6, or the unbracketed IPv6
+ * the Compose specification's own examples use (`::1:6000:6000`); counting colons from
+ * the left refused the last of these. The two rightmost fields are the ports. Any
+ * preceding address must be a valid IP literal before `bind` replaces it.
+ */
+function shortPort(entry: string): { host: string; container: string; protocol: string } | null {
+  const slashes = topLevelPositions(entry, '/');
+  const slash = slashes.length === 0 ? -1 : (slashes[slashes.length - 1] ?? -1);
+  // Docker lowercases the protocol before it validates it, so `/UDP` is `/udp`.
+  const protocol = slash === -1 ? '' : entry.slice(slash).toLowerCase();
+  const rest = slash === -1 ? entry : entry.slice(0, slash);
+  if (protocol !== '' && !/^\/[a-z]+$/u.test(protocol)) return null;
+  const colons = topLevelPositions(rest, ':');
+  const last = colons.length - 1;
+  const containerStart = last < 0 ? 0 : (colons[last] ?? -1) + 1;
+  const container = rest.slice(containerStart);
+  const hostStart = last < 1 ? 0 : (colons[last - 1] ?? -1) + 1;
+  const host = last < 0 ? '' : rest.slice(hostStart, colons[last] ?? rest.length);
+  const address = last < 1 ? '' : rest.slice(0, colons[last - 1] ?? 0);
+  if (address !== '' && !addressField(address)) return null;
+  if (!portField(container)) return null;
+  if (host !== '' && !portField(host)) return null;
+  return { host, container, protocol };
 }
 
 export const HEADER = '# Generated by houston. Do not edit by hand -- re-run `houston up`.\n';
