@@ -2213,6 +2213,95 @@ describe('up --pin on a workspace that exists', () => {
   });
 });
 
+describe('up of a workspace an env credential change was deferred on', () => {
+  afterEach(() => {
+    jest.dontMock('../../../src/core/runner/queries');
+    jest.dontMock('../../../src/core/runner/engine');
+    jest.dontMock('../../../src/core/lifecycle/ready');
+    jest.dontMock('../../../src/core/lifecycle/inspect');
+    jest.resetModules();
+  });
+
+  it('deploys it when it starts the stopped workspace, recreating every replica', async () => {
+    // `up` of a stopped workspace only starts its containers, which keep the environment
+    // they were created with. A running one is left as it is, and so is the deferred change.
+    const cases: Array<[string, string, boolean, number]> = [
+      ['stopped, recreated', 'exited', true, 0],
+      ['stopped, the recreate fails', 'exited', true, 1],
+      ['running', 'running', true, 0],
+      ['stopped, nothing deferred', 'exited', false, 0],
+    ];
+    const observed: unknown[] = [];
+    for (const [label, rc, pending, exitCode] of cases) {
+      jest.resetModules();
+      const forced: unknown[] = [];
+      jest.doMock('../../../src/core/runner/queries', () => ({
+        ...jest.requireActual('../../../src/core/runner/queries'),
+        rcState: async () => rc,
+      }));
+      jest.doMock('../../../src/core/runner/engine', () => ({
+        ...jest.requireActual('../../../src/core/runner/engine'),
+        up: async (_name: string, options: { forceRecreate?: unknown } = {}) => {
+          forced.push(options.forceRecreate);
+          return exitCode;
+        },
+      }));
+      jest.doMock('../../../src/core/lifecycle/ready', () => ({
+        ...jest.requireActual('../../../src/core/lifecycle/ready'),
+        upCompose: async () => 0,
+        restoreRoute: async () => undefined,
+      }));
+      jest.doMock('../../../src/core/lifecycle/inspect', () => ({
+        ...jest.requireActual('../../../src/core/lifecycle/inspect'),
+        summary: async () => ({}),
+      }));
+      const record = require('../../../src/core/runner/record') as typeof RecordNS;
+      const name = `deferred-${String(observed.length)}`;
+      await record.write(
+        name,
+        YAML.stringify({
+          services: {
+            'rocketchat-1': { environment: { REG_TOKEN: 'token' } },
+            'rocketchat-2': { environment: { REG_TOKEN: 'token' } },
+            mongodb: { image: 'mongo:8.0' },
+          },
+        }),
+        record.metadata({
+          name,
+          project: `houston-${name}`,
+          extra: pending ? { credentials_pending: true } : {},
+        }),
+      );
+      const createDocker =
+        require('../../../src/core/lifecycle/create-docker') as typeof CreateDockerNS;
+      const outcome = await createDocker
+        .reuse(name, false, createReq({ version: '', name }), nullEmit)
+        .then(
+          () => 'reused',
+          (error: Error) => error.message,
+        );
+      observed.push([
+        label,
+        outcome,
+        forced,
+        (await record.readMeta(name)).extra.credentials_pending === true,
+      ]);
+    }
+    const both = ['rocketchat-1', 'rocketchat-2'];
+    expect(observed).toEqual([
+      ['stopped, recreated', 'reused', [both], false],
+      [
+        'stopped, the recreate fails',
+        '`docker compose up` failed applying the changed environment',
+        [both],
+        true,
+      ],
+      ['running', 'reused', [], true],
+      ['stopped, nothing deferred', 'reused', [], false],
+    ]);
+  });
+});
+
 describe('a hosts line on Podman', () => {
   afterEach(() => {
     // The guard put back, never taken away: `runner/host` is the suite's stated engine.

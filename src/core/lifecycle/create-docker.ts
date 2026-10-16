@@ -67,7 +67,7 @@ import * as naming from './naming';
 import * as ownership from './ownership';
 import * as ports from './ports';
 import * as preconditions from './preconditions';
-import { restoreRoute, upCompose, waitAndFinalize } from './ready';
+import { recreateRocketChat, restoreRoute, upCompose, waitAndFinalize } from './ready';
 import * as request from './request';
 import * as seeding from './seeding';
 import * as sizing from './sizing';
@@ -416,6 +416,14 @@ export async function reuse(
     info(emit, `'${name}' already exists - bringing it back up.`, { phase: 'create' });
     if ((await upCompose(name, { pull: false, emit, streamOutput })) !== 0) {
       throw new DockerError('`docker compose up` failed');
+    }
+    // A credential change `env` wrote without a restart reaches Rocket.Chat here, and only
+    // a recreate of every replica proves it did: a stopped container that `up` merely starts
+    // keeps the environment it was created with. A running workspace is left alone above.
+    if (meta.extra[compose.CREDENTIALS_PENDING] === true) {
+      if ((await recreateRocketChat(name)) !== 0) {
+        throw new DockerError('`docker compose up` failed applying the changed environment');
+      }
     }
   }
   // A reused workspace gets its https name back. This path never resolved TLS -- it reuses

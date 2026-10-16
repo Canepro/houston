@@ -152,7 +152,7 @@
         "volumes": {}
       },
       "env": { "KEEP": null, "MONGO_URL": "mongodb://elsewhere", "MY": "v", "BLANK": "" },
-      "up": ["e", false, "rocketchat"],
+      "up": ["e", false, ["rocketchat", "rocketchat-2"]],
       "events": [
         {
           "message": "MONGO_URL is load-bearing: houston's Mongo connection; Rocket.Chat will not start if it is wrong. Setting it anyway.",
@@ -195,7 +195,7 @@
       "events": [
         { "message": "env updated on 'e': A", "phase": "config", "level": "info" },
         {
-          "message": "not restarting; the change applies next time the container is recreated (`houston up --name e`)",
+          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: `houston env --name e --set A=<value>` without --no-restart",
           "phase": "done",
           "level": "info"
         }
@@ -224,7 +224,7 @@
         "volumes": {}
       },
       "env": { "KEEP": null, "OLD": "kept", "ADDED": "x" },
-      "up": ["e", false, "rocketchat"],
+      "up": ["e", false, ["rocketchat", "rocketchat-2"]],
       "events": [
         { "message": "env updated on 'e': ADDED", "phase": "config", "level": "info" },
         {
@@ -269,7 +269,7 @@
         "volumes": {}
       },
       "env": { "constructor": "x", "MONGO_URL": "y" },
-      "up": ["e", false, "rocketchat"],
+      "up": ["e", false, ["rocketchat", "rocketchat-2"]],
       "events": [
         {
           "message": "MONGO_URL is load-bearing: houston's Mongo connection; Rocket.Chat will not start if it is wrong. Setting it anyway.",
@@ -326,7 +326,7 @@
         "volumes": {}
       },
       "env": { "NUM": 8080, "FLAG": true, "A": "1" },
-      "up": ["e", false, "rocketchat"],
+      "up": ["e", false, ["rocketchat", "rocketchat-2"]],
       "events": [
         { "message": "env updated on 'e': A", "phase": "config", "level": "info" },
         {
@@ -383,7 +383,7 @@
           "level": "info"
         },
         {
-          "message": "not restarting; the change applies next time the container is recreated (`houston up --name e`)",
+          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: `houston env --name e --set __proto__=<value> --set constructor=<value> --set toString=<value> --unset hasOwnProperty` without --no-restart",
           "phase": "done",
           "level": "info"
         }
@@ -408,7 +408,7 @@
       "events": [
         { "message": "env updated on 'e': A", "phase": "config", "level": "info" },
         {
-          "message": "not restarting; the change applies next time the container is recreated (`houston up --name e`)",
+          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: `houston env --name e --set A=<value>` without --no-restart",
           "phase": "done",
           "level": "info"
         }
@@ -440,7 +440,7 @@
       "events": [
         { "message": "env updated on 'e': A, __proto__", "phase": "config", "level": "info" },
         {
-          "message": "not restarting; the change applies next time the container is recreated (`houston up --name e`)",
+          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: `houston env --name e --set A=<value> --unset __proto__` without --no-restart",
           "phase": "done",
           "level": "info"
         }
@@ -476,7 +476,7 @@
       "events": [
         { "message": "env updated on 'e': KEEP, NEW", "phase": "config", "level": "info" },
         {
-          "message": "not restarting; the change applies next time the container is recreated (`houston up --name e`)",
+          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: `houston env --name e --set NEW=<value> --unset KEEP` without --no-restart",
           "phase": "done",
           "level": "info"
         }
@@ -510,7 +510,7 @@
       "events": [
         { "message": "env updated on 'e': KEEP, NEW", "phase": "config", "level": "info" },
         {
-          "message": "not restarting; the change applies next time the container is recreated (`houston up --name e`)",
+          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: `houston env --name e --set NEW=<value> --unset KEEP` without --no-restart",
           "phase": "done",
           "level": "info"
         }
@@ -541,7 +541,7 @@
       "events": [
         { "message": "env updated on 'e': KEEP, NEW", "phase": "config", "level": "info" },
         {
-          "message": "not restarting; the change applies next time the container is recreated (`houston up --name e`)",
+          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: `houston env --name e --set NEW=<value> --unset KEEP` without --no-restart",
           "phase": "done",
           "level": "info"
         }
@@ -572,7 +572,7 @@
       "events": [
         { "message": "env updated on 'e': KEEP, NEW", "phase": "config", "level": "info" },
         {
-          "message": "not restarting; the change applies next time the container is recreated (`houston up --name e`)",
+          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: `houston env --name e --set NEW=<value> --unset KEEP` without --no-restart",
           "phase": "done",
           "level": "info"
         }
@@ -695,7 +695,7 @@
       "events": [
         { "message": "env updated on 'e': KEEP, NEW", "phase": "config", "level": "info" },
         {
-          "message": "not restarting; the change applies next time the container is recreated (`houston up --name e`)",
+          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: `houston env --name e --set NEW=<value> --unset KEEP` without --no-restart",
           "phase": "done",
           "level": "info"
         }
@@ -723,7 +723,7 @@
       "events": [
         { "message": "env updated on 'e': KEEP, NEW", "phase": "config", "level": "info" },
         {
-          "message": "not restarting; the change applies next time the container is recreated (`houston up --name e`)",
+          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: `houston env --name e --set NEW=<value> --unset KEEP` without --no-restart",
           "phase": "done",
           "level": "info"
         }
@@ -751,7 +751,7 @@
       "events": [
         { "message": "env updated on 'e': KEEP, NEW", "phase": "config", "level": "info" },
         {
-          "message": "not restarting; the change applies next time the container is recreated (`houston up --name e`)",
+          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: `houston env --name e --set NEW=<value> --unset KEEP` without --no-restart",
           "phase": "done",
           "level": "info"
         }
@@ -828,7 +828,7 @@
       "events": [
         { "message": "env updated on 'e': KEEP, NEW", "phase": "config", "level": "info" },
         {
-          "message": "not restarting; the change applies next time the container is recreated (`houston up --name e`)",
+          "message": "not restarting; Rocket.Chat keeps its current environment until the change is applied: `houston env --name e --set NEW=<value> --unset KEEP` without --no-restart",
           "phase": "done",
           "level": "info"
         }

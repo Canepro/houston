@@ -342,12 +342,17 @@ export async function projectName(name: string): Promise<string> {
  * occupying its name. Record-first leaves the half that is fully visible and whose
  * compose file `up` regenerates anyway, which is already this tool's contract for that
  * document.
+ *
+ * `reverting` is for a write that undoes the change an interrupted write was making: the
+ * Compose texts that change could have written. It finishes that record only when one of them
+ * is the replacement the interrupted write recorded; see `rollbackUnderLock`.
  */
 export async function write(
   name: string,
   composeYaml: string,
   meta: Metadata,
   files: readonly (readonly [string, string])[] = [],
+  { reverting = [] }: { reverting?: readonly string[] } = {},
 ): Promise<void> {
   const ws = paths.workspace(name);
   await fs.mkdir(ws, { recursive: true });
@@ -377,11 +382,13 @@ export async function write(
     await fs.writeFile(target, content.split('{{ROOT_URL}}').join(advertised), 'utf8');
   }
   // The caller may pass back the provisional record an earlier interrupted write left. Only
-  // the replacement that write was making finishes it. `env`, `monitor`, `upgrade`, its
-  // rollback and `edge adopt` all edit whichever Compose file survived, so an edit of the
-  // previous release's file must not mark the record as describing it.
+  // the replacement that write was making, or a write proven to undo it, finishes it. `env`,
+  // `monitor`, `upgrade`, its rollback and `edge adopt` all edit whichever Compose file
+  // survived, so an edit of the previous release's file must not mark the record as
+  // describing it.
+  const undone = reverting.some((text) => fingerprint(text, files) === pending);
   let finished = meta;
-  if (pending === replacement) finished = withIncomplete(meta, null);
+  if (pending === replacement || undone) finished = withIncomplete(meta, null);
   else if (pending !== undefined) finished = withIncomplete(meta, pending);
   else if (hasIncomplete(meta)) finished = withIncomplete(meta, null);
   await paths.atomicWrite(joinPath(ws, 'repro.json'), serialise(finished));
@@ -412,6 +419,25 @@ function pendingReplacement(meta: Metadata): string | undefined {
   if (!hasIncomplete(meta) || meta.extra.incomplete !== true) return undefined;
   const recorded = meta.extra[REPLACEMENT_KEY];
   return typeof recorded === 'string' ? recorded : '';
+}
+
+/**
+ * The interrupted write a loaded record is unfinished by, for `markUnfinished`: its replacement
+ * fingerprint, `''` when it recorded none, and null for a finished record.
+ */
+export function unfinishedBy(meta: Metadata): string | null {
+  return pendingReplacement(meta) ?? null;
+}
+
+/**
+ * Mark `meta` unfinished by the interrupted write `unfinishedBy` named, for a write that puts
+ * back the files that record was read beside: the next `write` keeps it unfinished unless it
+ * writes that replacement.
+ */
+export function markUnfinished(meta: Metadata, pending: string): void {
+  meta.extra.incomplete = true;
+  if (pending === '') delete meta.extra[REPLACEMENT_KEY];
+  else meta.extra[REPLACEMENT_KEY] = pending;
 }
 
 /**

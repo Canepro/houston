@@ -337,8 +337,10 @@ variables; give it a setting's name and houston points you to the prefixed form.
 
 - An `OVERWRITE_SETTING_` value is applied at every boot. The admin UI can still change
   it while Rocket.Chat runs, and the next restart puts it back.
-- A change recreates only the Rocket.Chat container. MongoDB keeps running.
-  `--no-restart` saves the change for the next `up`.
+- A change recreates only the Rocket.Chat containers, every replica. MongoDB keeps running.
+  `--no-restart` writes the change without applying it. A stopped workspace gets it at
+  its next `up`; a running one keeps its environment until the same change is run again
+  without `--no-restart`.
 - Your overrides are kept with the workspace and win over the preset's.
 - You may override `MONGO_URL`, `PORT`, `ROOT_URL` or `TRANSPORTER` to reproduce a
   broken configuration. houston warns what each one will break.

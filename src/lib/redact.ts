@@ -111,19 +111,92 @@ function jsonToken(pattern: RegExp, text: string, at: number): string {
   return pattern.exec(text)?.[0] ?? '';
 }
 
+/** Where each object and array of a valid JSON text ends, by where it opens; one pass. */
+function jsonEnds(text: string): Map<number, number> {
+  const ends = new Map<number, number>();
+  const open: number[] = [];
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    if (char === '"') i += jsonToken(JSON_STRING, text, i).length - 1;
+    else if (char === '{' || char === '[') open.push(i);
+    else if (char === '}' || char === ']') ends.set(open.pop() ?? 0, i + 1);
+  }
+  return ends;
+}
+
+/** The index after the JSON value at `at`. */
+function jsonValueEnd(text: string, at: number, ends: ReadonlyMap<number, number>): number {
+  const open = text[at];
+  if (open === '{' || open === '[') return ends.get(at) ?? text.length;
+  return at + jsonToken(open === '"' ? JSON_STRING : JSON_LITERAL, text, at).length;
+}
+
+/**
+ * Whether the object at `at` has a `name` member naming a credential, in any member position;
+ * the last one counts, as for `JSON.parse`. Its `value` member is then the credential, as the
+ * same object in YAML is (`{name: DB_PASSWORD, value: ...}`).
+ */
+function namesCredential(text: string, at: number, ends: ReadonlyMap<number, number>): boolean {
+  let name = '';
+  let i = at + 1;
+  for (;;) {
+    i += jsonToken(JSON_SPACE, text, i).length;
+    if (text[i] === '}' || i >= text.length) return credentialKey(name);
+    if (text[i] === ',') {
+      i += 1;
+      continue;
+    }
+    const key = jsonToken(JSON_STRING, text, i);
+    i += key.length;
+    i += jsonToken(JSON_SPACE, text, i).length + 1;
+    i += jsonToken(JSON_SPACE, text, i).length;
+    const end = jsonValueEnd(text, i, ends);
+    if ((JSON.parse(key) as string) === 'name') {
+      const value = text.slice(i, end);
+      name = value.startsWith('"') ? (JSON.parse(value) as string) : value;
+    }
+    i = end;
+  }
+}
+
+/**
+ * A string an artifact holds, with every URL's user info masked and, in `KEY=VALUE`, the
+ * value of a credential key: the list-form environment entry `DB_PASSWORD=...`, a JSON string
+ * included.
+ */
+export function redactAssignedText(value: string): string {
+  // A complete JSON value is masked member by member; its first `=` is inside a string.
+  const json = redactJson(value);
+  if (json !== null) return json;
+  const urlRedacted = redactAllUserinfo(value);
+  // A URL password or query can contain `=`, so the user info goes first.
+  const equals = urlRedacted.indexOf('=');
+  if (equals > 0 && credentialKey(urlRedacted.slice(0, equals))) {
+    return `${urlRedacted.slice(0, equals + 1)}${REDACTED}`;
+  }
+  return urlRedacted;
+}
+
 /**
  * The JSON value at `at`, masked, and the index after it. A string is masked on its own, so a
- * URL ends with its string and a match cannot run on into the next string's `@`. A member a
- * credential key names is masked whole, each scalar below it included, as the same key in YAML
- * is. Everything else keeps its bytes, number spellings and member order included.
+ * URL ends with its string and a match cannot run on into the next string's `@`, and a
+ * `KEY=VALUE` string is masked as the same list entry in YAML is. A member a credential key
+ * names is masked whole, each scalar below it included, and so is the `value` beside a `name`
+ * that names a credential, as in YAML. Everything else keeps its bytes, number spellings and
+ * member order included.
  */
-function maskJsonValue(text: string, at: number, secret: boolean): [string, number] {
+function maskJsonValue(
+  text: string,
+  at: number,
+  secret: boolean,
+  ends: ReadonlyMap<number, number>,
+): [string, number] {
   const open = text[at];
   if (open === '"') {
     const token = jsonToken(JSON_STRING, text, at);
     if (secret) return [JSON.stringify(REDACTED), at + token.length];
     const decoded = JSON.parse(token) as string;
-    const masked = redactAllUserinfo(decoded);
+    const masked = redactAssignedText(decoded);
     return [masked === decoded ? token : JSON.stringify(masked), at + token.length];
   }
   if (open !== '{' && open !== '[') {
@@ -131,6 +204,7 @@ function maskJsonValue(text: string, at: number, secret: boolean): [string, numb
     return [secret ? JSON.stringify(REDACTED) : token, at + token.length];
   }
   const close = open === '{' ? '}' : ']';
+  const namedSecret = open === '{' && !secret && namesCredential(text, at, ends);
   let out = open;
   let i = at + 1;
   for (;;) {
@@ -145,16 +219,17 @@ function maskJsonValue(text: string, at: number, secret: boolean): [string, numb
     }
     let member = secret;
     if (open === '{') {
-      const [key, afterKey] = maskJsonValue(text, i, false);
+      const [key, afterKey] = maskJsonValue(text, i, false, ends);
       const name = JSON.parse(text.slice(i, afterKey)) as string;
-      member ||= key !== text.slice(i, afterKey) || credentialKey(name);
+      member ||=
+        key !== text.slice(i, afterKey) || credentialKey(name) || (name === 'value' && namedSecret);
       const colon = jsonToken(JSON_SPACE, text, afterKey);
       const valueAt = afterKey + colon.length + 1;
       const beforeValue = jsonToken(JSON_SPACE, text, valueAt);
       out += `${key}${colon}:${beforeValue}`;
       i = valueAt + beforeValue.length;
     }
-    const [value, after] = maskJsonValue(text, i, member);
+    const [value, after] = maskJsonValue(text, i, member, ends);
     out += value;
     i = after;
   }
@@ -169,7 +244,7 @@ function redactJson(text: string): string | null {
   }
   const leading = jsonToken(JSON_SPACE, text, 0);
   try {
-    const [value, after] = maskJsonValue(text, leading.length, false);
+    const [value, after] = maskJsonValue(text, leading.length, false, jsonEnds(text));
     return `${leading}${value}${text.slice(after)}`;
   } catch (error) {
     // Nesting deeper than the stack: JSON.parse reads it, and walking it cannot. Withhold it.
@@ -182,7 +257,8 @@ function redactJson(text: string): string | null {
  * Mask every URL's user info, user name included, for an artifact a person attaches.
  *
  * A JSON value, or `KEY=` followed by one, is masked string by string, a string holding JSON
- * included, and its credential members are masked too. Anything else is masked whole, which
+ * included, and its credentials are masked too: credential members, the `value` beside a
+ * credential `name`, and credential `KEY=VALUE` strings. Anything else is masked whole, which
  * can mask more than the user info, never less.
  */
 export function redactAllUserinfo(value: string): string {

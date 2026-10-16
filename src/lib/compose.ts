@@ -485,8 +485,10 @@ export async function suppliedCredentials(
 
 /**
  * The record key `env` sets when it changes whether the Compose file hands Rocket.Chat a licence
- * or a registration token, and removes once a recreate succeeds. Until then the Compose file
- * says what is configured, and the running container can still have the previous one.
+ * or a registration token. Until every Rocket.Chat service is recreated from the file, the file
+ * says what is configured and a running container can still have the previous one. Only
+ * `recreateRocketChat` (`core/lifecycle/ready`) removes it, for `env`, `upgrade`, its rollback
+ * and an `up` that starts a stopped workspace.
  */
 export const CREDENTIALS_PENDING = 'credentials_pending';
 

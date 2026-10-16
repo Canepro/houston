@@ -8,6 +8,8 @@ import type * as PathsNS from '../../src/core/runner/paths';
 import type * as PayloadNS from '../../src/core/lifecycle/payload';
 import type * as KubeNamespaceNS from '../../src/core/kube/namespace';
 import type * as AdminNS from '../../src/core/lifecycle/admin';
+import type * as DockerCliNS from '../../src/seams/docker-cli';
+import type * as EngineNS from '../../src/core/runner/engine';
 
 jest.mock('../../src/core/runner/paths', () => {
   const actual = jest.requireActual<typeof PathsNS>('../../src/core/runner/paths');
@@ -35,6 +37,12 @@ jest.mock('../../src/core/lifecycle/admin', () => {
   };
 });
 
+// The Compose process, for a test that drives the real `engine.up` to see what it is asked for.
+jest.mock('../../src/seams/docker-cli', () => {
+  const actual = jest.requireActual<typeof DockerCliNS>('../../src/seams/docker-cli');
+  return { ...actual, compose: jest.fn(actual.compose) };
+});
+
 // `env` recreates Rocket.Chat and waits for it; no engine runs here.
 jest.mock('../../src/core/runner/engine', () => ({
   ...jest.requireActual<object>('../../src/core/runner/engine'),
@@ -51,6 +59,7 @@ import * as lifecyclePayload from '../../src/core/lifecycle/payload';
 import * as kubeNamespace from '../../src/core/kube/namespace';
 import * as config from '../../src/lib/config';
 import { ValidationError } from '../../src/lib/errors';
+import * as dockerCli from '../../src/seams/docker-cli';
 import { Interrupted } from '../../src/seams/exec';
 import {
   cleanupCommand,
@@ -555,6 +564,61 @@ describe('the record', () => {
     expect((await record('e3-env-legacy')).license).toEqual(unknown);
     await setEnvLocked('e3-env-legacy', { PORT: '3001' }, []);
     expect((await record('e3-env-legacy')).license).toEqual(token);
+
+    // Every replica of a multi-instance workspace has the change only once each one is
+    // recreated. The real engine is asked for all of them in one Compose call, MongoDB left
+    // out, and only that call's success deploys the change.
+    const seam = jest.mocked(dockerCli.compose);
+    const actualUp = jest.requireActual<typeof EngineNS>('../../src/core/runner/engine').up;
+    const calls: string[][] = [];
+    let exitCode = 0;
+    up.mockImplementation(actualUp);
+    seam.mockImplementation(async (args) => {
+      calls.push([...args]);
+      return {
+        argv: ['docker', 'compose', ...args],
+        exitCode,
+        signal: null,
+        stdout: '',
+        stderr: '',
+      };
+    });
+    try {
+      await workspaceNamed(
+        'e3-env-replicas',
+        { reg_token_supplied: true, instances: 2 },
+        {},
+        YAML.stringify({
+          services: {
+            'rocketchat-1': { environment: { REG_TOKEN: 'token' } },
+            'rocketchat-2': { environment: { REG_TOKEN: 'token' } },
+            mongodb: { image: 'mongo:7.0' },
+          },
+        }),
+      );
+      exitCode = 1;
+      await expect(setEnvLocked('e3-env-replicas', {}, ['REG_TOKEN'])).rejects.toThrow(
+        'failed applying the env change',
+      );
+      expect((await record('e3-env-replicas')).license).toEqual(unknown);
+      exitCode = 0;
+      await setEnvLocked('e3-env-replicas', {}, ['REG_TOKEN']);
+      expect(calls.at(-1)).toEqual([
+        'up',
+        '-d',
+        '--remove-orphans',
+        '--force-recreate',
+        '--no-deps',
+        'rocketchat-1',
+        'rocketchat-2',
+      ]);
+      expect((await record('e3-env-replicas')).license).toEqual(none);
+    } finally {
+      up.mockImplementation(async () => 0);
+      seam.mockImplementation(
+        jest.requireActual<typeof DockerCliNS>('../../src/seams/docker-cli').compose,
+      );
+    }
   });
 
   it('reads a legacy Compose token only from supported Rocket.Chat environments', async () => {
@@ -1057,6 +1121,7 @@ describe('the bundle', () => {
         `  - 'INITIAL_USER_PAIR={"password":"JsonPairSentinel","username":"ops"}'`,
         `  - 'NESTED_CFG={"inner":"{\\"secret\\":\\"JsonNestedSentinel\\"}"}'`,
         '  - JWTKey=JwtListSentinel',
+        `  - 'EXTRA_PAIR=[{"name":"SMTP_PASSWORD","value":"JsonPairNamedSentinel"},"ADMIN_EMAIL=ops@x.example"]'`,
         COMPOSE.replace(
           'MONGO_URL: mongodb://rocket:MongoUrlSecret@mongodb:27017/rocketchat',
           [
@@ -1075,6 +1140,9 @@ describe('the bundle', () => {
             `      OIDC_IDP_CONFIG: '{"url":"https://u:Json{SecretSentinel@idp","admin":"ops@example.com"}'`,
             `      INITIAL_USER: '{"_id":"u1","username":"ops","email":"ops@x.example","password":"JsonPasswordSentinel"}'`,
             `      OAUTH_CFG: '{"client_secret":"JsonClientSecretSentinel", "nested":{"apiKey":1234567,"token":["JsonListSentinel",{"a":true}],"keycloakUrl":"https://kc.example"},"hosts":[1.0,"ops@x.example"]}'`,
+            `      EXTRA_ENV: '["PORT=3000","DB_PASSWORD=JsonKvSentinel"]'`,
+            `      EXTRA_LIST: '[{"name":"DB_PASSWORD","value":"JsonNameValueSentinel"},{"value":"JsonValueFirstSentinel","name":"client_secret"}, {"name":"LOG_LEVEL", "value": 1.50},{"name":"api_token","value":{"id":7,"key":"JsonNamedObjectSentinel"}}]'`,
+            `      NESTED_LIST: '{"cfg":"[\\"DB_PASSWORD=JsonNestedKvSentinel\\"]"}'`,
           ].join('\n'),
         ),
         '',
@@ -1107,6 +1175,12 @@ describe('the bundle', () => {
     expect(artifact).not.toContain('JsonPairSentinel');
     expect(artifact).not.toContain('JsonNestedSentinel');
     expect(artifact).not.toContain('JwtListSentinel');
+    expect(artifact).not.toContain('JsonPairNamedSentinel');
+    expect(artifact).not.toContain('JsonKvSentinel');
+    expect(artifact).not.toContain('JsonNameValueSentinel');
+    expect(artifact).not.toContain('JsonValueFirstSentinel');
+    expect(artifact).not.toContain('JsonNamedObjectSentinel');
+    expect(artifact).not.toContain('JsonNestedKvSentinel');
     const rendered = YAML.parse(artifact) as {
       services: { rocketchat: { environment: Record<string, string> } };
       'x-reference': Record<string, string>;
@@ -1155,6 +1229,18 @@ describe('the bundle', () => {
       '{"client_secret":"********", "nested":{"apiKey":"********","token":["********",{"a":"********"}],' +
         '"keycloakUrl":"https://kc.example"},"hosts":[1.0,"ops@x.example"]}',
     );
+    // A JSON `KEY=VALUE` string, and the `value` beside a credential `name` in either order,
+    // are masked as the same YAML list entry and mapping are; a benign one keeps its bytes.
+    expect(rendered.services.rocketchat.environment.EXTRA_ENV).toBe(
+      '["PORT=3000","DB_PASSWORD=********"]',
+    );
+    expect(rendered.services.rocketchat.environment.EXTRA_LIST).toBe(
+      '[{"name":"DB_PASSWORD","value":"********"},{"value":"********","name":"client_secret"}, ' +
+        '{"name":"LOG_LEVEL", "value": 1.50},{"name":"api_token","value":{"id":"********","key":"********"}}]',
+    );
+    expect(rendered.services.rocketchat.environment.NESTED_LIST).toBe(
+      '{"cfg":"[\\"DB_PASSWORD=********\\"]"}',
+    );
     expect(Object.keys(rendered['x-reference']).sort()).toEqual([
       'https://********@example.test?mode=read',
     ]);
@@ -1168,6 +1254,7 @@ describe('the bundle', () => {
       'INITIAL_USER_PAIR={"password":"********","username":"ops"}',
       'NESTED_CFG={"inner":"{\\"secret\\":\\"********\\"}"}',
       'JWTKey=********',
+      'EXTRA_PAIR=[{"name":"SMTP_PASSWORD","value":"********"},"ADMIN_EMAIL=ops@x.example"]',
     ]);
   });
 

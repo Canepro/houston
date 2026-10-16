@@ -37,7 +37,7 @@ import * as config from '../lib/config';
 import { ValidationError } from '../lib/errors';
 import { isTruthy, quotedText, toText } from '../lib/format';
 import { pathExpandUser } from '../lib/home';
-import { credentialKey, REDACTED, redactAllUserinfo } from '../lib/redact';
+import { credentialKey, REDACTED, redactAssignedText } from '../lib/redact';
 import { namesOf } from '../lib/presets/composite';
 import * as presets from '../lib/presets/index';
 import { PROFILES } from '../lib/seed-profiles';
@@ -640,19 +640,9 @@ function redactArtifactText(
   knownSecrets: readonly string[],
 ): string {
   if (secret) return REDACTED;
-  // A URL password or query can contain `=`. Mask userinfo in the complete string before
-  // treating an equals sign as a list-form environment assignment. A bundle also masks the
-  // user name, which log redaction leaves readable and which can be the credential itself.
-  const urlRedacted = redactAllUserinfo(value);
-  const equals = urlRedacted.indexOf('=');
-  if (equals > 0) {
-    const key = urlRedacted.slice(0, equals);
-    return redactKnownSecrets(
-      `${key}=${credentialKey(key) ? REDACTED : urlRedacted.slice(equals + 1)}`,
-      knownSecrets,
-    );
-  }
-  return redactKnownSecrets(urlRedacted, knownSecrets);
+  // A bundle also masks the URL user name, which log redaction leaves readable and which can
+  // be the credential itself. The same rule masks a JSON string inside the value.
+  return redactKnownSecrets(redactAssignedText(value), knownSecrets);
 }
 
 /** Redact standard credential fields and the workspace's known secret values in parsed YAML. */

@@ -114,7 +114,11 @@ const ROOT = path.resolve(__dirname, '..');
 // to the recorded credentials, keep a loaded record's spellings through an interrupted write and
 // clear its marker on retry, and restrict the record a Compose write makes last: total 4604.
 // One more reports an env credential change only once a recreate deploys it: total 4605.
-const FLOOR = 4605;
+// Five more: the engine recreates a named list of replicas, and none by force for an empty one
+// (one test became two rows, plus one); a deferred credential change is deployed by an upgrade
+// or its rollback, and an interrupted upgrade is finished only by the rollback that undoes it
+// (two); and by an `up` that starts the stopped workspace (one): total 4610.
+const FLOOR = 4610;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [
