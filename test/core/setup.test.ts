@@ -87,7 +87,7 @@ it('refuses non-plain targeted mappings without rewriting their source bytes', a
   }
 });
 
-it('keeps frozen saved selector aliases and a present null scenarios value', () => {
+it('keeps frozen saved selector aliases, falsy fallback, and a present null scenarios value', () => {
   for (const [stored, expected] of [
     [' Default ', 'monolith'],
     ['compose', 'monolith'],
@@ -96,6 +96,11 @@ it('keeps frozen saved selector aliases and a present null scenarios value', () 
     ['KUBERNETES', 'microservices'],
   ]) {
     expect(savedSelectors({ default_deployment: stored } as never).deployment).toBe(expected);
+  }
+  for (const ignored of [false, 0, [], {}]) {
+    expect(
+      savedSelectors({ default_deployment: ignored, deployment: 'microservices' } as never),
+    ).toMatchObject({ deployment: 'microservices', answered_deployment: true });
   }
   expect(savedSelectors({ default_scenarios: null, scenarios: ['email'] } as never)).toMatchObject({
     scenarios: [],

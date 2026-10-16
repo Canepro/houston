@@ -1,6 +1,7 @@
 /** Saved setup selectors, shared with new-workspace creation. No environment probes. */
 import * as config from './config';
 import { ValidationError } from './errors';
+import { isTruthy } from './format';
 
 export const DEPLOYMENTS = ['monolith', 'multi-instance', 'microservices'];
 function map(value: unknown): config.Config {
@@ -76,9 +77,7 @@ export function savedSelectors(cfg: config.Config = config.loadConfig()): {
   answered_scenarios: boolean;
 } {
   const defaults = map(cfg.defaults);
-  const dep = [cfg.default_deployment, cfg.deployment, defaults.deployment].find(
-    (value: unknown) => value !== undefined && value !== null && value !== '',
-  );
+  const dep = [cfg.default_deployment, cfg.deployment, defaults.deployment].find(isTruthy);
   // Presence is meaningful: a deliberate `default_scenarios: null` clears legacy scenarios.
   const scen = own(cfg, 'default_scenarios')
     ? cfg.default_scenarios
