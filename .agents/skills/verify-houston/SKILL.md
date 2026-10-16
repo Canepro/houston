@@ -83,7 +83,9 @@ untracked files are fingerprinted and left in place. Changes to their bytes or
 the addition or removal of a nonignored file fail the run. A bounded filesystem
 walk applies Git's ignore rules and refuses untracked symlinks, FIFOs, sockets,
 and other special files. Git's untracked listing alone omits some special files.
-Git metadata and ignored dependency or build paths stay outside this manifest.
+Root Git metadata and ignored dependency or build paths stay outside this manifest.
+Nonignored nested repository metadata is included by the same walk.
+Root filenames beginning with a colon are treated as literal paths.
 The helper refuses a run if that manifest changes during verification. Commit
 verifier changes before final acceptance and record the exact
 head in the delivery receipt. Version alone cannot distinguish two same-version

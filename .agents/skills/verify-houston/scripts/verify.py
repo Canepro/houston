@@ -528,6 +528,17 @@ def require_access_identity(data, name, runtime):
             f'Access response chose another workspace/runtime: expected {name}/{runtime}')
 
 
+def require_human_inspection_identity(human, name, runtime):
+    # renderInspection puts identity in its first writePanel: an exact title
+    # and a Runtime label/value row. Other panels cannot supply that identity.
+    panel = re.match(r'\A\+- ([^\r\n]*?) -+\+\r?\n(.*?)(?=^\+-|\Z)',
+                     human, flags=re.MULTILINE | re.DOTALL)
+    runtimes = re.findall(r'^\|  Runtime +([^\r\n|]*?) +\|\r?$', panel[2],
+                          flags=re.MULTILINE) if panel else []
+    require(panel is not None and panel[1] == name and runtimes == [runtime],
+            f'Human inspection chose another workspace/runtime: expected {name}/{runtime}')
+
+
 def require_unknown_panels(human, panels):
     for panel in panels:
         match = re.search(
@@ -750,11 +761,14 @@ def untracked_candidate_files(context):
         relative = {str(path.relative_to(root)): path for path in children}
         ignored = set(git_evidence_output(
             context, 'candidate ignore rules', ['check-ignore', '--stdin', '-z'],
-            stdin=('\0'.join(relative) + '\0').encode(), accepted_exits=(0, 1),
+            # A bare leading colon is Git pathspec magic. Prefix each literal
+            # relative path and compare Git's exact echoed spelling.
+            stdin=('\0'.join('./' + name for name in relative) + '\0').encode(),
+            accepted_exits=(0, 1),
         ).decode().split('\0'))
         for name, path in relative.items():
             CURRENT_FILE_WORK.get().check(path)
-            if name in tracked or name in ignored:
+            if name in tracked or './' + name in ignored:
                 continue
             mode = path.lstat().st_mode
             if stat.S_ISDIR(mode):
@@ -1494,6 +1508,7 @@ def main():
                             'Unavailable Docker engine must report a warning')
                 human_label = f'inspect-{runtime}-human'
                 human = run(human_label, ['inspect', '--name', name])
+                require_human_inspection_identity(human, name, runtime)
                 require_unknown_panels(
                     human,
                     ('nodes', 'services', 'pods') if runtime == 'kubernetes'
@@ -1708,10 +1723,11 @@ def main():
                                            'HOUSTON_SSH_LOCAL_PORT': str(port)})
                 require(collision['error']['code'] == 'VALIDATION_FAILED',
                         f'A primary forward colliding with a {label} port must refuse')
-            public = run('access-public', ['info', '--name', 'verify-public-fixture', '--json'],
-                         schema='houston.info.v1', overrides=remote)['data']
-            require_access_identity(public, 'verify-public-fixture', 'kubernetes')
-            require(public['access'] is None, 'Wildcard workspace must not claim loopback access')
+            for label, overrides in [('access-public-local', {}), ('access-public', remote)]:
+                public = run(label, ['info', '--name', 'verify-public-fixture', '--json'],
+                             schema='houston.info.v1', overrides=overrides)['data']
+                require_access_identity(public, 'verify-public-fixture', 'kubernetes')
+                require(public['access'] is None, 'Wildcard workspace must not claim loopback access')
             summary['features']['access'] = (
                 'PASS: Docker and Kubernetes loopback local and SSH-marker handoff, '
                 'IPv6, option safety, local-port boundaries; no SSH executed')

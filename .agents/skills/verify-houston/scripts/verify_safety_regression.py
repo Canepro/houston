@@ -46,6 +46,8 @@ if args == ['--version']:
     sys.exit(0)
 if args == ['capabilities']:
     commands = [descriptor('info', ['--name'], 'houston.info.v1'), descriptor('capabilities', [], 'houston.capabilities.v1')]
+    if attack.startswith('inspect-'):
+        commands.append(descriptor('inspect', ['--name'], 'houston.inspect.v1'))
     if attack.startswith(('bundle-', 'admin-')):
         commands.append(descriptor('evidence', ['--name', '--bundle'], 'houston.evidence.v1'))
     if attack == 'config-large' or attack.startswith('feature-'):
@@ -120,6 +122,28 @@ if args[0] == 'onboard':
         emit('houston.onboard.v1', dict(schema='houston.setup.v1', selection=selection, persisted=config, actions=[], capacity=dict(supported_action=None), gates=[dict(code='GATE_OWNED_CLUSTER')], action='unchanged', first_run_command='houston up --version 8.5.1 --name fixture --wait'))
     completed = config['onboarding'].get('completed', False)
     emit('houston.onboard.v1', dict(completed=completed, completed_at=config['onboarding'].get('completed_at'), grants=dict(owned_cluster=config['grants'].get('owned_cluster', False)), answered_grants=dict(owned_cluster=completed), clusters=config['grants']['clusters'], rc_repro_version='9.9.9'))
+if args[0] == 'inspect':
+    name = args[args.index('--name') + 1]
+    runtime = 'kubernetes' if name == 'verify-kube-fixture' else 'docker'
+    if '--json' in args:
+        emit('houston.inspect.v1', dict(name=name, runtime=runtime,
+             url='http://127.0.0.1:39999', bind_host='127.0.0.1',
+             docker=dict(containers=[], networks=[], volumes=[], warnings=['engine unavailable']),
+             kubernetes=dict(nodes=[], services=[], pods=[], warnings=['reads unavailable'],
+                             context='verify-offline', namespace='houston-verify-kube-fixture', cluster_exists=None)))
+    human_name, human_runtime = name, runtime
+    if attack != 'inspect-clean':
+        _, selected_runtime, field = attack.split(':')
+        if selected_runtime == runtime:
+            if field == 'name':
+                human_name = 'another-' + name + '-copy'
+            else:
+                human_runtime = 'docker' if runtime == 'kubernetes' else 'kubernetes'
+    # Match renderInspection/writePanel's title and label/value contract.
+    print(f'+- {human_name} ----+\n|  Runtime  {human_runtime}  |\n+----------------+')
+    for panel in ('nodes', 'services', 'pods') if runtime == 'kubernetes' else ('containers', 'networks', 'volumes'):
+        print(f'+- {panel} ----+\n|  unknown  |\n+----------------+')
+    sys.exit(0)
 if args[0] != 'info':
     raise RuntimeError(args)
 if attack.startswith('access-'):
@@ -147,13 +171,15 @@ if attack.startswith('access-'):
         access = dict(mode='remote_ssh' if remote else 'local', bind='loopback', host_port=39999,
                       local_port=port if remote else 39999, browser_url=f'http://127.0.0.1:{port}' if remote else record['root_url'],
                       tunnel_command=command, side_ports=sides, note='synthetic remote guidance' if remote else None)
+    if attack == 'access-public-local' and name == 'verify-public-fixture' and not remote:
+        access = dict(mode='local', browser_url=record['root_url'], tunnel_command=None)
     if '--json' not in args:
         print(' '.join(str(access[key] or '') for key in ('browser_url', 'tunnel_command')) if access else 'public')
         sys.exit(0)
     data = dict(name=name, runtime=runtime, access=access)
-    if attack != 'access-clean':
+    if attack.startswith('access-identity:'):
         _, stage, selected_runtime, field = attack.split(':')
-        actual_stage = 'public' if name == 'verify-public-fixture' else 'remote' if remote else 'discovery'
+        actual_stage = ('public' if remote else 'public-local') if name == 'verify-public-fixture' else 'remote' if remote else 'discovery'
         if stage == actual_stage and runtime == selected_runtime:
             data[field] = 'another-workspace' if field == 'name' else 'docker' if runtime == 'kubernetes' else 'kubernetes'
     emit('houston.info.v1', data)
@@ -173,6 +199,10 @@ if 'verify-kube-fixture' not in args and 'verify-fixture' not in args:
             root = Path.cwd()
             if attack == 'untracked-new':
                 (root / 'evidence.tmp').write_text('candidate root artifact\n')
+            elif attack in ('untracked-colon-new', 'untracked-colon-existing', 'untracked-nested'):
+                target = root / ('nested/new/artifact.txt' if attack == 'untracked-nested' else ':node_modules')
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text('candidate artifact changed\n')
             elif attack == 'untracked-existing':
                 (root / 'extension.ts').write_text('candidate changed existing source\n')
             elif attack == 'untracked-ignored':
@@ -384,6 +414,8 @@ def run_main_case(path, attack, proof_dir=None):
         (candidate / 'notes.tmp').write_bytes(b'unrelated dirty file\n')
         if attack.startswith('untracked-'):
             (candidate / 'extension.ts').write_text('existing untracked source\n')
+        if attack in ('untracked-colon-existing', 'untracked-colon-clean'):
+            (candidate / ':node_modules').write_text('existing colon artifact\n')
         if attack == 'untracked-symlink':
             (candidate / 'candidate-link').symlink_to(outside)
         if attack == 'untracked-fifo':
@@ -426,10 +458,22 @@ def run_main_case(path, attack, proof_dir=None):
             (retained / 'invocation.json').write_text(json.dumps(dict(
                 command=command, exit=result.returncode, attack=attack,
                 verifier_sha256=hashlib.sha256(path.read_bytes()).hexdigest()), indent=2) + '\n')
-            for name in (*PROVENANCE, 'candidate-fingerprint-after.json', 'fixture-manifest-after.json'):
+            names = [*PROVENANCE, 'candidate-fingerprint-after.json', 'fixture-manifest-after.json', 'commands.json']
+            # Retain actual synthetic outputs at the new CLI boundaries, including
+            # baseline false passes. These files contain no real workspace data.
+            for label in ('access-public-local', 'access-public', 'inspect-docker',
+                          'inspect-kubernetes', 'inspect-docker-human', 'inspect-kubernetes-human'):
+                names.extend((label + '.stdout', label + '.stderr'))
+            for name in names:
                 target = out / name
                 if target.is_file() and not target.is_symlink() and target.stat().st_size <= 1024 * 1024:
                     (retained / name).write_bytes(target.read_bytes())
+            if attack.startswith('untracked-colon'):
+                (retained / 'candidate-git-status.txt').write_bytes(subprocess.check_output(
+                    ['git', '-C', str(candidate), 'status', '--porcelain'], env=environment))
+                target = candidate / ':node_modules'
+                if target.is_file():
+                    (retained / 'colon-artifact.txt').write_bytes(target.read_bytes())
             printed = result.stdout.splitlines()
             if printed:
                 target = Path(printed[-1])
@@ -461,7 +505,7 @@ def run_main_case(path, attack, proof_dir=None):
         assert lines, f'main did not print summary: {result.stderr[-1200:]}'
         summary_path = Path(lines[-1])
         summary = json.loads(summary_path.read_text())
-        should_pass = (attack in ('clean', 'feature-clean', 'stdout-hardlink', 'access-clean', 'untracked-clean', 'untracked-ignored')
+        should_pass = (attack in ('clean', 'feature-clean', 'stdout-hardlink', 'access-clean', 'inspect-clean', 'untracked-clean', 'untracked-ignored', 'untracked-colon-clean')
                        or attack.endswith(':hardlink'))
         assert (result.returncode == 0) == should_pass, f'exit={result.returncode}: {summary}'
         assert summary['result'] == ('PASS_SCOPED' if should_pass else 'FAIL'), summary
@@ -490,6 +534,10 @@ def run_main_case(path, attack, proof_dir=None):
             if 'inventory' not in summary:
                 assert not [p for p in out.glob('sha256.json*') if p.is_file()], 'obsolete inventory retained'
                 return dict(observed, error=error, inventory=None, budget_refused=True)
+        elif attack.startswith('inspect-') and attack != 'inspect-clean':
+            assert 'Human inspection chose another workspace/runtime' in error, error
+        elif attack == 'access-public-local':
+            assert 'Wildcard workspace must not claim loopback access' in error, error
         elif attack.startswith('access-') and attack != 'access-clean':
             assert 'Access response chose another workspace/runtime' in error, error
         elif attack.startswith('untracked-'):
@@ -503,13 +551,24 @@ def run_main_case(path, attack, proof_dir=None):
                 assert 'extension.ts' in before, before
                 if attack == 'untracked-new':
                     assert (candidate / 'evidence.tmp').read_text() == 'candidate root artifact\n'
-                if attack in ('untracked-new', 'untracked-existing'):
+                if attack in ('untracked-new', 'untracked-existing', 'untracked-colon-new', 'untracked-colon-existing', 'untracked-nested'):
                     assert summary['candidate_unchanged'] is False and summary['source_unchanged'] is False, summary
-                    name = 'evidence.tmp' if attack == 'untracked-new' else 'extension.ts'
+                    name = ('evidence.tmp' if attack == 'untracked-new' else
+                            'extension.ts' if attack == 'untracked-existing' else
+                            'nested/new/artifact.txt' if attack == 'untracked-nested' else ':node_modules')
+                    if attack.startswith('untracked-colon'):
+                        status = subprocess.check_output(['git', '-C', str(candidate), 'status', '--porcelain'], env=environment).decode()
+                        assert '?? :node_modules' in status, status
+                        assert 'node_modules/yaml/index.js' not in after, after
+                        assert (candidate / ':node_modules').read_text() == 'candidate artifact changed\n'
+                        assert (name in before) == (attack == 'untracked-colon-existing'), before
                     assert before.get(name) != after[name], (before, after)
                     assert 'Candidate fingerprint changed' in error, error
                 else:
                     assert summary['candidate_unchanged'] is True, summary
+                    if attack == 'untracked-colon-clean':
+                        assert before[':node_modules'] == after[':node_modules'], (before, after)
+                        assert (candidate / ':node_modules').read_text() == 'existing colon artifact\n'
                 assert (candidate / 'extension.ts').read_text() == ('candidate changed existing source\n' if attack == 'untracked-existing' else 'existing untracked source\n')
         elif attack.startswith(('delete:', 'symlink:')):
             assert 'Mandatory provenance artifact' in error, error
@@ -685,12 +744,14 @@ def main():
     args = parser.parse_args()
     path = args.verify_source
     attacks = (
-        'clean', 'access-clean',
+        'clean', 'access-clean', 'access-public-local', 'inspect-clean',
+        *('inspect-identity:' + runtime + ':' + field
+          for runtime in ('docker', 'kubernetes') for field in ('name', 'runtime')),
         *('access-identity:' + stage + ':' + runtime + ':' + field
           for stage, runtime in (('discovery', 'docker'), ('discovery', 'kubernetes'),
-                                 ('remote', 'docker'), ('public', 'kubernetes'))
+                                 ('remote', 'docker'), ('public', 'kubernetes'), ('public-local', 'kubernetes'))
           for field in ('name', 'runtime')),
-        *('untracked-' + kind for kind in ('new', 'existing', 'clean', 'ignored', 'symlink', 'fifo')),
+        *('untracked-' + kind for kind in ('new', 'existing', 'colon-new', 'colon-existing', 'colon-clean', 'nested', 'clean', 'ignored', 'symlink', 'fifo')),
         'work-before:file', 'work-before:aggregate', 'work-before:entries',
         *('work-after:' + where for where in ('temp', 'fixture', 'retained', 'aggregate', 'final-total', 'time', 'growing', 'inventory', 'entries')),
         'root-symlink', 'summary-planted', 'no-summary',

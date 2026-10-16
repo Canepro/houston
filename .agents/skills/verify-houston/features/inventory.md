@@ -33,7 +33,9 @@ nonempty warnings. Kubernetes context and namespace must match the synthetic
 record, and unavailable Kind must leave `cluster_exists` null. The synthetic secret, login, and environment must
 be absent. Require fixture bytes to remain unchanged. Empty offline arrays prove
 only the unavailable-engine projection, never an empty or healthy real cluster.
-The helper also drives both fixtures without `--json` and requires each Docker
+The helper also drives both fixtures without `--json`. Each first panel must have
+the exact requested workspace name as its title and the expected `Runtime` row.
+A name that only contains the expected name does not match. Require each Docker
 containers, networks, and volumes panel plus each Kubernetes nodes, Services,
 and pods panel to mark its own unreadable state `unknown`, with the synthetic
 secret absent from both stdout and stderr.

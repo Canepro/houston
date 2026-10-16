@@ -33,7 +33,8 @@ SSH contract on both loopback runtimes. Require `data.name` and `data.runtime`
 to match each requested fixture before accepting its access values. These are
 existing fields from `lifecycle/payload.detail` through `lifecycle/inspect.summary`,
 not fields added to the `access` object. Check them again on every successful SSH
-JSON response, the IPv6 response, and the wildcard response. Identical access
+JSON response, the IPv6 response, and both local-session and SSH-session wildcard
+responses. Identical access
 values cannot establish that both runtimes were exercised. It uses only synthetic SSH_CONNECTION,
 SSH_CLIENT, SSH_TTY, HOUSTON_SSH_HOST, HOUSTON_SSH_USER, and
 HOUSTON_SSH_LOCAL_PORT values.
@@ -53,7 +54,9 @@ The `--` delimiter must precede a single
 destination argument, including spaces, quotes, shell punctuation, or an
 option-shaped user override. These explicit bind and option protections are
 safety corrections to the historical command.
-A wildcard-bound fixture must return null access guidance. Human output must
+A wildcard-bound fixture must return null access guidance both without SSH markers
+and with a synthetic SSH marker. Check its workspace name and runtime on each
+response. Human output must
 contain the JSON tunnel and browser URL. Compare fixture bytes before and after.
 Execute no printed tunnel or account mutation.
 
