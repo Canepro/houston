@@ -693,6 +693,14 @@ def require_setup_first_run(saved):
     return {'result': 'PASS', 'coverage': 'blocked command with matching facts', 'blocker': code}
 
 
+def reject_json_constant(token):
+    raise ValueError(f'Invalid JSON numeric constant: {token}')
+
+
+def strict_json_loads(payload):
+    return json.loads(payload, parse_constant=reject_json_constant)
+
+
 def yaml_document(node_exec, root, env, path):
     script = (
         'const fs=require("node:fs");'
@@ -706,7 +714,7 @@ def yaml_document(node_exec, root, env, path):
         env=env,
         stdin=read_bounded_file(path),
     )
-    return json.loads(result)
+    return strict_json_loads(result)
 
 
 def evidence_projection(value):
@@ -777,6 +785,15 @@ def git_evidence_context(root):
 @bounded_file_work
 def git_evidence_output(context, label, arguments, text=False, stdin=None, accepted_exits=(0,)):
     if arguments[0] == 'diff':
+        # A superproject diff can spawn status inside a submodule, whose own
+        # filter configuration is invisible to the superproject config query.
+        entries = git_evidence_output(
+            context, 'candidate Git index modes', ['ls-files', '--stage', '-z'],
+        )
+        for entry in entries.split(b'\0'):
+            CURRENT_FILE_WORK.get().check(label, entries=1)
+            require(not entry.startswith(b'160000 '),
+                    'Unsupported candidate Git submodule (tracked gitlink)')
         # diff hashes worktree bytes through convert_to_git, which can run clean
         # and process filters. Query effective config, including includes and
         # worktree config, on every diff so probe-written config is covered too.
@@ -849,8 +866,38 @@ def untracked_candidate_files(context):
 
 
 @bounded_file_work
+def require_safe_tracked_links(context):
+    """Check tracked link structure across the checkout, not arbitrary imports."""
+    root = context['root']
+    entries = git_evidence_output(
+        context, 'candidate tracked link modes', ['ls-files', '--stage', '-z'],
+    )
+    for entry in entries.split(b'\0'):
+        CURRENT_FILE_WORK.get().check('candidate tracked links', entries=1)
+        if not entry.startswith(b'120000 '):
+            continue
+        name = entry.split(b'\t', 1)[1].decode()
+        path = root / name
+        try:
+            target = path.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise RuntimeError(f'Unsafe candidate tracked link: {name} (unresolved)') from error
+        require(target.is_relative_to(root) and
+                (regular_file(target) or stat.S_ISDIR(target.lstat().st_mode)),
+                f'Unsafe candidate tracked link: {name}')
+        ignored = git_evidence_output(
+            context, 'candidate tracked link ignore rule',
+            ['check-ignore', '--no-index', '--stdin', '-z'],
+            stdin=('./' + str(target.relative_to(root)) + '\0').encode(),
+            accepted_exits=(0, 1),
+        )
+        require(not ignored, f'Unsafe candidate tracked link: {name} (ignored target)')
+
+
+@bounded_file_work
 def source_manifest(context):
     root = context['root']
+    require_safe_tracked_links(context)
     paths = git_evidence_output(
         context,
         'candidate source manifest',
@@ -1552,14 +1599,14 @@ def main():
                 return stdout.decode().strip()
             lines = stdout.decode().splitlines()
             require(len(lines) == 1, f'{label}: expected exactly one JSON envelope')
-            envelope = json.loads(lines[0])
+            envelope = strict_json_loads(lines[0])
             require(envelope.get('schema') == schema and envelope.get('contract') == 2,
                     f'{label}: unexpected schema or contract')
             require(envelope.get('ok') is ok, f'{label}: unexpected ok value')
             require(envelope.get('houston_version') == version, f'{label}: wrong build version')
             return envelope
 
-        package = json.loads(read_bounded_file(root / 'package.json'))
+        package = strict_json_loads(read_bounded_file(root / 'package.json'))
         version = package['version']
         require(run('version', ['--version']) == f'houston {version}', 'Version differs from package.json')
         caps = run('capabilities', ['capabilities'], schema='houston.capabilities.v1')['data']
@@ -1662,7 +1709,7 @@ def main():
             bundle_files = [bundle / name for name in expected_bundle_files]
             for file in bundle_files:
                 require_regular_file(file, f'Missing regular bundle file: {file.name}')
-            manifest = json.loads(read_bounded_file(bundle / 'manifest.json'))
+            manifest = strict_json_loads(read_bounded_file(bundle / 'manifest.json'))
             require(manifest['repro']['name'] == 'verify-fixture', 'Bundle names another workspace')
             require(evidence_projection(payload) == evidence_projection(bundle_payload)
                     == evidence_projection(manifest),
@@ -1819,18 +1866,23 @@ def main():
                                   overrides=dict(remote, HOUSTON_SSH_LOCAL_PORT=value))
                     require(invalid['error']['code'] == 'VALIDATION_FAILED',
                             f'Invalid local port {value} must be refused')
+            ipv6_remote = {'SSH_CONNECTION': ssh_values['SSH_CONNECTION'],
+                           'HOUSTON_SSH_LOCAL_PORT': '4311',
+                           'HOUSTON_SSH_USER': "operator's team",
+                           'HOUSTON_SSH_HOST': 'ssh-proof.invalid; echo unsafe'}
             remote_access('ipv6', 'SSH_CONNECTION', name='verify-ipv6-fixture', target='[::1]', port=4311, sides=(4312, 4313, 4314),
-                          changes={'HOUSTON_SSH_LOCAL_PORT': '4311',
-                                   'HOUSTON_SSH_USER': "operator's team",
-                                   'HOUSTON_SSH_HOST': 'ssh-proof.invalid; echo unsafe'})
+                          changes=ipv6_remote)
             for label, port in [('sidecar', 4312), ('sidecar-second', 4313), ('monitoring', 4314)]:
                 collision = run('access-' + label + '-port-collision',
                                 ['info', '--name', 'verify-ipv6-fixture', '--json'],
                                 expected=2, schema='houston.error.v1', ok=False,
-                                overrides={'SSH_TTY': ssh_values['SSH_TTY'],
-                                           'HOUSTON_SSH_LOCAL_PORT': str(port)})
+                                overrides=dict(ipv6_remote, HOUSTON_SSH_LOCAL_PORT=str(port)))
                 require(collision['error']['code'] == 'VALIDATION_FAILED',
                         f'A primary forward colliding with a {label} port must refuse')
+                message = collision['error'].get('message', '')
+                require(isinstance(message, str) and 'HOUSTON_SSH_LOCAL_PORT' in message
+                        and str(port) in message and 'side ports' in message,
+                        f'Collision refusal must identify the {label} side port')
             for label, overrides in [('access-public-local', {}), ('access-public', remote)]:
                 public = run(label, ['info', '--name', 'verify-public-fixture', '--json'],
                              schema='houston.info.v1', overrides=overrides)['data']

@@ -34,7 +34,9 @@ candidate checkout, and a verified Git top level. Every evidence Git command dis
 fsmonitor and hooks. Global/system config, caller Git overrides, prompts and optional
 locks are disabled; diff also disables external diff and textconv helpers. Before every diff,
 the helper inspects effective config, including local/worktree config and includes, and
-refuses configured clean or process filters before they can execute. Store evidence outside both
+refuses configured clean or process filters before they can execute. It also refuses
+any tracked gitlink before each diff. Submodules are unsupported because a diff can
+invoke their own Git configuration and helpers. Store evidence outside both
 checkouts.
 
 The helper requires Python 3.9+, Node, `dirname`, and `readlink`. Process-group
@@ -58,6 +60,10 @@ Each CLI process has a 60-second timeout and completes before the next command.
 The runner retains at most 4 MiB from each of stdout and stderr. Output beyond
 either limit fails the command and triggers cleanup; discarded output cannot
 produce a passing receipt.
+Command envelopes reject the non-JSON numeric tokens `NaN`, `Infinity`, and
+`-Infinity`, including in otherwise unchecked fields. Package and bundle manifest
+JSON and the JSON returned by the YAML projection reader use the same strict
+parser. Internal JSON copies operate only on already parsed values.
 Readiness means version and capability envelopes match `package.json`, followed
 by the expected missing-workspace refusal. The prescribed offline probes start no
 listener or container. Cleanup proves only
@@ -96,7 +102,12 @@ its actual executable digest. The resolved dispatcher must remain in the checkou
 `bin/` directory so its computed tools/source root is the candidate. Source links,
 including parent-directory links, must resolve to regular, nonignored files already
 in the source manifest; their target path and bytes are hashed as well as the link.
-Escaping, relocated, directory or ignored-target links fail before CLI execution.
+Within the source manifest, escaping, relocated, directory or ignored-target
+links fail before CLI execution. A separate bounded structural check resolves
+every tracked symlink across the checkout and refuses escaping, dangling, cyclic,
+special-file or ignored targets. In-tree, nonignored directory targets outside the
+source manifest are allowed, including `legacy/houston/data -> ../../data`. This
+structural check does not hash every possible import or contain arbitrary code.
 A file link within `bin/` to a manifested, nonignored file is supported.
 Both `src/cli/entry.ts` and `tools/cli.js` must be manifested files. Installed-package
 `dist/` fallback and ignored source dispatchers are outside this checkout verifier.

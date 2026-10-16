@@ -11,6 +11,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -50,6 +51,10 @@ def emit(schema, data=None, error=None, code=0):
             else:
                 data['schema'] = 'houston.setup.wrong'
     value['error' if error else 'data'] = error if error else data
+    if attack.startswith('json-constant:'):
+        value['extra_numeric'] = float(attack.split(':')[1])
+    elif attack == 'json-number-clean':
+        value['extra_numeric'] = 1.25
     print(json.dumps(value))
     sys.exit(code)
 
@@ -62,7 +67,7 @@ if args == ['capabilities']:
     commands = [descriptor('info', ['--name'], 'houston.info.v1'), descriptor('capabilities', [], 'houston.capabilities.v1')]
     if attack.startswith('inspect-'):
         commands.append(descriptor('inspect', ['--name'], 'houston.inspect.v1'))
-    if attack.startswith(('bundle-', 'admin-')):
+    if attack.startswith(('bundle-', 'admin-')) or attack == 'json-bundle-constant':
         commands.append(descriptor('evidence', ['--name', '--bundle'], 'houston.evidence.v1'))
     if attack == 'config-large' or attack.startswith('feature-'):
         commands.append(descriptor('onboard', ['--json'] + (['--show', '--deployment', '--scenario', '--seed-profile', '--retain-runs/--no-retain-runs', '--accept-defaults', '--reconfigure', '--section'] if attack.startswith('feature-') else []), 'houston.onboard.v1'))
@@ -83,7 +88,7 @@ if args[0] == 'evidence':
     if '--bundle' in args:
         bundle = Path(args[args.index('--bundle') + 1])
         bundle.mkdir()
-        (bundle / 'manifest.json').write_text(json.dumps(data))
+        (bundle / 'manifest.json').write_text(json.dumps(dict(data, generated_at=float('inf')) if attack == 'json-bundle-constant' else data))
         (bundle / 'README.md').write_text('Workspace `verify-fixture` Rocket.Chat 8.5.1 http://127.0.0.1:39999')
         (bundle / 'docker-compose.yml').write_text(compose)
         if attack in ('bundle-manifest', 'bundle-readme'):
@@ -174,9 +179,15 @@ if attack.startswith('access-'):
     port_text = os.environ.get('HOUSTON_SSH_LOCAL_PORT', str(host_port))
     try:
         port = int(port_text)
-        assert 1024 <= port <= 65535 and port not in sides
+        assert 1024 <= port <= 65535
     except (ValueError, AssertionError):
-        emit('houston.error.v1', error=dict(code='VALIDATION_FAILED'), code=2)
+        emit('houston.error.v1', error=dict(code='VALIDATION_FAILED', message='Invalid local port'), code=2)
+    if remote and not (os.environ.get('HOUSTON_SSH_USER') and os.environ.get('HOUSTON_SSH_HOST')):
+        emit('houston.error.v1', error=dict(code='VALIDATION_FAILED', message='Invalid SSH settings'), code=2)
+    if port in sides and attack != 'access-no-collision':
+        message = ('Invalid SSH settings' if attack == 'access-collision-reason' else
+                   f'HOUSTON_SSH_LOCAL_PORT {port_text} is one of this workspace\'s side ports')
+        emit('houston.error.v1', error=dict(code='VALIDATION_FAILED', message=message), code=2)
     access = None
     if record['extra']['bind_host'] != '0.0.0.0':
         command = None
@@ -239,6 +250,11 @@ if 'verify-kube-fixture' not in args and 'verify-fixture' not in args:
         elif attack.startswith(('entrypoint-', 'dispatch-')) and attack.endswith('mutate'):
             with Path(__file__).open('a') as stream:
                 stream.write('\n# candidate changed executable bytes\n')
+        elif attack.startswith('submodule-') and 'during' in attack:
+            import subprocess
+            sub = Path.cwd() / 'vendor'
+            oid = subprocess.check_output([GIT_EXE, '-C', str(sub), 'rev-parse', 'HEAD'], text=True).strip()
+            subprocess.run([GIT_EXE, 'update-index', '--add', '--cacheinfo', '160000', oid, 'vendor'], check=True)
         elif attack.startswith('filter-') and 'during' in attack:
             with (Path.cwd() / '.git/config').open('a') as stream:
                 stream.write('\n[include]\n\tpath = ' + FILTER_CONFIG + '\n')
@@ -491,7 +507,7 @@ def run_main_case(path, attack, proof_dir=None):
         stub = candidate / 'bin/houston'
         stub.write_text(
             f'#!{sys.executable}\nOUT={str(out)!r}\nATTACK={attack!r}\n'
-            f'FILTER_CONFIG={str(base / "filter-config")!r}\nOUTSIDE={str(outside)!r}\nOTHER={str(other)!r}\nHELPER={str(base / "git-helper")!r}\n' + STUB)
+            f'GIT_EXE={shutil.which("git")!r}\nFILTER_CONFIG={str(base / "filter-config")!r}\nOUTSIDE={str(outside)!r}\nOTHER={str(other)!r}\nHELPER={str(base / "git-helper")!r}\n' + STUB)
         stub.chmod(0o700)
         executable_before = stub.read_bytes()
         executable_target = stub
@@ -513,6 +529,16 @@ def run_main_case(path, attack, proof_dir=None):
                 (layout / 'tools').rmdir()
                 (layout / 'tools').symlink_to(target_dir, target_is_directory=True)
                 (target_dir / 'cli.js').write_text(adapter)
+            elif 'lib' in attack:
+                (layout / 'tools/cli.js').write_text("require('../lib/adapter.js');")
+                (target_dir / 'adapter.js').write_text(adapter)
+                (layout / 'lib').mkdir()
+                target = (target_dir / 'adapter.js')
+                if 'dangling' in attack:
+                    target = layout / 'absent.js'
+                elif 'cyclic' in attack:
+                    target = layout / 'lib/adapter.js'
+                (layout / 'lib/adapter.js').symlink_to(target)
             elif 'source' in attack:
                 (layout / 'tools/cli.js').write_text("require('../src/adapter.js');")
                 (target_dir / 'adapter.js').write_text(adapter)
@@ -565,13 +591,18 @@ def run_main_case(path, attack, proof_dir=None):
             (candidate / 'src/cli/entry.ts').write_text('// synthetic source layout\n')
             (candidate / 'tools/cli.js').write_text('// synthetic source layout\n')
         (candidate / 'package.json').write_text(
-            '{"version":"9.9.9"}' + (' ' * (2 * 1024 * 1024) if attack == 'package-large' else ''))
+            ('{"version":"9.9.9","extra_numeric":NaN}' if attack == 'json-package-constant' else '{"version":"9.9.9"}') + (' ' * (2 * 1024 * 1024) if attack == 'package-large' else ''))
         # The synthetic CLI writes JSON, a YAML subset. This parser dependency
         # supplies transport only; no receipt or finalizer logic is stubbed.
         yaml = candidate / 'node_modules/yaml'
         yaml.mkdir(parents=True)
         (yaml / 'index.js').write_text('exports.parse=JSON.parse;')
         (candidate / '.gitignore').write_text('node_modules/\nignored-build/\ndist/\n' + ('tools/cli.js\n' if attack == 'dispatch-ignored-regular-mutate' else ''))
+        if attack == 'dispatch-legacy-clean':
+            (candidate / 'data').mkdir()
+            (candidate / 'data/marker').write_text('legacy data control')
+            (candidate / 'legacy/houston').mkdir(parents=True)
+            (candidate / 'legacy/houston/data').symlink_to('../../data', target_is_directory=True)
         (candidate / 'notes.tmp').write_bytes(b'unrelated dirty file\n')
         if attack.startswith('untracked-'):
             (candidate / 'extension.ts').write_text('existing untracked source\n')
@@ -593,7 +624,7 @@ def run_main_case(path, attack, proof_dir=None):
         }
         for command in (
             ['git', 'init', '-q', str(candidate)],
-            ['git', '-C', str(candidate), 'add', 'bin', 'package.json', '.gitignore', *(['src', 'tools'] if 'relocated' not in attack else [])],
+            ['git', '-C', str(candidate), 'add', 'bin', 'package.json', '.gitignore', *(['src', 'tools'] if 'relocated' not in attack else []), *(['lib'] if 'lib' in attack else []), *(['data', 'legacy'] if attack == 'dispatch-legacy-clean' else [])],
             ['git', '-C', str(candidate), '-c', 'user.name=Verifier test',
              '-c', 'user.email=verifier@invalid', '-c', 'commit.gpgsign=false',
              '-c', f'core.hooksPath={os.devnull}', 'commit', '-qm', 'fixture'],
@@ -604,9 +635,39 @@ def run_main_case(path, attack, proof_dir=None):
             (candidate / 'src').mkdir(exist_ok=True)
             for item in candidate.glob('budget-*.bin'):
                 item.rename(candidate / 'src' / item.name)
+        if attack.startswith('submodule-'):
+            sub = candidate / 'vendor'
+            subprocess.run(['git', 'init', '-q', str(sub)], check=True, env=environment)
+            (sub / 'f.js').write_text('module.exports = 1;\n')
+            for command in (['git', '-C', str(sub), 'add', 'f.js'],
+                            ['git', '-C', str(sub), '-c', 'user.name=t', '-c', 'user.email=t@invalid', 'commit', '-qm', 's']):
+                subprocess.run(command, check=True, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if 'during' in attack:
+                with (candidate / '.git/info/exclude').open('a') as stream:
+                    stream.write('vendor/\n')
+            else:
+                for command in (['git', '-C', str(candidate), 'add', 'vendor'],
+                                ['git', '-C', str(candidate), '-c', 'user.name=t', '-c', 'user.email=t@invalid', 'commit', '-qm', 'sub']):
+                    subprocess.run(command, check=True, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            helper = base / 'filter-helper'
+            helper.write_text('#!/bin/sh\necho ran >> %s\n%s' % (base / 'helper-marker', 'exit 1\n' if 'process' in attack else 'cat\n'))
+            helper.chmod(0o700)
+            driver = 'process' if 'process' in attack else 'clean'
+            config = base / 'filter-config'
+            config.write_text('[filter "x"]\n\t%s = %s\n' % (driver, helper))
+            with (sub / '.git/config').open('a') as stream:
+                if 'worktree' in attack:
+                    stream.write('\n[extensions]\n\tworktreeConfig = true\n')
+                    (sub / '.git/config.worktree').write_text(config.read_text())
+                elif 'include' in attack:
+                    stream.write('\n[include]\n\tpath = ' + str(config) + '\n')
+                else:
+                    stream.write('\n' + config.read_text())
+            (sub / '.git/info/attributes').write_text('* filter=x\n')
+            (sub / 'f.js').write_text('module.exports = 2;\n')
         if attack.startswith('filter-'):
             helper = base / 'filter-helper'
-            helper.write_text('#!/bin/sh\necho ran >> %s\n%s' % (base / 'helper-marker', 'exit 1\n' if 'process' in attack else 'cat >/dev/null\nexec %s -C %s show HEAD:package.json\n' % (__import__('shutil').which('git'), candidate)))
+            helper.write_text('#!/bin/sh\necho ran >> %s\n%s' % (base / 'helper-marker', 'exit 1\n' if 'process' in attack else 'cat >/dev/null\nexec %s -C %s show HEAD:package.json\n' % (shutil.which('git'), candidate)))
             helper.chmod(0o700)
             driver = 'process' if 'process' in attack else 'clean'
             config = base / 'filter-config'
@@ -653,6 +714,8 @@ def run_main_case(path, attack, proof_dir=None):
             for label in ('access-public-local', 'access-public', 'inspect-docker',
                           'inspect-kubernetes', 'inspect-docker-human', 'inspect-kubernetes-human'):
                 names.extend((label + '.stdout', label + '.stderr'))
+            if attack.startswith('json-'):
+                names.extend(p.name for p in out.glob('*.stdout'))
             if attack.startswith('feature-'):
                 names.extend(p.name for p in out.glob('setup-*.stdout'))
             if attack.startswith('dispatch-'):
@@ -661,9 +724,16 @@ def run_main_case(path, attack, proof_dir=None):
                 (retained / 'dispatcher.bin').write_bytes(DISPATCHER)
                 (retained / 'adapter-before.js').write_bytes(adapter_before)
                 (retained / 'adapter-after.js').write_bytes((layout / 'tools/cli.js').read_bytes())
-            if attack.startswith('access-human:') or attack == 'access-clean':
+            if attack.startswith('access-'):
                 names.extend(p.name for p in out.glob('access-*.stdout'))
-            if attack.startswith('filter-'):
+            if attack.startswith('submodule-'):
+                for name in ('config', 'config.worktree', 'info/attributes'):
+                    target = candidate / 'vendor/.git' / name
+                    if target.is_file():
+                        (retained / ('submodule-' + name.replace('/', '-') + '.txt')).write_bytes(target.read_bytes())
+                (retained / 'git-index-modes.txt').write_bytes(subprocess.check_output(
+                    ['git', '-C', str(candidate), 'ls-files', '--stage'], env=environment))
+            if attack.startswith(('filter-', 'submodule-')):
                 for name in ('config', 'config.worktree', 'info/attributes'):
                     target = candidate / '.git' / name
                     if target.is_file():
@@ -716,7 +786,7 @@ def run_main_case(path, attack, proof_dir=None):
         summary_path = Path(lines[-1])
         summary = json.loads(summary_path.read_text())
         should_pass = (attack in ('clean', 'feature-clean', 'stdout-hardlink', 'access-clean', 'inspect-clean', 'untracked-clean', 'untracked-ignored', 'untracked-colon-clean', 'entrypoint-bin-clean', 'dispatch-clean', 'dispatch-bin-clean', 'dispatch-source-clean',
-                                  'git-helper-initial', 'git-helper-during', 'git-clean', 'cleanup-clean')
+                                  'git-helper-initial', 'git-helper-during', 'git-clean', 'cleanup-clean', 'dispatch-legacy-clean', 'json-number-clean')
                        or attack.endswith(':hardlink'))
         assert (result.returncode == 0) == should_pass, f'exit={result.returncode}: {summary}'
         assert summary['result'] == ('PASS_SCOPED' if should_pass else 'FAIL'), summary
@@ -725,7 +795,6 @@ def run_main_case(path, attack, proof_dir=None):
             retained_scratch = Path(summary['retained_scratch']) if 'retained_scratch' in summary else None
             remains = retained_scratch is not None and retained_scratch.is_dir()
             # Remove only this case's retained scratch after recording its real state.
-            import shutil
             if remains:
                 shutil.rmtree(retained_scratch)
             assert 0 < len(observations['cleanup_unlinks']) <= 256, observations
@@ -759,6 +828,19 @@ def run_main_case(path, attack, proof_dir=None):
             assert not (base / 'helper-marker').exists(), 'candidate Git helper executed with synthetic caller environment'
             assert all(item['sentinel'] is None for item in observations['git_environments']), 'caller-only sentinel reached Git environment'
             assert summary['candidate_unchanged'] is True, summary
+        elif attack.startswith('submodule-'):
+            assert not (base / 'helper-marker').exists(), 'submodule filter helper executed'
+            assert 'Unsupported candidate Git submodule (tracked gitlink)' in error, error
+            if 'during' not in attack:
+                assert not (out / 'commands.json').exists(), 'gitlink refused after CLI launch'
+        elif attack == 'access-no-collision':
+            assert 'access-sidecar-port-collision: expected exit 2, got 0' in error, error
+        elif attack in ('json-package-constant', 'json-bundle-constant'):
+            assert 'Invalid JSON numeric constant:' in error, error
+        elif attack == 'access-collision-reason':
+            assert 'Collision refusal must identify the sidecar side port' in error, error
+        elif attack.startswith('json-constant:'):
+            assert 'Invalid JSON numeric constant:' in error, error
         elif attack.startswith('filter-'):
             assert not (base / 'helper-marker').exists(), 'candidate filter helper executed'
             assert 'Candidate Git clean/process filter configured' in error, error
@@ -769,7 +851,7 @@ def run_main_case(path, attack, proof_dir=None):
         elif attack == 'feature-human-wrong':
             assert 'Human setup selected deployment differs' in error, error
         elif attack.startswith('dispatch-'):
-            if attack in ('dispatch-clean', 'dispatch-bin-clean', 'dispatch-source-clean'):
+            if attack in ('dispatch-clean', 'dispatch-bin-clean', 'dispatch-source-clean', 'dispatch-legacy-clean'):
                 assert executable_target.read_bytes() == executable_before
             elif attack == 'dispatch-source-mutate':
                 assert summary['candidate_unchanged'] is False and summary['source_unchanged'] is False, summary
@@ -779,7 +861,7 @@ def run_main_case(path, attack, proof_dir=None):
                 expected = ('Candidate dispatcher root differs' if 'relocated' in attack else
                             'Candidate checkout source dispatch is not manifested' if 'fallback' in attack or 'ignored-regular' in attack else
                             'Unsafe candidate source link')
-                assert expected in error, error
+                assert expected in error or 'Unsafe candidate tracked link' in error, error
                 assert executable_target.read_bytes() == executable_before, 'unsafe source executed'
                 assert not (out / 'commands.json').exists(), 'unsafe dispatcher launched'
         elif attack.startswith('entrypoint-'):
@@ -1024,6 +1106,12 @@ def main():
     args = parser.parse_args()
     path = args.verify_source
     attacks = (
+        'submodule-clean-initial', 'submodule-clean-include', 'submodule-clean-worktree',
+        'submodule-process-initial', 'submodule-clean-during', 'submodule-process-during',
+        'dispatch-lib-external-mutate', 'dispatch-lib-ignored-mutate',
+        'dispatch-lib-dangling', 'dispatch-lib-cyclic', 'dispatch-legacy-clean',
+        'access-no-collision', 'access-collision-reason', 'json-constant:NaN', 'json-constant:Infinity',
+        'json-constant:-Infinity', 'json-number-clean', 'json-package-constant', 'json-bundle-constant',
         'filter-clean-initial', 'filter-clean-include', 'filter-clean-worktree', 'filter-clean-during',
         'filter-process-initial', 'filter-process-during',
         'dispatch-relocated-mutate', 'dispatch-external-mutate', 'dispatch-source-external-mutate',

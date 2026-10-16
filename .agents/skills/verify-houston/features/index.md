@@ -45,9 +45,12 @@ candidate CLI; it does not replace the real Houston CLI integration sweep.
 
 Human access probes check their own exact workspace title and distinct Docker/Kubernetes
 ports. Candidate fingerprints bind the dispatcher root and source-link target bytes.
-Relocated dispatchers and escaping, directory or ignored-target links are refused.
+Relocated dispatchers and unsafe source-manifest links are refused. All tracked
+links also receive a bounded structural escape/ignored/dangling/cycle check; in-tree
+nonignored directory targets outside the source manifest remain supported. This
+does not contain arbitrary imports or execution.
 Evidence Git commands use an allowlisted environment with fsmonitor and hooks
-disabled, and refuse effective clean/process filters before each diff. The source
+disabled, and refuse effective clean/process filters and tracked gitlinks before each diff. The source
 entry and tools dispatcher must be manifested; ignored dist fallback is refused.
 Scratch removal has a fresh bounded traversal; a retained scratch locator
 and FAIL summary report exhaustion without claiming complete cleanup.

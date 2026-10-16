@@ -70,3 +70,9 @@ and is unsuitable for a real customer attachment.
 Live reachability remains pending an approved SSH destination, existing workspace,
 and operator-side browser and available local port. A generated command proves
 instructions only. It does not prove a tunnel connects or a browser reaches it.
+
+The three IPv6 side-port collision probes inherit the successful IPv6 SSH session,
+user and host settings and vary only the local primary port. Require
+`VALIDATION_FAILED` and a message naming `HOUSTON_SSH_LOCAL_PORT`, that port and
+`side ports`, matching the owner refusal. A missing-SSH-settings rejection does
+not establish collision detection.
