@@ -420,6 +420,67 @@ describe('SSH loopback guidance', () => {
       configured: '127.0.0.1',
       fail: false,
     },
+    {
+      label: 'context selects Kubernetes before recorded Docker',
+      flags: ['--context', 'fixture-cluster'],
+      runtime: 'docker',
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: true,
+    },
+    {
+      label: 'context selects a new wildcard Kubernetes bind',
+      flags: ['--context', 'fixture-cluster'],
+      runtime: 'docker',
+      recorded: '127.0.0.1',
+      configured: '0.0.0.0',
+      fail: false,
+    },
+    {
+      label: 'explicit Docker wins over context',
+      flags: ['--runtime', 'docker', '--context', 'fixture-cluster'],
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: false,
+    },
+    {
+      label: 'explicit Compose alias wins over context',
+      flags: ['--runtime', 'compose', '--context', 'fixture-cluster'],
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: false,
+    },
+    {
+      label: 'recorded Compose alias without context keeps its bind',
+      runtime: 'docker-compose',
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: false,
+    },
+    {
+      label: 'recorded Kubernetes alias without explicit context uses requested bind',
+      runtime: 'k8s',
+      context: 'stored-cluster',
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: true,
+    },
+    {
+      label: 'carried context selects Kubernetes before recorded Docker',
+      runtime: 'docker',
+      context: 'stored-cluster',
+      recorded: '0.0.0.0',
+      configured: '127.0.0.1',
+      fail: true,
+    },
+    {
+      label: 'carried context selects a new wildcard Kubernetes bind',
+      runtime: 'docker',
+      context: 'stored-cluster',
+      recorded: '127.0.0.1',
+      configured: '0.0.0.0',
+      fail: false,
+    },
     { label: 'legacy loopback', mapping: '127.0.0.2:3123:3000', configured: '0.0.0.0', fail: true },
     {
       label: 'legacy bracketed IPv6',
@@ -519,6 +580,7 @@ describe('SSH loopback guidance', () => {
         hostPort: 3123,
         extra: {
           ...('runtime' in scenario ? { runtime: scenario.runtime } : {}),
+          ...('context' in scenario ? { context: scenario.context } : {}),
           ...('owner' in scenario ? { owner: scenario.owner } : {}),
           ...('recorded' in scenario ? { bind_host: scenario.recorded } : {}),
         },
@@ -531,6 +593,8 @@ describe('SSH loopback guidance', () => {
         );
       }
     }
+    const filename = `${paths.workspace(name)}/repro.json`;
+    const before = fs.existsSync(filename) ? fs.readFileSync(filename, 'utf8') : null;
     const keys = [
       'SSH_CONNECTION',
       'SSH_CLIENT',
@@ -607,6 +671,7 @@ describe('SSH loopback guidance', () => {
         });
         if (scenario.fail) expect(stderr).toContain(`${key} must be an integer`);
         expect(stdout).not.toContain('tunnel :');
+        if (before !== null) expect(fs.readFileSync(filename, 'utf8')).toBe(before);
       }
     } finally {
       users.writeAll(priorUsers);

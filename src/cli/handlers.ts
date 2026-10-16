@@ -801,6 +801,8 @@ async function handoffBindForUp(o: Values): Promise<string | null> {
   const req = types.createReq({
     version: text(o.version),
     preset: strings(o.preset).length > 0 ? compositeName(strings(o.preset)) : '',
+    runtime: text(o.runtime),
+    context: text(o.context),
     name: text(o.name),
     actor: audit.actor(),
     bind: text(o.bind),
@@ -823,9 +825,11 @@ async function handoffBindForUp(o: Values): Promise<string | null> {
   } catch {
     return null;
   }
-  // resolveAxesStep gives a recorded runtime precedence over an implicit default or
-  // --context, but an explicit --runtime selects the operation this up will perform.
-  const runtime = topology.normalize(text(o.runtime) || topology.ofMeta(meta));
+  // The create front door carries context before inferring runtime. An explicit runtime
+  // wins; otherwise an explicit or carried context selects Kubernetes before the locked
+  // axes step can fall back to the recorded runtime.
+  req.context ||= text(topology.axesOfMeta(meta).context);
+  const runtime = topology.normalize(request.inferRuntime(req) || topology.ofMeta(meta));
   if (runtime === topology.KUBERNETES) return requested;
   return (await payload.bindHostOf(meta)) || null;
 }
