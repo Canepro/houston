@@ -31,8 +31,9 @@ import { NOTHING_LEFT, nullEmit, type Event } from '../../../src/lib/events';
 import type { KubectlResult } from '../../../src/seams/kubectl';
 import { createRepro } from '../../../src/core/lifecycle/create-docker';
 import { createKubernetes } from '../../../src/core/lifecycle/create-k8s';
+import { describe as describeWorkspace } from '../../../src/core/lifecycle/inspect';
 import { createReq } from '../../../src/core/lifecycle/types';
-import { exists } from '../../../src/core/runner/paths';
+import { exists, remove } from '../../../src/core/runner/paths';
 import { usedPorts } from '../../../src/core/runner/ports';
 import { readMeta } from '../../../src/core/runner/record';
 import * as topology from '../../../src/core/topology';
@@ -692,6 +693,53 @@ describe('a Kubernetes create', () => {
     expect(meta.extra.namespace).toBe(await namespaceFor('interrupted'));
     // ...and it must be distinguishable from a create that finished.
     expect(meta.extra.incomplete).toBe(true);
+  });
+
+  it('does not report an interrupted re-up as licensed before its Secret exists', async () => {
+    // The write-ahead record stored effective_license from the planned payload, and inspect
+    // trusts that boolean without reading incomplete. A re-up killed before createWorkspace
+    // installs the Secret was described as licensed, and the microservices warning was gone.
+    const LICENSE = 'synthetic-provisional-license';
+    const req = (license = '') =>
+      createReq({
+        version: '8.5.1',
+        name: 'kprov',
+        runtime: 'kubernetes',
+        deployment: 'microservices',
+        offline: true,
+        license,
+      });
+    const licenseNote = (groups: unknown): string => {
+      const rows = (groups as { rows?: [string, string][] }[]).flatMap((group) => group.rows ?? []);
+      return rows.find((row) => row[0] === 'License')?.[1] ?? '';
+    };
+    try {
+      await createKubernetes(req());
+      mockCreate = () => Promise.reject(new Error('stopped before the licence Secret'));
+      await expect(createKubernetes(req(LICENSE))).rejects.toThrow(
+        'stopped before the licence Secret',
+      );
+      const meta = await readMeta('kprov');
+      expect(meta.extra.incomplete).toBe(true);
+      expect(meta.extra.licensed).toBe(true);
+      expect(meta.extra.effective_license).toBe(false);
+      expect(JSON.stringify(meta)).not.toContain(LICENSE);
+      const interrupted = await describeWorkspace('kprov');
+      expect(interrupted.licensed).toBe(false);
+      expect(licenseNote(interrupted.note_groups)).toContain('Enterprise license not found');
+
+      mockCreate = null;
+      await createKubernetes(req(LICENSE));
+      const done = await readMeta('kprov');
+      expect(done.extra.incomplete).toBeUndefined();
+      expect(done.extra.effective_license).toBe(true);
+      expect(JSON.stringify(done)).not.toContain(LICENSE);
+      const completed = await describeWorkspace('kprov');
+      expect(completed.licensed).toBe(true);
+      expect(licenseNote(completed.note_groups)).toBe('');
+    } finally {
+      await remove('kprov');
+    }
   });
 
   it('takes back the edge route it registered when the create fails', async () => {

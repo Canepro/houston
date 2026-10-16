@@ -54,10 +54,19 @@ jest.mock('../../../src/core/lifecycle/ports', () => ({
   pickHostPort: jest.fn(),
   checkSidecarPorts: jest.fn(),
 }));
-jest.mock('../../../src/core/lifecycle/tlsplan', () => ({
-  ...jest.requireActual('../../../src/core/lifecycle/tlsplan'),
-  resolveTls: jest.fn(),
-}));
+jest.mock('../../../src/core/lifecycle/tlsplan', () => {
+  const actual = jest.requireActual('../../../src/core/lifecycle/tlsplan') as typeof tlsplan;
+  return {
+    ...actual,
+    resolveTls: jest.fn(),
+    kubernetesTlsPlan: jest.fn((...args: unknown[]) =>
+      actual.kubernetesTlsPlan(...(args as Parameters<typeof actual.kubernetesTlsPlan>)),
+    ),
+    routeKubernetesName: jest.fn((...args: unknown[]) =>
+      actual.routeKubernetesName(...(args as Parameters<typeof actual.routeKubernetesName>)),
+    ),
+  };
+});
 jest.mock('../../../src/core/kube/reachability', () => ({
   ...jest.requireActual('../../../src/core/kube/reachability'),
   helmReachable: jest.fn(),
@@ -919,6 +928,120 @@ describe('the values the release is installed with', () => {
       );
       expect(mocked(release.install)).toHaveBeenCalledTimes(1);
       expect((await readMeta('tk')).extra.retained_license).toBe(false);
+    } finally {
+      await paths.remove('tk');
+    }
+  });
+
+  it('keeps the licence Helm accepted when the tools Ingress fails on a re-up', async () => {
+    // Helm had accepted values that reference houston-license, then the tools Ingress apply
+    // threw before noteInstalledLicense. Rollback left the adopted namespace and its Secret,
+    // and the record stayed retained_license false, so the next empty payload installed a
+    // release with no Secret reference.
+    const LICENSE = 'synthetic-reup-license';
+    const licenseRef = {
+      name: 'ROCKETCHAT_LICENSE',
+      valueFrom: { secretKeyRef: { name: 'houston-license', key: 'license' } },
+    };
+    const events: string[] = [];
+    const helmValues: Record<string, unknown>[] = [];
+    let failHelm = false;
+    let failTools = false;
+    let useTls = false;
+    const req = (license: string) =>
+      createReq({
+        version: '8.5.1',
+        name: 'tk',
+        preset: 'email',
+        runtime: 'kubernetes',
+        offline: true,
+        wait: false,
+        license,
+      });
+    const since = (at: number) => events.slice(at);
+    const refOf = (values: Record<string, unknown> | undefined) =>
+      (values?.extraEnv as unknown[] | undefined) ?? [];
+    harness({ held: ['houston-tk'] });
+    mocked(sizing.checkCapacity).mockResolvedValue(undefined);
+    mocked(lifecyclePorts.pickHostPort).mockResolvedValue(3000);
+    mocked(lifecyclePorts.checkSidecarPorts).mockResolvedValue(undefined);
+    mocked(tlsplan.resolveTls).mockImplementation(() =>
+      Promise.resolve(useTls ? ({ mode: 'local', host: 'rc.example.test' } as never) : null),
+    );
+    mocked(tlsplan.kubernetesTlsPlan).mockResolvedValue({
+      host: 'rc.example.test',
+      ingressClass: 'traefik',
+      endpoint: { address: '127.0.0.1', port: 443, source: 'stated' },
+      context: 'prod',
+      issuer: { mode: 'local' },
+      clusterOwns443: true,
+    } as never);
+    mocked(tlsplan.routeKubernetesName).mockResolvedValue(undefined);
+    mocked(release.apply).mockImplementation((body: unknown) => {
+      const text = String(body);
+      if (text.includes('name: houston-license')) events.push('secret');
+      if (text.includes('houston-tools')) {
+        events.push('tools');
+        if (failTools) {
+          return Promise.reject(
+            new CreateFailedError('kubectl apply failed: tools ingress refused'),
+          );
+        }
+      }
+      return Promise.resolve();
+    });
+    mocked(release.install).mockImplementation((options: { values: Record<string, unknown> }) => {
+      events.push('helm');
+      helmValues.push(options.values);
+      if (failHelm) return Promise.reject(new CreateFailedError('helm install failed: refused'));
+      return Promise.resolve();
+    });
+    try {
+      await paths.remove('tk');
+      await createKubernetes(req(''));
+
+      failHelm = true;
+      const helmAt = events.length;
+      await expect(createKubernetes(req(LICENSE))).rejects.toThrow('helm install failed: refused');
+      expect(since(helmAt)).toContain('secret');
+      expect(since(helmAt)).toContain('helm');
+      expect(since(helmAt)).not.toContain('tools');
+      const refused = await readMeta('tk');
+      expect(refused.extra.retained_license).toBe(false);
+      expect(JSON.stringify(refused)).not.toContain(LICENSE);
+      expect(ran.some((argv) => argv.includes('delete'))).toBe(false);
+
+      failHelm = false;
+      failTools = true;
+      useTls = true;
+      const toolsAt = events.length;
+      await expect(createKubernetes(req(LICENSE))).rejects.toThrow(
+        'kubectl apply failed: tools ingress refused',
+      );
+      const toolsPhase = since(toolsAt);
+      expect(toolsPhase.indexOf('secret')).toBeGreaterThanOrEqual(0);
+      expect(toolsPhase.indexOf('secret')).toBeLessThan(toolsPhase.indexOf('helm'));
+      expect(toolsPhase.indexOf('helm')).toBeLessThan(toolsPhase.indexOf('tools'));
+      const accepted = helmValues.at(-1);
+      expect(refOf(accepted)).toContainEqual(licenseRef);
+      expect(JSON.stringify(accepted)).not.toContain(LICENSE);
+      expect(ran.some((argv) => argv.includes('delete'))).toBe(false);
+      const stuck = await readMeta('tk');
+      expect(stuck.extra.incomplete).toBe(true);
+      expect(stuck.extra.retained_license).toBe(true);
+      expect(stuck.extra.effective_license).toBe(true);
+      expect(JSON.stringify(stuck)).not.toContain(LICENSE);
+
+      failTools = false;
+      useTls = false;
+      await createKubernetes(req(''));
+      const retry = helmValues.at(-1);
+      expect(refOf(retry)).toContainEqual(licenseRef);
+      expect(JSON.stringify(retry)).not.toContain(LICENSE);
+      const kept = await readMeta('tk');
+      expect(kept.extra.incomplete).toBeUndefined();
+      expect(kept.extra.effective_license).toBe(true);
+      expect(JSON.stringify(kept)).not.toContain(LICENSE);
     } finally {
       await paths.remove('tk');
     }

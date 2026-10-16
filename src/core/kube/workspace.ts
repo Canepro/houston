@@ -26,7 +26,7 @@ import { deleteCluster, ensureKubeconfig } from './cluster';
 import { planCluster, type ClusterPlan } from './context';
 import { credentialInputs, ensureRepo, resolveChartVersion, valuesFor } from './chart';
 import { Interrupted, cleanup } from '../../seams/exec';
-import { updateMeta } from '../runner/record';
+import { updateMeta, type Metadata } from '../runner/record';
 import { forwardAlive, portForward, scenarioUiForwards } from './forward';
 import { ingressValues, toolsIngressManifest } from './ingress';
 import {
@@ -292,6 +292,9 @@ interface ChartInstall {
   readonly preset: Preset | null;
   readonly envOverrides: Record<string, string | null>;
   readonly licensed: boolean;
+  /** This run's licence text. Empty when the release only references a Secret already kept. */
+  readonly license: string;
+  readonly receipt: NamespaceReceipt;
   readonly issuer: IssuerSpec | null;
   readonly ingressClass: string;
   readonly namespace: string;
@@ -340,6 +343,11 @@ async function installChart(options: ChartInstall): Promise<Record<string, unkno
     { phase: 'boot', pct: 60 },
   );
   await install({ namespace, context, values, chartVersion, emit });
+  // The tools Ingress is later work. Helm has already accepted the Secret reference, and
+  // a failure there must not leave an adopted namespace without retained_license.
+  if (options.license !== '') {
+    await noteInstalledLicense(name, namespace, context, options.receipt);
+  }
   // The preset's own UIs at paths of the same name (Mailpit, Keycloak, the demo page).
   const tools = options.preset === null ? [] : publicPathsOf(options.preset.extra);
   if (tlsHost !== '' && tools.length > 0) {
@@ -439,7 +447,47 @@ async function noteNamespace(name: string, receipt: NamespaceReceipt): Promise<v
   }
 }
 
-/** A successful install may outlive connection setup and its provisional record. */
+function recordsThisInstall(
+  meta: Metadata,
+  name: string,
+  namespace: string,
+  context: string,
+  receipt: NamespaceReceipt,
+): boolean {
+  return (
+    meta.name === name &&
+    meta.project === namespace &&
+    meta.extra.namespace === namespace &&
+    meta.extra.context === context &&
+    meta.extra.runtime === 'kubernetes' &&
+    meta.extra.namespace_uid === receipt.uid &&
+    meta.extra.namespace_owner === receipt.owner &&
+    receipt.uid !== ''
+  );
+}
+
+/**
+ * The licence Secret is in the namespace. Inspect reads `effective_license` and ignores
+ * `incomplete`, so this is the first moment that boolean may be true.
+ */
+async function noteEffectiveLicense(
+  name: string,
+  namespace: string,
+  context: string,
+  receipt: NamespaceReceipt,
+): Promise<void> {
+  try {
+    await updateMeta(name, (meta) => {
+      if (!recordsThisInstall(meta, name, namespace, context, receipt)) return;
+      meta.extra.effective_license = true;
+    });
+  } catch (error) {
+    // Direct workspace callers can operate without a lifecycle write-ahead record.
+    if (!(error instanceof MissingRecordError)) throw error;
+  }
+}
+
+/** A release that references the licence Secret has been accepted. */
 async function noteInstalledLicense(
   name: string,
   namespace: string,
@@ -448,16 +496,7 @@ async function noteInstalledLicense(
 ): Promise<void> {
   try {
     await updateMeta(name, (meta) => {
-      if (
-        meta.name !== name ||
-        meta.project !== namespace ||
-        meta.extra.namespace !== namespace ||
-        meta.extra.context !== context ||
-        meta.extra.runtime !== 'kubernetes' ||
-        meta.extra.namespace_uid !== receipt.uid ||
-        meta.extra.namespace_owner !== receipt.owner ||
-        receipt.uid === ''
-      ) {
+      if (!recordsThisInstall(meta, name, namespace, context, receipt)) {
         throw new ConflictError(
           'workspace identity changed before licence installation could be recorded',
         );
@@ -635,6 +674,7 @@ export async function createWorkspace({
       // Where a browser reaches Rocket.Chat: the HTTPS name, else the workspace's own URL.
       tlsHost !== '' ? `https://${tlsHost}` : rootUrl,
     );
+    if (license !== '') await noteEffectiveLicense(name, namespace, context, receipt);
     values = await installChart({
       name,
       resolved,
@@ -647,6 +687,8 @@ export async function createWorkspace({
       preset,
       envOverrides,
       licensed,
+      license,
+      receipt,
       issuer,
       ingressClass,
       namespace,
@@ -654,7 +696,6 @@ export async function createWorkspace({
       chartVersion,
       emit,
     });
-    if (license !== '') await noteInstalledLicense(name, namespace, context, receipt);
   } catch (error) {
     // A failed create must not leave anything a user cannot see. No repro.json is written
     // until this returns, so a surviving namespace would be invisible to `list` and to
