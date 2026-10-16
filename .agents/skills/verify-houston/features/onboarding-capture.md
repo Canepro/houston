@@ -28,8 +28,10 @@ that contract, the helper drives an explicit missing workspace and requires exit
 4, error code `NOT_FOUND`, no bundle directory and unchanged fixture bytes. This
 refusal occurs before browser startup. The helper injects a scratch-only Node
 preload that resolves `playwright` and `playwright-core` to a fake Chromium whose
-launch writes a marker. The marker must remain absent. A successful capture
-claim needs a supported browser, an explicitly approved synthetic target, and a
+launch writes a marker. The marker must remain absent. The preload path enters
+`NODE_OPTIONS` quoted for Node's parser, as the setup-ready preload does, so a
+scratch directory with spaces or other awkward characters still reaches the CLI.
+A successful capture claim needs a supported browser, an explicitly approved synthetic target, and a
 retained nonempty capture artifact that can be opened after cleanup. Record the
 exact target and prerequisite versions. If it starts a temporary listener, bind
 to loopback and verify the actual bind before driving it; stop only its owned PID.
