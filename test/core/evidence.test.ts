@@ -1584,7 +1584,19 @@ describe('the bundle', () => {
         '  proxy:',
         '    image: example',
         `    command: sh -c "useradd -u 1000 app; mkdir -p /data/db && proxy -p 8080:80 --password;"`,
+        '  split:',
+        '    image: example',
+        '    entrypoint: [mysql]',
+        '    command: [-u, root, -p, SplitSentinel]',
+        '  windows:',
+        '    image: example',
+        String.raw`    command: ['C:\bin\mysql.exe', -u, root, -p, ExeSentinel]`,
+        '  pysplit:',
+        '    image: example',
+        '    entrypoint: [python]',
+        '    command: [-u, app.py, -p, production]',
         'x-copy: QuotedSentinel',
+        'x-split-copy: SplitSentinel',
         'x-env: production',
         'x-escaped-copy: EscapedWordSentinel',
         'x-backtick-copy: BacktickSentinel',
@@ -1617,6 +1629,8 @@ describe('the bundle', () => {
       'EmbeddedListSentinel',
       'QuotedPhraseSentinel',
       'EscapedWordSentinel',
+      'SplitSentinel',
+      'ExeSentinel',
     ]) {
       expect(compose).not.toContain(sentinel);
     }
@@ -1640,6 +1654,16 @@ describe('the bundle', () => {
     );
     expect(pick(parsed, 'services', 'python', 'command')).toBe('python -u app.py -p production');
     expect(parsed['x-env']).toBe('production');
+    // One command split over `entrypoint` and `command` is judged whole: mysql's -p is withheld
+    // in both keys, while python's split command stays readable.
+    expect(pick(parsed, 'services', 'split', 'entrypoint')).toBe('********');
+    expect(pick(parsed, 'services', 'split', 'command')).toBe('********');
+    expect(pick(parsed, 'services', 'pysplit', 'command')).toEqual([
+      '-u',
+      'app.py',
+      '-p',
+      'production',
+    ]);
     expect(compose).toContain('\n');
     expect(pick(parsed, 'services', 'digits', 'command')).toBe('********');
     // Short flag clusters and `user:group` are not credentials.

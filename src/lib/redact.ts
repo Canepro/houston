@@ -276,11 +276,13 @@ export function httpUsers(words: readonly string[]): HttpUser[] {
 
 /**
  * Whether these words run a client whose `-u` is a user and whose `-p` is a password: the
- * MySQL, MariaDB and MongoDB tools. Elsewhere `-u` means something else (`python -u` is
+ * MySQL, MariaDB, MongoDB and mycli tools, `mysql.exe` included. Elsewhere `-u` means something else (`python -u` is
  * unbuffered), and reading the next `-p` value as a password would mask it across the bundle.
  */
 export function userPasswordClient(words: readonly string[]): boolean {
-  return words.some((word) => /^(?:mysql|mariadb|mongo)[\w-]*$/u.test(word.split('/').pop() ?? ''));
+  return words.some((word) =>
+    /^(?:mysql|mariadb|mongo|mycli)[\w.-]*$/u.test(word.split(/[/\\]/u).pop() ?? ''),
+  );
 }
 
 /** Whether one argument names a user: `-u x`, `-ux`, `--user[=x]`, `--username[=x]`. */

@@ -697,11 +697,17 @@ function redactArtifactValue(
   const name = toText(fields.name);
   const namedSecret = credentialKey(name) || matchesKnownSecret(name, knownSecrets);
   const out: Record<string, unknown> = {};
+  // `command: [mysql]` with `args: [-u, root, -p, x]` splits one command over two keys, so the
+  // keys are judged together as well as one by one.
+  const argumentLists = Object.entries(fields).filter(([key]) => argumentListKey(key, parentKey));
+  const joinedCredential = argumentsCarryCredential(
+    argumentLists.flatMap(([, item]) => argumentWords(item)),
+  );
   for (const [key, item] of Object.entries(fields)) {
     const safeKey = redactArtifactText(key, false, knownSecrets);
     // A command that names a credential flag is withheld whole: the flag's value can be
     // spelled in more ways than this reader can follow, and a partial mask would show it.
-    if (argumentListKey(key, parentKey) && argumentsCarryCredential(item)) {
+    if (argumentListKey(key, parentKey) && (joinedCredential || argumentsCarryCredential(item))) {
       out[safeKey] = REDACTED;
       continue;
     }
@@ -714,6 +720,13 @@ function redactArtifactValue(
     );
   }
   return out;
+}
+
+/** The words of a command, entrypoint, args or healthcheck value, a string split at spaces. */
+function argumentWords(value: unknown): string[] {
+  if (typeof value === 'string') return value.split(/\s+/u).filter((word) => word !== '');
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === 'string');
 }
 
 /** Whether a command, entrypoint, args or healthcheck value names a credential flag. */
@@ -906,13 +919,16 @@ function discoverArtifactSecrets(
   };
   // The item after a credential flag is its value, as in `--flag=value`; neither item names
   // a credential on its own, so classify it here, before any scalar renders.
-  const discoverArguments = (list: YAML.YAMLSeq): void => {
+  // `siblings` holds the words of the map's other argument lists: `command: [mysql]` names the
+  // client for `args: [-u, root, -p, x]`.
+  const discoverArguments = (list: YAML.YAMLSeq, siblings: readonly string[] = []): void => {
     const items = list.items.map((item) => (YAML.isAlias(item) ? item.resolve(doc) : item));
     const words = items.map((item) => (YAML.isScalar(item) ? String(item.value) : ''));
     const strings = items.flatMap((item) =>
       YAML.isScalar(item) && typeof item.value === 'string' ? [item.value] : [],
     );
-    const userGiven = userPasswordClient(strings) && strings.some(userArgument);
+    const command = [...siblings, ...strings];
+    const userGiven = userPasswordClient(command) && command.some(userArgument);
     for (const user of httpUsers(words)) {
       add(user.value);
       add(user.password);
@@ -957,13 +973,28 @@ function discoverArtifactSecrets(
         credentialKey(String(name.value))
       );
     });
+    const argumentText = (pair: (typeof node.items)[number]): string[] => {
+      const key = YAML.isAlias(pair.key) ? pair.key.resolve(doc) : pair.key;
+      if (!YAML.isScalar(key) || !argumentListKey(String(key.value), parentKey)) return [];
+      const list = YAML.isAlias(pair.value) ? pair.value.resolve(doc) : pair.value;
+      if (YAML.isScalar(list)) return argumentWords(list.value);
+      if (!YAML.isSeq(list)) return [];
+      return argumentWords(
+        list.items.map((item) => {
+          const scalar = YAML.isAlias(item) ? item.resolve(doc) : item;
+          return YAML.isScalar(scalar) ? scalar.value : null;
+        }),
+      );
+    };
     for (const pair of node.items) {
       visit(pair.key, false);
       const key = YAML.isAlias(pair.key) ? pair.key.resolve(doc) : pair.key;
       const text = YAML.isScalar(key) ? String(key.value) : '';
       visit(pair.value, secret || credentialKey(text) || (text === 'value' && named), text);
       const list = YAML.isAlias(pair.value) ? pair.value.resolve(doc) : pair.value;
-      if (argumentListKey(text, parentKey) && YAML.isSeq(list)) discoverArguments(list);
+      if (argumentListKey(text, parentKey) && YAML.isSeq(list)) {
+        discoverArguments(list, node.items.filter((other) => other !== pair).flatMap(argumentText));
+      }
       if (argumentListKey(text, parentKey) && YAML.isScalar(list)) {
         if (typeof list.value === 'string') discoverCommandText(list.value, add);
       }
