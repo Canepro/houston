@@ -72,7 +72,9 @@ export interface Metadata {
 export function hasComposeInstancePorts(meta: Pick<Metadata, 'extra'>): boolean {
   const runtime = extraBag(meta).runtime;
   const normalized = typeof runtime === 'string' ? runtime.trim().toLowerCase() : '';
-  return normalized === '' || normalized === 'docker';
+  // These are the supported persisted Docker spellings. Unknown explicit runtimes stay
+  // excluded rather than inheriting topology.ofMeta's permissive Docker fallback.
+  return ['', 'docker', 'compose', 'docker-compose', 'dockercompose'].includes(normalized);
 }
 
 /** Legacy or hand-edited extra values are not necessarily an object bag at runtime. */

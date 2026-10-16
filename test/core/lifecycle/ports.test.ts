@@ -10,6 +10,7 @@ import { emptyPreset } from '../../../src/lib/presets/types';
 
 import type * as CreateDockerNS from '../../../src/core/lifecycle/create-docker';
 import type * as PortsNS from '../../../src/core/lifecycle/ports';
+import type * as RunnerPortsNS from '../../../src/core/runner/ports';
 import type * as RecordNS from '../../../src/core/runner/record';
 import type * as TypesNS from '../../../src/core/lifecycle/types';
 import type * as VersionsNS from '../../../src/lib/versions';
@@ -47,6 +48,67 @@ describe('picking a host port', () => {
 });
 
 describe('recorded port claims', () => {
+  it.each([
+    ['', true],
+    ['docker', true],
+    ['compose', true],
+    ['docker-compose', true],
+    ['dockercompose', true],
+    [' CoMpOsE ', true],
+    [' DOCKER-COMPOSE ', true],
+    [' DockerCompose ', true],
+    ['kubernetes', false],
+    ['k8s', false],
+    ['kube', false],
+    [' K8S ', false],
+    ['nomad', false],
+  ] as const)('retains the supported runtime instance claims for %j', async (runtime, compose) => {
+    const probe = jest.fn(async () => {
+      throw new Error('unexpected live socket probe');
+    });
+    jest.doMock('../../../src/core/runner/ports', () => ({
+      ...jest.requireActual<object>('../../../src/core/runner/ports'),
+      portFree: probe,
+    }));
+    const record = require('../../../src/core/runner/record') as typeof RecordNS;
+    const ports = require('../../../src/core/lifecycle/ports') as typeof PortsNS;
+    const runner = require('../../../src/core/runner/ports') as typeof RunnerPortsNS;
+    const name = 'runtime-claims';
+    try {
+      await record.writeRecord(
+        name,
+        record.metadata({
+          name,
+          hostPort: 6400,
+          extra: {
+            runtime,
+            instances: 2,
+            sidecar_ports: [8025, '8082'],
+            monitoring_ports: [9090, '5050'],
+            tls_ports: [443, '8443'],
+          },
+        }),
+      );
+      const file = `${workspace(name)}/repro.json`;
+      const bytes = fs.readFileSync(file, 'utf8');
+      const expected = [6400, ...(compose ? [6401, 6402] : []), 8025, 8082, 9090, 5050, 443, 8443];
+      expect(await ports.ownPorts(name)).toEqual(new Set(expected));
+      const used = await runner.usedPorts();
+      expect([...used]).toEqual(expect.arrayContaining(expected));
+      expect([6401, 6402].map((port) => used.has(port))).toEqual([compose, compose]);
+      expect(await ports.sidecarHolder([6401])).toEqual(compose ? { name, ports: [6401] } : null);
+      if (compose) {
+        await expect(ports.pickHostPort(6401, emptyPreset('default'))).rejects.toThrow(
+          'already claimed by another repro',
+        );
+        expect(probe).not.toHaveBeenCalled();
+      }
+      expect(fs.readFileSync(file, 'utf8')).toBe(bytes);
+    } finally {
+      fs.rmSync(workspace(name), { recursive: true, force: true });
+    }
+  });
+
   it.each([null, []])('keeps malformed extra %j in home-wide conflict checks', async (extra) => {
     const record = require('../../../src/core/runner/record') as typeof RecordNS;
     const ports = require('../../../src/core/lifecycle/ports') as typeof PortsNS;

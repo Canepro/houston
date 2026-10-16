@@ -192,30 +192,41 @@ describe('SSH access handoff', () => {
     ).toThrow("HOUSTON_SSH_LOCAL_PORT 8081 is one of this workspace's side ports");
   });
 
-  it('forwards every recorded instance and refuses a primary-port collision with one', () => {
-    const meta = workspace({
-      extra: {
-        runtime: 'docker',
-        deployment: 'multi-instance',
-        instances: 3,
-        sidecar_ports: [3125, 8025],
-      },
-    });
-    const env = { SSH_TTY: '/dev/ttys001', USER: 'operator', HOUSTON_SSH_HOST: 'server' };
-    const answer = handoff(meta, env);
-    expect(answer?.side_ports).toEqual([3124, 3125, 3126, 8025]);
-    expect(answer?.tunnel_command).toBe(
-      'ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:3123:127.0.0.1:3123 ' +
-        '-L 127.0.0.1:3124:127.0.0.1:3124 -L 127.0.0.1:3125:127.0.0.1:3125 ' +
-        '-L 127.0.0.1:3126:127.0.0.1:3126 -L 127.0.0.1:8025:127.0.0.1:8025 -- operator@server',
-    );
-    for (const port of ['3124', '3125', '3126']) {
-      expect(() => handoff(meta, { ...env, HOUSTON_SSH_LOCAL_PORT: port })).toThrow(
-        `HOUSTON_SSH_LOCAL_PORT ${port} is one of this workspace's side ports`,
+  it.each([
+    'docker',
+    'compose',
+    'docker-compose',
+    'dockercompose',
+    ' CoMpOsE ',
+    ' DOCKER-COMPOSE ',
+    ' DockerCompose ',
+  ])(
+    'forwards every recorded instance and refuses a primary-port collision with one for %j',
+    (runtime) => {
+      const meta = workspace({
+        extra: {
+          runtime,
+          deployment: 'multi-instance',
+          instances: 3,
+          sidecar_ports: [3125, 8025],
+        },
+      });
+      const env = { SSH_TTY: '/dev/ttys001', USER: 'operator', HOUSTON_SSH_HOST: 'server' };
+      const answer = handoff(meta, env);
+      expect(answer?.side_ports).toEqual([3124, 3125, 3126, 8025]);
+      expect(answer?.tunnel_command).toBe(
+        'ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:3123:127.0.0.1:3123 ' +
+          '-L 127.0.0.1:3124:127.0.0.1:3124 -L 127.0.0.1:3125:127.0.0.1:3125 ' +
+          '-L 127.0.0.1:3126:127.0.0.1:3126 -L 127.0.0.1:8025:127.0.0.1:8025 -- operator@server',
       );
-    }
-    expect(handoff(workspace({ extra: { instances: 1 } }), env)?.side_ports).toEqual([]);
-  });
+      for (const port of ['3124', '3125', '3126']) {
+        expect(() => handoff(meta, { ...env, HOUSTON_SSH_LOCAL_PORT: port })).toThrow(
+          `HOUSTON_SSH_LOCAL_PORT ${port} is one of this workspace's side ports`,
+        );
+      }
+      expect(handoff(workspace({ extra: { instances: 1 } }), env)?.side_ports).toEqual([]);
+    },
+  );
 
   it('forwards only recorded Kubernetes side ports when chart replicas exceed one', () => {
     const meta = workspace({
@@ -278,13 +289,39 @@ describe('SSH access handoff', () => {
     expect(answer?.note).not.toContain('still names port 3123');
   });
 
-  it.each(['http://127.0.0.1:3123', 'http://127.0.0.1:3123/', 'http://127.0.0.1:3123/chat'])(
+  it.each([
+    ['http://127.0.0.1:3123', 'http://127.0.0.1:3123'],
+    ['http://127.0.0.1:3123/', 'http://127.0.0.1:3123'],
+    ['http://127.0.0.1:3123/chat', 'http://127.0.0.1:3123/chat'],
+  ])(
     'does not claim a different origin for an advertised URL on the tunnel origin: %s',
-    (advertised_url) => {
+    (advertised_url, browser_url) => {
       const answer = handoff(workspace({ extra: { advertised_url } }), { SSH_TTY: '/dev/ttys001' });
-      expect(answer?.browser_url).toBe('http://127.0.0.1:3123');
+      expect(answer?.browser_url).toBe(browser_url);
       expect(answer?.note).not.toContain('rather than the tunnel');
       expect(answer?.note).not.toContain('still names port');
+    },
+  );
+
+  it.each([
+    ['https://external.example.test/chat', 'http://localhost:3123', '/chat'],
+    [
+      'https://fixture-user:fixture-pass@external.example.test/space%20name/chat?request=once#view',
+      'http://localhost:3123',
+      '/space%20name/chat',
+    ],
+    ['', 'http://localhost:3123/legacy', '/legacy'],
+    ['not-a-url', 'http://localhost:3123/legacy', '/legacy'],
+    ['http://127.0.0.1:3123/?request=once#view', 'http://localhost:3123', ''],
+  ])(
+    'keeps only the application pathname on the remapped tunnel URL: %s',
+    (advertised_url, rootUrl, path) => {
+      const answer = handoff(workspace({ rootUrl, extra: { advertised_url } }), {
+        SSH_TTY: '/synthetic',
+        HOUSTON_SSH_LOCAL_PORT: '4311',
+      });
+      expect(answer?.browser_url).toBe(`http://127.0.0.1:4311${path}`);
+      expect(answer?.tunnel_command).toContain('127.0.0.1:4311:127.0.0.1:3123');
     },
   );
 

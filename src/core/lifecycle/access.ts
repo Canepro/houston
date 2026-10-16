@@ -151,6 +151,20 @@ function sameOrigin(left: string, right: string): boolean {
   }
 }
 
+/** A base pathname survives remapping; request queries and client fragments do not. */
+function applicationPath(...urls: readonly string[]): string {
+  for (const value of urls) {
+    try {
+      const url = new URL(value);
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') continue;
+      return url.pathname === '/' ? '' : url.pathname;
+    } catch {
+      // A malformed advertised URL cannot supply a base; try the recorded call URL.
+    }
+  }
+  return '';
+}
+
 function shellWord(value: string): string {
   if (SAFE_SHELL_WORD.test(value)) return value;
   return `'${value.replace(/'/gu, "'\\''")}'`;
@@ -267,7 +281,8 @@ export function handoff(
   const user = safeDestinationPart(remoteUser(env), 'HOUSTON_SSH_USER');
   const host = safeDestinationPart(remoteHost(env), 'HOUSTON_SSH_HOST');
   const target = forwardTarget(bind);
-  const browserUrl = `http://127.0.0.1:${String(selectedPort)}`;
+  const rootUrl = advertisedUrl ?? (meta.rootUrl || `http://localhost:${String(remotePort)}`);
+  const browserUrl = `http://127.0.0.1:${String(selectedPort)}${applicationPath(rootUrl, meta.rootUrl)}`;
   const destination = shellWord(`${user}@${host}`);
   // One -L per forward; side services keep their port numbers so the URLs a preset
   // prints and the redirects it configured (SAML, OIDC) stay right through the tunnel.
@@ -296,7 +311,6 @@ export function handoff(
           : 'so open them at 127.0.0.1 on those ports on your machine.'),
     );
   }
-  const rootUrl = advertisedUrl ?? (meta.rootUrl || `http://localhost:${String(remotePort)}`);
   if (!sameOrigin(rootUrl, browserUrl)) {
     notes.push(
       `Rocket.Chat's ROOT_URL is ${rootUrl}: absolute links (invitations, password resets, ` +

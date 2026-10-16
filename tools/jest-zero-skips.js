@@ -101,7 +101,9 @@ const ROOT = path.resolve(__dirname, '..');
 // Measured collection: 4564.
 // Two R6 cases cover human malformed-record rendering and invalid recorded IPv6 brackets.
 // Measured nonexecuting collection: 4566.
-const FLOOR = 4566;
+// R7 adds 13 runtime-claim cases, six alias handoff cases and five pathname cases.
+// Measured nonexecuting collection: 4590.
+const FLOOR = 4590;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [
