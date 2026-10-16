@@ -296,15 +296,18 @@ export function chartEnv(
     if (value === null) byName.delete(key);
     else byName.set(key, { name: key, value: String(value) });
   }
-  env.splice(0, env.length, ...byName.values());
+  const token = byName.get('REG_TOKEN')?.value?.trim() ?? '';
+  if (token === '') byName.delete('REG_TOKEN');
+  else byName.set('REG_TOKEN', { name: 'REG_TOKEN', value: token });
   if (regTokenSecret !== '') {
     // By REFERENCE, so the token is never a value in this document. The chart renders
     // extraEnv verbatim, so valueFrom survives -- verified against the published chart.
-    env.push({
+    byName.set('REG_TOKEN', {
       name: 'REG_TOKEN',
       valueFrom: { secretKeyRef: { name: regTokenSecret, key: REG_TOKEN_KEY } },
     });
   }
+  env.splice(0, env.length, ...byName.values());
   if (licensed) {
     env.push({
       name: 'ROCKETCHAT_LICENSE',

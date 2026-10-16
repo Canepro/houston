@@ -32,6 +32,7 @@ import { KUBERNETES } from '../../../src/core/topology';
 import {
   bestChartAtOrBelow,
   chartEnv,
+  hasEffectiveRegToken,
   refuseChartOwnedEnv,
   resolveChartVersion,
   valuesFor,
@@ -720,6 +721,56 @@ describe('the chart', () => {
       secretKeyRef: { name: 'houston-reg-token', key: 'token' },
     });
     expect(entry?.value).toBeUndefined();
+  });
+
+  it('renders the winning registration token trimmed, omitting blank values', () => {
+    const cases: {
+      preset: string;
+      overrides?: Record<string, string | null>;
+      secret?: string;
+      expected: ChartEnvEntry[];
+    }[] = [
+      { preset: '  preset-fixture  ', expected: [{ name: 'REG_TOKEN', value: 'preset-fixture' }] },
+      { preset: ' \t\n ', expected: [] },
+      { preset: '', expected: [] },
+      {
+        preset: '  preset-fixture  ',
+        overrides: { REG_TOKEN: '  override-fixture  ' },
+        expected: [{ name: 'REG_TOKEN', value: 'override-fixture' }],
+      },
+      { preset: 'preset-fixture', overrides: { REG_TOKEN: ' \t ' }, expected: [] },
+      { preset: 'preset-fixture', overrides: { REG_TOKEN: null }, expected: [] },
+      {
+        preset: '  preset-fixture  ',
+        secret: REG_TOKEN_SECRET,
+        expected: [
+          {
+            name: 'REG_TOKEN',
+            valueFrom: {
+              secretKeyRef: { name: REG_TOKEN_SECRET, key: REG_TOKEN_KEY },
+            },
+          },
+        ],
+      },
+    ];
+    for (const { preset, overrides = {}, secret = '', expected } of cases) {
+      const presetEnv = { REG_TOKEN: preset, UNRELATED: '  retain padding  ' };
+      const values = valuesFor({
+        rcVersion: '8.5.1',
+        rcImage: 'rc',
+        microservices: false,
+        presetEnv,
+        envOverrides: overrides,
+        regTokenSecret: secret,
+      });
+      const env = values.extraEnv as ChartEnvEntry[];
+      expect(env.filter((entry) => entry.name === 'REG_TOKEN')).toEqual(expected);
+      expect(
+        hasEffectiveRegToken(presetEnv, secret === '' ? '' : 'secret-fixture', overrides),
+      ).toBe(expected.length !== 0);
+      expect(env.find((entry) => entry.name === 'UNRELATED')?.value).toBe('  retain padding  ');
+      expect(presetEnv.REG_TOKEN).toBe(preset);
+    }
   });
 
   it('turns NATS off for a monolith, because nothing would talk to it', () => {

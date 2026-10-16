@@ -94,8 +94,8 @@ const ROOT = path.resolve(__dirname, '..');
 // Whole-value interpolation refusals: 11 cases; IPv6 and long-syntax regressions: 2; total 4525.
 // Seven licence-warning cases, the licensed-user microservices regression, and two
 // end-to-end registration-token normalization regressions add ten exercised Jest cases above
-// the bind-enforcement base.
-const FLOOR = 4535;
+// the bind-enforcement base. One chart-consumer regression covers the winning Kubernetes token.
+const FLOOR = 4536;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [
