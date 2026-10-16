@@ -5,8 +5,9 @@ On the pre-repair script this binds to the old gates. Those gates accept a
 dangling capture-missing-bundle symlink, a retained secret outside the bundle
 trio and command receipts, a revoked onboarding record with completed false,
 a symlink or special file beside the bundle, a secret left outside the
-retained tree, and access shown only on the Docker fixture. After each
-repair, the same cases call the predicates main uses.
+retained tree, access shown only on the Docker fixture, and an access
+discovery payload whose data is null or a string. After each repair, the
+same cases call the predicates main uses.
 """
 import importlib.util
 import json
@@ -23,6 +24,7 @@ SECRET_MESSAGE = 'Synthetic secret leaked'
 ONBOARD_MESSAGE = 'Onboarding failed to persist the revoked grant state or legacy fields'
 SPECIAL_MESSAGE = 'Retained output contains a symlink or special entry'
 ACCESS_MESSAGE = 'Access payload is omitted'
+ACCESS_OBJECT_MESSAGE = 'Access discovery payload for'
 ONBOARD_COMPLETED_AT = '2026-01-02T00:00:00+00:00'
 ONBOARD_VERSION = '9.9.9-test'
 ONBOARD_LEGACY = {
@@ -349,10 +351,24 @@ def access_cases(results):
             ])
         return run
 
+    def malformed(payloads):
+        def run():
+            access_gate(payloads)
+        return run
+
     run_case(results, 'access neither fixture', pending, 'allow', ACCESS_MESSAGE)
     run_case(results, 'access both fixtures', both, 'allow', ACCESS_MESSAGE)
     run_case(results, 'access docker only', split('kubernetes'), 'refuse', ACCESS_MESSAGE)
     run_case(results, 'access kubernetes only', split('docker'), 'refuse', ACCESS_MESSAGE)
+    run_case(results, 'access data null both',
+             malformed([('docker', None), ('kubernetes', None)]),
+             'refuse', f'{ACCESS_OBJECT_MESSAGE} docker, kubernetes is not an object')
+    run_case(results, 'access data null one',
+             malformed([('docker', access_payload(True)), ('kubernetes', None)]),
+             'refuse', f'{ACCESS_OBJECT_MESSAGE} kubernetes is not an object')
+    run_case(results, 'access data string both',
+             malformed([('docker', 'loopback'), ('kubernetes', 'loopback')]),
+             'refuse', f'{ACCESS_OBJECT_MESSAGE} docker, kubernetes is not an object')
 
 
 def main():

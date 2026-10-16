@@ -27,8 +27,8 @@ measure a port conflict on the operator's laptop.
 The v2 consumer is `info --json`, schema `houston.info.v1`, at `data.access`.
 Human `info` prints the same tunnel and browser URL. The helper probes the clean
 Docker fixture `verify-docker-access-fixture` and the Kubernetes fixture
-`verify-access-fixture`. When neither payload has `data.access`, this port stays
-pending. When either payload has `data.access`, require the local, human, and
+`verify-access-fixture`. Each payload `data` value must be an object, or the run fails. When both objects omit `data.access`, this port stays
+pending. When either object has `data.access`, require the local, human, and
 SSH contract on both loopback runtimes. It uses only synthetic SSH_CONNECTION,
 SSH_CLIENT, SSH_TTY, HOUSTON_SSH_HOST, HOUSTON_SSH_USER, and
 HOUSTON_SSH_LOCAL_PORT values.

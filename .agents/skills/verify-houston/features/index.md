@@ -5,7 +5,7 @@
 | Discovery and missing workspace | [capabilities](capabilities.md) | Mandatory offline path on every v2 candidate. |
 | Attachable evidence | [evidence](evidence.md) | Drive when `evidence` is advertised; otherwise pending. |
 | Resource inspection | [inspect](inventory.md) | Drive offline fixtures when `inspect` is advertised; live resources pending. |
-| SSH access handoff | [access](access.md) | Probe the clean Docker fixture and the Kubernetes fixture. Drive when either `info` payload includes `data.access`, and then require the contract on both loopback runtimes. Otherwise pending. No SSH execution. |
+| SSH access handoff | [access](access.md) | Probe the clean Docker fixture and the Kubernetes fixture. A non-object `data` value fails the run. Drive when either object includes `data.access`, and then require the contract on both loopback runtimes. When both objects omit the field, the port stays pending. No SSH execution. |
 | Onboarding and capture | [onboarding and capture](onboarding-capture.md) | Drive synthetic-home onboarding persistence and local teardown authority refusals when `onboard` is advertised. Live engine behavior and successful browser capture remain pending. |
 | Goal-first setup | [setup](setup.md) | Drive when `onboard` advertises `--show`; buffered prompts included; shared API requires its separate check. |
 

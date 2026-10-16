@@ -94,8 +94,8 @@ which must refuse without creating a bundle or starting a browser.
 
 An absent optional port is pending. An advertised port with an incompatible
 recipe is a verifier drift failure, not permission to skip it. The helper probes `info` on the clean Docker fixture and the Kubernetes fixture.
-When either payload has `data.access`, the SSH handoff drive runs for both
-loopback runtimes, using only synthetic environment overrides. When both omit
+Each payload `data` value must be an object, or the run fails. When either object has `data.access`, the SSH handoff drive runs for both
+loopback runtimes, using only synthetic environment overrides. When both objects omit
 the field, the port stays pending. An advertised `onboard` command triggers status, unknown-grant refusal,
 grant and revoke drives in the run's disposable home. The helper checks the
 persisted grant state, cluster scope and preservation of legacy settings.

@@ -135,6 +135,9 @@ def access_supported(payloads):
     require(isinstance(payloads, list)
             and [runtime for runtime, _data in payloads] == ['docker', 'kubernetes'],
             'Access discovery must include the docker and kubernetes loopback fixtures')
+    invalid = [runtime for runtime, data in payloads if not isinstance(data, dict)]
+    require(not invalid,
+            'Access discovery payload for ' + ', '.join(invalid) + ' is not an object')
     present = [runtime for runtime, data in payloads
                if isinstance(data, dict) and 'access' in data]
     missing = [runtime for runtime, data in payloads
