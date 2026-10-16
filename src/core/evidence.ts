@@ -697,38 +697,110 @@ function redactArtifactValue(
   return out;
 }
 
+/** Whether one argument names a user: `-u x`, `-ux`, `--user[=x]`, `--username[=x]`. */
+function userArgument(word: string): boolean {
+  return /^(?:-u.*|--user(?:name)?(?:=.*)?)$/u.test(word);
+}
+
 /**
  * Whether `flag` takes `value` as a credential: a long credential flag (`--password`), or `-p`
- * once a user flag came earlier in the same command, as `mongosh -u x -p` and `mysql -u x -p`
- * write it. Elsewhere `-p` is a port or `mkdir -p`, and masking those would erase evidence.
+ * in a command that also names a user, as `mongosh -u x -p` and `mysql -p -u x` write it.
+ * Elsewhere `-p` is a port or `mkdir -p`, and masking those would erase evidence.
  */
 function credentialArgument(flag: string, value: string, userGiven: boolean): boolean {
   if (credentialFlag(flag)) return true;
   return flag === '-p' && userGiven && value !== '';
 }
 
-const USER_FLAGS: readonly string[] = ['-u', '--user', '--username'];
-
-/**
- * Shell words of one command string: a quoted run is one word without its quotes, and `;`,
- * `&`, `|`, parentheses and redirections end a word rather than joining the value before them.
- */
-function commandWords(text: string): string[] {
-  const words: string[] = [];
-  const word = /'([^']*)'|"((?:[^"\\]|\\.)*)"|([^\s'";&|()<>]+)/gu;
-  for (const match of text.matchAll(word)) words.push(match[1] ?? match[2] ?? match[3] ?? '');
-  return words;
+/** One shell word and whether any part of it was quoted, so it may hold a nested command. */
+interface ShellWord {
+  readonly text: string;
+  /** The word as written, quotes and escapes included: the artifact holds this spelling. */
+  readonly raw: string;
+  readonly quoted: boolean;
 }
 
-/** The values after credential flags in one command string. */
-function discoverCommandText(text: string, add: (value: string) => void): void {
-  const words = commandWords(text);
-  let userGiven = false;
-  for (let index = 0; index + 1 < words.length; index += 1) {
-    const flag = words[index] ?? '';
-    if (USER_FLAGS.includes(flag)) userGiven = true;
-    const value = words[index + 1] ?? '';
-    if (credentialArgument(flag, value, userGiven)) add(value);
+/**
+ * The simple commands in one shell string, as words. Adjacent quoted and unquoted parts join
+ * into one word, backslash escapes one character (inside double quotes only before `"`, `\`,
+ * `$` or a backtick), and `;`, `&`, `|`, parentheses and newlines end a command. Redirections
+ * end a word. This is enough to find a flag's value; it does not expand anything.
+ */
+function shellCommands(text: string): ShellWord[][] {
+  const commands: ShellWord[][] = [];
+  let command: ShellWord[] = [];
+  let word = '';
+  let quoted = false;
+  let started = false;
+  let start = 0;
+  const begin = (index: number): void => {
+    if (!started) start = index;
+    started = true;
+  };
+  const endWord = (end: number): void => {
+    if (started) command.push({ text: word, raw: text.slice(start, end), quoted });
+    word = '';
+    quoted = false;
+    started = false;
+  };
+  const endCommand = (end: number): void => {
+    endWord(end);
+    if (command.length > 0) commands.push(command);
+    command = [];
+  };
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index] ?? '';
+    if (char === "'") {
+      begin(index);
+      const close = text.indexOf("'", index + 1);
+      const end = close < 0 ? text.length : close;
+      word += text.slice(index + 1, end);
+      quoted = true;
+      index = end;
+    } else if (char === '"') {
+      begin(index);
+      quoted = true;
+      for (index += 1; index < text.length && text[index] !== '"'; index += 1) {
+        const inner = text[index] ?? '';
+        const next = text[index + 1] ?? '';
+        if (inner === '\\' && '"\\$`'.includes(next) && next !== '') {
+          word += next;
+          index += 1;
+        } else word += inner;
+      }
+    } else if (char === '\\') {
+      begin(index);
+      word += text[index + 1] ?? '';
+      index += 1;
+    } else if (/[;&|()\n]/u.test(char)) {
+      endCommand(index);
+    } else if (/[\s<>]/u.test(char)) {
+      endWord(index);
+    } else {
+      begin(index);
+      word += char;
+    }
+  }
+  endCommand(text.length);
+  return commands;
+}
+
+/** The values after credential flags in one command string, nested `sh -c` strings included. */
+function discoverCommandText(text: string, add: (value: string) => void, depth = 0): void {
+  if (depth > 8) return;
+  for (const command of shellCommands(text)) {
+    const userGiven = command.some((word) => userArgument(word.text));
+    for (let index = 0; index < command.length; index += 1) {
+      const word = command[index] as ShellWord;
+      const next = command[index + 1];
+      if (next !== undefined && credentialArgument(word.text, next.text, userGiven)) {
+        add(next.text);
+        // The artifact spells a quoted or escaped value as written; mask that spelling too,
+        // without its outer quotes, which stay to show where the value was.
+        add(next.raw.replace(/^(['"])(.*)\1$/su, '$2'));
+      }
+      if (word.quoted) discoverCommandText(word.text, add, depth + 1);
+    }
   }
 }
 
@@ -776,13 +848,14 @@ function discoverArtifactSecrets(
   // a credential on its own, so classify it here, before any scalar renders.
   const discoverArguments = (list: YAML.YAMLSeq): void => {
     const items = list.items.map((item) => (YAML.isAlias(item) ? item.resolve(doc) : item));
-    let userGiven = false;
+    const userGiven = items.some(
+      (item) => YAML.isScalar(item) && typeof item.value === 'string' && userArgument(item.value),
+    );
     for (let index = 0; index < items.length; index += 1) {
       const flag = items[index];
       if (!YAML.isScalar(flag) || typeof flag.value !== 'string') continue;
       // A shell string (`sh -c "client --password X"`, `CMD-SHELL`) holds its own arguments.
       discoverCommandText(flag.value, add);
-      if (USER_FLAGS.includes(flag.value)) userGiven = true;
       const next = items[index + 1];
       const value = YAML.isScalar(next) ? String(next.value) : '';
       if (credentialArgument(flag.value, value, userGiven)) visit(list.items[index + 1], true);

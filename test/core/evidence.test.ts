@@ -1515,7 +1515,7 @@ describe('the bundle', () => {
     expect(parsed['x-control']).toBe('readable');
   });
 
-  it('discovers credential flags inside quoted command strings, and -p only after a user', async () => {
+  it('discovers credential flags in shell command strings by shell quoting rules', async () => {
     const { compose } = await bundledCompose(
       'e7-argv-strings',
       [
@@ -1523,31 +1523,49 @@ describe('the bundle', () => {
         '  rocketchat:',
         '    image: example',
         '    command: client --reg-token "Two WordsSentinel" --port 27017',
-        '    entrypoint: [sh, -c, "client --password \'QuotedSentinel\'; echo done"]',
+        `    entrypoint: [sh, -c, "client --password 'QuotedSentinel'; echo done"]`,
         '    healthcheck:',
-        '      test: [CMD-SHELL, "mongosh -u admin -p ShortFlagSentinel --eval ping"]',
+        `      test: sh -c 'mongosh -p HealthSentinel --username=root --eval ping'`,
+        '  nested:',
+        '    image: example',
+        `    command: su -c "client --password NestedSentinel" app`,
+        '  joined:',
+        '    image: example',
+        String.raw`    command: client --password Pre"Mid JoinedSentinel" --reg-token Bs\ EscapedSentinel`,
+        '  mysql:',
+        '    image: example',
+        '    command: [mysql, -p, ListShortSentinel, -uroot]',
         '  proxy:',
         '    image: example',
-        '    command: sh -c "mkdir -p /data/db && proxy -p 8080"',
+        `    command: sh -c "useradd -u 1000 app; mkdir -p /data/db && proxy -p 8080:80 --password;"`,
         'x-copy: QuotedSentinel',
-        'x-port: 8080',
+        'x-port: 8080:80',
         'x-control: readable',
         '',
       ].join('\n'),
     );
-    expect(compose).not.toContain('WordsSentinel');
-    expect(compose).not.toContain('QuotedSentinel');
-    expect(compose).not.toContain('ShortFlagSentinel');
+    for (const sentinel of [
+      'WordsSentinel',
+      'QuotedSentinel',
+      'HealthSentinel',
+      'NestedSentinel',
+      'JoinedSentinel',
+      'EscapedSentinel',
+      'ListShortSentinel',
+    ]) {
+      expect(compose).not.toContain(sentinel);
+    }
     const parsed = YAML.parse(compose) as Record<string, unknown>;
     expect(pick(parsed, 'services', 'rocketchat', 'command')).toBe(
       'client --reg-token "********" --port 27017',
     );
     expect(parsed['x-copy']).toBe('********');
-    // Without a user flag, -p is mkdir's or a port, and stays readable everywhere.
+    // `;` ends a command: the user flag before it does not make the later -p a password, and a
+    // flag with nothing after it masks nothing.
     expect(pick(parsed, 'services', 'proxy', 'command')).toBe(
-      'sh -c "mkdir -p /data/db && proxy -p 8080"',
+      'sh -c "useradd -u 1000 app; mkdir -p /data/db && proxy -p 8080:80 --password;"',
     );
-    expect(parsed['x-port']).toBe(8080);
+    expect(parsed['x-port']).toBe('8080:80');
     expect(parsed['x-control']).toBe('readable');
   });
 
