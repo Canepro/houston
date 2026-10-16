@@ -103,7 +103,19 @@ export function commandCarriesCredential(text: string): boolean {
   const words = text.split(/[\s'"`;&|()<>\\]+/u).filter((word) => word !== '');
   if (words.some(credentialFlagWord)) return true;
   return (
-    words.includes('-p') && words.some((word) => /^(?:-u.*|--user(?:name)?(?:=.*)?)$/u.test(word))
+    (words.includes('-p') &&
+      words.some((word) => /^(?:-u.*|--user(?:name)?(?:=.*)?)$/u.test(word))) ||
+    httpUserPassword(words)
+  );
+}
+
+/** `curl -u user:pass` and wget's `--user=user:pass` carry a password in the user value. */
+export function httpUserPassword(words: readonly string[]): boolean {
+  if (!words.some((word) => /(?:^|\/)(?:curl|wget)$/u.test(word))) return false;
+  return words.some((word, index) =>
+    /^(?:-u|--user)$/u.test(word)
+      ? (words[index + 1] ?? '').includes(':')
+      : /^(?:-u|--user=).*:/u.test(word),
   );
 }
 

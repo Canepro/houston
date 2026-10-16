@@ -42,6 +42,7 @@ import {
   commandCarriesCredential,
   credentialFlag,
   credentialFlagWord,
+  httpUserPassword,
   valueTakingCredentialFlag,
   credentialKey,
   discoverTextSecrets,
@@ -713,7 +714,8 @@ function argumentsCarryCredential(value: unknown): boolean {
   const words = value.filter((item): item is string => typeof item === 'string');
   return (
     words.some((word) => credentialFlagWord(word) || commandCarriesCredential(word)) ||
-    (words.includes('-p') && words.some(userArgument))
+    (words.includes('-p') && words.some(userArgument)) ||
+    httpUserPassword(words)
   );
 }
 

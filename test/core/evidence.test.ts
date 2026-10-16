@@ -1548,6 +1548,12 @@ describe('the bundle', () => {
         '  embedded:',
         '    image: example',
         `    environment: { SPEC: '{"command":"client --password EmbeddedSentinel"}' }`,
+        '  curl:',
+        '    image: example',
+        '    command: curl -u admin:CurlUserSentinel https://x',
+        '  curllist:',
+        '    image: example',
+        '    command: [curl, -u, "admin:CurlListSentinel", https://x]',
         '  login:',
         '    image: example',
         '    command: docker login --password-stdin registry.example.test',
@@ -1578,6 +1584,8 @@ describe('the bundle', () => {
       'TopEqualsSentinel',
       'BacktickSentinel',
       'EmbeddedSentinel',
+      'CurlUserSentinel',
+      'CurlListSentinel',
     ]) {
       expect(compose).not.toContain(sentinel);
     }
