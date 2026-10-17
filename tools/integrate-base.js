@@ -771,7 +771,10 @@ function run(options) {
       if (write && !dryRun && current === committed.committed) {
         fs.writeFileSync(path.join(root, FIXTURE), committed.merged);
         git(root, ['add', '--', FIXTURE]);
-        say(`  ${FIXTURE}: merged by verdict and staged; \`git commit --amend\` records it`);
+        // Staged is not committed: the run stays not done until the amend records it.
+        problems.push(
+          `${FIXTURE}: merged by verdict and staged; run \`git commit --amend\`, then rerun`,
+        );
       } else {
         // Until the amend, HEAD still holds the textual merge, whatever the tree holds.
         problems.push(
@@ -786,7 +789,8 @@ function run(options) {
   }
 
   // Measure the merged (or current) tree, and move each pin to what it measures.
-  const adjust = merge !== null || write;
+  // A criss-cross merge has no one base to bound a pin against, so it moves none.
+  const adjust = merge !== null ? merge.bases === 1 : write;
   let measured;
   try {
     measured = measure(root);
@@ -816,6 +820,7 @@ function run(options) {
     const next = rewriteSites(file, text, (site, index) => {
       const want = measured[site.metric];
       const least = bounds[site.metric];
+      if (least !== undefined && least.value === Infinity) return spell(site, current[index]);
       if (least !== undefined && want < least.value) {
         problems.push(
           site.metric === 'floor'
@@ -951,10 +956,14 @@ function lowerBounds(root, merge, force, unreadable = []) {
       ['ours (HEAD)', ours],
       ['the base', theirs],
     ]) {
-      if (value === null) unreadable.push(`${side}'s ${metric} pin cannot be read`);
+      if (value === null) {
+        unreadable.push(`${side}'s ${metric} pin cannot be read`);
+        // Its value could be above anything measured, so no pin of this metric moves.
+        bounds[metric] = { value: Infinity, what: 'an unread side' };
+      }
     }
     const known = [ours, theirs].filter((value) => value !== null);
-    if (known.length === 0) continue;
+    if (known.length === 0 || bounds[metric] !== undefined) continue;
     const value = Math.max(...known);
     if (metric === 'floor') {
       bounds.floor = { value, what: "the larger side's floor" };

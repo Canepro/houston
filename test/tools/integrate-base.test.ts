@@ -542,6 +542,10 @@ describe('a base merge, end to end', () => {
       // Staged, so the amend it asks for records it.
       expect(git(clean, 'diff', '--name-only')).toBe('');
       expect(git(clean, 'diff', '--name-only', '--cached')).toContain('usage-error.json');
+      // Staged is not committed: not done until the amend, and done after it.
+      expect(written.ok).toBe(false);
+      git(clean, 'commit', '-q', '--amend', '--no-edit');
+      expect(tool.run({ root: clean, measure: () => ANCESTOR }).ok).toBe(true);
       expect(written.lines.join('\n')).toMatch(/git commit --amend/u);
     } finally {
       fs.rmSync(clean, { recursive: true, force: true });
@@ -692,7 +696,7 @@ describe('a base merge, end to end', () => {
     expect(read('test/cli/render-human.test.ts')).toContain('all 48 routable paths');
   });
 
-  it('keeps the floor bound of the side it can read when the other side reads oddly', () => {
+  it("moves no floor while one side's floor pin cannot be read", () => {
     git(root, 'merge', '--abort');
     git(root, 'checkout', '-q', 'base');
     const floorFile = path.join(root, 'tools/jest-zero-skips.js');
@@ -709,12 +713,15 @@ describe('a base merge, end to end', () => {
     );
     fs.writeFileSync(path.join(root, 'other.txt'), 'resolved\n');
     git(root, 'add', 'tools/jest-zero-skips.js', 'other.txt');
-    // 104 tests: below ours' readable 105. The base's 110 cannot be read at all.
+    // 104 tests: below ours' readable 105, and the base's 110 cannot be read at all.
     const result = tool.run({ root, measure: () => ({ ...MERGED, floor: 104 }) });
     const text = result.lines.join('\n');
     expect(result.ok).toBe(false);
-    expect(text).toMatch(/collects 104 tests, below the larger side's floor of 105/u);
     expect(text).toMatch(/floor pin .*cannot be read/u);
+    expect(read('tools/jest-zero-skips.js')).toMatch(/^const FLOOR = 115;$/mu);
+    // Above ours' 105 but perhaps below the unread base: still not moved.
+    const above = tool.run({ root, measure: () => ({ ...MERGED, floor: 108 }) });
+    expect(above.ok).toBe(false);
     expect(read('tools/jest-zero-skips.js')).toMatch(/^const FLOOR = 115;$/mu);
   });
 
@@ -743,6 +750,13 @@ describe('a base merge, end to end', () => {
     expect(result.ok).toBe(false);
     expect(result.lines.join('\n')).toMatch(/2 merge bases/u);
     expect(read('tools/jest-zero-skips.js')).toBe(before);
+    // Resolved by hand, it still moves no pin: there is no one base to bound it against.
+    git(root, 'checkout', '--ours', '--', '.');
+    git(root, 'add', '-A');
+    const pinned = read('test/cli/render-human.test.ts');
+    const resolved = tool.run({ root, measure: () => ({ ...MERGED, paths: 50 }) });
+    expect(resolved.ok).toBe(false);
+    expect(read('test/cli/render-human.test.ts')).toBe(pinned);
   });
 
   it('outside a merge, reports a stale pin and moves it only with --write', () => {
