@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -7,15 +8,62 @@ import {
   SECRET_KEY_HINTS,
   URL_USERINFO,
   redactAllUserinfo,
+  redactAssignedText,
   credentialFlag,
   redactArgv,
   redactEnv,
 } from '../../src/lib/redact';
+import { assertProtectedFragmentsWithheld } from '../fixtures/lib/protected-fragments';
 
 /** What earlier releases' redactor returned for the larger corpora below, recorded. */
 const RECORDED = JSON.parse(
   fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'lib', 'redact.json'), 'utf8'),
 ) as { mongo_url_redacted: string[] };
+
+/**
+ * A pinned, finite snapshot from the merged workbench-v2 head. The fixture names its exact
+ * coverage and limits: it protects previously masked bytes from becoming readable, rather than
+ * claiming that the rows exhaust every spelling a redactor can encounter.
+ */
+const MASKING_BASELINE = JSON.parse(
+  fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'lib', 'masking-baseline.json'), 'utf8'),
+) as {
+  base: string;
+  scope: string[];
+  limits: string[];
+  public_row_count: number;
+  public_marker_count: number;
+  public_sha256: string;
+  public: [string, string, string[]][];
+};
+
+function publicBaselineSha256(): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        base: MASKING_BASELINE.base,
+        public: MASKING_BASELINE.public,
+      }),
+    )
+    .digest('hex');
+}
+
+function redactBaselineRow(kind: string, input: string): string {
+  switch (kind) {
+    case 'assigned':
+      return redactAssignedText(input);
+    case 'userinfo':
+      return redactAllUserinfo(input);
+    case 'env': {
+      const [key = '', value = ''] = input.split('\0');
+      return `${key}\0${redactEnv(key, value)}`;
+    }
+    case 'argv':
+      return redactArgv(input.split('\0')).join('\0');
+    default:
+      throw new Error(`unknown masking baseline row '${kind}'`);
+  }
+}
 
 /**
  * Every code point the userinfo pattern's `\s` matches in earlier releases, recorded by
@@ -57,6 +105,35 @@ const CASES: [string, string][] = [
   ['EMPTY', ''],
   ['NOT_A_URL', 'rc:s3cret@mongo'],
 ];
+
+describe('the pinned masking baseline', () => {
+  it('uses unique public-redaction markers', () => {
+    const markers = MASKING_BASELINE.public.flatMap(([, , protectedMarkers]) => protectedMarkers);
+    expect(MASKING_BASELINE.public).toHaveLength(MASKING_BASELINE.public_row_count);
+    expect(markers).toHaveLength(MASKING_BASELINE.public_marker_count);
+    expect(new Set(markers).size).toBe(markers.length);
+    expect(publicBaselineSha256()).toBe(MASKING_BASELINE.public_sha256);
+  });
+
+  it('keeps every finite cd43ec6 public-redaction marker and meaningful fragment non-readable', () => {
+    expect(MASKING_BASELINE.base).toBe('cd43ec601791a7cdf510bfaa9c0a6d4e935e7f03');
+    for (const [kind, input, protectedMarkers] of MASKING_BASELINE.public) {
+      for (const marker of protectedMarkers) expect(input).toContain(marker);
+      const output = redactBaselineRow(kind, input);
+      assertProtectedFragmentsWithheld(output, protectedMarkers);
+      for (const marker of protectedMarkers) {
+        expect(() => assertProtectedFragmentsWithheld(marker.slice(0, -1), [marker])).toThrow(
+          'protected marker fragment',
+        );
+        const middle = Math.floor(marker.length / 2);
+        const altered = `${marker.slice(0, middle)}!${marker.slice(middle + 1)}`;
+        expect(() => assertProtectedFragmentsWithheld(altered, [marker])).toThrow(
+          'protected marker fragment',
+        );
+      }
+    }
+  });
+});
 
 describe('redactEnv', () => {
   it('masks a value whose key names a credential', () => {
