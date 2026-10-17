@@ -258,6 +258,8 @@ interface Tree extends Counts {
   notes: string[];
   other: string;
   cases: Record<string, number>;
+  /** The whole fixture, when a test needs more than one `corpus` group. */
+  fixture?: string;
 }
 
 /** The pinned files as this tree spells them, cut down to the lines the pins live on. */
@@ -297,9 +299,8 @@ function tree(state: Tree): Record<string, string> {
     ].join('\n'),
     'test/cli/invariants/printed-commands.test.ts': `expect(COMMAND_SPECS).toHaveLength(${String(state.paths)});\n`,
     'test/cli/invariants/source-rules.test.ts': `expect(speakers.length).toBe(${String(state.json)});\n`,
-    'test/fixtures/cli/usage-error.json': fixture([V('a'), V('b'), V('c')], {
-      corpus: state.cases,
-    }),
+    'test/fixtures/cli/usage-error.json':
+      state.fixture ?? fixture([V('a'), V('b'), V('c')], { corpus: state.cases }),
     'other.txt': `${state.other}\n`,
   };
 }
@@ -474,6 +475,61 @@ describe('a base merge, end to end', () => {
     expect(result.ok).toBe(false);
     expect(text).toMatch(/tools\/dup\.js does not parse/u);
     expect(text).toMatch(/leftover other\.txt:1: leftover conflict marker/u);
+  });
+
+  it('refuses a merge that lost a command one side added, rather than shrink the pins', () => {
+    fs.writeFileSync(path.join(root, 'other.txt'), 'resolved\n');
+    git(root, 'add', 'other.txt');
+    // Both sides have 46 commands; a merged registry of 45 dropped one of them.
+    const result = tool.run({ root, measure: () => ({ ...MERGED, paths: 45 }) });
+    expect(result.ok).toBe(false);
+    expect(result.lines.join('\n')).toMatch(/45 paths, fewer than the larger side's 46/u);
+    expect(read('test/cli/render-human.test.ts')).toContain('all 46 routable paths');
+  });
+
+  it('keeps going past a pin it cannot read, and stages the files it did merge', () => {
+    git(root, 'merge', '--abort');
+    git(root, 'checkout', '-q', 'branch');
+    fs.writeFileSync(path.join(root, 'test/cli/invariants/source-rules.test.ts'), 'renamed\n');
+    git(root, 'commit', '-q', '-am', 'rename the pin');
+    git(root, 'merge', '-q', 'base');
+    const result = tool.run({ root, measure: never });
+    const text = result.lines.join('\n');
+    expect(result.ok).toBe(false);
+    expect(text).toMatch(/source-rules\.test\.ts: the json pin/u);
+    expect(git(root, 'diff', '--name-only', '--cached')).toContain('tools/jest-zero-skips.js');
+    expect(unmerged()).not.toContain('tools/jest-zero-skips.js');
+  });
+
+  it('catches a merge git committed by itself with a textual fixture merge', () => {
+    // Ours inserts a verdict at index 0 and retargets its case; the base adds a group whose
+    // case means `a`. The lines never touch, so git commits -- and points the base's case
+    // at `z`.
+    const pad = { pad: {} };
+    const base = fixture([V('a'), V('b')], { g1: { keep: 0 }, ...pad });
+    const ours = fixture([V('z'), V('a'), V('b')], { g1: { keep: 1 }, ...pad });
+    const theirs = fixture([V('a'), V('b')], { g1: { keep: 0 }, ...pad, g2: { extra: 0 } });
+    const clean = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-integrate-base-clean-'));
+    try {
+      git(clean, 'init', '-q', '-b', 'base');
+      commit(clean, { ...ANCESTOR, fixture: base }, 'ancestor');
+      git(clean, 'checkout', '-q', '-b', 'branch');
+      commit(clean, { ...ANCESTOR, fixture: ours }, 'branch');
+      git(clean, 'checkout', '-q', 'base');
+      commit(clean, { ...ANCESTOR, fixture: theirs }, 'base');
+      git(clean, 'checkout', '-q', 'branch');
+      git(clean, 'merge', '-q', '--no-edit', 'base');
+      const fixturePath = path.join(clean, 'test/fixtures/cli/usage-error.json');
+      expect(meaning(fs.readFileSync(fixturePath, 'utf8'))['g2 > extra']).toEqual(V('z'));
+      const report = tool.run({ root: clean, measure: () => ANCESTOR });
+      expect(report.ok).toBe(false);
+      expect(report.lines.join('\n')).toMatch(/textual merge of usage-error\.json/u);
+      const written = tool.run({ root: clean, write: true, measure: () => ANCESTOR });
+      expect(meaning(fs.readFileSync(fixturePath, 'utf8'))['g2 > extra']).toEqual(V('a'));
+      expect(written.lines.join('\n')).toMatch(/git commit --amend/u);
+    } finally {
+      fs.rmSync(clean, { recursive: true, force: true });
+    }
   });
 
   it('keeps a fixture resolution someone staged by hand, on every rerun', () => {

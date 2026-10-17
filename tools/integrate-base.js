@@ -620,60 +620,68 @@ function run(options) {
     const unmerged = unmergedPaths(root);
     const owned = [FIXTURE, ...new Set(SITES.map((site) => site.file))];
     for (const file of owned) {
-      const conflicted = unmerged.includes(file);
-      const current = fs.readFileSync(path.join(root, file), 'utf8');
-      // A pinned file git merged by itself is left to the measurement below. The fixture is
-      // not: a textual merge of two sides' verdict indices is wrong even when it is clean.
-      if (file === FIXTURE ? !conflicted && !changedOnBothSides(root, merge, file) : !conflicted) {
-        continue;
-      }
-      const sides = {
-        ancestor: show(root, merge.ancestor, file),
-        ours: show(root, 'HEAD', file),
-        theirs: show(root, merge.theirs, file),
-      };
-      if (sides.ours === null || sides.theirs === null) {
-        problems.push(`${file} is missing on one side; resolve it by hand`);
-        continue;
-      }
-      const verdicts =
-        file === FIXTURE ? mergeFixture(sides.ancestor, sides.ours, sides.theirs) : null;
-      if (verdicts !== null && current === verdicts.text) continue;
-      // Untouched is what git left: conflict markers, or for the fixture, git's own clean
-      // merge. Anything else someone wrote -- staged or not -- is theirs to keep.
-      const untouched = conflicted
-        ? hasMarkers(current)
-        : current === gitMergeFile(sides.ours, sides.ancestor ?? '', sides.theirs);
-      if (!untouched && !force) {
-        say(`  ${file}: already edited by hand, left alone (--force merges it anyway)`);
-        continue;
-      }
-      if (verdicts !== null) {
-        put(file, verdicts.text);
-        say(`  ${file}: merged, ${String(verdicts.appended)} verdict(s) appended from ours`);
-        for (const where of verdicts.baseWins) {
-          say(`    both sides changed ${where.join(' > ')}; the base's verdict stands`);
+      try {
+        const conflicted = unmerged.includes(file);
+        const current = fs.readFileSync(path.join(root, file), 'utf8');
+        // A pinned file git merged by itself is left to the measurement below. The fixture is
+        // not: a textual merge of two sides' verdict indices is wrong even when it is clean.
+        if (
+          file === FIXTURE ? !conflicted && !changedOnBothSides(root, merge, file) : !conflicted
+        ) {
+          continue;
         }
-        continue;
+        const sides = {
+          ancestor: show(root, merge.ancestor, file),
+          ours: show(root, 'HEAD', file),
+          theirs: show(root, merge.theirs, file),
+        };
+        if (sides.ours === null || sides.theirs === null) {
+          problems.push(`${file} is missing on one side; resolve it by hand`);
+          continue;
+        }
+        const verdicts =
+          file === FIXTURE ? mergeFixture(sides.ancestor, sides.ours, sides.theirs) : null;
+        if (verdicts !== null && current === verdicts.text) continue;
+        // Untouched is what git left: conflict markers, or for the fixture, git's own clean
+        // merge. Anything else someone wrote -- staged or not -- is theirs to keep.
+        const untouched = conflicted
+          ? hasMarkers(current)
+          : current === gitMergeFile(sides.ours, sides.ancestor ?? '', sides.theirs);
+        if (!untouched && !force) {
+          say(`  ${file}: already edited by hand, left alone (--force merges it anyway)`);
+          continue;
+        }
+        if (verdicts !== null) {
+          put(file, verdicts.text);
+          say(`  ${file}: merged, ${String(verdicts.appended)} verdict(s) appended from ours`);
+          for (const where of verdicts.baseWins) {
+            say(`    both sides changed ${where.join(' > ')}; the base's verdict stands`);
+          }
+          continue;
+        }
+        if (sides.ancestor === null) {
+          problems.push(`${file} has no merge-base version; resolve it by hand`);
+          continue;
+        }
+        const result = mergeSiteFile(file, sides.ancestor, sides.ours, sides.theirs);
+        put(file, result.text);
+        const moved = distinct(
+          sitesIn(file)
+            .map((site, index) => [site, index])
+            .filter(([, index]) => result.values.merged[index] !== result.values.ours[index])
+            .map(([site, index]) => `${site.metric} ${String(result.values.merged[index])}`),
+        );
+        say(
+          `  ${file}: merged` +
+            (moved.length > 0 ? `; ${moved.join(', ')} (base + ours - merge base)` : '') +
+            (result.comments > 0 ? `; ${String(result.comments)} comment hunk(s) joined` : ''),
+        );
+        if (result.conflicted) problems.push(`${file} still has a conflict outside the pins`);
+      } catch (error) {
+        // One unreadable file is reported; the files already merged are still staged.
+        if (!(error instanceof Refusal)) throw error;
+        problems.push(error.message);
       }
-      if (sides.ancestor === null) {
-        problems.push(`${file} has no merge-base version; resolve it by hand`);
-        continue;
-      }
-      const result = mergeSiteFile(file, sides.ancestor, sides.ours, sides.theirs);
-      put(file, result.text);
-      const moved = distinct(
-        sitesIn(file)
-          .map((site, index) => [site, index])
-          .filter(([, index]) => result.values.merged[index] !== result.values.ours[index])
-          .map(([site, index]) => `${site.metric} ${String(result.values.merged[index])}`),
-      );
-      say(
-        `  ${file}: merged` +
-          (moved.length > 0 ? `; ${moved.join(', ')} (base + ours - merge base)` : '') +
-          (result.comments > 0 ? `; ${String(result.comments)} comment hunk(s) joined` : ''),
-      );
-      if (result.conflicted) problems.push(`${file} still has a conflict outside the pins`);
     }
     if (!dryRun) {
       const clean = [...writes].filter(([, text]) => !hasMarkers(text)).map(([file]) => file);
@@ -699,6 +707,22 @@ function run(options) {
     }
   }
 
+  if (merge === null) {
+    const committed = committedFixtureMerge(root);
+    if (committed !== null) {
+      if (write && !dryRun) {
+        fs.writeFileSync(path.join(root, FIXTURE), committed);
+        say(`  ${FIXTURE}: merged by verdict; \`git commit --amend\` records it in the merge`);
+      } else {
+        problems.push(
+          `HEAD is a merge git committed by itself with a textual merge of usage-error.json, ` +
+            'which can point cases at the wrong verdicts; rerun with --write, then ' +
+            '`git commit --amend`',
+        );
+      }
+    }
+  }
+
   // Measure the merged (or current) tree, and move each pin to what it measures.
   const adjust = merge !== null || write;
   let measured;
@@ -709,21 +733,31 @@ function run(options) {
     problems.push(error.message);
     return finish(out, problems);
   }
+  const bounds = lowerBounds(root, merge, force);
   for (const file of new Set(SITES.map((site) => site.file))) {
     const text = writes.get(file) ?? fs.readFileSync(path.join(root, file), 'utf8');
-    const current = readSites(file, text);
+    let current;
+    try {
+      current = readSites(file, text);
+    } catch (error) {
+      if (!(error instanceof Refusal)) throw error;
+      problems.push(error.message);
+      continue;
+    }
     const changes = [];
     const next = rewriteSites(file, text, (site, index) => {
       const want = measured[site.metric];
-      if (site.metric === 'floor') {
-        const least = floorBound(root, merge, current[index]);
-        if (want < least.value) {
-          problems.push(
-            `the suite collects ${String(want)} tests, below ${least.what} of ` +
-              `${String(least.value)}: tests were lost. The floor is not lowered here.`,
-          );
-          return spell(site, current[index]);
-        }
+      const least = bounds[site.metric];
+      if (least !== undefined && want < least.value) {
+        problems.push(
+          site.metric === 'floor'
+            ? `the suite collects ${String(want)} tests, below ${least.what} of ` +
+                `${String(least.value)}: tests were lost. The floor is not lowered here.`
+            : `the merged tree has ${String(want)} ${site.metric}, fewer than ${least.what} ` +
+                `${String(least.value)}: a command one side added was lost. Pins left alone; ` +
+                '--force moves them anyway.',
+        );
+        return spell(site, current[index]);
       }
       if (want !== current[index]) {
         changes.push(`${site.metric} ${String(current[index])} -> ${String(want)}`);
@@ -758,17 +792,77 @@ function distinct(items) {
 }
 
 /**
- * How low a measured floor may go. Outside a merge, the floor as it stands: only a commit
- * that removes tests lowers it. In a merge, the larger of the two sides' floors -- not the
- * arithmetic sum, which counts twice a test both sides carry (a shared commit, a cherry-pick)
- * -- because the merged suite holds everything either side held unless the merge lost some.
+ * When HEAD is a merge whose fixture is still git's own textual merge of its parents, and
+ * that differs from the merge by verdict, the merge by verdict. Otherwise null. This is the
+ * merge `git merge` without `--no-commit` finishes before this tool can run.
  */
-function floorBound(root, merge, current) {
-  if (merge === null) return { value: current, what: 'the floor' };
-  const sides = ['HEAD', merge.theirs].map((rev) => show(root, rev, FLOOR_FILE));
-  if (sides.includes(null)) return { value: current, what: 'the floor' };
-  const value = Math.max(...sides.map((text) => readSites(FLOOR_FILE, text)[0]));
-  return { value, what: "the larger side's floor" };
+function committedFixtureMerge(root) {
+  if (git(root, ['rev-parse', '-q', '--verify', 'HEAD^2'], true).status !== 0) return null;
+  const bases = git(root, ['merge-base', 'HEAD^1', 'HEAD^2'], true);
+  if (bases.status !== 0) return null;
+  const ancestor = show(root, bases.stdout.trim(), FIXTURE);
+  const ours = show(root, 'HEAD^1', FIXTURE);
+  const theirs = show(root, 'HEAD^2', FIXTURE);
+  if (ours === null || theirs === null || ours === theirs) return null;
+  const current = fs.readFileSync(path.join(root, FIXTURE), 'utf8');
+  if (current !== gitMergeFile(ours, ancestor ?? '', theirs)) return null;
+  try {
+    const merged = mergeFixture(ancestor, ours, theirs).text;
+    return merged === current ? null : merged;
+  } catch (error) {
+    if (error instanceof Refusal) return null;
+    throw error;
+  }
+}
+
+/** The value of `metric` at its first pin in `rev`, or null when that cannot be read. */
+function pinnedAt(root, rev, metric) {
+  const index = SITES.findIndex((site) => site.metric === metric);
+  const site = SITES[index];
+  const text = show(root, rev, site.file);
+  if (text === null) return null;
+  try {
+    const at = sitesIn(site.file).indexOf(site);
+    return readSites(site.file, text)[at];
+  } catch (error) {
+    if (error instanceof Refusal) return null;
+    throw error;
+  }
+}
+
+/**
+ * How low each measured value may go, by metric.
+ *
+ * The floor: outside a merge, the floor as it stands -- only a commit that removes tests
+ * lowers it. In a merge, the larger of the two sides' floors, not the arithmetic sum, which
+ * counts twice a test both sides carry (a shared commit, a cherry-pick): the merged suite
+ * holds everything either side held unless the merge lost some.
+ *
+ * The command counts, in a merge where neither side removed any: the larger side's. A
+ * merged registry smaller than that dropped a command one side added. `--force` lifts this
+ * one; a side that removed commands lifts it too, since then the smaller count is the point.
+ */
+function lowerBounds(root, merge, force) {
+  const bounds = {};
+  const current = (metric) => pinnedAt(root, 'HEAD', metric);
+  if (merge === null) {
+    const floor = readSites(FLOOR_FILE, fs.readFileSync(path.join(root, FLOOR_FILE), 'utf8'))[0];
+    bounds.floor = { value: floor, what: 'the floor' };
+    return bounds;
+  }
+  for (const metric of distinct(SITES.map((site) => site.metric))) {
+    const ours = current(metric);
+    const theirs = pinnedAt(root, merge.theirs, metric);
+    const ancestor = pinnedAt(root, merge.ancestor, metric);
+    if (ours === null || theirs === null) continue;
+    const value = Math.max(ours, theirs);
+    if (metric === 'floor') {
+      bounds.floor = { value, what: "the larger side's floor" };
+    } else if (!force && ancestor !== null && ours >= ancestor && theirs >= ancestor) {
+      bounds[metric] = { value, what: "the larger side's" };
+    }
+  }
+  return bounds;
 }
 
 function finish(out, problems) {

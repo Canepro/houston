@@ -168,7 +168,9 @@ const ROOT = path.resolve(__dirname, '..');
 // the note join and a scratch-repository merge. `yarn integrate-base` measured 4969.
 // Five review fixes: a staged fixture kept, an interim floor clamped to both sides, a dry run
 // that measures nothing unwritten, a failed collection refused, and a title past 100: 4974.
-const FLOOR = 4974;
+// Three more: a lost command refused, an unreadable pin reported past, and a merge git
+// committed by itself caught: 4977.
+const FLOOR = 4977;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

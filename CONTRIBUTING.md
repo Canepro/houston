@@ -145,7 +145,8 @@ the branch as soon as the merge stops:
    from `COMMAND_SPECS` and `describeCommands()`, and the suite size from a run that
    collects every test and executes none. Measured values replace the arithmetic ones,
    because a test both sides carry is counted twice. The floor never drops below either
-   side's floor; a smaller suite means the merge lost tests, and the tool says so.
+   side's floor; a smaller suite means the merge lost tests, and the tool says so. A command
+   count below both sides' is refused the same way, unless a side removed commands.
 5. It also requires every `tools/**/*.js` to parse and no conflict marker to remain.
    A duplicate `require` left by a resolved hunk fails only when that tool runs.
 
