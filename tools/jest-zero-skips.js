@@ -173,7 +173,10 @@ const ROOT = path.resolve(__dirname, '..');
 // Two more: a one-sided fixture change in a committed merge is left alone, and a pinned
 // file the base deleted is reported while the rest is staged: 4979.
 // One more keeps a half-resolved pinned file: total 4980.
-const FLOOR = 4980;
+// Four more: a dry run with stale pins is not done, a lost command is refused without a
+// readable merge base, a staged fixture beats a side the merge refuses, and an unreadable
+// floor outside a merge is reported while the other pins move: 4984.
+const FLOOR = 4984;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

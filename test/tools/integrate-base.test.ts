@@ -600,6 +600,85 @@ describe('a base merge, end to end', () => {
     expect(read('tools/jest-zero-skips.js')).toBe(before);
   });
 
+  it('in a dry run with nothing left to merge, reports pins it would move as not done', () => {
+    fs.writeFileSync(path.join(root, 'other.txt'), 'resolved\n');
+    git(root, 'add', 'other.txt');
+    tool.run({ root, measure: () => MERGED });
+    const result = tool.run({ root, dryRun: true, measure: () => ({ ...MERGED, paths: 48 }) });
+    expect(result.ok).toBe(false);
+    expect(result.lines.join('\n')).toMatch(/would move paths 47 -> 48/u);
+    expect(read('test/cli/render-human.test.ts')).toContain('all 47 routable paths');
+  });
+
+  it('still refuses a lost command when the merge base has no readable pins', () => {
+    const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-integrate-base-nopin-'));
+    try {
+      git(scratch, 'init', '-q', '-b', 'base');
+      commit(scratch, ANCESTOR, 'ancestor');
+      fs.writeFileSync(path.join(scratch, 'test/cli/foundation.test.ts'), 'no pins here\n');
+      git(scratch, 'commit', '-q', '-am', 'ancestor without pins');
+      git(scratch, 'checkout', '-q', '-b', 'branch');
+      commit(scratch, OURS, 'branch');
+      git(scratch, 'checkout', '-q', 'base');
+      commit(scratch, THEIRS, 'base');
+      git(scratch, 'checkout', '-q', 'branch');
+      git(scratch, 'merge', '-q', 'base');
+      const resolved = tree({ ...THEIRS, ...MERGED, notes: [], cases: {} });
+      fs.writeFileSync(
+        path.join(scratch, 'test/cli/foundation.test.ts'),
+        resolved['test/cli/foundation.test.ts'],
+      );
+      fs.writeFileSync(path.join(scratch, 'other.txt'), 'resolved\n');
+      git(scratch, 'add', 'test/cli/foundation.test.ts', 'other.txt');
+      const result = tool.run({ root: scratch, measure: () => ({ ...MERGED, paths: 45 }) });
+      expect(result.ok).toBe(false);
+      expect(result.lines.join('\n')).toMatch(/45 paths, fewer than the larger side's 46/u);
+    } finally {
+      fs.rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts a staged fixture resolution even when a side is not in the recorder layout', () => {
+    const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-integrate-base-layout-'));
+    try {
+      const pretty = (cases: Record<string, number>) =>
+        `${JSON.stringify({ verdicts: [V('a'), V('b'), V('c')], cases: { corpus: cases } }, null, 2)}\n`;
+      git(scratch, 'init', '-q', '-b', 'base');
+      commit(scratch, ANCESTOR, 'ancestor');
+      git(scratch, 'checkout', '-q', '-b', 'branch');
+      commit(scratch, { ...OURS, fixture: pretty(OURS.cases) }, 'branch');
+      git(scratch, 'checkout', '-q', 'base');
+      commit(scratch, THEIRS, 'base');
+      git(scratch, 'checkout', '-q', 'branch');
+      git(scratch, 'merge', '-q', 'base');
+      const hand = fixture([V('a'), V('b'), V('c')], { corpus: { zero: 1, one: 0, two: 2 } });
+      fs.writeFileSync(path.join(scratch, 'test/fixtures/cli/usage-error.json'), hand);
+      fs.writeFileSync(path.join(scratch, 'other.txt'), 'resolved\n');
+      git(scratch, 'add', 'test/fixtures/cli/usage-error.json', 'other.txt');
+      const result = tool.run({ root: scratch, measure: () => MERGED });
+      expect(result.lines.join('\n')).not.toMatch(/layout/u);
+      expect(result.ok).toBe(true);
+    } finally {
+      fs.rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('outside a merge, reports an unreadable floor and still moves the other pins', () => {
+    fs.writeFileSync(path.join(root, 'other.txt'), 'resolved\n');
+    git(root, 'add', 'other.txt');
+    tool.run({ root, measure: () => MERGED });
+    git(root, 'commit', '-q', '-m', 'merge');
+    const floorFile = path.join(root, 'tools/jest-zero-skips.js');
+    fs.writeFileSync(
+      floorFile,
+      read('tools/jest-zero-skips.js').replace('const FLOOR', 'const FLOR'),
+    );
+    const result = tool.run({ root, write: true, measure: () => ({ ...MERGED, paths: 48 }) });
+    expect(result.ok).toBe(false);
+    expect(result.lines.join('\n')).toMatch(/the floor pin/u);
+    expect(read('test/cli/render-human.test.ts')).toContain('all 48 routable paths');
+  });
+
   it('outside a merge, reports a stale pin and moves it only with --write', () => {
     fs.writeFileSync(path.join(root, 'other.txt'), 'resolved\n');
     git(root, 'add', 'other.txt');

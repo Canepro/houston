@@ -252,6 +252,16 @@ function isComment(line) {
   return /^\s*\/\//u.test(line);
 }
 
+/** The fixture merged by verdict, or null when a side is one the merge refuses. */
+function verdictMerge(sides) {
+  try {
+    return mergeFixture(sides.ancestor, sides.ours, sides.theirs).text;
+  } catch (error) {
+    if (error instanceof Refusal) return null;
+    throw error;
+  }
+}
+
 /** A conflicted file with its marker labels (`<<<<<<< HEAD`, branch names) taken off. */
 function unlabelled(text) {
   return text.replace(/^(<{7}|\|{7}|>{7}) .*$/gmu, '$1');
@@ -678,18 +688,20 @@ function run(options) {
           problems.push(`${file} is missing on one side; resolve it by hand`);
           continue;
         }
-        const verdicts =
-          file === FIXTURE ? mergeFixture(sides.ancestor, sides.ours, sides.theirs) : null;
-        if (verdicts !== null && current === verdicts.text) continue;
         // Untouched is what git left: conflict markers, or for the fixture, git's own clean
-        // merge. Anything else someone wrote -- staged or not -- is theirs to keep.
+        // merge. Anything else someone wrote -- staged or not -- is theirs to keep, and is
+        // not merged again: a side the fixture merge refuses cannot block a hand resolution.
         const untouched = conflicted
           ? asGitLeftIt(current, sides)
           : current === gitMergeFile(sides.ours, sides.ancestor ?? '', sides.theirs);
         if (!untouched && !force) {
+          // This tool's own earlier write, on a rerun.
+          if (file === FIXTURE && verdictMerge(sides) === current) continue;
           say(`  ${file}: already edited by hand, left alone (--force merges it anyway)`);
           continue;
         }
+        const verdicts =
+          file === FIXTURE ? mergeFixture(sides.ancestor, sides.ours, sides.theirs) : null;
         if (verdicts !== null) {
           put(file, verdicts.text);
           say(`  ${file}: merged, ${String(verdicts.appended)} verdict(s) appended from ours`);
@@ -820,6 +832,7 @@ function run(options) {
       if (merge !== null && !hasMarkers(next)) git(root, ['add', '--', file]);
     }
     say(`  ${file}: ${dryRun ? 'would move' : 'measured'} ${distinct(changes).join(', ')}`);
+    if (dryRun) problems.push(`dry run: ${file} is not written yet`);
   }
   say(
     `measured: ${String(measured.paths)} paths, ${String(measured.options)} options, ` +
@@ -862,19 +875,32 @@ function committedFixtureMerge(root) {
   }
 }
 
-/** The value of `metric` at its first pin in `rev`, or null when that cannot be read. */
-function pinnedAt(root, rev, metric) {
-  const index = SITES.findIndex((site) => site.metric === metric);
-  const site = SITES[index];
-  const text = show(root, rev, site.file);
-  if (text === null) return null;
-  try {
-    const at = sitesIn(site.file).indexOf(site);
-    return readSites(site.file, text)[at];
-  } catch (error) {
-    if (error instanceof Refusal) return null;
-    throw error;
+/**
+ * The value of `metric` in `text`, from the first of its pins that reads, or null. One pin
+ * at a time: an unreadable pin elsewhere in the file does not hide this one.
+ */
+function pinValue(text, metric) {
+  for (const site of SITES.filter((candidate) => candidate.metric === metric)) {
+    const global = new RegExp(site.pattern.source, `${site.pattern.flags}g`);
+    const matches = [...text.matchAll(global)];
+    if (matches.length !== 1) continue;
+    try {
+      return site.words ? fromWords(matches[0][1]) : Number(matches[0][1]);
+    } catch (error) {
+      if (!(error instanceof Refusal)) throw error;
+    }
   }
+  return null;
+}
+
+/** The value of `metric` in `rev`, or null when no pin of it there can be read. */
+function pinnedAt(root, rev, metric) {
+  for (const file of distinct(SITES.filter((site) => site.metric === metric).map((s) => s.file))) {
+    const text = show(root, rev, file);
+    const value = text === null ? null : pinValue(text, metric);
+    if (value !== null) return value;
+  }
+  return null;
 }
 
 /**
@@ -888,13 +914,18 @@ function pinnedAt(root, rev, metric) {
  * The command counts, in a merge where neither side removed any: the larger side's. A
  * merged registry smaller than that dropped a command one side added. `--force` lifts this
  * one; a side that removed commands lifts it too, since then the smaller count is the point.
+ * A merge base with no readable pin cannot show a removal, so there the bound stands.
  */
 function lowerBounds(root, merge, force) {
   const bounds = {};
   const current = (metric) => pinnedAt(root, 'HEAD', metric);
   if (merge === null) {
-    const floor = readSites(FLOOR_FILE, fs.readFileSync(path.join(root, FLOOR_FILE), 'utf8'))[0];
-    bounds.floor = { value: floor, what: 'the floor' };
+    const text = fs.existsSync(path.join(root, FLOOR_FILE))
+      ? fs.readFileSync(path.join(root, FLOOR_FILE), 'utf8')
+      : '';
+    // An unreadable floor is reported by the measurement loop, file by file.
+    const floor = pinValue(text, 'floor');
+    if (floor !== null) bounds.floor = { value: floor, what: 'the floor' };
     return bounds;
   }
   for (const metric of distinct(SITES.map((site) => site.metric))) {
@@ -905,7 +936,9 @@ function lowerBounds(root, merge, force) {
     const value = Math.max(ours, theirs);
     if (metric === 'floor') {
       bounds.floor = { value, what: "the larger side's floor" };
-    } else if (!force && ancestor !== null && ours >= ancestor && theirs >= ancestor) {
+    } else if (!force && (ancestor === null || (ours >= ancestor && theirs >= ancestor))) {
+      // With no readable merge base, a side that removed commands cannot be told apart, so
+      // the bound stands and --force is the way past it.
       bounds[metric] = { value, what: "the larger side's" };
     }
   }
