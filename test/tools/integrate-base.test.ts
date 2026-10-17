@@ -526,6 +526,9 @@ describe('a base merge, end to end', () => {
       expect(report.lines.join('\n')).toMatch(/textual merge of usage-error\.json/u);
       const written = tool.run({ root: clean, write: true, measure: () => ANCESTOR });
       expect(meaning(fs.readFileSync(fixturePath, 'utf8'))['g2 > extra']).toEqual(V('a'));
+      // Staged, so the amend it asks for records it.
+      expect(git(clean, 'diff', '--name-only')).toBe('');
+      expect(git(clean, 'diff', '--name-only', '--cached')).toContain('usage-error.json');
       expect(written.lines.join('\n')).toMatch(/git commit --amend/u);
     } finally {
       fs.rmSync(clean, { recursive: true, force: true });
@@ -565,6 +568,16 @@ describe('a base merge, end to end', () => {
     expect(result.ok).toBe(false);
     expect(result.lines.join('\n')).toMatch(/source-rules\.test\.ts[^\n]*(missing|deleted)/u);
     expect(unmerged()).not.toContain('tools/jest-zero-skips.js');
+  });
+
+  it('leaves a pinned file someone half resolved, markers and all', () => {
+    const file = 'tools/jest-zero-skips.js';
+    const partial = `${read(file)}// resolved by hand while a conflict remains\n`;
+    expect(partial).toMatch(/^<{7}/mu);
+    fs.writeFileSync(path.join(root, file), partial);
+    const result = tool.run({ root, measure: never });
+    expect(result.lines.join('\n')).toContain(`${file}: already edited by hand`);
+    expect(read(file)).toBe(partial);
   });
 
   it('keeps a fixture resolution someone staged by hand, on every rerun', () => {

@@ -172,7 +172,8 @@ const ROOT = path.resolve(__dirname, '..');
 // committed by itself caught: 4977.
 // Two more: a one-sided fixture change in a committed merge is left alone, and a pinned
 // file the base deleted is reported while the rest is staged: 4979.
-const FLOOR = 4979;
+// One more keeps a half-resolved pinned file: total 4980.
+const FLOOR = 4980;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

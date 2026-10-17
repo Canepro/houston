@@ -215,7 +215,7 @@ function hasMarkers(text) {
   return text.split('\n').some((line) => MARKER.test(line));
 }
 
-function gitMergeFile(ours, ancestor, theirs) {
+function gitMergeFile(ours, ancestor, theirs, style = '--diff3') {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'integrate-base-'));
   try {
     const files = { ours, base: ancestor, theirs };
@@ -225,7 +225,7 @@ function gitMergeFile(ours, ancestor, theirs) {
       [
         'merge-file',
         '-p',
-        '--diff3',
+        ...(style === '' ? [] : [style]),
         '-L',
         'ours',
         '-L',
@@ -250,6 +250,25 @@ function gitMergeFile(ours, ancestor, theirs) {
 
 function isComment(line) {
   return /^\s*\/\//u.test(line);
+}
+
+/** A conflicted file with its marker labels (`<<<<<<< HEAD`, branch names) taken off. */
+function unlabelled(text) {
+  return text.replace(/^(<{7}|\|{7}|>{7}) .*$/gmu, '$1');
+}
+
+/**
+ * True when a conflicted file is still exactly git's conflict output, in any of its three
+ * styles: nobody has resolved part of it. A file someone resolved one hunk of keeps its
+ * markers, so markers alone do not say the file is untouched.
+ */
+function asGitLeftIt(current, sides) {
+  if (!hasMarkers(current)) return false;
+  const want = unlabelled(current);
+  return ['', '--diff3', '--zdiff3'].some(
+    (style) =>
+      unlabelled(gitMergeFile(sides.ours, sides.ancestor ?? '', sides.theirs, style)) === want,
+  );
 }
 
 /** True when only comment lines stand between line `from` and the `FLOOR` declaration. */
@@ -665,7 +684,7 @@ function run(options) {
         // Untouched is what git left: conflict markers, or for the fixture, git's own clean
         // merge. Anything else someone wrote -- staged or not -- is theirs to keep.
         const untouched = conflicted
-          ? hasMarkers(current)
+          ? asGitLeftIt(current, sides)
           : current === gitMergeFile(sides.ours, sides.ancestor ?? '', sides.theirs);
         if (!untouched && !force) {
           say(`  ${file}: already edited by hand, left alone (--force merges it anyway)`);
@@ -732,6 +751,7 @@ function run(options) {
     if (committed !== null) {
       if (write && !dryRun) {
         fs.writeFileSync(path.join(root, FIXTURE), committed);
+        git(root, ['add', '--', FIXTURE]);
         say(`  ${FIXTURE}: merged by verdict; \`git commit --amend\` records it in the merge`);
       } else {
         problems.push(
