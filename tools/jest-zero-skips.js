@@ -170,7 +170,9 @@ const ROOT = path.resolve(__dirname, '..');
 // that measures nothing unwritten, a failed collection refused, and a title past 100: 4974.
 // Three more: a lost command refused, an unreadable pin reported past, and a merge git
 // committed by itself caught: 4977.
-const FLOOR = 4977;
+// Two more: a one-sided fixture change in a committed merge is left alone, and a pinned
+// file the base deleted is reported while the rest is staged: 4979.
+const FLOOR = 4979;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

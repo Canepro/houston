@@ -344,6 +344,20 @@ function renderFixture(fixture) {
   return `{\n  "verdicts": [\n${verdicts.join(',\n')}\n  ],\n  "cases": ${map(fixture.cases, '  ')}\n}\n`;
 }
 
+/** Every case path with the verdict it points at, as one comparable string. */
+function fixtureMeaning(raw) {
+  const fixture = JSON.parse(raw);
+  const out = [];
+  const walk = (node, at) => {
+    for (const [key, value] of Object.entries(node)) {
+      if (isPlainObject(value)) walk(value, [...at, key]);
+      else out.push(JSON.stringify([...at, key, fixture.verdicts[value]]));
+    }
+  };
+  walk(fixture.cases, []);
+  return out.sort().join('\n');
+}
+
 function isPlainObject(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -622,6 +636,12 @@ function run(options) {
     for (const file of owned) {
       try {
         const conflicted = unmerged.includes(file);
+        if (!fs.existsSync(path.join(root, file))) {
+          problems.push(
+            `${file} is missing from the tree (deleted on one side); resolve it by hand`,
+          );
+          continue;
+        }
         const current = fs.readFileSync(path.join(root, file), 'utf8');
         // A pinned file git merged by itself is left to the measurement below. The fixture is
         // not: a textual merge of two sides' verdict indices is wrong even when it is clean.
@@ -735,6 +755,10 @@ function run(options) {
   }
   const bounds = lowerBounds(root, merge, force);
   for (const file of new Set(SITES.map((site) => site.file))) {
+    if (!writes.has(file) && !fs.existsSync(path.join(root, file))) {
+      problems.push(`${file} is missing from the tree, so its pins cannot be checked`);
+      continue;
+    }
     const text = writes.get(file) ?? fs.readFileSync(path.join(root, file), 'utf8');
     let current;
     try {
@@ -803,12 +827,15 @@ function committedFixtureMerge(root) {
   const ancestor = show(root, bases.stdout.trim(), FIXTURE);
   const ours = show(root, 'HEAD^1', FIXTURE);
   const theirs = show(root, 'HEAD^2', FIXTURE);
-  if (ours === null || theirs === null || ours === theirs) return null;
+  // Only one side changed it: git's merge is that side's file, which is right.
+  if (ours === null || theirs === null || ancestor === null) return null;
+  if (ours === ancestor || theirs === ancestor || ours === theirs) return null;
   const current = fs.readFileSync(path.join(root, FIXTURE), 'utf8');
-  if (current !== gitMergeFile(ours, ancestor ?? '', theirs)) return null;
+  if (current !== gitMergeFile(ours, ancestor, theirs)) return null;
   try {
     const merged = mergeFixture(ancestor, ours, theirs).text;
-    return merged === current ? null : merged;
+    // Different bytes are not a wrong merge; a case pointing at a different verdict is.
+    return fixtureMeaning(merged) === fixtureMeaning(current) ? null : merged;
   } catch (error) {
     if (error instanceof Refusal) return null;
     throw error;

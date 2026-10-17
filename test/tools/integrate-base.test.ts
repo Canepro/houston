@@ -532,6 +532,41 @@ describe('a base merge, end to end', () => {
     }
   });
 
+  it('lets a merge git committed alone stand when only one side changed the fixture', () => {
+    const base = fixture([V('a'), V('b')], { g1: { keep: 0, other: 1 } });
+    // Ours reorders the verdicts and moves every index with them: same meaning, new bytes.
+    const ours = fixture([V('b'), V('a')], { g1: { keep: 1, other: 0 } });
+    const clean = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-integrate-base-one-side-'));
+    try {
+      git(clean, 'init', '-q', '-b', 'base');
+      commit(clean, { ...ANCESTOR, fixture: base }, 'ancestor');
+      git(clean, 'checkout', '-q', '-b', 'branch');
+      commit(clean, { ...ANCESTOR, fixture: ours }, 'branch');
+      git(clean, 'checkout', '-q', 'base');
+      commit(clean, { ...ANCESTOR, fixture: base, other: 'theirs' }, 'base');
+      git(clean, 'checkout', '-q', 'branch');
+      git(clean, 'merge', '-q', '--no-edit', 'base');
+      const report = tool.run({ root: clean, measure: () => ANCESTOR });
+      expect(report.lines.join('\n')).not.toMatch(/textual merge/u);
+      expect(report.ok).toBe(true);
+    } finally {
+      fs.rmSync(clean, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a pinned file the base deleted, and still stages what it merged', () => {
+    git(root, 'merge', '--abort');
+    git(root, 'checkout', '-q', 'base');
+    git(root, 'rm', '-q', 'test/cli/invariants/source-rules.test.ts');
+    git(root, 'commit', '-q', '-m', 'delete a pinned file');
+    git(root, 'checkout', '-q', 'branch');
+    git(root, 'merge', '-q', 'base');
+    const result = tool.run({ root, measure: never });
+    expect(result.ok).toBe(false);
+    expect(result.lines.join('\n')).toMatch(/source-rules\.test\.ts[^\n]*(missing|deleted)/u);
+    expect(unmerged()).not.toContain('tools/jest-zero-skips.js');
+  });
+
   it('keeps a fixture resolution someone staged by hand, on every rerun', () => {
     const fixturePath = 'test/fixtures/cli/usage-error.json';
     const hand = fixture([V('a'), V('b'), V('c')], { corpus: { one: 0, hand: 1 } });
