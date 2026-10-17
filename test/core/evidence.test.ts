@@ -1683,8 +1683,20 @@ describe('the bundle', () => {
         '  herestring:',
         '    image: example',
         '    command: ["sh", "-c", "cat <<< data\\nclient --password HereStringSentinel"]',
+        '  xargsheredoc:',
+        '    image: example',
+        '    command: ["sh", "-c", "xargs -n1 sh <<EOF\\nclient --password XargsHeredocSentinel\\nEOF"]',
+        '  clusterheredoc:',
+        '    image: example',
+        '    command: ["sh", "-c", "sudo -nu alice sh <<EOF\\nclient --password ClusterHeredocSentinel\\nEOF"]',
+        '  protoheredoc:',
+        '    image: example',
+        '    command: ["sh", "-c", "toString -x <<EOF\\nclient --password ProtoHeredocData\\nEOF"]',
         'x-copy: QuotedSentinel',
         'x-split-copy: SplitSentinel',
+        'x-dup-xargs-heredoc: XargsHeredocSentinel',
+        'x-dup-cluster-heredoc: ClusterHeredocSentinel',
+        'x-proto-heredoc: ProtoHeredocData',
         'x-dup-here-string: HereStringSentinel',
         'x-dup-ansi-unicode: AnsiUnicodeSentinel',
         'x-dup-quoted-dollar: $QuotedDollarSentinel',
@@ -1771,6 +1783,8 @@ describe('the bundle', () => {
       'KubeLiteralSentinel',
       'SshpassSentinel',
       'HereStringSentinel',
+      'XargsHeredocSentinel',
+      'ClusterHeredocSentinel',
     ]) {
       expect(compose).not.toContain(sentinel);
     }
@@ -1801,6 +1815,8 @@ describe('the bundle', () => {
     // A short credential masks whole values only, not every place its letters appear.
     expect(parsed['x-short-copy']).toBe('********');
     expect(parsed['x-short-word']).toBe('cabbage');
+    // An unknown program with no shell word reads its heredoc as data, and never throws.
+    expect(parsed['x-proto-heredoc']).toBe('ProtoHeredocData');
     // `env` runs `printf` here, and `sh` is only its argument.
     expect(parsed['x-env-printf']).toBe('EnvPrintfData');
     // `printf` names `sh` as data, so its heredoc is data too.

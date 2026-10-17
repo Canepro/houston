@@ -772,31 +772,44 @@ const HEREDOC_WRAPPERS: Readonly<Record<string, { values: RegExp; operands: numb
   flock: { values: /^-[wE]$/u, operands: 1 },
 };
 
+/** Programs that read a heredoc as data whatever their arguments name: `printf '%s' sh`. */
+const HEREDOC_DATA =
+  /^(?:cat|printf|echo|tee|grep|egrep|fgrep|sed|awk|gawk|head|tail|wc|base64|jq|yq|sort|uniq|cut|tr|less|more|dd|xxd|od|curl|wget|kubectl|oc|psql|mysql|mongo|mongosh|python3?|node|ruby|perl)$/u;
+
 /**
- * Whether a command reads its heredoc as a shell program: whether the program it runs, past
- * `NAME=value` assignments and the wrappers above with their options, is a shell. `env sh` and
- * `sudo -n sh` do; `env printf '%s' sh` runs `printf`. `su` and `runuser` start a shell.
+ * Whether a command reads its heredoc as a shell program. The program it runs decides, past
+ * `NAME=value` assignments and the wrappers above with their options (`-nu alice` takes the
+ * value of its last letter): a shell does, a known data reader (`cat`, `printf`) does not.
+ * Any other program, a wrapper this table does not know (`xargs`, `nsenter`) included, counts
+ * as running a shell when a shell word follows it, which errs toward masking.
  */
 function heredocRunsShell(command: readonly ShellWord[]): boolean {
+  const isShell = (name: string): boolean =>
+    /^(?:sh|bash|zsh|dash|ash|ksh|su|runuser)$/u.test(name);
   let wrapper: { values: RegExp; operands: number } | undefined;
   let operands = 0;
   for (let index = 0; index < command.length; index += 1) {
     const word = (command[index] as ShellWord).text;
     const name = word.split('/').pop() ?? '';
-    if (wrapper === undefined && /^[A-Za-z_]\w*=/u.test(word)) continue;
+    if (/^[A-Za-z_]\w*=/u.test(word)) continue;
     if (wrapper !== undefined && word.startsWith('-') && word !== '-') {
-      if (wrapper.values.test(word)) index += 1;
+      // `-nu alice`: a cluster of short options takes the value of its last letter.
+      const last = word.startsWith('--') ? word : `-${word.slice(-1)}`;
+      if (wrapper.values.test(word) || wrapper.values.test(last)) index += 1;
       continue;
     }
-    if (wrapper !== undefined && /^[A-Za-z_]\w*=/u.test(word)) continue;
     if (wrapper !== undefined && operands > 0) {
       operands -= 1;
       continue;
     }
-    if (/^(?:sh|bash|zsh|dash|ash|ksh|su|runuser)$/u.test(name)) return true;
-    wrapper = HEREDOC_WRAPPERS[name];
-    if (wrapper === undefined) return false;
-    operands = wrapper.operands;
+    if (isShell(name)) return true;
+    wrapper = Object.hasOwn(HEREDOC_WRAPPERS, name) ? HEREDOC_WRAPPERS[name] : undefined;
+    if (wrapper !== undefined) {
+      operands = wrapper.operands;
+      continue;
+    }
+    if (HEREDOC_DATA.test(name)) return false;
+    return command.slice(index + 1).some((later) => isShell(later.text.split('/').pop() ?? ''));
   }
   return false;
 }
