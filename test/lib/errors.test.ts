@@ -3,6 +3,7 @@ import * as path from 'path';
 
 import {
   AuthorityGateError,
+  CaptureFailedError,
   ConflictError,
   CreateFailedError,
   DockerError,
@@ -32,6 +33,7 @@ describe('the taxonomy', () => {
     [DockerError, 502, 'ENGINE_UNAVAILABLE', 3],
     [PreflightError, 409, 'PREFLIGHT_FAILED', 3],
     [CreateFailedError, 500, 'CREATE_FAILED', 7],
+    [CaptureFailedError, 500, 'CAPTURE_FAILED', 9],
     [AuthorityGateError, 403, 'GATE', 6],
   ])('%p carries its status, code and exit code onto the instance', (Cls, status, code, exit) => {
     const exc = new (Cls as typeof ReproError)('boom');

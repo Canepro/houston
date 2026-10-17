@@ -153,7 +153,16 @@ const ROOT = path.resolve(__dirname, '..');
 // Credential arguments add thirty-two over the grants base of 4831: total 4863.
 // One more names credential option words ending in pass and leaves lookalikes readable: 4864.
 // Merged with PR 62 (base 4881): credential arguments add 4864 - 4831 = 33, so 4881 + 33 = 4914.
-const FLOOR = 4914;
+// Capture and its shell-roundtrip contract add twenty-three cases; seven repair regressions
+// bring that branch's total to 4,570. Workload-directory refusal and cleanup-fence regressions
+// and one recorded-target matrix (scheme semantics, nested userinfo, placeholders) bring its
+// collection-only measured total to 4,573 over the branch's own base. A full Jest run of the
+// merged tree (capture on the PR 61 base) measured 4861 tests.
+// Round 7 adds six cases (unresolved placeholders, a leftover raw recording, its publication
+// in two modes, workspace HTTP credentials and the browser context options): 4867.
+// Round 8 adds one case (timing modifiers and fill values taken as authored or refused): 4868.
+// Merged with PRs 62 and 64 (base 4914): capture adds 4868 - 4831 = 37 cases, so 4914 + 37 = 4951.
+const FLOOR = 4951;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

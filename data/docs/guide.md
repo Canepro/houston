@@ -6,7 +6,8 @@ starting one, read the [README](../../README.md) first.
 Every command also explains itself: `houston <command> --help`.
 
 **Contents:** [Commands at a glance](#commands-at-a-glance) ·
-[Everyday lifecycle](#everyday-lifecycle) · [Scenarios (presets)](#scenarios-presets) ·
+[Everyday lifecycle](#everyday-lifecycle) · [Browser capture](#browser-capture) ·
+[Scenarios (presets)](#scenarios-presets) ·
 [Sample data](#sample-data) · [A customer's settings](#a-customers-settings) ·
 [Settings and environment variables](#settings-and-environment-variables) ·
 [Backup, restore, upgrade](#backup-restore-upgrade) · [HTTPS](#https) ·
@@ -21,7 +22,7 @@ Every command also explains itself: `houston <command> --help`.
 | Group                     | Commands                                                                            |
 | ------------------------- | ----------------------------------------------------------------------------------- |
 | lifecycle                 | `up` `start` `stop` `restart` `down` `prune`                                        |
-| inspect                   | `list` `info` `inspect` `logs` `ready` `stats` `evidence`                           |
+| inspect                   | `list` `info` `inspect` `logs` `ready` `stats` `evidence` `workloads` `capture`     |
 | settings                  | `use` `config` `onboard` `env`                                                      |
 | data                      | `seed` `config-import` `backup` `backups` `restore` `upgrade`                       |
 | performance (Docker only) | `loadtest` `capacity`                                                               |
@@ -77,6 +78,64 @@ houston use ticket-1234        # later commands without --name act on ticket-123
 **Remove workspaces you are done with.** Each one uses about 1.1 GB of memory, `up`
 refuses when the machine does not have room, and too many at once can run a machine
 out of memory.
+
+---
+
+## Browser capture
+
+Use a workload to record the browser steps that reproduce a case in an existing workspace.
+
+```bash
+houston workloads
+houston capture --name ticket-1234 --workload smoke --bundle ./ticket-1234-capture --json
+```
+
+The built-in `smoke` workload signs in with the workspace admin and records the landing page and
+the signed-in home. Copy it to `~/.houston/workloads/<name>.yaml` to adapt selectors for a
+specific Rocket.Chat version. A user workload with the same name takes precedence over the
+built-in one.
+
+Capture needs Playwright and Chromium. Install both in the directory where you run Houston:
+
+```bash
+npm install playwright
+npx playwright install chromium
+```
+
+The bundle contains the evidence record, a capture manifest, checkpoint PNG files, one frame
+per action, a video, and an action-summary JSON trace. The trace contains only step indexes,
+actions, outcomes and timings. Houston never collects a raw Playwright network trace because
+it cannot certify confidentiality of transient sessions, rotated tokens or other origins.
+Houston masks known secret values and any nonempty fill into a credential-shaped field before
+typing it. The control stays hidden if it later enters a modal dialog or the page removes its
+visible cover. Houston keeps matching that field for the rest of the capture, so a control the
+page replaces, or one on a later page, is hidden and covered when it appears. It matches the
+selector you wrote when plain CSS resolves it to the field, and otherwise the field's own
+`name`, `type`, `id`, `autocomplete`, `formcontrolname` and `data-testid`; a field with none of
+those is refused. Goto targets in the manifest and step banner omit URL userinfo; navigation
+still uses the original authored target. Targets containing nested URL credentials are
+redacted as a whole, including encoded nested URLs, encoded delimiters inside their userinfo,
+and userinfo that contains whitespace or a backslash. Ambiguous encodings can redact a
+harmless target too. The value of a credential-shaped query or fragment parameter (`token`,
+`access_token`, `id_token`, `refresh_token`, `password`, `api_key`, an OAuth `code` and similar)
+is replaced with `REDACTED` in the manifest and step banner, and `state` is kept. A workspace
+under a path (`https://example.test/rocketchat`) keeps that path: `goto: /` opens the path
+and evidence shows no more than the origin. Userinfo in the workspace URL
+(`http://user:pass@host`) is used as HTTP
+basic auth for that origin only and appears in no artifact. `timeout_ms` is a positive and
+`settle_ms` a nonnegative whole number of milliseconds, and a `fill` value must be a quoted
+YAML string; anything else stops the capture at parse time instead of running a different
+workload. Placeholder values are expanded
+only for navigation, and a `{{placeholder}}` that nothing defines stops the capture before a
+browser opens. Houston saves the video and then removes Playwright's raw copy. If it cannot
+remove it, the capture fails and the raw directory stays out of the bundle. Inspect the visible
+PNG files and video before you attach the bundle because a page can echo a value outside the
+masked input.
+
+Exit 9 means a step failed or an artifact did not hold up. Houston keeps the partial bundle so
+you can see where the workload stopped, but that bundle is not proof of the reported behaviour.
+`capture` refuses to reuse a nonempty bundle directory. `--force` replaces only an identifiable
+earlier Houston evidence bundle.
 
 ---
 

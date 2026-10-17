@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -106,6 +107,18 @@ const COMPOSE = [
   '    image: mongo:7.0',
   '',
 ].join('\n');
+
+function captureInstructionArgs(readme: string): string[] {
+  const match = readme.match(/```bash\nhouston capture([\s\S]*?)\n```/u);
+  const suffix = match?.[1];
+  if (suffix === undefined) throw new Error('README did not include a fenced capture instruction');
+  const parsed = spawnSync('/bin/sh', ['-c', `set -- capture${suffix}; printf '%s\\0' "$@"`], {
+    encoding: 'buffer',
+  });
+  if (parsed.status !== 0)
+    throw new Error(`shell rejected capture instruction: ${String(parsed.stderr)}`);
+  return parsed.stdout.toString('utf8').split('\0').filter(Boolean);
+}
 
 const KUBERNETES_DETAIL = {
   deployment: 'monolith',
@@ -2778,8 +2791,37 @@ describe('the bundle', () => {
     const readme = fs.readFileSync(path.join(dest, 'README.md'), 'utf8');
     expect(readme).toContain('| URL | https://support.example.test |');
     expect(readme).not.toContain('| URL | http://localhost:3000 |');
-    expect(readme).not.toContain('houston capture');
+    expect(readme).toContain('houston capture --name ');
     expect(readme).toContain(`\`\`\`bash\n${cleanupCommand(name)}\n\`\`\``);
+  });
+
+  it('renders a capture instruction the shell parses as the original arguments', () => {
+    for (const name of ["e7-public's\ncapture", "e7-public's\\pipe|`tick"]) {
+      const readme = renderMarkdown({ repro: { name, rc_version: '8.5.1' } });
+
+      expect(captureInstructionArgs(readme)).toEqual([
+        'capture',
+        '--name',
+        name,
+        '--workload',
+        'smoke',
+      ]);
+    }
+  });
+
+  it('keeps backticks in the cleanup command inside one Markdown code fence', () => {
+    const command = cleanupCommand('legacy```name');
+    const readme = renderMarkdown({
+      repro: { name: 'legacy```name' },
+      retention: { cleanup: command },
+    });
+    const section = readme.split('## Cleanup\n\n')[1]!;
+    const lines = section.split('\n');
+    const opener = lines[0]!;
+    const fence = opener.slice(0, -4);
+    expect(opener.endsWith('bash')).toBe(true);
+    expect(fence.length).toBeGreaterThan(3);
+    expect(lines.slice(1, -1).join('\n')).toBe(command + '\n' + fence);
   });
 
   it('redacts credentials in a Kubernetes values artifact', async () => {

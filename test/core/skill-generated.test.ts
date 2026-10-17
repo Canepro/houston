@@ -9,6 +9,7 @@
  * tools/skill-generate.js` fails here, which is the point.
  */
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import * as config from '../../src/lib/config';
@@ -20,18 +21,35 @@ const generator = require(path.join(ROOT, 'tools', 'skill-generate.js')) as {
   TARGET: string;
   TEMPLATE: string;
   PROJECT_COPIES: string[];
+  generate: () => string;
   render: (manifest: unknown, template: string, version: string) => string;
 };
 const VERSION = (require('../../package.json') as { version: string }).version;
 
 describe('the shipped skill file', () => {
   it('skill file matches capabilities', () => {
-    const fresh = generator.render(
-      capabilities(),
-      fs.readFileSync(generator.TEMPLATE, 'utf8'),
-      VERSION,
-    );
+    const fresh = generator.generate();
     expect(fs.readFileSync(generator.TARGET, 'utf8')).toBe(fresh);
+  });
+
+  it('renders build presets instead of a caller-local preset', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-skill-generated-'));
+    const previousHome = process.env.HOUSTON_HOME;
+    try {
+      fs.mkdirSync(path.join(home, 'presets'));
+      fs.writeFileSync(
+        path.join(home, 'presets', 'local-skill-only.yaml'),
+        'name: local-skill-only\nservices: {}\n',
+      );
+      process.env.HOUSTON_HOME = home;
+
+      expect(generator.generate()).not.toContain('`local-skill-only`');
+      expect(process.env.HOUSTON_HOME).toBe(home);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOUSTON_HOME;
+      else process.env.HOUSTON_HOME = previousHome;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it('names the safe cluster read, and keep and share among what to ask about first', () => {
@@ -39,7 +57,7 @@ describe('the shipped skill file', () => {
     // `keep` (it moves a cluster's deletion date) or `share` (it grants AWS access), and
     // was never told which cluster command only reads.
     const shipped = fs.readFileSync(generator.TARGET, 'utf8');
-    expect(shipped).toMatch(/`houston cluster overview --json`[ \t]+\|[ \t]+the safe read/u);
+    expect(shipped).toMatch(/`houston cluster overview --json`\s+\|\s+the safe read/u);
     const ask = shipped.slice(
       shipped.indexOf('### Ask a person first'),
       shipped.indexOf('## Three standing rules'),

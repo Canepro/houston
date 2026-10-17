@@ -258,6 +258,11 @@ export function presetDir(): string {
   return joinPath(home(), 'presets');
 }
 
+/** User capture workloads, `<name>.yaml`, which win over the built-in ones by name. */
+export function workloadDir(): string {
+  return joinPath(home(), 'workloads');
+}
+
 /** Where loadtest and capacity reports are written by default. */
 export function reportsDir(): string {
   return joinPath(home(), 'reports');

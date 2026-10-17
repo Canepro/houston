@@ -96,6 +96,7 @@ the selected destination.
 | pause it, then resume it | `houston stop --name <name>`, then `houston start --name <name>` |
 | start one with LDAP, SAML, email and so on | `houston up --version 8.5.1 --name <name> --preset ldap --wait` |
 | fill it with conversations, files and profiles | `houston seed --name <name> --verify-seed` |
+| record scripted browser evidence | `houston capture --name <name> --workload smoke` |
 | back it up | `houston backup --name <name>` |
 | upgrade it to another version | `houston upgrade --name <name> --to 8.6.1` |
 | remove it and keep its data | `houston down --name <name>` |

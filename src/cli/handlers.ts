@@ -4,6 +4,7 @@ import { constants as osConstants } from 'node:os';
 
 import type * as AuditNS from '../core/audit';
 import type * as BackupNS from '../core/backup';
+import type * as CaptureNS from '../core/capture';
 import type * as ClusterNS from '../core/cluster';
 import type * as DataNS from '../core/data';
 import type * as DoctorNS from '../core/doctor';
@@ -1146,6 +1147,17 @@ async function dispatch(
           reason: retain ? 'explicit task' : '',
         },
         bundle: text(o.bundle),
+      });
+    }
+    case 'workloads': {
+      const capture = require('../core/capture') as typeof CaptureNS;
+      return { workloads: await capture.listWorkloads() };
+    }
+    case 'capture': {
+      const capture = require('../core/capture') as typeof CaptureNS;
+      const name = await target(text(o.name));
+      return await capture.captureBundle(name, text(o.workload), text(o.bundle), {
+        force: bool(o.force),
       });
     }
     case 'inspect': {
@@ -3435,6 +3447,26 @@ export async function renderHuman(
       );
       io.writeOut(`  cleanup   ${display(retention.cleanup)}\n`);
       if (isTruthy(result.bundle)) io.writeOut(`  bundle    ${display(bag(result.bundle).path)}\n`);
+      return;
+    }
+    case 'workloads': {
+      const workloads = bags(result.workloads);
+      if (workloads.length === 0) {
+        io.writeOut('No capture workloads found.\n');
+        return;
+      }
+      writeTable(
+        io,
+        ['WORKLOAD', 'DESCRIPTION', 'SOURCE'],
+        workloads.map((row) => [display(row.name), display(row.description), display(row.source)]),
+      );
+      return;
+    }
+    case 'capture': {
+      const bundle = bag(result.bundle);
+      const location = display(bundle.path);
+      io.writeOut(`bundle  ${location}\n`);
+      io.writeOut(`  open  ${location}/README.md\n`);
       return;
     }
     case 'inspect':

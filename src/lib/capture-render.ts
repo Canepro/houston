@@ -14,7 +14,7 @@ function bag(value: unknown): Record<string, unknown> {
 }
 
 function markdownText(value: unknown): string {
-  return toText(value)
+  return (value === 0 ? '0' : toText(value))
     .replace(/[\r\n]+/gu, ' ')
     .replaceAll('\\', '\\\\')
     .replaceAll('|', '\\|');
@@ -22,6 +22,22 @@ function markdownText(value: unknown): string {
 
 function markdownCode(value: unknown): string {
   return markdownText(value).replaceAll('`', '\\`');
+}
+
+/** A shell argument kept literal in the README's copy-and-run capture instruction. */
+function shellArgument(value: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(value)) return value;
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+/** A Markdown fence long enough that literal command bytes cannot close it. */
+function commandFence(value: string): string[] {
+  const longestBacktickRun = Math.max(
+    0,
+    ...[...value.matchAll(/`+/gu)].map((match) => match[0].length),
+  );
+  const fence = '`'.repeat(Math.max(3, longestBacktickRun + 1));
+  return [`${fence}bash`, value, fence];
 }
 
 /** A capture artifact must remain relative to its capture directory before becoming a link. */
@@ -46,7 +62,7 @@ export function renderCaptureSection(value: unknown): string[] {
   const manifest = bag(value);
   const lines: string[] = [];
   const failed = bag(manifest.failed_step);
-  if (toText(manifest.status) === 'failed') {
+  if (toText(manifest.status) === 'failed' && Object.keys(failed).length > 0) {
     const index = markdownText(failed.index) || '?';
     const action = markdownCode(failed.action) || '?';
     const target = markdownCode(failed.target) || '?';
@@ -54,6 +70,13 @@ export function renderCaptureSection(value: unknown): string[] {
       `> **This capture did not complete.** It stopped at step ${index} (${action} ${target}). ` +
         'Treat the artifacts below as partial, not as proof of the behaviour. A workload ' +
         'written for another Rocket.Chat version is the usual cause.',
+      '',
+    );
+  }
+
+  if (toText(manifest.status) === 'failed' && Object.keys(failed).length === 0) {
+    lines.push(
+      '> **Artifact validation failed.** The browser steps completed, but the retained artifacts do not hold up. See the actual validation failures below. Do not attach this bundle as proof.',
       '',
     );
   }
@@ -83,10 +106,10 @@ export function renderCaptureSection(value: unknown): string[] {
   );
   if (masks.length > 0) {
     lines.push(
-      `Houston covered known secret input${masks.length === 1 ? '' : 's'} ` +
+      `Houston hid known secret input${masks.length === 1 ? '' : 's'} ` +
         `(${masks.map((selector) => `\`${selector}\``).join(', ')}) before Playwright filled ${
           masks.length === 1 ? 'it' : 'them'
-        }. The retained PNG frames and video show that cover instead of the direct control value.`,
+        }. A visible cover marks ordinary inputs. The control itself stays hidden if a later page change removes that cover or paints above it.`,
     );
   } else {
     lines.push(
@@ -94,7 +117,9 @@ export function renderCaptureSection(value: unknown): string[] {
     );
   }
   lines.push(
-    'The trace has no screenshots or DOM snapshots. Byte-level redaction checks known secret values in text artifacts, but it cannot prove that the page did not echo a value somewhere else.',
+    privacy.trace_policy === 'action-summary-only'
+      ? 'The trace is an action summary containing only step index, action, outcome and timing. Houston does not collect a Playwright trace, network bodies, headers, WebSockets, DOM snapshots or screenshots in it. It cannot diagnose network or session behavior.'
+      : 'This legacy capture does not establish confidentiality of its trace. Omit the trace before attaching the bundle.',
     '',
   );
 
@@ -198,6 +223,7 @@ export function renderMarkdown(payloadValue: unknown, captureValue?: unknown): s
     '',
   );
   if (Object.keys(capture).length === 0) {
+    const command = `houston capture --name ${shellArgument(toText(repro.name))} --workload smoke`;
     lines.push(
       'This bundle records workspace metadata and any available configuration. ' +
         'Runtime deployment was not verified. ' +
@@ -205,6 +231,8 @@ export function renderMarkdown(payloadValue: unknown, captureValue?: unknown): s
         'Include a scripted capture with a later collection to record those actions.',
       '',
     );
+    if (/[\r\n\\`|]/u.test(command)) lines.push('Add one with:', '', ...commandFence(command), '');
+    else lines.push(`Add one with \`${command}\`.`, '');
   } else {
     lines.push(...renderCaptureSection(capture));
   }
@@ -224,6 +252,6 @@ export function renderMarkdown(payloadValue: unknown, captureValue?: unknown): s
   // The record owns shell quoting. A fenced block must keep that command byte for byte,
   // including the final newline a legacy workspace name can legitimately contain.
   const cleanup = toText(bag(payload.retention).cleanup);
-  if (cleanup !== '') lines.push('## Cleanup', '', '```bash', cleanup, '```', '');
+  if (cleanup !== '') lines.push('## Cleanup', '', ...commandFence(cleanup), '');
   return lines.join('\n');
 }

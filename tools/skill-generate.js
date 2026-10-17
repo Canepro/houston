@@ -50,6 +50,9 @@ const EXIT_PROSE = {
     '     PERSON to run, not something you may run yourself.',
   create_failed: 'known dead. Stop; do not retry in a loop.',
   conflict: 'the name or port is taken. Pick another.',
+  capture_failed:
+    'a scripted browser capture stopped, or its artifacts do not hold up.\n' +
+    '     `error.details.bundle` is the partial bundle; read its README, do not attach it as proof.',
 };
 
 function code(text) {
