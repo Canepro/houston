@@ -36,6 +36,47 @@ export const REDACTED = '********';
  */
 const JOINED_KEY_HINTS: readonly string[] = ['privatekey', 'sshkey'];
 
+const HEADER_KEY = /^(?:(?:proxy|http)_)?(?:authorization(?:_?headers?)?|auth_?headers?)$/u;
+
+/**
+ * Words containing `pass` that are not credentials: anything ending in `bypass`
+ * (`--proxybypass`, `--bypassfile`), and a few whole words (`--nopass`, `--lowpass`). Checked
+ * after the digits and the named forms are removed, so any other word ending in `pass` or a
+ * password spelling is a credential: `--requirepass`, `--installpassword`, `--db2pass`.
+ */
+const NOT_A_PASS =
+  /^(?:[a-z0-9]*bypass|compass|trespass|overpass|underpass|surpass|lowpass|highpass|bandpass|allpass|nopass|skippass|mispass)$/u;
+
+/**
+ * One word of an option name that names a credential:
+ * - a word ending in `pass`, `password`, `passwd` or `passphrase`, digits allowed anywhere
+ *   before it and after it, with the named forms `in`, `out`, `code`, `file`, `key`
+ *   (`-passin`, `--passcode`), unless its ending is NOT_A_PASS.
+ * - a credential stem, alone or ending a joined name (`--accesstoken`, `--rootpassword`).
+ * - a credential stem followed by `key`, `accesskey`, `file`, `value`, `data`, `string` or
+ *   `text`: `--secretkey`, `--secretaccesskey`, `--apikeyvalue`, `--sshkeydata`.
+ */
+const PASS_WORD = /^[a-z0-9]*pass\d*(?:w[o0]rd|wd|phrase)?\d*(?:in|out|code|file|key)?\d*$/u;
+const STEM =
+  'password|passwd|passphrase|secret|token|apikey|credential|privatekey|sshkey|accesskey';
+const STEM_WORD = new RegExp(
+  `(?:${STEM})s?\\d*$|^(?:${STEM})(?:key|accesskey|file|value|data|string|text)s?\\d*$`,
+  'u',
+);
+
+function credentialWord(word: string): boolean {
+  if (PASS_WORD.test(word)) {
+    const core = word
+      .replace(/\d+$/u, '')
+      .replace(/(?:in|out|code|file|key)$/u, '')
+      .replace(/\d+$/u, '')
+      .replace(/\d*(?:w[o0]rd|wd|phrase)$/u, '')
+      .replace(/\d+$/u, '');
+    return !NOT_A_PASS.test(core);
+  }
+  return STEM_WORD.test(word);
+}
+
 /**
  * Whether a key names a credential, for an artifact a person attaches. The hints are written in
  * environment spelling (`_key`, `rocketchat_license`), and an artifact also holds keys spelled
@@ -44,19 +85,323 @@ const JOINED_KEY_HINTS: readonly string[] = ['privatekey', 'sshkey'];
  * hide a hint it already held. `keycloakUrl` and `monkeyPatch` hold no word `key`.
  */
 export function credentialKey(key: string): boolean {
-  const words = key
-    .replace(/(\p{Lu})(\p{Lu}\p{Ll})/gu, '$1_$2')
-    .replace(/(\p{Ll}|\p{Nd})(\p{Lu})/gu, '$1_$2')
-    .replace(/[^\p{L}\p{Nd}]/gu, '_')
-    .toLowerCase();
+  const words = keyWords(key);
   const lowered = key.toLowerCase();
   // Header names are credentials; nearby policy/count fields are not. Match complete
   // normalized names so authorizationEnabled and authHeaderCount remain readable.
   return (
-    /^(?:(?:proxy|http)_)?(?:authorization(?:_?headers?)?|auth_?headers?)$/u.test(words) ||
+    HEADER_KEY.test(words) ||
     [...SECRET_KEY_HINTS, ...JOINED_KEY_HINTS].some(
       (hint) => lowered.includes(hint) || words.includes(hint),
     )
+  );
+}
+
+/** A key's words lower-cased and joined by `_`, at each case change and non-alphanumeric. */
+function keyWords(key: string): string {
+  return key
+    .replace(/(\p{Lu})(\p{Lu}\p{Ll})/gu, '$1_$2')
+    .replace(/(\p{Ll}|\p{Nd})(\p{Lu})/gu, '$1_$2')
+    .replace(/[^\p{L}\p{Nd}]/gu, '_')
+    .toLowerCase();
+}
+
+/**
+ * Keys whose list value is an argument sequence: a Compose or Kubernetes `command`,
+ * `entrypoint` or `args`. In such a list a credential flag and the argument after it are
+ * separate items, so neither item names its own credential. A healthcheck `test` is one too, but
+ * only under its parent: see `argumentListKey`.
+ */
+export const ARGUMENT_LIST_KEYS: readonly string[] = Object.freeze([
+  'command',
+  'entrypoint',
+  'args',
+]);
+
+/** Whether `key` names a healthcheck: `healthcheck`, or an extension field such as `x-healthcheck`. */
+export function healthcheckKey(key: string): boolean {
+  return /health[-_]?check/iu.test(key);
+}
+
+/**
+ * Whether `key`, inside an object held under `parent`, is an argument list. `test` is one only
+ * in a healthcheck; anywhere else it is arbitrary data, such as a chart value, and masking it
+ * would erase whatever it holds from the whole bundle.
+ */
+export function argumentListKey(key: string, parent = ''): boolean {
+  return ARGUMENT_LIST_KEYS.includes(key) || (key === 'test' && healthcheckKey(parent));
+}
+
+/**
+ * Whether an argument item is a flag whose NEXT item is its credential value: `--password` or
+ * `--reg-token`. `--flag=value` carries its own value and is read as an assignment instead;
+ * `--port` and a plain argument are not flags of this kind. The flag's own words decide:
+ * `--proxy-bypass-list` holds the letters `pass` and no credential word.
+ */
+export function credentialFlag(item: string): boolean {
+  const flag = /^--?([A-Za-z][^=\s]*)$/u.exec(item)?.[1];
+  if (flag === undefined) return false;
+  const words = keyWords(flag);
+  return (
+    HEADER_KEY.test(words) ||
+    /(?:^|_)rocketchat_license(?:_|$)/u.test(words) ||
+    /(?:^|_)oauth2_bearer$/u.test(words) ||
+    words
+      .split('_')
+      .some(
+        (word, index, all) =>
+          credentialWord(word) || (/^keys?$/u.test(word) && KEY_OWNER.test(all[index - 1] ?? '')),
+      )
+  );
+}
+
+/**
+ * The words before `key` that make an option a key's value: `--api-key`, `--client-key`.
+ * Elsewhere `key` names a sort or a column (`jq --sort-keys`, `--primary-key`), not a secret.
+ */
+const KEY_OWNER =
+  /^(?:api|access|secret|private|priv|license|licence|master|client|encryption|encrypt|decryption|signing|sign|auth|session|shared|psk|ssh|gpg|pgp|account|app|service|storage|sas|kms|join|registration|bootstrap|root|admin|consumer|hmac|jwt|cookie|unseal|recovery|wrap|enc|tls|ssl|server|ca|rsa|deploy|token|bearer|cluster|node|user|owner|identity|cert|crypt)$/u;
+
+/**
+ * Whether the text before an `=` names a credential: a key (`DB_PASSWORD`), or the last word of
+ * a command line, which is a flag when it starts with `-` and is judged as one.
+ */
+function assignsCredential(before: string): boolean {
+  const last = before.split(/\s+/u).pop() ?? '';
+  return last.startsWith('-') ? credentialFlag(last) : credentialKey(before);
+}
+
+/** Whether a flag hands its credential to the NEXT argument, rather than switching a mode. */
+export function valueTakingCredentialFlag(flag: string): boolean {
+  return credentialFlag(flag) && !/-(?:stdin|file|fd|env|prompt|cmd|command)$/u.test(flag);
+}
+
+/** Whether one argument word is, or assigns, a credential flag: `--password`, `--password=x`. */
+export function credentialFlagWord(word: string): boolean {
+  const equals = word.indexOf('=');
+  return credentialFlag(equals > 0 ? word.slice(0, equals) : word);
+}
+
+/**
+ * Whether a command string names a credential flag anywhere: in any quoted, nested, or
+ * backtick-substituted part, in `--flag=value` form, or as `-p` beside a user flag. Splitting at
+ * every quote and shell operator only finds flags; it is not how the command parses.
+ */
+export function commandCarriesCredential(text: string): boolean {
+  const words = text.split(/[\s'"`;&|()<>\\]+/u).filter((word) => word !== '');
+  if (words.some(credentialFlagWord)) return true;
+  return (
+    (words.includes('-p') && userPasswordClient(words) && words.some(userArgument)) ||
+    shortOptionPasswords(words).length > 0 ||
+    httpUserPassword(words) ||
+    authorizationHeaders(words).length > 0
+  );
+}
+
+/** `curl -u user:pass`, `--proxy-user` and wget's `--user=user:pass` carry a password. */
+export function httpUserPassword(words: readonly string[]): boolean {
+  return httpUsers(words).length > 0;
+}
+
+/** A header flag whose value, or `--header=value`, is one request header. */
+const HEADER_FLAG = /^(?:-H|--header|--proxy-header)$/u;
+const HEADER_ATTACHED = /^(?:--header=|--proxy-header=|-H)(.*)$/su;
+const AUTHORIZATION_HEADER = /^\s*(?:proxy-)?authorization\s*:\s*(.*)$/isu;
+
+/**
+ * The values of the `Authorization:` and `Proxy-Authorization:` headers that `words` hand to a
+ * header flag (`-H`, `--header`, `--proxy-header`, attached or not), empty when the header has
+ * none. Other headers are not credentials.
+ */
+export function authorizationHeaders(words: readonly string[]): string[] {
+  const values: string[] = [];
+  words.forEach((word, index) => {
+    const header = HEADER_FLAG.test(word) ? words[index + 1] : HEADER_ATTACHED.exec(word)?.[1];
+    const value = AUTHORIZATION_HEADER.exec(header ?? '')?.[1];
+    if (value !== undefined) values.push(value.trim());
+  });
+  return values;
+}
+
+/** Schemes that name how a credential is sent and are not the credential. */
+const AUTHORIZATION_SCHEME = /^(?:bearer|basic|digest|negotiate|ntlm|token)$/iu;
+
+/**
+ * The strings that give away an `Authorization:` header value, for copies elsewhere: the value
+ * and the credential after its scheme (`Bearer abc` holds `abc`). A bare scheme holds no secret,
+ * nor does a variable (`$TOKEN`) in a `shell` command, which expands it; a list item is literal.
+ */
+export function authorizationCredentials(value: string, shell = false): string[] {
+  const scheme = /^(\S+)[ \t]+(\S.*)$/su.exec(value);
+  const credential = scheme?.[2] ?? value;
+  if (credential === '' || (shell && credential.startsWith('$'))) return [];
+  if (scheme === null && AUTHORIZATION_SCHEME.test(value)) return [];
+  return scheme === null ? [value] : [value, credential];
+}
+
+/** The start of a word that holds its own user value: `--user=`, `--proxy-user=`, `-u`, `-U`. */
+export const HTTP_USER_PREFIX = /^(?:--(?:proxy-)?user=|-[uU])/u;
+
+/** A `user:password` value of a curl or wget command, and the word that holds it. */
+export interface HttpUser {
+  readonly value: string;
+  readonly password: string;
+  /** Index of the word holding the value; `attached` when it follows `-u` or `--user=` there. */
+  readonly index: number;
+  readonly attached: boolean;
+}
+
+/**
+ * The `user:password` values after a curl or wget in `words`: `-u v`, `--user v`, `--user=v`,
+ * `-uv`, and curl's `-U`, `--proxy-user` in the same four spellings (`-U` is wget's
+ * `--user-agent`, so it counts for curl only). A long option is never read as an attached `-u`:
+ * an attached short option is a single dash and one letter. Only words after the program count,
+ * so `docker run -u root:root curlimage/curl` names a user and group, not a password. A value
+ * without a colon has no password in it.
+ */
+export function httpUsers(words: readonly string[]): HttpUser[] {
+  const program = words.findIndex((word) => /(?:^|[/\\])(?:curl|wget)(?:\.exe)?$/iu.test(word));
+  if (program < 0) return [];
+  const curl = /curl(?:\.exe)?$/iu.test(words[program] ?? '');
+  const separateFlag = curl ? /^(?:-[uU]|--user|--proxy-user)$/u : /^(?:-u|--user|--proxy-user)$/u;
+  const attachedFlag = curl
+    ? /^(?:--(?:proxy-)?user=|-[uU](?!-))(.*)$/su
+    : /^(?:--(?:proxy-)?user=|-u(?!-))(.*)$/su;
+  const users: HttpUser[] = [];
+  for (let index = program + 1; index < words.length; index += 1) {
+    const word = words[index] ?? '';
+    const separate = separateFlag.test(word);
+    const attached = separate ? undefined : attachedFlag.exec(word)?.[1];
+    const next = words[index + 1] ?? '';
+    const value = separate ? next : attached;
+    const colon = value?.indexOf(':') ?? -1;
+    if (value === undefined || colon < 0) continue;
+    users.push({
+      value,
+      password: value.slice(colon + 1),
+      index: separate ? index + 1 : index,
+      attached: !separate,
+    });
+  }
+  return users;
+}
+
+/**
+ * Whether these words run a client whose `-u` is a user and whose `-p` is a password: the
+ * MySQL, MariaDB, MongoDB and mycli tools, `mysql.exe` included. Elsewhere `-u` means something else (`python -u` is
+ * unbuffered), and reading the next `-p` value as a password would mask it across the bundle.
+ */
+export function userPasswordClient(words: readonly string[]): boolean {
+  return words.some((word) =>
+    /^(?:mysql|mariadb|mongo|mycli)[\w.-]*$/iu.test(word.split(/[/\\]/u).pop() ?? ''),
+  );
+}
+
+/** Whether one argument names a user: `-u x`, `-ux`, `--user[=x]`, `--username[=x]`. */
+export function userArgument(word: string): boolean {
+  return /^(?:-u.*|--user(?:name)?(?:=.*)?)$/u.test(word);
+}
+
+/**
+ * The passwords a client's short option carries: MySQL's attached `-pS3cret`, the only form in
+ * which its `-p` takes a value, `redis-cli -a S3cret`, `docker login -p S3cret`, `sshpass -p S3cret`
+ * and the values of `kubectl create secret ... --from-literal=key=S3cret`. Elsewhere `-pX` and `-a` mean other
+ * things (`mkdir -pv`, `cp -a`), so the program decides.
+ */
+export function shortOptionPasswords(words: readonly string[]): string[] {
+  const mysql = userPasswordClient(words);
+  const redis = words.some((word) =>
+    /^(?:redis|valkey|keydb)-cli[\w.-]*$/iu.test(word.split(/[/\\]/u).pop() ?? ''),
+  );
+  // `docker login -p`; Docker's other `-p` publishes a port.
+  const dockerLogin =
+    words.some((word) => /^docker(?:\.exe)?$/iu.test(word.split(/[/\\]/u).pop() ?? '')) &&
+    words.includes('login');
+  const sshpass = words.some((word) =>
+    /^sshpass(?:\.exe)?$/iu.test(word.split(/[/\\]/u).pop() ?? ''),
+  );
+  // `kubectl create secret generic x --from-literal=key=value`: every literal is the secret.
+  const secretLiterals =
+    words.some((word) => /^(?:kubectl|oc)(?:\.exe)?$/iu.test(word.split(/[/\\]/u).pop() ?? '')) &&
+    words.includes('secret');
+  const values: string[] = [];
+  words.forEach((word, index) => {
+    const attached = /^-p(.+)$/su.exec(word)?.[1];
+    if ((mysql || sshpass) && attached !== undefined) values.push(attached);
+    if (sshpass && word === '-p' && (words[index + 1] ?? '') !== '')
+      values.push(words[index + 1] ?? '');
+    const literal = /^--from-literal=[^=]*=(.+)$/su.exec(word)?.[1];
+    if (secretLiterals && literal !== undefined) values.push(literal);
+    const separate = /^[^=]*=(.+)$/su.exec(words[index + 1] ?? '')?.[1];
+    if (secretLiterals && word === '--from-literal' && separate !== undefined)
+      values.push(separate);
+    const next = words[index + 1] ?? '';
+    if (redis && word === '-a' && next !== '') values.push(next);
+    if (dockerLogin && word === '-p' && next !== '' && !next.startsWith('-')) values.push(next);
+  });
+  return values;
+}
+
+/** The words of a command, entrypoint, args or healthcheck value, a string split at spaces. */
+export function argumentWords(value: unknown): string[] {
+  if (typeof value === 'string') return value.split(/\s+/u).filter((word) => word !== '');
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === 'string');
+}
+
+/**
+ * Every credential value one flat argument list carries: the value after a credential flag or
+ * in `--flag=value`, a client's short password option, `curl -u user:password` and an
+ * `Authorization:` header's credential.
+ */
+export function argumentCredentials(words: readonly string[]): string[] {
+  const userGiven = userPasswordClient(words) && words.some(userArgument);
+  const values = shortOptionPasswords(words);
+  for (const user of httpUsers(words)) values.push(user.value, user.password);
+  for (const header of authorizationHeaders(words))
+    values.push(...authorizationCredentials(header));
+  words.forEach((word, index) => {
+    const equals = word.indexOf('=');
+    if (equals > 0 && valueTakingCredentialFlag(word.slice(0, equals))) {
+      values.push(word.slice(equals + 1));
+    }
+    const next = words[index + 1];
+    if (next !== undefined && credentialArgument(word, next, userGiven)) values.push(next);
+  });
+  return values.filter((value) => value !== '');
+}
+
+/**
+ * `8080`, `8080:80`, `8000-8010:80/udp`, `127.0.0.1:8080:80`, `[::1]:8080:80`, `0.0.0.0::80`:
+ * every part a port number or range, after an optional bind address and before an optional
+ * protocol, which `-p` publishes rather than hides.
+ */
+export function portSpelling(value: string): boolean {
+  const bound = value.replace(/^(?:[0-9]{1,3}(?:\.[0-9]{1,3}){3}|\[[0-9A-Fa-f:.]+\]):/u, '');
+  const parts = bound.replace(/\/(?:tcp|udp|sctp)$/u, '').split(':');
+  const maximum = bound === value ? 3 : 2;
+  return (
+    parts.length <= maximum &&
+    parts.every((part, index) =>
+      part === ''
+        ? bound !== value && index === 0 && parts.length === 2
+        : /^[0-9]{1,5}(?:-[0-9]{1,5})?$/u.test(part) &&
+          part.split('-').every((port) => Number(port) <= 65535),
+    )
+  );
+}
+
+/**
+ * Whether `flag` takes `value` as a credential: a long credential flag (`--password`), or `-p`
+ * in a command that also names a user, as `mongosh -u x -p` and `mysql -p -u x` write it.
+ * Elsewhere `-p` is a port or `mkdir -p`, and masking those would erase evidence.
+ */
+export function credentialArgument(flag: string, value: string, userGiven: boolean): boolean {
+  // A value may start with `-`; only a bare long option is the next argument instead.
+  if (valueTakingCredentialFlag(flag)) return value !== '' && !/^--[A-Za-z][\w-]*$/u.test(value);
+  // A following option or a port is the next argument, not a password `-p` was asked for.
+  return (
+    flag === '-p' && userGiven && value !== '' && !value.startsWith('-') && !portSpelling(value)
   );
 }
 
@@ -137,16 +482,18 @@ function jsonValueEnd(text: string, at: number, ends: ReadonlyMap<number, number
 }
 
 /**
- * Whether the object at `at` has a `name` member naming a credential, in any member position;
- * the last one counts, as for `JSON.parse`. Its `value` member is then the credential, as the
- * same object in YAML is (`{name: DB_PASSWORD, value: ...}`).
+ * Whether the object at `at` has a `name` member naming a credential, in any member position.
+ * `JSON.parse` keeps only the last duplicate `name`, but the retained bytes hold every member and
+ * a reader may take the first, so ANY credential name counts, as for duplicate YAML names. Every
+ * `value` member of the object is then the credential, as the same object in YAML is
+ * (`{name: DB_PASSWORD, value: ...}`).
  */
 function namesCredential(text: string, at: number, ends: ReadonlyMap<number, number>): boolean {
-  let name = '';
+  let named = false;
   let i = at + 1;
   for (;;) {
     i += jsonToken(JSON_SPACE, text, i).length;
-    if (text[i] === '}' || i >= text.length) return credentialKey(name);
+    if (text[i] === '}' || i >= text.length) return named;
     if (text[i] === ',') {
       i += 1;
       continue;
@@ -158,7 +505,7 @@ function namesCredential(text: string, at: number, ends: ReadonlyMap<number, num
     const end = jsonValueEnd(text, i, ends);
     if ((JSON.parse(key) as string) === 'name') {
       const value = text.slice(i, end);
-      name = value.startsWith('"') ? (JSON.parse(value) as string) : value;
+      named ||= credentialKey(value.startsWith('"') ? (JSON.parse(value) as string) : value);
     }
     i = end;
   }
@@ -186,6 +533,7 @@ export function discoverTextSecrets(
   text: string,
   add: (value: string, whole?: boolean) => void,
   depth = 0,
+  command?: (text: string) => void,
 ): void {
   if (depth > 100) throw new RangeError('artifact credential nesting exceeds limit');
   let valid = false;
@@ -197,14 +545,49 @@ export function discoverTextSecrets(
   }
   if (valid) {
     const ends = jsonEnds(text);
-    const walk = (at: number, secret: boolean, level: number): number => {
+    /** The decoded strings of the array at `at`, and `''` for any other item. */
+    const itemsOf = (at: number): string[] => {
+      const items: string[] = [];
+      let i = at + 1;
+      for (;;) {
+        i += jsonToken(JSON_SPACE, text, i).length;
+        if (text[i] === ']' || i >= text.length) return items;
+        if (text[i] === ',') {
+          i += 1;
+          continue;
+        }
+        const end = jsonValueEnd(text, i, ends);
+        items.push(text[i] === '"' ? (JSON.parse(text.slice(i, end)) as string) : '');
+        i = end;
+      }
+    };
+    /** An argument as its flag logic reads it: a string's text, a number's spelling, else `''`. */
+    const argumentText = (at: number): string => {
+      if (text[at] === '"') return JSON.parse(jsonToken(JSON_STRING, text, at)) as string;
+      return text[at] === '{' || text[at] === '[' ? '' : jsonToken(JSON_LITERAL, text, at);
+    };
+    const walk = (
+      at: number,
+      secret: boolean,
+      level: number,
+      argv = false,
+      parent = '',
+    ): number => {
       if (level > 100) throw new RangeError('artifact credential nesting exceeds limit');
       const open = text[at];
       if (open === '"') {
         const token = jsonToken(JSON_STRING, text, at);
         const decoded = JSON.parse(token) as string;
         if (secret) add(decoded);
-        discoverTextSecrets(decoded, add, level + 1);
+        // A command string with a credential flag is attached whole: its spelling as decoded
+        // text and as the JSON-escaped text the artifact holds.
+        if (argv && /\s/u.test(decoded) && commandCarriesCredential(decoded)) {
+          add(decoded);
+          add(token.slice(1, -1));
+          // `["sh", "-c", "client --password x"]`: the flag's value, for copies elsewhere.
+          command?.(decoded);
+        }
+        discoverTextSecrets(decoded, add, level + 1, command);
         return at + token.length;
       }
       if (open !== '{' && open !== '[') {
@@ -216,6 +599,18 @@ export function discoverTextSecrets(
         return at + token.length;
       }
       const named = open === '{' && namesCredential(text, at, ends);
+      // In an argument array, the item after a credential flag is its value.
+      const items = argv && open === '[' ? itemsOf(at) : [];
+      const userGiven = userPasswordClient(items) && items.some(userArgument);
+      for (const password of shortOptionPasswords(items)) add(password);
+      for (const user of httpUsers(items)) {
+        add(user.value);
+        add(user.password);
+      }
+      for (const header of authorizationHeaders(items)) {
+        for (const credential of authorizationCredentials(header)) add(credential);
+      }
+      let flag = '';
       let i = at + 1;
       for (;;) {
         i += jsonToken(JSON_SPACE, text, i).length;
@@ -225,27 +620,89 @@ export function discoverTextSecrets(
           continue;
         }
         let member = secret;
+        let list = false;
+        let key = '';
         if (open === '{') {
           const token = jsonToken(JSON_STRING, text, i);
-          const key = JSON.parse(token) as string;
-          discoverTextSecrets(key, add, level + 1);
+          key = JSON.parse(token) as string;
+          discoverTextSecrets(key, add, level + 1, command);
           member ||= credentialKey(key) || (key === 'value' && named);
+          list = argumentListKey(key, parent);
           i += token.length;
           i += jsonToken(JSON_SPACE, text, i).length + 1;
           i += jsonToken(JSON_SPACE, text, i).length;
         }
-        i = walk(i, member, level + 1);
+        const item = argumentText(i);
+        const isString = text[i] === '"';
+        if (flag !== '') member ||= credentialArgument(flag, item, userGiven);
+        // The items of an argument array are argument strings too: `["sh", "-c", "..."]`.
+        i = walk(i, member, level + 1, open === '[' ? argv : list, key);
+        flag = argv && open === '[' && isString ? item : '';
       }
     };
     walk(jsonToken(JSON_SPACE, text, 0).length, false, depth);
+    // `{"command": ["mongosh"], "args": ["-u", "root", "-p", "x"]}` splits one command over two
+    // members; read them joined as well, in source order, so a duplicate member still counts.
+    /** The items of the array at `at` as arguments: strings decoded, scalars as spelled. */
+    const listTexts = (at: number): string[] => {
+      const items: string[] = [];
+      let i = at + 1;
+      for (;;) {
+        i += jsonToken(JSON_SPACE, text, i).length;
+        if (text[i] === ']' || i >= text.length) return items;
+        if (text[i] === ',') {
+          i += 1;
+          continue;
+        }
+        items.push(argumentText(i));
+        i = jsonValueEnd(text, i, ends);
+      }
+    };
+    const joined = (at: number, level: number): void => {
+      const open = text[at];
+      if (level > 100 || (open !== '{' && open !== '[')) return;
+      const words: string[] = [];
+      let lists = 0;
+      let i = at + 1;
+      for (;;) {
+        i += jsonToken(JSON_SPACE, text, i).length;
+        if (i >= text.length || text[i] === '}' || text[i] === ']') break;
+        if (text[i] === ',') {
+          i += 1;
+          continue;
+        }
+        let key = '';
+        if (open === '{') {
+          const token = jsonToken(JSON_STRING, text, i);
+          key = JSON.parse(token) as string;
+          i += token.length;
+          i += jsonToken(JSON_SPACE, text, i).length + 1;
+          i += jsonToken(JSON_SPACE, text, i).length;
+        }
+        const end = jsonValueEnd(text, i, ends);
+        if (open === '{' && argumentListKey(key)) {
+          lists += 1;
+          // Numbers keep their source spelling: `"-p", 123456` passes `123456`.
+          if (text[i] === '[') words.push(...listTexts(i));
+          else words.push(...argumentWords(JSON.parse(text.slice(i, end))));
+        }
+        joined(i, level + 1);
+        i = end;
+      }
+      if (lists > 1) for (const credential of argumentCredentials(words)) add(credential);
+    };
+    joined(jsonToken(JSON_SPACE, text, 0).length, depth);
     return;
   }
   // Inspect a complete assignment's RHS before URL matching, so a JSON string ends its URL.
   const equals = text.indexOf('=');
   if (equals > 0 && !text.slice(0, equals).includes('://')) {
     const value = text.slice(equals + 1);
-    if (credentialKey(text.slice(0, equals))) add(value);
-    discoverTextSecrets(value, add, depth + 1);
+    // `--password-file=/run/secrets/x` names where a secret is, not the secret.
+    const lastWord = text.slice(0, equals).split(/\s+/u).pop() ?? '';
+    const modeSwitch = credentialFlag(lastWord) && !valueTakingCredentialFlag(lastWord);
+    if (assignsCredential(text.slice(0, equals)) && !modeSwitch) add(value);
+    discoverTextSecrets(value, add, depth + 1, command);
     return;
   }
   const urls = new RegExp(URL_ANY_USERINFO.source, 'gu');
@@ -277,7 +734,7 @@ export function redactAssignedText(
   const urlRedacted = redactAllUserinfo(value, knownSecrets);
   // A URL password or query can contain `=`, so the user info goes first.
   const equals = urlRedacted.indexOf('=');
-  if (equals > 0 && credentialKey(urlRedacted.slice(0, equals))) {
+  if (equals > 0 && assignsCredential(urlRedacted.slice(0, equals))) {
     return `${urlRedacted.slice(0, equals + 1)}${REDACTED}`;
   }
   return redactKnownValues(urlRedacted, knownSecrets);

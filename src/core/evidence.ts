@@ -38,6 +38,22 @@ import { ValidationError } from '../lib/errors';
 import { isTruthy, quotedText, toText } from '../lib/format';
 import { pathExpandUser } from '../lib/home';
 import {
+  argumentCredentials,
+  argumentListKey,
+  argumentWords,
+  authorizationCredentials,
+  authorizationHeaders,
+  commandCarriesCredential,
+  credentialArgument,
+  credentialFlagWord,
+  httpUserPassword,
+  healthcheckKey,
+  HTTP_USER_PREFIX,
+  httpUsers,
+  shortOptionPasswords,
+  userArgument,
+  userPasswordClient,
+  valueTakingCredentialFlag,
   credentialKey,
   discoverTextSecrets,
   type KnownSecret,
@@ -668,6 +684,7 @@ function redactArtifactValue(
   knownSecrets: readonly KnownSecret[],
   secret = false,
   seen = new WeakSet<object>(),
+  parentKey = '',
 ): unknown {
   if (typeof value === 'string') return redactArtifactText(value, secret, knownSecrets);
   if (typeof value === 'number' || typeof value === 'boolean' || value === null) {
@@ -683,17 +700,327 @@ function redactArtifactValue(
   const name = toText(fields.name);
   const namedSecret = credentialKey(name) || matchesKnownSecret(name, knownSecrets);
   const out: Record<string, unknown> = {};
+  // `command: [mysql]` with `args: [-u, root, -p, x]` splits one command over two keys, so the
+  // keys are judged together as well as one by one.
+  const argumentLists = Object.entries(fields).filter(([key]) => argumentListKey(key, parentKey));
+  const joinedCredential = argumentsCarryCredential(
+    argumentLists.flatMap(([, item]) => argumentWords(item)),
+  );
   for (const [key, item] of Object.entries(fields)) {
     const safeKey = redactArtifactText(key, false, knownSecrets);
+    // A command that names a credential flag is withheld whole: the flag's value can be
+    // spelled in more ways than this reader can follow, and a partial mask would show it.
+    if (argumentListKey(key, parentKey) && (joinedCredential || argumentsCarryCredential(item))) {
+      out[safeKey] = REDACTED;
+      continue;
+    }
     out[safeKey] = redactArtifactValue(
       item,
       knownSecrets,
       secret || safeKey !== key || credentialKey(key) || (key === 'value' && namedSecret),
       seen,
+      key,
     );
   }
   return out;
 }
+
+/** Whether a command, entrypoint, args or healthcheck value names a credential flag. */
+function argumentsCarryCredential(value: unknown): boolean {
+  if (typeof value === 'string') return commandCarriesCredential(value);
+  if (!Array.isArray(value)) return false;
+  const words = value.filter((item): item is string => typeof item === 'string');
+  return (
+    words.some((word) => credentialFlagWord(word) || commandCarriesCredential(word)) ||
+    (words.includes('-p') && userPasswordClient(words) && words.some(userArgument)) ||
+    shortOptionPasswords(words).length > 0 ||
+    httpUserPassword(words) ||
+    authorizationHeaders(words).length > 0
+  );
+}
+
+/** One shell word and whether any part of it was quoted, so it may hold a nested command. */
+interface ShellWord {
+  readonly text: string;
+  /** The word as written, quotes and escapes included: the artifact holds this spelling. */
+  readonly raw: string;
+  readonly quoted: boolean;
+}
+
+/**
+ * Wrappers that run the program named after their options, with the options that take a value
+ * and how many operands come before the program (`timeout 5 sh`, `chroot /root sh`).
+ */
+const HEREDOC_WRAPPERS: Readonly<Record<string, { values: RegExp; operands: number }>> = {
+  env: { values: /^(?:-[uC]|--unset|--chdir)$/u, operands: 0 },
+  sudo: {
+    values:
+      /^(?:-[ugCDhprtUT]|--(?:user|group|chdir|host|prompt|role|type|other-user|close-from))$/u,
+    operands: 0,
+  },
+  doas: { values: /^-[uC]$/u, operands: 0 },
+  exec: { values: /^-a$/u, operands: 0 },
+  nice: { values: /^(?:-n|--adjustment)$/u, operands: 0 },
+  ionice: { values: /^-[cnp]$/u, operands: 0 },
+  timeout: { values: /^(?:-[sk]|--signal|--kill-after)$/u, operands: 1 },
+  time: { values: /^-[fo]$/u, operands: 0 },
+  command: { values: /^$/u, operands: 0 },
+  nohup: { values: /^$/u, operands: 0 },
+  setsid: { values: /^$/u, operands: 0 },
+  stdbuf: { values: /^-[ioe]$/u, operands: 0 },
+  chroot: { values: /^--(?:userspec|groups)$/u, operands: 1 },
+  flock: { values: /^-[wE]$/u, operands: 1 },
+};
+
+/** Programs that read a heredoc as data whatever their arguments name: `printf '%s' sh`. */
+const HEREDOC_DATA =
+  /^(?:cat|printf|echo|tee|grep|egrep|fgrep|sed|awk|gawk|head|tail|wc|base64|jq|yq|sort|uniq|cut|tr|less|more|dd|xxd|od|curl|wget|kubectl|oc|psql|mysql|mongo|mongosh|python3?|node|ruby|perl)$/u;
+
+/**
+ * The program a wrapped command runs, best effort: past `NAME=value` assignments and the
+ * wrappers above with their options and operands. In a short-option cluster the first letter
+ * that takes a value ends it, and takes the next word only when nothing follows it
+ * (`-nu alice`, but not `-uroot`).
+ */
+function wrappedProgram(command: readonly ShellWord[]): string {
+  let wrapper: { values: RegExp; operands: number } | undefined;
+  let operands = 0;
+  for (let index = 0; index < command.length; index += 1) {
+    const word = (command[index] as ShellWord).text;
+    if (/^[A-Za-z_]\w*=/u.test(word)) continue;
+    if (wrapper !== undefined && word.startsWith('-') && word !== '-') {
+      if (word.startsWith('--')) {
+        if (!word.includes('=') && wrapper.values.test(word)) index += 1;
+        continue;
+      }
+      const letters = word.slice(1);
+      const taking = [...letters].findIndex((letter) => wrapper?.values.test(`-${letter}`));
+      if (taking === letters.length - 1) index += 1;
+      continue;
+    }
+    if (wrapper !== undefined && operands > 0) {
+      operands -= 1;
+      continue;
+    }
+    const name = word.split('/').pop() ?? '';
+    wrapper = Object.hasOwn(HEREDOC_WRAPPERS, name) ? HEREDOC_WRAPPERS[name] : undefined;
+    if (wrapper === undefined) return name;
+    operands = wrapper.operands;
+  }
+  return '';
+}
+
+/**
+ * Whether a command reads its heredoc as a shell program. A command that names a shell
+ * anywhere does, unless the program it runs is a known data reader (`printf '%s' sh`,
+ * `env printf '%s' sh`): unsure, it errs toward reading the body, which errs toward masking.
+ */
+function heredocRunsShell(command: readonly ShellWord[]): boolean {
+  const isShell = (word: ShellWord): boolean =>
+    /^(?:sh|bash|zsh|dash|ash|ksh|su|runuser)$/u.test(word.text.split('/').pop() ?? '');
+  if (!command.some(isShell)) return false;
+  return !HEREDOC_DATA.test(wrappedProgram(command));
+}
+
+/** Bash's single-character ANSI-C escapes; any other escaped character stands for itself. */
+const ANSI_C_ESCAPES: Readonly<Record<string, string>> = {
+  a: '\x07',
+  b: '\b',
+  e: '\x1b',
+  E: '\x1b',
+  f: '\f',
+  n: '\n',
+  r: '\r',
+  t: '\t',
+  v: '\v',
+};
+
+/**
+ * The simple commands in one shell string, as words. Adjacent quoted and unquoted parts join
+ * into one word, backslash escapes one character (inside double quotes only before `"`, `\`,
+ * `$` or a backtick), `$'...'` decodes its escapes, and `;`, `&`, `|`, parentheses and newlines
+ * end a command. Redirections end a word, and a heredoc's body is skipped unless a shell reads
+ * it. This is enough to find a flag's value; it does not expand anything.
+ */
+function shellCommands(text: string): ShellWord[][] {
+  const commands: ShellWord[][] = [];
+  let command: ShellWord[] = [];
+  let word = '';
+  let quoted = false;
+  let started = false;
+  let start = 0;
+  const begin = (index: number): void => {
+    if (!started) start = index;
+    started = true;
+  };
+  const endWord = (end: number): void => {
+    if (started) command.push({ text: word, raw: text.slice(start, end), quoted });
+    word = '';
+    quoted = false;
+    started = false;
+  };
+  const endCommand = (end: number): void => {
+    endWord(end);
+    if (command.length > 0) commands.push(command);
+    command = [];
+  };
+  // Heredoc delimiters on the current line; their bodies start at the next newline.
+  let heredocs: { delimiter: string; tabs: boolean }[] = [];
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index] ?? '';
+    if (char === '$' && text[index + 1] === "'") {
+      // Bash's ANSI-C quoting, `$'pa\x73s'`, passes the decoded text.
+      begin(index);
+      quoted = true;
+      for (index += 2; index < text.length && text[index] !== "'"; index += 1) {
+        const inner = text[index] ?? '';
+        if (inner !== '\\') {
+          word += inner;
+          continue;
+        }
+        const escape =
+          /^(?:x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|c(.)|([0-7]{1,3})|(.))/su.exec(
+            text.slice(index + 1),
+          );
+        const [match = '', hex, unicode, wide, control, octal, single] = escape ?? [];
+        const point = parseInt(unicode ?? wide ?? '', 16);
+        if (hex !== undefined) word += String.fromCharCode(parseInt(hex, 16));
+        else if (!Number.isNaN(point) && point <= 0x10ffff) word += String.fromCodePoint(point);
+        else if (control !== undefined) word += String.fromCharCode(control.charCodeAt(0) & 0x1f);
+        else if (octal !== undefined) word += String.fromCharCode(parseInt(octal, 8));
+        else if (single !== undefined) word += ANSI_C_ESCAPES[single] ?? single;
+        index += match.length;
+      }
+    } else if (char === '<' && text.startsWith('<<<', index)) {
+      // A here-string, `cat <<< data`, feeds one word and no following lines.
+      endWord(index);
+      index += 2;
+    } else if (char === '<' && text[index + 1] === '<' && text[index + 2] !== '<') {
+      // `cat <<EOF` feeds the following lines as data; only a shell runs them.
+      endWord(index);
+      const tabs = text[index + 2] === '-';
+      const spec = /^[ \t]*(['"]?)([^\s'"<>;&|()]+)\1/u.exec(text.slice(index + (tabs ? 3 : 2)));
+      // `$((1<<2))` shifts a number; a delimiter is a word.
+      if (spec !== null && !/^\d+$/u.test(spec[2] ?? '')) {
+        heredocs.push({ delimiter: spec[2] ?? '', tabs });
+        index += (tabs ? 3 : 2) + spec[0].length - 1;
+      } else index += 1;
+    } else if (char === '\n' && heredocs.length > 0) {
+      // A shell reading the heredoc runs it, so its lines stay commands then.
+      const shell = heredocRunsShell(command);
+      endCommand(index);
+      let line = index + 1;
+      for (const heredoc of heredocs) {
+        for (;;) {
+          const newline = text.indexOf('\n', line);
+          const end = newline < 0 ? text.length : newline;
+          const body = text.slice(line, end);
+          line = end + 1;
+          if ((heredoc.tabs ? body.replace(/^\t+/u, '') : body) === heredoc.delimiter) break;
+          if (newline < 0) break;
+        }
+      }
+      heredocs = [];
+      if (!shell) index = line - 1;
+    } else if (char === "'") {
+      begin(index);
+      const close = text.indexOf("'", index + 1);
+      const end = close < 0 ? text.length : close;
+      word += text.slice(index + 1, end);
+      quoted = true;
+      index = end;
+    } else if (char === '"') {
+      begin(index);
+      quoted = true;
+      for (index += 1; index < text.length && text[index] !== '"'; index += 1) {
+        const inner = text[index] ?? '';
+        const next = text[index + 1] ?? '';
+        if (inner === '\\' && next === '\n') {
+          // A line continuation inside double quotes joins the lines as well.
+          index += 1;
+        } else if (inner === '\\' && '"\\$`'.includes(next) && next !== '') {
+          word += next;
+          index += 1;
+        } else word += inner;
+      }
+    } else if (char === '\\' && text[index + 1] === '\n') {
+      // A line continuation joins lines; it is not part of any word.
+      index += 1;
+    } else if (char === '\\') {
+      begin(index);
+      word += text[index + 1] ?? '';
+      // `sh -c client\ --password\ X` passes one escaped word as the program: read it again.
+      quoted = true;
+      index += 1;
+    } else if (char === '#' && word === '' && !quoted) {
+      // A `#` that starts a word begins a comment: the shell never runs the rest of the line.
+      const newline = text.indexOf('\n', index);
+      index = newline < 0 ? text.length : newline - 1;
+    } else if (/[;&|()`\n]/u.test(char)) {
+      endCommand(index);
+    } else if (/[\s<>]/u.test(char)) {
+      endWord(index);
+    } else {
+      begin(index);
+      word += char;
+    }
+  }
+  endCommand(text.length);
+  return commands;
+}
+
+/** The values after credential flags in one command string, nested `sh -c` strings included. */
+function discoverCommandText(text: string, add: (value: string) => void, depth = 0): void {
+  if (depth > 8) return;
+  for (const command of shellCommands(text)) {
+    const texts = command.map((word) => word.text);
+    const userGiven = userPasswordClient(texts) && texts.some(userArgument);
+    // The artifact spells a quoted or escaped value as written; mask that spelling too, without
+    // its outer quotes, which stay to show where the value was. Inside an outer double-quoted
+    // string the artifact also escapes `"`, `\`, `$` and backticks.
+    const spellings = (value: string, raw?: string): void => {
+      add(value);
+      if (raw !== undefined) add(raw.replace(/^(['"])(.*)\1$/su, '$2'));
+      if (depth > 0) {
+        add(value.replace(/["\\$`]/gu, '\\$&'));
+        if (raw !== undefined) add(raw.replace(/["\\$`]/gu, '\\$&'));
+      }
+    };
+    // `curl -u user:password`: the user value as a whole and its password are both credentials.
+    for (const user of httpUsers(command.map((word) => word.text))) {
+      const word = command[user.index] as ShellWord;
+      spellings(user.value, user.attached ? word.raw.replace(HTTP_USER_PREFIX, '') : word.raw);
+      spellings(user.password);
+    }
+    for (const password of shortOptionPasswords(texts)) spellings(password);
+    // `-H 'Authorization: Bearer token'`: the header's credential, not the whole header line.
+    for (const header of authorizationHeaders(command.map((word) => word.text))) {
+      // `$TOKEN` expands, but `'Bearer $x'` and `\$x` pass the dollar literally.
+      const holder = command.find((word) => word.text.includes(header));
+      const literal = holder !== undefined && /^'|\\\$/u.test(holder.raw);
+      for (const credential of authorizationCredentials(header, !literal)) spellings(credential);
+    }
+    for (let index = 0; index < command.length; index += 1) {
+      const word = command[index] as ShellWord;
+      // `--password=value` carries its own value.
+      const equals = word.text.indexOf('=');
+      if (equals > 0 && valueTakingCredentialFlag(word.text.slice(0, equals))) {
+        add(word.text.slice(equals + 1));
+      }
+      const next = command[index + 1];
+      if (next !== undefined && credentialArgument(word.text, next.text, userGiven)) {
+        spellings(next.text, next.raw);
+      }
+      if (word.quoted) discoverCommandText(word.text, add, depth + 1);
+    }
+  }
+}
+
+/**
+ * A discovered credential shorter than this matches whole values only: `-p a` must not mask
+ * every `a` in the bundle. Its own place is masked by the flag rule regardless.
+ */
+const SHORT_SECRET = 6;
 
 /** Discover before `toJS` loses duplicate members and original numeric spellings. */
 function discoverArtifactSecrets(
@@ -702,22 +1029,32 @@ function discoverArtifactSecrets(
   secrets: Set<string>,
   wholeSecrets: Set<string>,
   secret = false,
-  seen = new WeakMap<object, boolean>(),
+  seen = new WeakMap<object, number>(),
   depth = 0,
+  parentKey = '',
 ): void {
   if (typeof node !== 'object' || node === null) return;
-  // A benign alias visited first must still be revisited under a credential key.
-  if (seen.has(node) && (seen.get(node) === true || !secret)) return;
+  // A benign alias visited first must still be revisited under a credential key, and under a
+  // healthcheck key: `test` is an argument list there and nowhere else. A visit as a credential
+  // covers a plain one in the same context. Bits: 1 plain, 2 plain in a healthcheck, 4 as a
+  // credential, 8 as a credential in a healthcheck.
+  const health = healthcheckKey(parentKey);
+  const visited = seen.get(node) ?? 0;
+  const covering = (health ? 8 : 4) | (secret ? 0 : health ? 2 : 1);
+  if ((visited & covering) !== 0) return;
   if (depth > 100) throw new RangeError('artifact credential nesting exceeds limit');
-  seen.set(node, secret);
-  const visit = (child: unknown, credential = secret): void =>
-    discoverArtifactSecrets(child, doc, secrets, wholeSecrets, credential, seen, depth + 1);
+  seen.set(node, visited | (secret ? (health ? 8 : 4) : health ? 2 : 1));
+  const visit = (child: unknown, credential = secret, key = ''): void =>
+    discoverArtifactSecrets(child, doc, secrets, wholeSecrets, credential, seen, depth + 1, key);
   const add = (text: string, whole = false): void => {
     if (text === '') return;
     // Once a header value is known to be a credential, its bare token is a credential
     // too. Copies may omit the scheme, including copies encountered before the header.
     const authorization = /^(?:Bearer|Basic)[ \t]+(\S+)$/iu.exec(text);
     if (authorization?.[1] !== undefined) add(authorization[1]);
+    // OpenSSL's `pass:secret` holds the passphrase after its prefix; a copy may omit it.
+    const passphrase = /^pass:(.+)$/su.exec(text);
+    if (passphrase?.[1] !== undefined) add(passphrase[1]);
     // Numeric text is still a credential, but its digits must not erase ports or replica
     // suffixes. Use the same core scalar parser as the artifact, including hex and .inf.
     const numeric = /^[-+.0-9]/u.test(text)
@@ -733,15 +1070,39 @@ function discoverArtifactSecrets(
       wholeSecrets.add(text);
       wholeSecrets.add(String(numeric.contents.value));
       wholeSecrets.add(YAML.stringify(numeric.contents.value).replace(/\n$/u, ''));
-    } else (whole ? wholeSecrets : secrets).add(text);
+    } else (whole || text.length < SHORT_SECRET ? wholeSecrets : secrets).add(text);
+  };
+  // The item after a credential flag is its value, as in `--flag=value`; neither item names
+  // a credential on its own, so classify it here, before any scalar renders.
+  // `siblings` holds the words of the map's other argument lists: `command: [mysql]` names the
+  // client for `args: [-u, root, -p, x]`.
+  const discoverArguments = (list: YAML.YAMLSeq, siblings: readonly string[] = []): void => {
+    const items = list.items.map((item) => (YAML.isAlias(item) ? item.resolve(doc) : item));
+    const words = items.map((item) => (YAML.isScalar(item) ? String(item.value) : ''));
+    const strings = items.flatMap((item) =>
+      YAML.isScalar(item) && typeof item.value === 'string' ? [item.value] : [],
+    );
+    const command = [...siblings, ...strings];
+    const userGiven = userPasswordClient(command) && command.some(userArgument);
+    // Joined with its siblings, so `command: [curl]` and `args: [-u, user:pw]` read as one.
+    for (const credential of argumentCredentials([...siblings, ...words])) add(credential);
+    for (let index = 0; index < items.length; index += 1) {
+      const flag = items[index];
+      if (!YAML.isScalar(flag) || typeof flag.value !== 'string') continue;
+      // A shell string (`sh -c "client --password X"`, `CMD-SHELL`) holds its own arguments.
+      discoverCommandText(flag.value, add);
+      const next = items[index + 1];
+      const value = YAML.isScalar(next) ? String(next.value) : '';
+      if (credentialArgument(flag.value, value, userGiven)) visit(list.items[index + 1], true);
+    }
   };
   if (YAML.isAlias(node)) {
-    visit(node.resolve(doc));
+    visit(node.resolve(doc), secret, parentKey);
   } else if (YAML.isScalar(node)) {
     const value: unknown = node.value;
     if (typeof value === 'string') {
       if (secret) add(value);
-      discoverTextSecrets(value, add);
+      discoverTextSecrets(value, add, 0, (text) => discoverCommandText(text, add));
     } else if (secret) {
       add(String(value), true);
       add(YAML.stringify(value).replace(/\n$/u, ''), true);
@@ -762,11 +1123,31 @@ function discoverArtifactSecrets(
         credentialKey(String(name.value))
       );
     });
+    const argumentText = (pair: (typeof node.items)[number]): string[] => {
+      const key = YAML.isAlias(pair.key) ? pair.key.resolve(doc) : pair.key;
+      if (!YAML.isScalar(key) || !argumentListKey(String(key.value), parentKey)) return [];
+      const list = YAML.isAlias(pair.value) ? pair.value.resolve(doc) : pair.value;
+      if (YAML.isScalar(list)) return argumentWords(list.value);
+      if (!YAML.isSeq(list)) return [];
+      return argumentWords(
+        list.items.map((item) => {
+          const scalar = YAML.isAlias(item) ? item.resolve(doc) : item;
+          return YAML.isScalar(scalar) ? scalar.value : null;
+        }),
+      );
+    };
     for (const pair of node.items) {
       visit(pair.key, false);
       const key = YAML.isAlias(pair.key) ? pair.key.resolve(doc) : pair.key;
       const text = YAML.isScalar(key) ? String(key.value) : '';
-      visit(pair.value, secret || credentialKey(text) || (text === 'value' && named));
+      visit(pair.value, secret || credentialKey(text) || (text === 'value' && named), text);
+      const list = YAML.isAlias(pair.value) ? pair.value.resolve(doc) : pair.value;
+      if (argumentListKey(text, parentKey) && YAML.isSeq(list)) {
+        discoverArguments(list, node.items.filter((other) => other !== pair).flatMap(argumentText));
+      }
+      if (argumentListKey(text, parentKey) && YAML.isScalar(list)) {
+        if (typeof list.value === 'string') discoverCommandText(list.value, add);
+      }
     }
   }
 }

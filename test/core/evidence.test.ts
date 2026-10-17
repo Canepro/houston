@@ -1317,6 +1317,1077 @@ describe('the bundle', () => {
     expect(parsed['x-pair']).toEqual({ name: 'DB_PASSWORD', value: '********' });
   });
 
+  /** Write `doc` as the workspace's Compose file and collect a bundle from it. */
+  async function bundledCompose(
+    name: string,
+    doc: string,
+  ): Promise<{ compose: string; everything: string }> {
+    await workspaceNamed(name, {}, {}, doc);
+    const dest = path.join(workspace(name), 'out', 'bundle');
+    await collect(name, { bundle: dest });
+    return {
+      compose: fs.readFileSync(path.join(dest, 'docker-compose.yml'), 'utf8'),
+      everything: fs
+        .readdirSync(dest)
+        .map((file) => fs.readFileSync(path.join(dest, file), 'utf8'))
+        .join('\n'),
+    };
+  }
+
+  function pick(value: unknown, ...keys: string[]): unknown {
+    return keys.reduce<unknown>((node, key) => (node as Record<string, unknown>)[key], value);
+  }
+
+  it.each([
+    {
+      id: 'first',
+      origin: 'a credential name first, an ordinary name last',
+      json: '{"name":"Authorization","value":"Bearer DupJsonFirstSentinel","name":"ordinary","keep":1.50}',
+      masked: '{"name":"Authorization","value":"********","name":"ordinary","keep":1.50}',
+      sentinel: 'DupJsonFirstSentinel',
+      copy: 'DupJsonFirstSentinel',
+    },
+    {
+      id: 'last',
+      origin: 'an ordinary name first, a credential name last',
+      json: '{"name":"ordinary","value":"Bearer DupJsonLastSentinel","name":"Authorization","keep":1.50}',
+      masked: '{"name":"ordinary","value":"********","name":"Authorization","keep":1.50}',
+      sentinel: 'DupJsonLastSentinel',
+      copy: 'DupJsonLastSentinel',
+    },
+    {
+      id: 'single',
+      origin: 'a single credential name',
+      json: '{"name":"Authorization","value":"Bearer DupJsonSingleSentinel","keep":1.50}',
+      masked: '{"name":"Authorization","value":"********","keep":1.50}',
+      sentinel: 'DupJsonSingleSentinel',
+      copy: 'DupJsonSingleSentinel',
+    },
+    {
+      id: 'direct',
+      origin: 'duplicate direct Authorization members',
+      json: '{"Authorization":"Bearer DupJsonDirectSentinel","Authorization":"ordinary","keep":1.50}',
+      masked: '{"Authorization":"********","Authorization":"********","keep":1.50}',
+      sentinel: 'DupJsonDirectSentinel',
+      copy: 'DupJsonDirectSentinel',
+    },
+    {
+      id: 'middle',
+      origin: 'a credential name between ordinary names, with a value on each side',
+      json: '{"value":"DupJsonEarlySentinel","name":"ordinary","name":"DB_PASSWORD","name":"other","value":"DupJsonLateSentinel","keep":1.50}',
+      masked:
+        '{"value":"********","name":"ordinary","name":"DB_PASSWORD","name":"other","value":"********","keep":1.50}',
+      sentinel: 'DupJsonLateSentinel',
+      copy: 'DupJsonEarlySentinel',
+    },
+    {
+      id: 'numeric',
+      origin: 'a numeric credential value beside duplicate names',
+      json: '{"name":"DB_PASSWORD","value":4.50,"name":"ordinary","keep":27017}',
+      masked: '{"name":"DB_PASSWORD","value":"********","name":"ordinary","keep":27017}',
+      sentinel: null,
+      copy: '4.5',
+    },
+  ])(
+    'discovers duplicate embedded JSON names before rendering copies: $origin',
+    async ({ id, json, masked, sentinel, copy }) => {
+      const name = `e7-dup-json-${id}`;
+      const { compose, everything } = await bundledCompose(
+        name,
+        [
+          `x-before: ${copy}`,
+          `x-json: '${json}'`,
+          `x-after: ${copy}`,
+          'x-port: 27017',
+          'x-control: readable',
+          '',
+        ].join('\n'),
+      );
+      if (sentinel !== null) expect(everything).not.toContain(sentinel);
+      if (sentinel !== null && copy !== sentinel) expect(everything).not.toContain(copy);
+      const parsed = YAML.parse(compose) as Record<string, unknown>;
+      expect(parsed['x-json']).toBe(masked);
+      expect(parsed['x-before']).toBe('********');
+      expect(parsed['x-after']).toBe('********');
+      expect(parsed['x-port']).toBe(27017);
+      expect(parsed['x-control']).toBe('readable');
+    },
+  );
+
+  it('keeps duplicate JSON names that name no credential readable', async () => {
+    const ordinary =
+      '{"name":"service","value":"KeepOrdinaryJsonSentinel","name":"label","keep":1.50}';
+    const { compose } = await bundledCompose(
+      'e7-dup-json-ordinary',
+      [`x-json: '${ordinary}'`, 'x-port: 27017', 'x-control: readable', ''].join('\n'),
+    );
+    const parsed = YAML.parse(compose) as Record<string, unknown>;
+    expect(parsed['x-json']).toBe(ordinary);
+    expect(parsed['x-port']).toBe(27017);
+  });
+
+  it.each(
+    ['command', 'entrypoint', 'args', 'test'].flatMap((field) =>
+      ['--password', '--reg-token'].map((flag) => ({ field, flag })),
+    ),
+  )(
+    'discovers the $flag value in a $field list before rendering copies',
+    async ({ field, flag }) => {
+      const secret = `Argv_${field}_${flag.slice(2).replace('-', '_')}_Sentinel`;
+      const list = `[client, ${flag}, ${secret}, --port, "27017"]`;
+      const { compose, everything } = await bundledCompose(
+        `e7-argv-${field}-${flag.slice(2)}`,
+        [
+          `x-before: ${secret}`,
+          'services:',
+          '  rocketchat:',
+          '    image: example',
+          ...(field === 'test'
+            ? ['    healthcheck:', `      test: ${list}`]
+            : [`    ${field}: ${list}`]),
+          `x-after: ${secret}`,
+          'x-port: 27017',
+          'x-replica: rocketchat-1',
+          'x-controls:',
+          '  authorizationEnabled: true',
+          '  authHeaderCount: 2',
+          'x-control: readable',
+          '',
+        ].join('\n'),
+      );
+      expect(everything).not.toContain(secret);
+      const parsed = YAML.parse(compose) as Record<string, unknown>;
+      const rocketchat = pick(parsed, 'services', 'rocketchat');
+      expect(
+        field === 'test' ? pick(rocketchat, 'healthcheck', 'test') : pick(rocketchat, field),
+      ).toBe('********');
+      expect(parsed['x-before']).toBe('********');
+      expect(parsed['x-after']).toBe('********');
+      expect(parsed['x-port']).toBe(27017);
+      expect(parsed['x-replica']).toBe('rocketchat-1');
+      expect(parsed['x-controls']).toEqual({ authorizationEnabled: true, authHeaderCount: 2 });
+      expect(parsed['x-control']).toBe('readable');
+    },
+  );
+
+  it('does not let a credential flag mask an argument it does not precede', async () => {
+    const { compose } = await bundledCompose(
+      'e7-argv-equals',
+      [
+        'x-before: EqualsArgumentSentinel',
+        'services:',
+        '  rocketchat:',
+        '    image: example',
+        '    command: [client, --password=EqualsArgumentSentinel, EqualsNeighborSentinel, --port, "27017", --name, rocketchat-1, --verbose, --password]',
+        '    args: [--password, ArgsSentinelOne, --port, "27017"]',
+        'x-notes:',
+        '  - --password',
+        '  - NotListSentinel',
+        'x-port: 27017',
+        'x-control: readable',
+        '',
+      ].join('\n'),
+    );
+    expect(compose).not.toContain('EqualsArgumentSentinel');
+    expect(compose).not.toContain('ArgsSentinelOne');
+    const parsed = YAML.parse(compose) as Record<string, unknown>;
+    // A command naming a credential flag is withheld whole.
+    expect(pick(parsed, 'services', 'rocketchat', 'command')).toBe('********');
+    expect(pick(parsed, 'services', 'rocketchat', 'args')).toBe('********');
+    // A list under any other key is data, not an argument sequence.
+    expect(parsed['x-notes']).toEqual(['--password', 'NotListSentinel']);
+    expect(parsed['x-before']).toBe('********');
+    expect(parsed['x-port']).toBe(27017);
+    expect(parsed['x-control']).toBe('readable');
+  });
+
+  it('discovers credential flags in shell command strings by shell quoting rules', async () => {
+    const { compose } = await bundledCompose(
+      'e7-argv-strings',
+      [
+        'services:',
+        '  rocketchat:',
+        '    image: example',
+        '    command: client --reg-token "Two WordsSentinel" --port 27017',
+        `    entrypoint: [sh, -c, "client --password 'QuotedSentinel'; echo done"]`,
+        '    healthcheck:',
+        `      test: sh -c 'mongosh -p HealthSentinel --username=root --eval ping'`,
+        '  nested:',
+        '    image: example',
+        `    command: su -c "client --password NestedSentinel" app`,
+        '  joined:',
+        '    image: example',
+        String.raw`    command: client --password Pre"Mid JoinedSentinel" --reg-token Bs\ EscapedSentinel`,
+        '  mysql:',
+        '    image: example',
+        '    command: [mysql, -p, ListShortSentinel, -uroot]',
+        '  digits:',
+        '    image: example',
+        '    command: [mongosh, -u, root, -p, "12345678"]',
+        '  cluster:',
+        '    image: example',
+        '    command: [python, -u, app.py, -pv]',
+        '  exec:',
+        '    image: example',
+        '    command: docker exec -u root:root app',
+        '  continued:',
+        '    image: example',
+        '    command: "client --password \\\\\\nContinuedSentinel --verbose"',
+        '  escaped:',
+        '    image: example',
+        String.raw`    command: sh -c "client --password Esc\\\"apedSentinel"`,
+        '  numeric:',
+        '    image: example',
+        '    command: mongosh -u root -p 12345 --eval ping',
+        '  equals:',
+        '    image: example',
+        '    command: curl https://host --password=TopEqualsSentinel',
+        '  backtick:',
+        '    image: example',
+        '    command: echo `client --password BacktickSentinel`',
+        '  embedded:',
+        '    image: example',
+        `    environment: { SPEC: '{"command":"client --password EmbeddedSentinel"}' }`,
+        '  curl:',
+        '    image: example',
+        '    command: curl -u admin:CurlUserSentinel https://x',
+        '  curllist:',
+        '    image: example',
+        '    command: [curl, -u, "admin:CurlListSentinel", https://x]',
+        '  embeddedlist:',
+        '    image: example',
+        `    environment: { SPEC: '{"command":["sh","-c","client --password EmbeddedListSentinel"]}' }`,
+        '  embeddedquoted:',
+        '    image: example',
+        `    environment: { SPEC: '{"command":["sh","-c","client --password \\"open QuotedPhraseSentinel\\""]}' }`,
+        '  embeddedsubst:',
+        '    image: example',
+        `    environment: { SPEC: '{"command":["sh","-c","client --password \\"$(cat /run/secrets/x)\\""]}' }`,
+        '  dash:',
+        '    image: example',
+        '    command: client --password -DashSentinel',
+        '  pwfile:',
+        '    image: example',
+        '    command: client --password-file=/run/secrets/db',
+        '  login:',
+        '    image: example',
+        '    command: docker login --password-stdin registry.example.test',
+        '  python:',
+        '    image: example',
+        '    command: python -u app.py -p production',
+        '  escapedword:',
+        '    image: example',
+        String.raw`    command: sh -c client\ --password\ EscapedWordSentinel`,
+        '  docker:',
+        '    image: example',
+        '    command: docker run -u 1000 -p 8080:80 -p --eval image',
+        '  proxy:',
+        '    image: example',
+        `    command: sh -c "useradd -u 1000 app; mkdir -p /data/db && proxy -p 8080:80 --password;"`,
+        '  split:',
+        '    image: example',
+        '    entrypoint: [mysql]',
+        '    command: [-u, root, -p, SplitSentinel]',
+        '  windows:',
+        '    image: example',
+        String.raw`    command: ['C:\bin\mysql.exe', -u, root, -p, ExeSentinel]`,
+        '  pysplit:',
+        '    image: example',
+        '    entrypoint: [python]',
+        '    command: [-u, app.py, -p, production]',
+        '  mysqlattached:',
+        '    image: example',
+        '    command: mysql -uroot -pAttachedSentinel',
+        '  redis:',
+        '    image: example',
+        '    command: [redis-cli, -a, RedisSentinel, PING]',
+        '  openssl:',
+        '    image: example',
+        '    command: openssl rsa -in key.pem -passin pass:PassinSentinel',
+        '  curlsplit:',
+        '    image: example',
+        '    entrypoint: [curl]',
+        '    command: [-u, "admin:CurlPairSentinel", https://x]',
+        '  jsonsplit:',
+        '    image: example',
+        `    environment: { SPEC: '{"command":["mongosh"],"args":["-u","root","-p","JsonPairSentinel"]}' }`,
+        '  copyarchive:',
+        '    image: example',
+        '    command: cp -a production /dst',
+        '  dockerlogin:',
+        '    image: example',
+        '    command: docker login -u admin -p DockerLoginSentinel registry.example.test',
+        '  oauth:',
+        '    image: example',
+        '    command: curl --oauth2-bearer OauthSentinel https://x',
+        '  ansi:',
+        '    image: example',
+        `    command: bash -c "client --password $'AnsiSentinel'"`,
+        '  heredoc:',
+        '    image: example',
+        '    command: ["sh", "-c", "cat <<EOF\\nclient --password HeredocData\\nEOF"]',
+        '  shellheredoc:',
+        '    image: example',
+        '    command: ["sh", "-c", "sh <<EOF\\nclient --password ShellHeredocSentinel\\nEOF"]',
+        '  jq:',
+        '    image: example',
+        '    command: jq --sort-keys input.json',
+        '  jsondup:',
+        '    image: example',
+        `    environment: { SPEC: '{"command":["mongosh"],"args":["-u","root","-p","DupJsonSentinel"],"args":[]}' }`,
+        '  wrappedheredoc:',
+        '    image: example',
+        '    command: ["sh", "-c", "env sh <<EOF\\nclient --password WrappedHeredocSentinel\\nEOF"]',
+        '  literalbearer:',
+        '    image: example',
+        '    command: [curl, -H, "Authorization: Bearer $LiteralBearerSentinel", https://x]',
+        '  shortpw:',
+        '    image: example',
+        '    command: [mysql, -u, root, -p, ab]',
+        '  wincurl:',
+        '    image: example',
+        String.raw`    command: ['C:\Windows\System32\curl.exe', -u, 'admin:WinCurlSentinel', https://x]`,
+        '  jsonshell:',
+        '    image: example',
+        `    environment: { SPEC: '{"command":["sh","-c","client --password JsonShellSentinel"]}' }`,
+        '  upperclient:',
+        '    image: example',
+        String.raw`    command: ['C:\BIN\MYSQL.EXE', -uroot, -pUpperSentinel]`,
+        '  jsonnumber:',
+        '    image: example',
+        `    environment: { SPEC: '{"command":["mongosh"],"args":["-u","root","-p",987654321]}' }`,
+        '  printfheredoc:',
+        '    image: example',
+        `    command: ["sh", "-c", "printf '%s' sh <<EOF\\nclient --password PrintfHeredocData\\nEOF"]`,
+        '  sudoheredoc:',
+        '    image: example',
+        '    command: ["sh", "-c", "sudo -n sh <<EOF\\nclient --password SudoHeredocSentinel\\nEOF"]',
+        '  timeheredoc:',
+        '    image: example',
+        '    command: ["sh", "-c", "timeout 5 bash <<EOF\\nclient --password TimeoutHeredocSentinel\\nEOF"]',
+        '  ansiunicode:',
+        '    image: example',
+        `    command: bash -c "client --password $'Ansi\\u0055nicodeSentinel'"`,
+        '  quoteddollar:',
+        '    image: example',
+        `    command: ["sh", "-c", "curl -H 'Authorization: Bearer $QuotedDollarSentinel' https://x"]`,
+        '  envprintf:',
+        '    image: example',
+        `    command: ["sh", "-c", "env printf '%s' sh <<EOF\\nclient --password EnvPrintfData\\nEOF"]`,
+        '  kubeliteral:',
+        '    image: example',
+        '    command: kubectl create secret generic example --from-literal=key1=KubeLiteralSentinel',
+        '  sshlogin:',
+        '    image: example',
+        '    command: sshpass -p SshpassSentinel ssh user@host',
+        '  herestring:',
+        '    image: example',
+        '    command: ["sh", "-c", "cat <<< data\\nclient --password HereStringSentinel"]',
+        '  xargsheredoc:',
+        '    image: example',
+        '    command: ["sh", "-c", "xargs -n1 sh <<EOF\\nclient --password XargsHeredocSentinel\\nEOF"]',
+        '  clusterheredoc:',
+        '    image: example',
+        '    command: ["sh", "-c", "sudo -nu alice sh <<EOF\\nclient --password ClusterHeredocSentinel\\nEOF"]',
+        '  protoheredoc:',
+        '    image: example',
+        '    command: ["sh", "-c", "toString -x <<EOF\\nclient --password ProtoHeredocData\\nEOF"]',
+        '  attachedheredoc:',
+        '    image: example',
+        '    command: ["sh", "-c", "sudo -uroot sh <<EOF\\nclient --password AttachedHeredocSentinel\\nEOF"]',
+        '  splitstringheredoc:',
+        '    image: example',
+        '    command: ["sh", "-c", "env -S sh <<EOF\\nclient --password SplitStringHeredocSentinel\\nEOF"]',
+        'x-copy: QuotedSentinel',
+        'x-split-copy: SplitSentinel',
+        'x-dup-attached-heredoc: AttachedHeredocSentinel',
+        'x-dup-split-string-heredoc: SplitStringHeredocSentinel',
+        'x-dup-xargs-heredoc: XargsHeredocSentinel',
+        'x-dup-cluster-heredoc: ClusterHeredocSentinel',
+        'x-proto-heredoc: ProtoHeredocData',
+        'x-dup-here-string: HereStringSentinel',
+        'x-dup-ansi-unicode: AnsiUnicodeSentinel',
+        'x-dup-quoted-dollar: $QuotedDollarSentinel',
+        'x-env-printf: EnvPrintfData',
+        'x-dup-kube-literal: KubeLiteralSentinel',
+        'x-dup-ssh-login: SshpassSentinel',
+        'x-dup-sudo-heredoc: SudoHeredocSentinel',
+        'x-dup-timeout-heredoc: TimeoutHeredocSentinel',
+        'x-dup-json-shell: JsonShellSentinel',
+        'x-dup-upper: UpperSentinel',
+        'x-dup-number: 987654321',
+        'x-printf-heredoc: PrintfHeredocData',
+        'x-dup-json-dup: DupJsonSentinel',
+        'x-dup-wrapped: WrappedHeredocSentinel',
+        'x-dup-literal: $LiteralBearerSentinel',
+        'x-dup-wincurl: WinCurlSentinel',
+        'x-short-copy: ab',
+        'x-short-word: cabbage',
+        'x-dup-docker: DockerLoginSentinel',
+        'x-dup-oauth: OauthSentinel',
+        'x-dup-ansi: AnsiSentinel',
+        'x-dup-shell-heredoc: ShellHeredocSentinel',
+        'x-heredoc: HeredocData',
+        'x-input: input.json',
+        'x-dup-attached: AttachedSentinel',
+        'x-dup-redis: RedisSentinel',
+        'x-dup-ssl: PassinSentinel',
+        'x-dup-curl: CurlPairSentinel',
+        'x-dup-json: JsonPairSentinel',
+        'x-env: production',
+        'x-escaped-copy: EscapedWordSentinel',
+        'x-backtick-copy: BacktickSentinel',
+        'x-registry: registry.example.test',
+        'x-dash-copy: -DashSentinel',
+        'x-mount-path: /run/secrets/db',
+        "x-dollar: 'cost $5 each'",
+        "x-open: 'open the door'",
+        'x-port: 8080:80',
+        'x-control: readable',
+        '',
+      ].join('\n'),
+    );
+    for (const sentinel of [
+      'WordsSentinel',
+      'QuotedSentinel',
+      'HealthSentinel',
+      'NestedSentinel',
+      'JoinedSentinel',
+      'EscapedSentinel',
+      'ListShortSentinel',
+      'ContinuedSentinel',
+      'apedSentinel',
+      'TopEqualsSentinel',
+      'BacktickSentinel',
+      'EmbeddedSentinel',
+      'CurlUserSentinel',
+      'CurlListSentinel',
+      'DashSentinel',
+      'EmbeddedListSentinel',
+      'QuotedPhraseSentinel',
+      'EscapedWordSentinel',
+      'SplitSentinel',
+      'ExeSentinel',
+      'AttachedSentinel',
+      'RedisSentinel',
+      'PassinSentinel',
+      'CurlPairSentinel',
+      'JsonPairSentinel',
+      'DockerLoginSentinel',
+      'OauthSentinel',
+      'AnsiSentinel',
+      'ShellHeredocSentinel',
+      'DupJsonSentinel',
+      'WrappedHeredocSentinel',
+      'LiteralBearerSentinel',
+      'WinCurlSentinel',
+      'JsonShellSentinel',
+      'UpperSentinel',
+      '987654321',
+      'SudoHeredocSentinel',
+      'TimeoutHeredocSentinel',
+      'AnsiUnicodeSentinel',
+      'QuotedDollarSentinel',
+      'KubeLiteralSentinel',
+      'SshpassSentinel',
+      'HereStringSentinel',
+      'XargsHeredocSentinel',
+      'ClusterHeredocSentinel',
+      'AttachedHeredocSentinel',
+      'SplitStringHeredocSentinel',
+    ]) {
+      expect(compose).not.toContain(sentinel);
+    }
+    const parsed = YAML.parse(compose) as Record<string, unknown>;
+    expect(pick(parsed, 'services', 'rocketchat', 'command')).toBe('********');
+    expect(parsed['x-copy']).toBe('********');
+    expect(pick(parsed, 'services', 'numeric', 'command')).toBe('********');
+    // A mode switch takes no value: the registry stays readable outside the withheld command.
+    expect(pick(parsed, 'services', 'login', 'command')).toBe('********');
+    expect(parsed['x-registry']).toBe('registry.example.test');
+    // A mode switch in `--flag=value` form names a path, not a secret.
+    expect(parsed['x-mount-path']).toBe('/run/secrets/db');
+    // A naive split of `"$(cat ...)"` must not make `$` a secret across the bundle.
+    expect(parsed['x-dollar']).toBe('cost $5 each');
+    expect(parsed['x-open']).toBe('open the door');
+    // A port or an option after -p is the next argument; newlines are never masked.
+    // `-u` beside `-p` counts only for a MySQL, MariaDB or MongoDB client; Docker's are a user and
+    // a port, and stay readable.
+    expect(pick(parsed, 'services', 'docker', 'command')).toBe(
+      'docker run -u 1000 -p 8080:80 -p --eval image',
+    );
+    expect(pick(parsed, 'services', 'python', 'command')).toBe('python -u app.py -p production');
+    expect(parsed['x-env']).toBe('production');
+    // One command split over `entrypoint` and `command` is judged whole: mysql's -p is withheld
+    // in both keys, while python's split command stays readable.
+    expect(pick(parsed, 'services', 'split', 'entrypoint')).toBe('********');
+    expect(pick(parsed, 'services', 'split', 'command')).toBe('********');
+    // A short credential masks whole values only, not every place its letters appear.
+    expect(parsed['x-short-copy']).toBe('********');
+    expect(parsed['x-short-word']).toBe('cabbage');
+    // An unknown program with no shell word reads its heredoc as data, and never throws.
+    expect(parsed['x-proto-heredoc']).toBe('ProtoHeredocData');
+    // `env` runs `printf` here, and `sh` is only its argument.
+    expect(parsed['x-env-printf']).toBe('EnvPrintfData');
+    // `printf` names `sh` as data, so its heredoc is data too.
+    expect(parsed['x-printf-heredoc']).toBe('PrintfHeredocData');
+    // A heredoc fed to `cat` is data, and `--sort-keys` sorts: their values stay readable.
+    expect(parsed['x-heredoc']).toBe('HeredocData');
+    expect(parsed['x-input']).toBe('input.json');
+    expect(pick(parsed, 'services', 'jq', 'command')).toBe('jq --sort-keys input.json');
+    // `-a` is a password only for redis-cli; `cp -a` keeps its argument readable.
+    expect(pick(parsed, 'services', 'copyarchive', 'command')).toBe('cp -a production /dst');
+    expect(pick(parsed, 'services', 'pysplit', 'command')).toEqual([
+      '-u',
+      'app.py',
+      '-p',
+      'production',
+    ]);
+    expect(compose).toContain('\n');
+    expect(pick(parsed, 'services', 'digits', 'command')).toBe('********');
+    // Short flag clusters and `user:group` are not credentials.
+    expect(pick(parsed, 'services', 'cluster', 'command')).toEqual([
+      'python',
+      '-u',
+      'app.py',
+      '-pv',
+    ]);
+    expect(pick(parsed, 'services', 'exec', 'command')).toBe('docker exec -u root:root app');
+    // `;` ends a command: the user flag before it does not make the later -p a password, and a
+    // flag with nothing after it masks nothing.
+    // It names --password, so the line is withheld; the values around it are not secrets and
+    // stay readable everywhere else.
+    expect(pick(parsed, 'services', 'proxy', 'command')).toBe('********');
+    expect(parsed['x-port']).toBe('8080:80');
+    expect(parsed['x-control']).toBe('readable');
+  });
+
+  interface CommandCase {
+    finding: string;
+    yaml: string[];
+    absent: string[];
+    expected: [string[], unknown][];
+  }
+
+  // One case per Codex finding on PR 64 rounds two and three, so each fails and passes on its own.
+  it.each<CommandCase>([
+    {
+      finding: 'curl and wget user:password values',
+      yaml: [
+        'services:',
+        '  curl:',
+        '    image: example',
+        '    command: curl -u admin:CurlShellSentinel https://host:8080/x',
+        '  curlquoted:',
+        '    image: example',
+        '    command: curl --user "admin:Two CurlQuotedSentinel" https://x',
+        '  wget:',
+        '    image: example',
+        '    command: [wget, "--user=admin:WgetEqualsSentinel", https://x]',
+        '  curllist:',
+        '    image: example',
+        '    command: [curl, -u, "admin:CurlListSentinel", https://x]',
+        '  curlplain:',
+        '    image: example',
+        '    command: curl -u admin https://host:8080/x',
+        '  image-user:',
+        '    image: example',
+        '    command: docker run -u root:rootgroup curlimage/curl https://x',
+        `x-json: '{"command":["curl","-u","admin:JsonCurlSentinel","https://x"]}'`,
+        'x-copy-shell: CurlShellSentinel',
+        'x-copy-quoted: Two CurlQuotedSentinel',
+        'x-copy-wget: WgetEqualsSentinel',
+        'x-copy-list: CurlListSentinel',
+        'x-copy-json: JsonCurlSentinel',
+        'x-user: admin',
+        'x-group: rootgroup',
+      ],
+      absent: [
+        'CurlShellSentinel',
+        'CurlQuotedSentinel',
+        'WgetEqualsSentinel',
+        'CurlListSentinel',
+        'JsonCurlSentinel',
+      ],
+      expected: [
+        [['services', 'curlplain', 'command'], 'curl -u admin https://host:8080/x'],
+        [['x-json'], '{"command":["curl","-u","********","https://x"]}'],
+        [['x-copy-list'], '********'],
+        [['x-user'], 'admin'],
+        // A user and group beside an image named like curl are not a password.
+        [['x-group'], 'rootgroup'],
+      ],
+    },
+    {
+      finding: 'host-qualified port mappings beside a user flag',
+      yaml: [
+        'services:',
+        '  run:',
+        '    image: example',
+        '    command: docker run -u 1000 -p 127.0.0.1:8080:80 -p "[::1]:8081:80" -p 8082:80/tcp image',
+        '  runlist:',
+        '    image: example',
+        '    command: [docker, run, -u, "1000", -p, "0.0.0.0::8083"]',
+        '  login:',
+        '    image: example',
+        '    command: [mongosh, -u, root, -p, "Pass:WordSentinel"]',
+        'x-bind: 127.0.0.1:8080:80',
+        "x-bind6: '[::1]:8081:80'",
+        'x-proto: 8082:80/tcp',
+        'x-any: 0.0.0.0::8083',
+        'x-copy-password: Pass:WordSentinel',
+      ],
+      absent: ['WordSentinel'],
+      expected: [
+        [['x-bind'], '127.0.0.1:8080:80'],
+        [['x-bind6'], '[::1]:8081:80'],
+        [['x-proto'], '8082:80/tcp'],
+        [['x-any'], '0.0.0.0::8083'],
+        [['x-copy-password'], '********'],
+      ],
+    },
+    {
+      finding: 'a test key outside a healthcheck',
+      yaml: [
+        'services:',
+        '  rocketchat:',
+        '    image: example',
+        '    healthcheck:',
+        '      test: [CMD, client, --password, HealthTestSentinel]',
+        'x-healthcheck: &default',
+        '  test: [CMD, client, --password, AnchoredTestSentinel]',
+        'x-chart:',
+        '  checks:',
+        '    test: [--password, ExpectedOutputSentinel]',
+        'x-copy-health: HealthTestSentinel',
+        'x-copy-anchored: AnchoredTestSentinel',
+        'x-copy-chart: ExpectedOutputSentinel',
+      ],
+      absent: ['HealthTestSentinel', 'AnchoredTestSentinel'],
+      expected: [
+        [['services', 'rocketchat', 'healthcheck', 'test'], '********'],
+        [['x-healthcheck', 'test'], '********'],
+        [['x-chart'], { checks: { test: ['--password', 'ExpectedOutputSentinel'] } }],
+        [['x-copy-chart'], 'ExpectedOutputSentinel'],
+      ],
+    },
+    {
+      finding: 'a double-quoted line continuation',
+      yaml: [
+        'services:',
+        '  continued:',
+        '    image: example',
+        String.raw`    command: "client --password \"Dq\\\nContinuedSentinel\" --verbose"`,
+        'x-copy: DqContinuedSentinel',
+        'x-control: readable',
+      ],
+      absent: ['DqContinuedSentinel'],
+      expected: [
+        [['services', 'continued', 'command'], '********'],
+        [['x-copy'], '********'],
+        [['x-control'], 'readable'],
+      ],
+    },
+    {
+      finding: 'a short -p beside a user flag in an embedded JSON array',
+      yaml: [
+        `x-json: '{"command":["mongosh","-u","root","-p","TopSecretJsonSentinel"]}'`,
+        `x-port-json: '{"command":["python","-u","app.py","-p","8080"]}'`,
+        `x-mkdir-json: '{"command":["mkdir","-p","/data/db"]}'`,
+        'x-copy: TopSecretJsonSentinel',
+        'x-port: 8080',
+      ],
+      absent: ['TopSecretJsonSentinel'],
+      expected: [
+        [['x-json'], '{"command":["mongosh","-u","root","-p","********"]}'],
+        [['x-port-json'], '{"command":["python","-u","app.py","-p","8080"]}'],
+        [['x-mkdir-json'], '{"command":["mkdir","-p","/data/db"]}'],
+        [['x-copy'], '********'],
+        [['x-port'], 8080],
+      ],
+    },
+    {
+      finding: 'an option whose name only contains a credential word',
+      yaml: [
+        'services:',
+        '  browser:',
+        '    image: example',
+        '    command: chromium --proxy-bypass-list=localhost --headless',
+        '  browserlist:',
+        '    image: example',
+        '    command: [chromium, --proxy-bypass-list, internal.example.test, --compass, --headless]',
+        '  joined:',
+        '    image: example',
+        '    command: [client, --rootpassword, JoinedPasswordSentinel]',
+        '  keyed:',
+        '    image: example',
+        '    command: [client, --ssh-key, SshKeySentinel]',
+        'x-host: localhost',
+        'x-internal: internal.example.test',
+        'x-copy-joined: JoinedPasswordSentinel',
+        'x-copy-keyed: SshKeySentinel',
+      ],
+      absent: ['JoinedPasswordSentinel', 'SshKeySentinel'],
+      expected: [
+        [['services', 'browser', 'command'], 'chromium --proxy-bypass-list=localhost --headless'],
+        [
+          ['services', 'browserlist', 'command'],
+          ['chromium', '--proxy-bypass-list', 'internal.example.test', '--compass', '--headless'],
+        ],
+        [['services', 'joined', 'command'], '********'],
+        [['x-host'], 'localhost'],
+        [['x-internal'], 'internal.example.test'],
+      ],
+    },
+    {
+      finding: 'compound credential options such as -passin and --secretkey',
+      yaml: [
+        'services:',
+        '  openssl:',
+        '    image: example',
+        '    command: openssl rsa -in k.pem -passin pass:PassinSentinel',
+        '  out:',
+        '    image: example',
+        '    command: [openssl, pkcs12, -passout, "pass:PassoutSentinel"]',
+        '  skey:',
+        '    image: example',
+        '    command: [client, --secretkey, SecretkeySentinel]',
+        '  akey:',
+        '    image: example',
+        '    command: [client, --secretaccesskey, SecretAccessKeySentinel]',
+        '  db:',
+        '    image: example',
+        '    command: [client, --dbpass, DbpassSentinel, --adminpass=AdminpassSentinel]',
+        '  root:',
+        '    image: example',
+        '    command: client --rootpass RootpassSentinel --userpass=UserpassSentinel',
+        '  code:',
+        '    image: example',
+        '    command: [client, --passcode, PasscodeSentinel]',
+        '  proxy:',
+        '    image: example',
+        '    command: [chromium, --proxy-bypass-list, internal.example.test, --bypass, --compass]',
+        `x-json: '{"command":["client","--secretkey","JsonSecretkeySentinel"]}'`,
+        'x-copy-secretkey: SecretkeySentinel',
+        'x-copy-dbpass: DbpassSentinel',
+        'x-copy-passcode: PasscodeSentinel',
+        'x-internal: internal.example.test',
+      ],
+      absent: [
+        'PassinSentinel',
+        'PassoutSentinel',
+        'SecretkeySentinel',
+        'SecretAccessKeySentinel',
+        'DbpassSentinel',
+        'AdminpassSentinel',
+        'RootpassSentinel',
+        'UserpassSentinel',
+        'PasscodeSentinel',
+        'JsonSecretkeySentinel',
+      ],
+      expected: [
+        [['services', 'openssl', 'command'], '********'],
+        [['services', 'skey', 'command'], '********'],
+        [['services', 'root', 'command'], '********'],
+        [['x-json'], '{"command":["client","--secretkey","********"]}'],
+        [['x-copy-secretkey'], '********'],
+        [
+          ['services', 'proxy', 'command'],
+          ['chromium', '--proxy-bypass-list', 'internal.example.test', '--bypass', '--compass'],
+        ],
+        [['x-internal'], 'internal.example.test'],
+      ],
+    },
+    {
+      finding: 'an alias revisited under its healthcheck key',
+      yaml: [
+        'x-hc: &hc',
+        '  test: [CMD, client, --password, AliasHealthSentinel]',
+        'services:',
+        '  web:',
+        '    image: example',
+        '    healthcheck: *hc',
+        'x-copy: AliasHealthSentinel',
+        'x-control: readable',
+      ],
+      absent: ['AliasHealthSentinel'],
+      expected: [
+        [['x-hc'], { test: ['CMD', 'client', '--password', '********'] }],
+        [['x-copy'], '********'],
+        [['x-control'], 'readable'],
+      ],
+    },
+    {
+      finding: 'curl long options that begin with -u',
+      yaml: [
+        'services:',
+        '  url:',
+        '    image: example',
+        '    command: curl --url=https://host/path --silent',
+        '  urllist:',
+        '    image: example',
+        '    command: [curl, "--url=https://host/path", --upload-file, "a:b"]',
+        '  attached:',
+        '    image: example',
+        '    command: curl -uadmin:AttachedUserSentinel https://host/path',
+        'x-url: https://host/path',
+        'x-path: //host/path',
+        'x-copy: AttachedUserSentinel',
+      ],
+      absent: ['AttachedUserSentinel'],
+      expected: [
+        [['services', 'url', 'command'], 'curl --url=https://host/path --silent'],
+        [
+          ['services', 'urllist', 'command'],
+          ['curl', '--url=https://host/path', '--upload-file', 'a:b'],
+        ],
+        [['services', 'attached', 'command'], '********'],
+        [['x-url'], 'https://host/path'],
+        [['x-path'], '//host/path'],
+        [['x-copy'], '********'],
+      ],
+    },
+    {
+      finding: 'curl proxy-user credentials',
+      yaml: [
+        'services:',
+        '  shell:',
+        '    image: example',
+        '    command: curl --proxy-user admin:ProxyShellSentinel https://host',
+        '  short:',
+        '    image: example',
+        '    command: [curl, -U, "admin:ProxyListSentinel", https://host]',
+        '  equals:',
+        '    image: example',
+        '    command: curl --proxy-user=admin:ProxyEqualsSentinel https://host',
+        '  attached:',
+        '    image: example',
+        '    command: curl -Uadmin:ProxyAttachedSentinel https://host',
+        '  nocolon:',
+        '    image: example',
+        '    command: curl --proxy-user admin https://host',
+        '  agent:',
+        '    image: example',
+        '    command: wget -U "Mozilla/5.0 (X11; a:b)" https://host',
+        `x-json: '{"command":["curl","--proxy-user","admin:ProxyJsonSentinel","https://x"]}'`,
+        'x-copy-shell: ProxyShellSentinel',
+        'x-copy-list: ProxyListSentinel',
+        'x-copy-json: ProxyJsonSentinel',
+        'x-user: admin',
+      ],
+      absent: [
+        'ProxyShellSentinel',
+        'ProxyListSentinel',
+        'ProxyEqualsSentinel',
+        'ProxyAttachedSentinel',
+        'ProxyJsonSentinel',
+      ],
+      expected: [
+        [['services', 'shell', 'command'], '********'],
+        [['services', 'short', 'command'], '********'],
+        [['services', 'nocolon', 'command'], 'curl --proxy-user admin https://host'],
+        [['services', 'agent', 'command'], 'wget -U "Mozilla/5.0 (X11; a:b)" https://host'],
+        [['x-json'], '{"command":["curl","--proxy-user","********","https://x"]}'],
+        [['x-copy-list'], '********'],
+        [['x-user'], 'admin'],
+      ],
+    },
+    {
+      finding: 'a credential flag named only in a shell comment',
+      yaml: [
+        'services:',
+        '  quoted:',
+        '    image: example',
+        `    command: 'sh -c "echo ok # client --password CommentQuotedSentinel"'`,
+        '  block:',
+        '    image: example',
+        '    command: |',
+        '      echo start',
+        '      # client --password CommentBlockSentinel',
+        '      client --password RealBlockSentinel',
+        '  word:',
+        '    image: example',
+        '    command: sh -c "client --password Real#HashSentinel"',
+        'x-copy-quoted: CommentQuotedSentinel',
+        'x-copy-block: CommentBlockSentinel',
+        'x-copy-real: RealBlockSentinel',
+        'x-copy-hash: Real#HashSentinel',
+      ],
+      absent: ['RealBlockSentinel', 'Real#HashSentinel'],
+      expected: [
+        [['x-copy-quoted'], 'CommentQuotedSentinel'],
+        [['x-copy-block'], 'CommentBlockSentinel'],
+        [['x-copy-real'], '********'],
+        [['x-copy-hash'], '********'],
+      ],
+    },
+    {
+      finding: 'an Authorization header in command arguments',
+      yaml: [
+        'services:',
+        '  shell:',
+        '    image: example',
+        `    command: "curl -H 'Authorization: Bearer HeaderShellSecret' https://host"`,
+        '  wget:',
+        '    image: example',
+        `    command: 'wget --header "Authorization: Basic HeaderWgetSecret" https://host'`,
+        '  list:',
+        '    image: example',
+        '    command: [curl, -H, "Authorization: Bearer HeaderListSecret", https://host]',
+        '  proxy:',
+        '    image: example',
+        '    command: [curl, "--header=Proxy-Authorization: Bearer HeaderProxySecret", https://host]',
+        '  plain:',
+        '    image: example',
+        `    command: 'curl -H "Content-Type: application/json" -H "Accept: text/plain" https://host'`,
+        '  plainlist:',
+        '    image: example',
+        '    command: [curl, -H, "X-Request-Id: abc123", https://host]',
+        `x-json: '{"command":["curl","-H","Authorization: Bearer HeaderJsonSecret","https://x"]}'`,
+        'x-copy-shell: HeaderShellSecret',
+        'x-copy-bearer: Bearer HeaderListSecret',
+        'x-copy-wget: HeaderWgetSecret',
+        'x-copy-json: HeaderJsonSecret',
+        'x-content: application/json',
+        'x-id: abc123',
+      ],
+      absent: [
+        'HeaderShellSecret',
+        'HeaderWgetSecret',
+        'HeaderListSecret',
+        'HeaderProxySecret',
+        'HeaderJsonSecret',
+      ],
+      expected: [
+        [['services', 'shell', 'command'], '********'],
+        [['services', 'wget', 'command'], '********'],
+        [['services', 'list', 'command'], '********'],
+        [['services', 'proxy', 'command'], '********'],
+        [
+          ['services', 'plain', 'command'],
+          'curl -H "Content-Type: application/json" -H "Accept: text/plain" https://host',
+        ],
+        [
+          ['services', 'plainlist', 'command'],
+          ['curl', '-H', 'X-Request-Id: abc123', 'https://host'],
+        ],
+        [['x-copy-shell'], '********'],
+        [['x-copy-bearer'], '********'],
+        [['x-copy-json'], '********'],
+        [['x-content'], 'application/json'],
+        [['x-id'], 'abc123'],
+      ],
+    },
+  ])(
+    'masks command credentials without masking neighbours: $finding',
+    async ({ finding, yaml, absent, expected }) => {
+      const { compose } = await bundledCompose(
+        `e7-${finding.replace(/[^a-z]+/gu, '-').slice(0, 24)}`,
+        [...yaml, ''].join('\n'),
+      );
+      for (const sentinel of absent) expect(compose).not.toContain(sentinel);
+      const parsed = YAML.parse(compose) as Record<string, unknown>;
+      for (const [keys, value] of expected) expect(pick(parsed, ...keys)).toEqual(value);
+    },
+  );
+
+  it('discovers credential arguments in embedded JSON argument arrays', async () => {
+    const embedded =
+      '{"command":["client","--password","JsonArgumentSentinel","--port","27017"],"entrypoint":["client","--reg-token","JsonRegArgumentSentinel"],"args":["client","--password","JsonArgsSentinel"],"healthcheck":{"test":["CMD","client","--password","JsonTestSentinel"]},"keep":1.50,"notes":["--password","NotCommandSentinel"]}';
+    const masked =
+      '{"command":["client","--password","********","--port","27017"],"entrypoint":["client","--reg-token","********"],"args":["client","--password","********"],"healthcheck":{"test":["CMD","client","--password","********"]},"keep":1.50,"notes":["--password","NotCommandSentinel"]}';
+    const { compose } = await bundledCompose(
+      'e7-argv-json',
+      [
+        'x-before-json: JsonArgumentSentinel',
+        'x-before-reg: JsonRegArgumentSentinel',
+        'x-before-args: JsonArgsSentinel',
+        'x-before-test: JsonTestSentinel',
+        `x-json: '${embedded}'`,
+        'x-port: 27017',
+        'x-replica: rocketchat-1',
+        'x-control: readable',
+        '',
+      ].join('\n'),
+    );
+    for (const secret of [
+      'JsonArgumentSentinel',
+      'JsonRegArgumentSentinel',
+      'JsonArgsSentinel',
+      'JsonTestSentinel',
+    ])
+      expect(compose).not.toContain(secret);
+    const parsed = YAML.parse(compose) as Record<string, unknown>;
+    expect(parsed['x-json']).toBe(masked);
+    expect(parsed['x-port']).toBe(27017);
+    expect(parsed['x-replica']).toBe('rocketchat-1');
+    expect(compose).toContain('NotCommandSentinel');
+  });
+
+  it('discovers a credential argument reached through a YAML alias', async () => {
+    const { compose } = await bundledCompose(
+      'e7-argv-alias',
+      [
+        'x-before: AliasArgumentSentinel',
+        'x-argv: &argv [client, --password, AliasArgumentSentinel]',
+        'services:',
+        '  rocketchat:',
+        '    image: example',
+        '    command: *argv',
+        'x-after: AliasArgumentSentinel',
+        'x-port: 27017',
+        'x-control: readable',
+        '',
+      ].join('\n'),
+    );
+    expect(compose).not.toContain('AliasArgumentSentinel');
+    const parsed = YAML.parse(compose) as Record<string, unknown>;
+    // The anchor renders as a list; its second appearance is masked whole as a repeated object.
+    expect(parsed['x-argv']).toEqual(['client', '--password', '********']);
+    expect(parsed['x-port']).toBe(27017);
+    expect(parsed['x-control']).toBe('readable');
+  });
+
+  it('keeps a numeric credential argument whole, never erasing ports or replica suffixes', async () => {
+    const { compose } = await bundledCompose(
+      'e7-argv-numeric',
+      [
+        'x-before: 7',
+        'x-lexical-before: "4.50"',
+        'x-lexical-canonical: 4.5',
+        'services:',
+        '  rocketchat:',
+        '    image: example',
+        '    command:',
+        '      - client',
+        '      - --password',
+        '      - 7',
+        '      - --port',
+        '      - 27017',
+        '    entrypoint: [client, --reg-token, "4.50", --port, "27017"]',
+        'x-port: 27017',
+        'x-replica: rocketchat-7',
+        'x-lexical-replica: rocketchat-4.50',
+        'x-embedded: \'{ "keep":27017, "decimal":1.50, "copy":"7", "lexical":"4.50" }\'',
+        'x-control: readable',
+        '',
+      ].join('\n'),
+    );
+    const parsed = YAML.parse(compose) as Record<string, unknown>;
+    expect(pick(parsed, 'services', 'rocketchat', 'command')).toBe('********');
+    expect(pick(parsed, 'services', 'rocketchat', 'entrypoint')).toBe('********');
+    expect(parsed['x-before']).toBe('********');
+    expect(parsed['x-lexical-before']).toBe('********');
+    expect(parsed['x-lexical-canonical']).toBe('********');
+    expect(parsed['x-port']).toBe(27017);
+    expect(parsed['x-replica']).toBe('rocketchat-7');
+    expect(parsed['x-lexical-replica']).toBe('rocketchat-4.50');
+    expect(parsed['x-embedded']).toBe(
+      '{ "keep":27017, "decimal":1.50, "copy":"********", "lexical":"********" }',
+    );
+    expect(parsed['x-control']).toBe('readable');
+  });
+
   it.each(['yaml', 'assignment', 'json', 'named', 'alias', 'nested-json'])(
     'keeps numeric text credentials whole through %s discovery in actual bundles',
     async (origin) => {

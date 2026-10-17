@@ -7,6 +7,7 @@ import {
   SECRET_KEY_HINTS,
   URL_USERINFO,
   redactAllUserinfo,
+  credentialFlag,
   redactArgv,
   redactEnv,
 } from '../../src/lib/redact';
@@ -227,6 +228,56 @@ describe('redactAllUserinfo', () => {
       `OIDC={"url":"https://${REDACTED}@idp","admin":"ops@example.com"}`,
       `https://${REDACTED}@h`,
     ]);
+  });
+});
+
+describe('credentialFlag', () => {
+  it('names credential option words and leaves lookalikes readable', () => {
+    const credentials = [
+      '--requirepass',
+      '-storepass',
+      '-keypass',
+      '--sslpass',
+      '--password1',
+      '--password2',
+      '--secretvalue',
+      '-passin',
+      '--secretkey',
+      '--dbpass',
+      '--passcode',
+      '--password',
+      '--db2pass',
+      '--mysql8pass',
+      '--s3pass',
+      '--db2password',
+      '--apikeyvalue',
+      '--sshkeydata',
+      '--installpassword',
+      '--installpass',
+      '--sanopass',
+      '--pass2word',
+      '--passw0rd',
+      '--oauth2-bearer',
+      '--api-key',
+      '--client-key',
+    ];
+    const readable = [
+      '--bypass',
+      '--compass',
+      '--proxy-bypass-list',
+      '--port',
+      '--passive',
+      '--passthrough',
+      '--proxybypass',
+      '--sslbypass',
+      '--nopass',
+      '--skippass',
+      '--lowpass',
+      '--bypassfile',
+      '--sort-keys',
+      '--primary-key',
+    ];
+    expect([...credentials, ...readable].filter(credentialFlag)).toEqual(credentials);
   });
 });
 

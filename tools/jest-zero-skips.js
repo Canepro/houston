@@ -125,10 +125,19 @@ const ROOT = path.resolve(__dirname, '..');
 // Seven bundle regressions cover duplicate YAML names and six numeric-text discovery routes.
 // Three more cover authorization copies, a failed licence write and an external kill during
 // that write. Existing complete-licence and Compose-kill cases are extended, not recounted.
+// Nineteen more cover duplicate embedded JSON names (six table cases and an ordinary-name
+// control) and credential arguments in command, entrypoint, args and healthcheck lists (eight
+// table cases, an equals-form and neighbour control, embedded JSON arrays, an alias and numeric
+// arguments).
+// One more masks a credential flag inside a command string: total 4647.
 // Inspect adds twenty cases on top of the evidence base: total 4647.
+// Credential arguments (19) and command strings (1) add twenty over 4647: total 4667.
 // SSH access adds ninety-eight cases over the inspect base: total 4745.
 // One more passes a bracketed IPv6 SSH host bare: total 4746.
 // One more refuses a tunnel port a preset or monitoring will publish, before create: 4747.
+// Credential arguments add twenty over the SSH access base of 4747: total 4767.
+// Six more cover the PR 64 round-two findings, one case each: total 4773.
+// Six more cover the PR 64 round-three findings, one case each: total 4779.
 // Onboarding grants add cluster-ownership, rollback, marker-publication and onboard-grant
 // boundary cases; a full collection of the merged tree measured 4831 tests.
 // Goal-first setup adds its owner-boundary cases, and four review fixes add one each: the setup
@@ -141,7 +150,10 @@ const ROOT = path.resolve(__dirname, '..');
 // The eighth adds five: the actor-prefixed first-run name, --reconfigure asking with an explicit
 // answer and rejecting it without a prompt, the saved selectors in capabilities, and the skill's
 // saved-selector recipe: 4876 + 5 = 4881.
-const FLOOR = 4881;
+// Credential arguments add thirty-two over the grants base of 4831: total 4863.
+// One more names credential option words ending in pass and leaves lookalikes readable: 4864.
+// Merged with PR 62 (base 4881): credential arguments add 4864 - 4831 = 33, so 4881 + 33 = 4914.
+const FLOOR = 4914;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [
