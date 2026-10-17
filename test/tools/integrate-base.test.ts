@@ -679,6 +679,32 @@ describe('a base merge, end to end', () => {
     expect(read('test/cli/render-human.test.ts')).toContain('all 48 routable paths');
   });
 
+  it('keeps the floor bound of the side it can read when the other side reads oddly', () => {
+    git(root, 'merge', '--abort');
+    git(root, 'checkout', '-q', 'base');
+    const floorFile = path.join(root, 'tools/jest-zero-skips.js');
+    fs.writeFileSync(
+      floorFile,
+      read('tools/jest-zero-skips.js').replace('FLOOR = 110', 'FLOOR=110'),
+    );
+    git(root, 'commit', '-q', '-am', 'the base spells its floor differently');
+    git(root, 'checkout', '-q', 'branch');
+    git(root, 'merge', '-q', 'base');
+    fs.writeFileSync(
+      floorFile,
+      tree({ ...THEIRS, floor: 115, notes: [] })['tools/jest-zero-skips.js'] ?? '',
+    );
+    fs.writeFileSync(path.join(root, 'other.txt'), 'resolved\n');
+    git(root, 'add', 'tools/jest-zero-skips.js', 'other.txt');
+    // 104 tests: below ours' readable 105. The base's 110 cannot be read at all.
+    const result = tool.run({ root, measure: () => ({ ...MERGED, floor: 104 }) });
+    const text = result.lines.join('\n');
+    expect(result.ok).toBe(false);
+    expect(text).toMatch(/collects 104 tests, below the larger side's floor of 105/u);
+    expect(text).toMatch(/floor pin .*cannot be read/u);
+    expect(read('tools/jest-zero-skips.js')).toMatch(/^const FLOOR = 115;$/mu);
+  });
+
   it('outside a merge, reports a stale pin and moves it only with --write', () => {
     fs.writeFileSync(path.join(root, 'other.txt'), 'resolved\n');
     git(root, 'add', 'other.txt');

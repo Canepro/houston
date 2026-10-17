@@ -176,7 +176,8 @@ const ROOT = path.resolve(__dirname, '..');
 // Four more: a dry run with stale pins is not done, a lost command is refused without a
 // readable merge base, a staged fixture beats a side the merge refuses, and an unreadable
 // floor outside a merge is reported while the other pins move: 4984.
-const FLOOR = 4984;
+// One more keeps the readable side's floor bound when the other side's pin is odd: 4985.
+const FLOOR = 4985;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

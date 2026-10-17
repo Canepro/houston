@@ -785,7 +785,9 @@ function run(options) {
     problems.push(error.message);
     return finish(out, problems);
   }
-  const bounds = lowerBounds(root, merge, force);
+  const unreadable = [];
+  const bounds = lowerBounds(root, merge, force, unreadable);
+  problems.push(...unreadable);
   for (const file of new Set(SITES.map((site) => site.file))) {
     if (!writes.has(file) && !fs.existsSync(path.join(root, file))) {
       problems.push(`${file} is missing from the tree, so its pins cannot be checked`);
@@ -916,7 +918,7 @@ function pinnedAt(root, rev, metric) {
  * one; a side that removed commands lifts it too, since then the smaller count is the point.
  * A merge base with no readable pin cannot show a removal, so there the bound stands.
  */
-function lowerBounds(root, merge, force) {
+function lowerBounds(root, merge, force, unreadable = []) {
   const bounds = {};
   const current = (metric) => pinnedAt(root, 'HEAD', metric);
   if (merge === null) {
@@ -932,11 +934,19 @@ function lowerBounds(root, merge, force) {
     const ours = current(metric);
     const theirs = pinnedAt(root, merge.theirs, metric);
     const ancestor = pinnedAt(root, merge.ancestor, metric);
-    if (ours === null || theirs === null) continue;
-    const value = Math.max(ours, theirs);
+    // A side whose pin cannot be read is named, and the other side's bound still stands.
+    for (const [side, value] of [
+      ['ours (HEAD)', ours],
+      ['the base', theirs],
+    ]) {
+      if (value === null) unreadable.push(`${side}'s ${metric} pin cannot be read`);
+    }
+    const known = [ours, theirs].filter((value) => value !== null);
+    if (known.length === 0) continue;
+    const value = Math.max(...known);
     if (metric === 'floor') {
       bounds.floor = { value, what: "the larger side's floor" };
-    } else if (!force && (ancestor === null || (ours >= ancestor && theirs >= ancestor))) {
+    } else if (!force && (ancestor === null || known.every((side) => side >= ancestor))) {
       // With no readable merge base, a side that removed commands cannot be told apart, so
       // the bound stands and --force is the way past it.
       bounds[metric] = { value, what: "the larger side's" };
