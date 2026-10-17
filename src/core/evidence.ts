@@ -752,7 +752,7 @@ interface ShellWord {
  * and how many operands come before the program (`timeout 5 sh`, `chroot /root sh`).
  */
 const HEREDOC_WRAPPERS: Readonly<Record<string, { values: RegExp; operands: number }>> = {
-  env: { values: /^(?:-[uCS]|--unset|--chdir|--split-string)$/u, operands: 0 },
+  env: { values: /^(?:-[uC]|--unset|--chdir)$/u, operands: 0 },
   sudo: {
     values:
       /^(?:-[ugCDhprtUT]|--(?:user|group|chdir|host|prompt|role|type|other-user|close-from))$/u,
@@ -777,41 +777,49 @@ const HEREDOC_DATA =
   /^(?:cat|printf|echo|tee|grep|egrep|fgrep|sed|awk|gawk|head|tail|wc|base64|jq|yq|sort|uniq|cut|tr|less|more|dd|xxd|od|curl|wget|kubectl|oc|psql|mysql|mongo|mongosh|python3?|node|ruby|perl)$/u;
 
 /**
- * Whether a command reads its heredoc as a shell program. The program it runs decides, past
- * `NAME=value` assignments and the wrappers above with their options (`-nu alice` takes the
- * value of its last letter): a shell does, a known data reader (`cat`, `printf`) does not.
- * Any other program, a wrapper this table does not know (`xargs`, `nsenter`) included, counts
- * as running a shell when a shell word follows it, which errs toward masking.
+ * The program a wrapped command runs, best effort: past `NAME=value` assignments and the
+ * wrappers above with their options and operands. In a short-option cluster the first letter
+ * that takes a value ends it, and takes the next word only when nothing follows it
+ * (`-nu alice`, but not `-uroot`).
  */
-function heredocRunsShell(command: readonly ShellWord[]): boolean {
-  const isShell = (name: string): boolean =>
-    /^(?:sh|bash|zsh|dash|ash|ksh|su|runuser)$/u.test(name);
+function wrappedProgram(command: readonly ShellWord[]): string {
   let wrapper: { values: RegExp; operands: number } | undefined;
   let operands = 0;
   for (let index = 0; index < command.length; index += 1) {
     const word = (command[index] as ShellWord).text;
-    const name = word.split('/').pop() ?? '';
     if (/^[A-Za-z_]\w*=/u.test(word)) continue;
     if (wrapper !== undefined && word.startsWith('-') && word !== '-') {
-      // `-nu alice`: a cluster of short options takes the value of its last letter.
-      const last = word.startsWith('--') ? word : `-${word.slice(-1)}`;
-      if (wrapper.values.test(word) || wrapper.values.test(last)) index += 1;
+      if (word.startsWith('--')) {
+        if (!word.includes('=') && wrapper.values.test(word)) index += 1;
+        continue;
+      }
+      const letters = word.slice(1);
+      const taking = [...letters].findIndex((letter) => wrapper?.values.test(`-${letter}`));
+      if (taking === letters.length - 1) index += 1;
       continue;
     }
     if (wrapper !== undefined && operands > 0) {
       operands -= 1;
       continue;
     }
-    if (isShell(name)) return true;
+    const name = word.split('/').pop() ?? '';
     wrapper = Object.hasOwn(HEREDOC_WRAPPERS, name) ? HEREDOC_WRAPPERS[name] : undefined;
-    if (wrapper !== undefined) {
-      operands = wrapper.operands;
-      continue;
-    }
-    if (HEREDOC_DATA.test(name)) return false;
-    return command.slice(index + 1).some((later) => isShell(later.text.split('/').pop() ?? ''));
+    if (wrapper === undefined) return name;
+    operands = wrapper.operands;
   }
-  return false;
+  return '';
+}
+
+/**
+ * Whether a command reads its heredoc as a shell program. A command that names a shell
+ * anywhere does, unless the program it runs is a known data reader (`printf '%s' sh`,
+ * `env printf '%s' sh`): unsure, it errs toward reading the body, which errs toward masking.
+ */
+function heredocRunsShell(command: readonly ShellWord[]): boolean {
+  const isShell = (word: ShellWord): boolean =>
+    /^(?:sh|bash|zsh|dash|ash|ksh|su|runuser)$/u.test(word.text.split('/').pop() ?? '');
+  if (!command.some(isShell)) return false;
+  return !HEREDOC_DATA.test(wrappedProgram(command));
 }
 
 /** Bash's single-character ANSI-C escapes; any other escaped character stands for itself. */

@@ -1692,8 +1692,16 @@ describe('the bundle', () => {
         '  protoheredoc:',
         '    image: example',
         '    command: ["sh", "-c", "toString -x <<EOF\\nclient --password ProtoHeredocData\\nEOF"]',
+        '  attachedheredoc:',
+        '    image: example',
+        '    command: ["sh", "-c", "sudo -uroot sh <<EOF\\nclient --password AttachedHeredocSentinel\\nEOF"]',
+        '  splitstringheredoc:',
+        '    image: example',
+        '    command: ["sh", "-c", "env -S sh <<EOF\\nclient --password SplitStringHeredocSentinel\\nEOF"]',
         'x-copy: QuotedSentinel',
         'x-split-copy: SplitSentinel',
+        'x-dup-attached-heredoc: AttachedHeredocSentinel',
+        'x-dup-split-string-heredoc: SplitStringHeredocSentinel',
         'x-dup-xargs-heredoc: XargsHeredocSentinel',
         'x-dup-cluster-heredoc: ClusterHeredocSentinel',
         'x-proto-heredoc: ProtoHeredocData',
@@ -1785,6 +1793,8 @@ describe('the bundle', () => {
       'HereStringSentinel',
       'XargsHeredocSentinel',
       'ClusterHeredocSentinel',
+      'AttachedHeredocSentinel',
+      'SplitStringHeredocSentinel',
     ]) {
       expect(compose).not.toContain(sentinel);
     }
