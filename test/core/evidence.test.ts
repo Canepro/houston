@@ -1680,8 +1680,12 @@ describe('the bundle', () => {
         '  sshlogin:',
         '    image: example',
         '    command: sshpass -p SshpassSentinel ssh user@host',
+        '  herestring:',
+        '    image: example',
+        '    command: ["sh", "-c", "cat <<< data\\nclient --password HereStringSentinel"]',
         'x-copy: QuotedSentinel',
         'x-split-copy: SplitSentinel',
+        'x-dup-here-string: HereStringSentinel',
         'x-dup-ansi-unicode: AnsiUnicodeSentinel',
         'x-dup-quoted-dollar: $QuotedDollarSentinel',
         'x-env-printf: EnvPrintfData',
@@ -1766,6 +1770,7 @@ describe('the bundle', () => {
       'QuotedDollarSentinel',
       'KubeLiteralSentinel',
       'SshpassSentinel',
+      'HereStringSentinel',
     ]) {
       expect(compose).not.toContain(sentinel);
     }

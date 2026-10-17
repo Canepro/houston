@@ -870,6 +870,10 @@ function shellCommands(text: string): ShellWord[][] {
         else if (single !== undefined) word += ANSI_C_ESCAPES[single] ?? single;
         index += match.length;
       }
+    } else if (char === '<' && text.startsWith('<<<', index)) {
+      // A here-string, `cat <<< data`, feeds one word and no following lines.
+      endWord(index);
+      index += 2;
     } else if (char === '<' && text[index + 1] === '<' && text[index + 2] !== '<') {
       // `cat <<EOF` feeds the following lines as data; only a shell runs them.
       endWord(index);
