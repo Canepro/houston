@@ -626,7 +626,7 @@ describe('a base merge, end to end', () => {
       const resolved = tree({ ...THEIRS, ...MERGED, notes: [], cases: {} });
       fs.writeFileSync(
         path.join(scratch, 'test/cli/foundation.test.ts'),
-        resolved['test/cli/foundation.test.ts'],
+        resolved['test/cli/foundation.test.ts'] ?? '',
       );
       fs.writeFileSync(path.join(scratch, 'other.txt'), 'resolved\n');
       git(scratch, 'add', 'test/cli/foundation.test.ts', 'other.txt');
