@@ -17,7 +17,8 @@
  *     takes `46` silently when both sides made the same edit.
  *   - a duplicate `require` left by a resolved hunk, which only fails when the tool runs.
  *
- * WHAT IT DOES. Run it on the PR branch after `git merge <base>` stops on conflicts:
+ * WHAT IT DOES. Run it on the PR branch after `git merge --no-commit --no-ff <base>`. Without
+ * `--no-commit` a merge git finishes cleanly is committed before this can repair the fixture:
  *
  *   1. It merges the three owned files above from the merge base, `HEAD` (ours) and
  *      `MERGE_HEAD` (the base, theirs), stages each one it resolves cleanly, and leaves
@@ -97,7 +98,7 @@ const SITES = [
     file: 'test/cli/invariants/command-surface.test.ts',
     metric: 'paths',
     words: true,
-    pattern: /registers exactly the ([a-z-]+) commands the table declares/u,
+    pattern: /registers exactly the ([a-z]+(?:[ -][a-z]+)*) commands the table declares/u,
   },
   {
     file: 'test/cli/invariants/command-surface.test.ts',
@@ -301,7 +302,9 @@ function resolveCommentHunks(text) {
 
 /**
  * Merge one file that holds owned numbers. Each number becomes base + (ours - ancestor):
- * what the base has, plus what this branch added. Measurement corrects it later.
+ * what the base has, plus what this branch added. Measurement corrects it later. The floor
+ * is never written below either side's: a branch that removed tests would otherwise stage
+ * a floor under the base's while a conflict elsewhere holds the measurement off.
  */
 function mergeSiteFile(file, ancestor, ours, theirs) {
   const values = {
@@ -313,9 +316,10 @@ function mergeSiteFile(file, ancestor, ours, theirs) {
   let text = gitMergeFile(neutral(ours), neutral(ancestor), neutral(theirs));
   let comments = 0;
   if (file === FLOOR_FILE) ({ text, resolved: comments } = resolveCommentHunks(text));
-  const merged = values.theirs.map(
-    (value, index) => value + values.ours[index] - values.ancestor[index],
-  );
+  const merged = sitesIn(file).map((site, index) => {
+    const sum = values.theirs[index] + values.ours[index] - values.ancestor[index];
+    return site.metric === 'floor' ? Math.max(sum, values.ours[index], values.theirs[index]) : sum;
+  });
   sitesIn(file).forEach((site, index) => {
     text = text.split(placeholder(index)).join(spell(site, merged[index]));
   });
@@ -527,22 +531,37 @@ function measureFloor(root) {
       throw new Refusal(`the collection run wrote no result: ${result.stderr.slice(-2000)}`);
     }
     const report = JSON.parse(fs.readFileSync(output, 'utf8'));
-    const broken = report.testResults
-      .filter((suite) => suite.status !== 'passed' && suite.message)
-      .map((suite) => path.relative(root, suite.name));
-    if (report.numRuntimeErrorTestSuites > 0 || broken.length > 0) {
-      throw new Refusal(
-        `${String(broken.length)} test file(s) failed to load, so the suite cannot be ` +
-          `counted:\n    ${broken.join('\n    ')}`,
-      );
-    }
-    if (report.numPassedTests !== 0 || report.numFailedTests !== 0) {
-      throw new Refusal('the collection run executed tests; its pattern matched a test name');
-    }
-    return report.numTotalTests;
+    return collectionCount(root, result.status, report, result.stderr);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+}
+
+/**
+ * The count a collection run's report holds, or a refusal. Jest's exit code is part of the
+ * verdict: the zero-skips reporter fails an authored `.skip` or `.only` through it alone,
+ * and the report it leaves behind looks whole.
+ */
+function collectionCount(root, status, report, stderr) {
+  const broken = report.testResults
+    .filter((suite) => suite.status !== 'passed' && suite.message)
+    .map((suite) => path.relative(root, suite.name));
+  if (report.numRuntimeErrorTestSuites > 0 || broken.length > 0) {
+    throw new Refusal(
+      `${String(broken.length)} test file(s) failed to load, so the suite cannot be ` +
+        `counted:\n    ${broken.join('\n    ')}`,
+    );
+  }
+  if (report.numPassedTests !== 0 || report.numFailedTests !== 0) {
+    throw new Refusal('the collection run executed tests; its pattern matched a test name');
+  }
+  if (status !== 0) {
+    throw new Refusal(
+      `the collection run exited ${String(status)}, so its count is not trusted:\n` +
+        stderr.slice(-2000),
+    );
+  }
+  return report.numTotalTests;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -608,11 +627,6 @@ function run(options) {
       if (file === FIXTURE ? !conflicted && !changedOnBothSides(root, merge, file) : !conflicted) {
         continue;
       }
-      const resolvedByHand = conflicted ? !hasMarkers(current) : show(root, '', file) !== current;
-      if (resolvedByHand && !force) {
-        say(`  ${file}: already edited by hand, left alone (--force merges it anyway)`);
-        continue;
-      }
       const sides = {
         ancestor: show(root, merge.ancestor, file),
         ours: show(root, 'HEAD', file),
@@ -622,11 +636,22 @@ function run(options) {
         problems.push(`${file} is missing on one side; resolve it by hand`);
         continue;
       }
-      if (file === FIXTURE) {
-        const result = mergeFixture(sides.ancestor, sides.ours, sides.theirs);
-        put(file, result.text);
-        say(`  ${file}: merged, ${String(result.appended)} verdict(s) appended from ours`);
-        for (const where of result.baseWins) {
+      const verdicts =
+        file === FIXTURE ? mergeFixture(sides.ancestor, sides.ours, sides.theirs) : null;
+      if (verdicts !== null && current === verdicts.text) continue;
+      // Untouched is what git left: conflict markers, or for the fixture, git's own clean
+      // merge. Anything else someone wrote -- staged or not -- is theirs to keep.
+      const untouched = conflicted
+        ? hasMarkers(current)
+        : current === gitMergeFile(sides.ours, sides.ancestor ?? '', sides.theirs);
+      if (!untouched && !force) {
+        say(`  ${file}: already edited by hand, left alone (--force merges it anyway)`);
+        continue;
+      }
+      if (verdicts !== null) {
+        put(file, verdicts.text);
+        say(`  ${file}: merged, ${String(verdicts.appended)} verdict(s) appended from ours`);
+        for (const where of verdicts.baseWins) {
           say(`    both sides changed ${where.join(' > ')}; the base's verdict stands`);
         }
         continue;
@@ -661,6 +686,14 @@ function run(options) {
       problems.push(
         `${String(left.length)} path(s) still unmerged; resolve them, then rerun:\n    ` +
           left.join('\n    '),
+      );
+      return finish(out, problems);
+    }
+    if (dryRun && writes.size > 0) {
+      // The measurement reads the tree on disk, which still holds what git left.
+      problems.push(
+        `dry run: ${String(writes.size)} file(s) above are not written, and the measurement ` +
+          'reads the tree on disk; rerun without --dry-run to measure the merge',
       );
       return finish(out, problems);
     }
@@ -789,5 +822,6 @@ module.exports = {
   mergeFixture,
   renderFixture,
   measureCounts,
+  collectionCount,
   run,
 };

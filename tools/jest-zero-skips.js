@@ -166,7 +166,9 @@ const ROOT = path.resolve(__dirname, '..');
 // total 4955.
 // tools/integrate-base.js adds fourteen: its pins on this tree, the fixture's verdict merge,
 // the note join and a scratch-repository merge. `yarn integrate-base` measured 4969.
-const FLOOR = 4969;
+// Five review fixes: a staged fixture kept, an interim floor clamped to both sides, a dry run
+// that measures nothing unwritten, a failed collection refused, and a title past 100: 4974.
+const FLOOR = 4974;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

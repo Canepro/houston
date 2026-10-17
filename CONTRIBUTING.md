@@ -128,9 +128,11 @@ Go through this list for every change:
 
 ## Merging the base branch
 
-A long-lived branch takes its base with `git merge <base>`, never a rebase of shared work.
-The same files conflict every time, and each has one right answer that a textual merge
-gets wrong. Run `yarn integrate-base` on the branch as soon as the merge stops:
+A long-lived branch takes its base with `git merge --no-commit --no-ff <base>`, never a
+rebase of shared work. `--no-commit` matters: when git merges every file cleanly it commits
+at once, and the fixture below can be wrong even then. The same files conflict every time,
+and each has one right answer that a textual merge gets wrong. Run `yarn integrate-base` on
+the branch as soon as the merge stops:
 
 1. It merges `test/fixtures/cli/usage-error.json` by verdict, not by line. Each side's
    cases point at that side's own verdict list, so even a clean textual merge can be wrong.

@@ -49,6 +49,7 @@ interface Tool {
   ): { text: string; baseWins: string[][]; appended: number };
   renderFixture(fixture: Fixture): string;
   measureCounts(root: string): Omit<Counts, 'floor'>;
+  collectionCount(root: string, status: number | null, report: object, stderr: string): number;
   run(options: {
     root: string;
     write?: boolean;
@@ -86,6 +87,34 @@ describe('the pins the tool owns, on this tree', () => {
     expect(tool.toWords(40)).toBe('forty');
     expect(tool.toWords(102)).toBe('one hundred and two');
     for (let n = 0; n <= 999; n += 1) expect(tool.fromWords(tool.toWords(n))).toBe(n);
+  });
+
+  it('reads a title count past one hundred, which has spaces in it', () => {
+    const text = [
+      "it('registers exactly the one hundred and two commands the table declares', () => {",
+      '  expect(declared).toHaveLength(102);',
+      '  expect(advertised.size).toBe(16);',
+      '  expect(described).toHaveLength(102);',
+      '  expect(flags).toBe(202);',
+    ].join('\n');
+    expect(tool.readSites('test/cli/invariants/command-surface.test.ts', text)).toEqual([
+      102, 102, 16, 102, 202,
+    ]);
+  });
+
+  it('refuses a collection run Jest itself failed, though its report looks whole', () => {
+    // The zero-skips reporter fails an authored `.skip` through Jest's exit code alone.
+    const report = {
+      numTotalTests: 10,
+      numPassedTests: 0,
+      numFailedTests: 0,
+      numRuntimeErrorTestSuites: 0,
+      testResults: [],
+    };
+    expect(tool.collectionCount('/root', 0, report, '')).toBe(10);
+    expect(() =>
+      tool.collectionCount('/root', 1, report, 'zero-skips gate FAILED: an authored skip'),
+    ).toThrow(/exited 1[^]*zero-skips gate FAILED/u);
   });
 });
 
@@ -161,6 +190,14 @@ describe('merging the usage-error fixture', () => {
 // ---------------------------------------------------------------------------------------
 
 describe('the note above FLOOR', () => {
+  it('never writes an interim floor below either side, even when ours removed tests', () => {
+    const file = (floor: number) =>
+      `'use strict';\n// The suite.\nconst FLOOR = ${String(floor)};\n`;
+    const merged = tool.mergeSiteFile('tools/jest-zero-skips.js', file(100), file(90), file(110));
+    expect(merged.values.merged).toEqual([110]);
+    expect(merged.text).toContain('const FLOOR = 110;');
+  });
+
   const conflict = (ours: string[], base: string[], theirs: string[], after: string) =>
     [
       'module.exports = {};',
@@ -437,6 +474,26 @@ describe('a base merge, end to end', () => {
     expect(result.ok).toBe(false);
     expect(text).toMatch(/tools\/dup\.js does not parse/u);
     expect(text).toMatch(/leftover other\.txt:1: leftover conflict marker/u);
+  });
+
+  it('keeps a fixture resolution someone staged by hand, on every rerun', () => {
+    const fixturePath = 'test/fixtures/cli/usage-error.json';
+    const hand = fixture([V('a'), V('b'), V('c')], { corpus: { one: 0, hand: 1 } });
+    fs.writeFileSync(path.join(root, fixturePath), hand);
+    git(root, 'add', fixturePath);
+    const result = tool.run({ root, measure: never });
+    expect(result.lines.join('\n')).toContain(`${fixturePath}: already edited by hand`);
+    expect(read(fixturePath)).toBe(hand);
+  });
+
+  it('in a dry run, measures nothing it has not written', () => {
+    fs.writeFileSync(path.join(root, 'other.txt'), 'resolved\n');
+    git(root, 'add', 'other.txt');
+    const before = read('tools/jest-zero-skips.js');
+    const result = tool.run({ root, dryRun: true, measure: never });
+    expect(result.ok).toBe(false);
+    expect(result.lines.join('\n')).toMatch(/dry run[^]*rerun without --dry-run/u);
+    expect(read('tools/jest-zero-skips.js')).toBe(before);
   });
 
   it('outside a merge, reports a stale pin and moves it only with --write', () => {
