@@ -398,6 +398,9 @@ describe('scripted browser capture', () => {
     for (const [target, recorded] of credentialTargets) {
       cases.push(['https://workspace.test', target, recorded, `https://workspace.test${target}`]);
     }
+    // A long run of tabs with no `=` after it is read in linear time; backtracking would hang.
+    const tabs = `/x?a${'\t'.repeat(5000)}x`;
+    cases.push(['https://workspace.test', tabs, tabs, `https://workspace.test/x?ax`]);
     // The URL parser strips a tab inside a name, so the browser sends `token`.
     cases.push([
       'https://workspace.test',
@@ -540,6 +543,10 @@ describe('scripted browser capture', () => {
         );
       }
     }
+    // A value is sent only by fill; on any other action it would be silently unused.
+    expect(() =>
+      parseWorkload(['steps:', '  - click: "#ok"', '    value: confirm'].join('\n'), 'fixture'),
+    ).toThrow(/step 0: value applies only to fill, not click/u);
     // Zero is a real settle (none) but not a timeout: Playwright reads 0 as "wait forever".
     expect(() => parseWorkload(steps('    timeout_ms: 0\n'), 'fixture')).toThrow(
       /timeout_ms must be a whole number of milliseconds greater than zero/u,
@@ -799,6 +806,7 @@ describe('scripted browser capture', () => {
     const payload = await captureBundle('ticket-1234', 'stage', out, { driverFactory });
 
     expect(fs.existsSync(path.join(out, 'capture', 'manifest.json'))).toBe(true);
+    expect(fs.statSync(out).mode & 0o777).toBe(0o700);
     expect((payload.bundle as { files: string[] }).files).toEqual(
       expect.arrayContaining(['capture/manifest.json', 'capture/shots/shot-01.png']),
     );

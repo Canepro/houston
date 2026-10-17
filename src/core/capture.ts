@@ -314,6 +314,10 @@ export function parseWorkload(text: string, source: string): Workload {
     if (action === undefined || actions.length !== 1) {
       throw new ValidationError(`${where} must name exactly one action (${ACTIONS.join(', ')})`);
     }
+    // A value the action never sends would make the run prove a different procedure.
+    if (action !== 'fill' && 'value' in item) {
+      throw new ValidationError(`${where}: value applies only to fill, not ${action}`);
+    }
     const target = toText(item[action]).trim();
     if (target === '') throw new ValidationError(`${where}: ${action} needs a target`);
     const value = item.value;
@@ -530,7 +534,7 @@ function credentialParam(name: string): boolean {
 }
 
 /** A parameter name after a `?`, `&`, `#` or `;`, up to its `=`. */
-const PARAMETER_NAME = /[?&#;]([^=&#;?\s/]*(?:[\t\n\r]+[^=&#;?\s/]*)*)=/gu;
+const PARAMETER_NAME = /[?&#;]((?:[^=&#;?\s/]|[\t\n\r])*)=/gu;
 
 /**
  * `text` with the value of every credential-shaped parameter replaced, running to the next
@@ -1321,6 +1325,9 @@ export async function captureBundle(
     }
     try {
       await withholdRawRecording(captureDir, stage);
+      // Screenshots and video still need a person's review, so the bundle stays private to
+      // its owner wherever `--bundle` puts it.
+      await fs.chmod(out, 0o700);
       const captured = await filesBelow(captureDir, 'capture');
       await fs.rename(captureDir, path.join(out, 'capture'));
       bundle.files = [...new Set([...bundle.files, ...captured])].sort();
@@ -1664,11 +1671,16 @@ function installSecretMask(target: MaskTarget | null, options: MaskOptions): str
   // A structural selector (`.reveal + input`, `:has()`) can start matching a node outside the
   // changed subtree, so it is resolved in every known root: one query per selector, never a
   // walk of every element.
-  const protectMatches = (scope: MaskRoot, deep: boolean, node: MaskTarget | null): void => {
+  const protectMatches = (
+    scope: MaskRoot,
+    deep: boolean,
+    node: MaskTarget | null,
+    everyRoot = true,
+  ): void => {
     for (const selector of state.selectors) {
       try {
         if (node !== null && node.matches(selector)) protect(cover(node));
-        const scopes = deep ? [scope] : structural(selector) ? state.roots : [];
+        const scopes = deep ? [scope] : structural(selector) && everyRoot ? state.roots : [];
         for (const root of scopes)
           for (const match of Array.from(root.querySelectorAll(selector))) protect(cover(match));
       } catch {
@@ -1714,8 +1726,24 @@ function installSecretMask(target: MaskTarget | null, options: MaskOptions): str
       discover(node);
       protectMatches(node, true, node);
     }
+    // The all-roots query for structural selectors does not depend on the node, so it runs
+    // once per batch, not once per touched node.
+    let structuralDue = false;
     for (const node of touched) {
-      if (!added.has(node) && node.nodeType === 1) protectMatches(node, false, node);
+      if (added.has(node) || node.nodeType !== 1) continue;
+      protectMatches(node, false, node, false);
+      structuralDue = true;
+    }
+    if (structuralDue) {
+      for (const selector of state.selectors) {
+        if (!structural(selector)) continue;
+        try {
+          for (const root of state.roots)
+            for (const match of Array.from(root.querySelectorAll(selector))) protect(cover(match));
+        } catch {
+          // The selector was valid when it was accepted; never let a page break the observer.
+        }
+      }
     }
     position();
   });
