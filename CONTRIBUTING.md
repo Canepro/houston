@@ -109,7 +109,8 @@ Go through this list for every change:
    `test/cli/invariants/printed-commands.test.ts` checks every `houston …` in the README,
    CONTRIBUTING, the guides and the skill template.
 5. **Added tests move the floor.** Set `FLOOR` in `tools/jest-zero-skips.js` to the
-   measured total, and say why in the commit.
+   measured total, and say why in the commit. `yarn integrate-base --write` measures it and
+   the command-surface counts, and moves the pins that are stale.
 6. **A regression test must fail without the fix.** Reverse the fix, run the test,
    confirm it fails for the reason you state, then restore the fix byte for byte.
 7. **A change under `data/webui/`** means re-recording the digest in `tools/gui-hash.js`,
@@ -122,6 +123,32 @@ Go through this list for every change:
    pinned prior-head corpus: every previously masked marker stays non-readable unless an
    approved intentional contract change names it. A new or changed regex over authored text
    needs a killable child-process deadline.
+
+---
+
+## Merging the base branch
+
+A long-lived branch takes its base with `git merge <base>`, never a rebase of shared work.
+The same files conflict every time, and each has one right answer that a textual merge
+gets wrong. Run `yarn integrate-base` on the branch as soon as the merge stops:
+
+1. It merges `test/fixtures/cli/usage-error.json` by verdict, not by line. Each side's
+   cases point at that side's own verdict list, so even a clean textual merge can be wrong.
+   Where both sides changed one case, the base's verdict stands, and the tool names it.
+2. It merges the pinned counts and `FLOOR` as the base's value plus what this branch added,
+   and joins the two notes above `FLOOR`.
+3. It stages what it resolved and lists every other unmerged path. Resolve those by hand.
+   Source conflicts are a judgement, and the tool does not make one.
+4. Run it again. With nothing unmerged it measures the merged tree: the command counts
+   from `COMMAND_SPECS` and `describeCommands()`, and the suite size from a run that
+   collects every test and executes none. Measured values replace the arithmetic ones,
+   because a test both sides carry is counted twice. The floor never drops below either
+   side's floor; a smaller suite means the merge lost tests, and the tool says so.
+5. It also requires every `tools/**/*.js` to parse and no conflict marker to remain.
+   A duplicate `require` left by a resolved hunk fails only when that tool runs.
+
+Rerun it until it exits 0. Then regenerate the skill if commands changed
+(`yarn skill:generate`), run the gates below, and commit the merge.
 
 ---
 

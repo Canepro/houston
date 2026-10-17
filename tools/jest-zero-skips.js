@@ -164,7 +164,9 @@ const ROOT = path.resolve(__dirname, '..');
 // Merged with PRs 62 and 64 (base 4914): capture adds 4868 - 4831 = 37 cases, so 4914 + 37 = 4951.
 // The pinned masking corpus adds fixture-integrity, public, artifact and authored-text timeout guards:
 // total 4955.
-const FLOOR = 4955;
+// tools/integrate-base.js adds fourteen: its pins on this tree, the fixture's verdict merge,
+// the note join and a scratch-repository merge. `yarn integrate-base` measured 4969.
+const FLOOR = 4969;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [
