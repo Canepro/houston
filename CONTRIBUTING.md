@@ -120,8 +120,8 @@ Go through this list for every change:
 9. **Masking leans toward masking.** Treat an ambiguous byte as private; hiding too much is
    safer than making a previously masked value readable. A proposed narrowing needs a
    pinned prior-head corpus: every previously masked marker stays non-readable unless an
-   approved intentional contract change names it. A regex over authored text needs a killable
-   child-process deadline.
+   approved intentional contract change names it. A new or changed regex over authored text
+   needs a killable child-process deadline.
 
 ---
 

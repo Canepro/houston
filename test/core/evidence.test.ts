@@ -185,7 +185,7 @@ function maskingMatrixRows(): MaskingMatrixRow[] {
           copyKey: `x-row-${rowId}`,
           marker,
           service: `m${rowId}`,
-          script: heredocScript(command, layout, marker, `MASK_GUARD_END_${rowId}`),
+          script: heredocScript(command, layout, marker, `EOF_${rowId}`),
         });
         expect(`${wrapperId}-${shellId}-${layout}`).toMatch(/^[a-z0-9-]+$/u);
       }
@@ -195,11 +195,12 @@ function maskingMatrixRows(): MaskingMatrixRow[] {
 }
 
 /** The pinned inputs and their fully rendered rows make a dropped or duplicated form visible. */
-function maskingCorpusSha256(rows: readonly MaskingMatrixRow[]): string {
+function maskingCorpusSha256(rows: readonly MaskingMatrixRow[], document: string): string {
   return createHash('sha256')
     .update(
       JSON.stringify({
         base: MASKING_BASELINE.base,
+        public: MASKING_BASELINE.public,
         matrix: MASKING_BASELINE.matrix,
         rows: rows.map(
           ({ rowId, wrapperId, shellId, layout, copyKey, marker, service, script }) => ({
@@ -213,6 +214,7 @@ function maskingCorpusSha256(rows: readonly MaskingMatrixRow[]): string {
             script,
           }),
         ),
+        document,
       }),
     )
     .digest('hex');
@@ -1269,11 +1271,13 @@ describe('the bundle', () => {
     const markers = rows.map((row) => row.marker);
     expect(rows).toHaveLength(MASKING_BASELINE.matrix.marker_count);
     expect(new Set(markers).size).toBe(markers.length);
-    expect(maskingCorpusSha256(rows)).toBe(MASKING_BASELINE.corpus_sha256);
+    const document = maskingMatrixDocument(rows);
+    expect(maskingCorpusSha256(rows, document)).toBe(MASKING_BASELINE.corpus_sha256);
+    for (const marker of markers) expect(document).toContain(marker);
     for (const row of rows) expect(credentialKey(row.copyKey)).toBe(false);
 
     const name = 'e7-masking-baseline';
-    await workspaceNamed(name, {}, {}, maskingMatrixDocument(rows));
+    await workspaceNamed(name, {}, {}, document);
     const dest = path.join(workspace(name), 'out', 'bundle');
 
     await writeBundle(name, dest, await record(name));

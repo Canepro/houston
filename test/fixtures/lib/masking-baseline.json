@@ -8,9 +8,13 @@
   "limits": [
     "This is a regression corpus, not a proof that every credential spelling is recognized.",
     "A public row names the bytes that were withheld at the pinned base; stronger masking or different safe formatting is acceptable, but no meaningful protected fragment may remain readable.",
-    "The expected matrix pins its inputs and fully rendered rows by count and digest. Add a reviewed row when a masking rule changes or a newly discovered authored shape needs preservation."
+    "The expected matrix pins its inputs and fully rendered rows by count and digest. Add a reviewed row when a masking rule changes or a newly discovered authored shape needs preservation.",
+    "The timing guard runs finite 5,000- to 10,000-character inputs in a child with a 2.5 s deadline. It catches known bounded pathological cases; it does not prove every regex is linear."
   ],
-  "corpus_sha256": "b6b10a20ec624a8bc7dda2d9c7fc17f9b1f987edb513a04d0f59aabfdabc8646",
+  "corpus_sha256": "3db5b1717b109e528db3bedf563ec88f20cc85651c3d6561745ee65122cd678d",
+  "public_row_count": 7,
+  "public_marker_count": 10,
+  "public_sha256": "c178525819a7fc6d65f5916b10f027dc04273fa61f1d424642b1daa2b3fc2099",
   "public": [
     [
       "assigned",
