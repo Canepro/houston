@@ -7,9 +7,10 @@
   ],
   "limits": [
     "This is a regression corpus, not a proof that every credential spelling is recognized.",
-    "A public row names the bytes that were withheld at the pinned base; stronger masking or different safe formatting is acceptable.",
-    "The expected matrix markers are pinned by count and digest. Add a reviewed row when a masking rule changes or a newly discovered authored shape needs preservation."
+    "A public row names the bytes that were withheld at the pinned base; stronger masking or different safe formatting is acceptable, but no meaningful protected fragment may remain readable.",
+    "The expected matrix pins its inputs and fully rendered rows by count and digest. Add a reviewed row when a masking rule changes or a newly discovered authored shape needs preservation."
   ],
+  "corpus_sha256": "b6b10a20ec624a8bc7dda2d9c7fc17f9b1f987edb513a04d0f59aabfdabc8646",
   "public": [
     [
       "assigned",
@@ -84,7 +85,6 @@
       "output-redirection"
     ],
     "marker_prefix": "MASK_GUARD_VALUE_",
-    "marker_count": 1200,
-    "marker_sha256": "bb56fcdf4b204bc49c744dfa5a9a665f9074fa77ca7ff090166a735efaae8c42"
+    "marker_count": 1200
   }
 }

@@ -12,6 +12,7 @@ import {
   redactArgv,
   redactEnv,
 } from '../../src/lib/redact';
+import { assertProtectedFragmentsWithheld } from '../fixtures/lib/protected-fragments';
 
 /** What earlier releases' redactor returned for the larger corpora below, recorded. */
 const RECORDED = JSON.parse(
@@ -96,11 +97,21 @@ describe('the pinned masking baseline', () => {
     expect(new Set(markers).size).toBe(markers.length);
   });
 
-  it('keeps every finite cd43ec6 public-redaction marker non-readable', () => {
+  it('keeps every finite cd43ec6 public-redaction marker and meaningful fragment non-readable', () => {
     expect(MASKING_BASELINE.base).toBe('cd43ec601791a7cdf510bfaa9c0a6d4e935e7f03');
     for (const [kind, input, protectedMarkers] of MASKING_BASELINE.public) {
       const output = redactBaselineRow(kind, input);
-      for (const marker of protectedMarkers) expect(output).not.toContain(marker);
+      assertProtectedFragmentsWithheld(output, protectedMarkers);
+      for (const marker of protectedMarkers) {
+        expect(() => assertProtectedFragmentsWithheld(marker.slice(0, -1), [marker])).toThrow(
+          'protected marker fragment',
+        );
+        const middle = Math.floor(marker.length / 2);
+        const altered = `${marker.slice(0, middle)}!${marker.slice(middle + 1)}`;
+        expect(() => assertProtectedFragmentsWithheld(altered, [marker])).toThrow(
+          'protected marker fragment',
+        );
+      }
     }
   });
 });

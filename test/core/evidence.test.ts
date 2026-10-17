@@ -74,6 +74,7 @@ import {
 } from '../../src/core/evidence';
 import { atomicWrite, workspace } from '../../src/core/runner/paths';
 import { metadata, readMeta, updateMeta, write } from '../../src/core/runner/record';
+import { assertProtectedFragmentsWithheld } from '../fixtures/lib/protected-fragments';
 
 const namespaceLabels = kubeNamespace.namespaceLabels as jest.MockedFunction<
   typeof kubeNamespace.namespaceLabels
@@ -117,17 +118,21 @@ const MASKING_BASELINE = JSON.parse(
   scope: string[];
   limits: string[];
   public: [string, string, string[]][];
+  corpus_sha256: string;
   matrix: {
     wrappers: [string, string][];
     shells: [string, string][];
     layouts: string[];
     marker_prefix: string;
     marker_count: number;
-    marker_sha256: string;
   };
 };
 
 interface MaskingMatrixRow {
+  readonly rowId: string;
+  readonly wrapperId: string;
+  readonly shellId: string;
+  readonly layout: string;
   readonly copyKey: string;
   readonly marker: string;
   readonly service: string;
@@ -173,6 +178,10 @@ function maskingMatrixRows(): MaskingMatrixRow[] {
         const marker = `${matrix.marker_prefix}${rowId}`;
         const command = [wrapper, shell].filter((part) => part !== '').join(' ');
         rows.push({
+          rowId,
+          wrapperId,
+          shellId,
+          layout,
           copyKey: `x-row-${rowId}`,
           marker,
           service: `m${rowId}`,
@@ -183,6 +192,30 @@ function maskingMatrixRows(): MaskingMatrixRow[] {
     }
   }
   return rows;
+}
+
+/** The pinned inputs and their fully rendered rows make a dropped or duplicated form visible. */
+function maskingCorpusSha256(rows: readonly MaskingMatrixRow[]): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        base: MASKING_BASELINE.base,
+        matrix: MASKING_BASELINE.matrix,
+        rows: rows.map(
+          ({ rowId, wrapperId, shellId, layout, copyKey, marker, service, script }) => ({
+            rowId,
+            wrapperId,
+            shellId,
+            layout,
+            copyKey,
+            marker,
+            service,
+            script,
+          }),
+        ),
+      }),
+    )
+    .digest('hex');
 }
 
 function maskingMatrixDocument(rows: readonly MaskingMatrixRow[]): string {
@@ -1228,7 +1261,7 @@ describe('the bundle', () => {
     expect(out.files).not.toContain('logs/compose.log');
   });
 
-  it('keeps every finite cd43ec6 evidence-matrix marker non-readable', async () => {
+  it('keeps every finite cd43ec6 evidence-matrix marker and meaningful fragment non-readable', async () => {
     // This invokes the actual record/writeBundle path. Its companion public-entrypoint test
     // covers redactors whose output is intentionally not the same as an attachable artifact.
     expect(MASKING_BASELINE.base).toBe('cd43ec601791a7cdf510bfaa9c0a6d4e935e7f03');
@@ -1236,9 +1269,7 @@ describe('the bundle', () => {
     const markers = rows.map((row) => row.marker);
     expect(rows).toHaveLength(MASKING_BASELINE.matrix.marker_count);
     expect(new Set(markers).size).toBe(markers.length);
-    expect(createHash('sha256').update(markers.join('\n')).digest('hex')).toBe(
-      MASKING_BASELINE.matrix.marker_sha256,
-    );
+    expect(maskingCorpusSha256(rows)).toBe(MASKING_BASELINE.corpus_sha256);
     for (const row of rows) expect(credentialKey(row.copyKey)).toBe(false);
 
     const name = 'e7-masking-baseline';
@@ -1248,7 +1279,17 @@ describe('the bundle', () => {
     await writeBundle(name, dest, await record(name));
 
     const artifact = fs.readFileSync(path.join(dest, 'docker-compose.yml'), 'utf8');
-    for (const marker of markers) expect(artifact).not.toContain(marker);
+    assertProtectedFragmentsWithheld(artifact, markers);
+    const probe = markers[Math.floor(markers.length / 2)];
+    if (probe === undefined) throw new Error('masking corpus had no probe marker');
+    expect(() => assertProtectedFragmentsWithheld(probe.slice(0, -1), [probe])).toThrow(
+      'protected marker fragment',
+    );
+    const middle = Math.floor(probe.length / 2);
+    const altered = `${probe.slice(0, middle)}!${probe.slice(middle + 1)}`;
+    expect(() => assertProtectedFragmentsWithheld(altered, [probe])).toThrow(
+      'protected marker fragment',
+    );
     expect(artifact).toContain('********');
   });
 
