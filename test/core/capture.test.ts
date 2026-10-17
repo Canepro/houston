@@ -378,6 +378,8 @@ describe('scripted browser capture', () => {
       ['/?token=%73ekret', '/?token=REDACTED'],
       ['/?api_key=sekret&page=2', '/?api_key=REDACTED&page=2'],
       ['/?a=1;password=sekret', '/?a=1;password=REDACTED'],
+      ['/?q=1&pwd=sekret', '/?q=1&pwd=REDACTED'],
+      ['/?totp=123456&otp_code=654321', '/?totp=REDACTED&otp_code=REDACTED'],
       [
         '/?access_token=sekret&access_token=sekret2',
         '/?access_token=REDACTED&access_token=REDACTED',
@@ -396,6 +398,13 @@ describe('scripted browser capture', () => {
     for (const [target, recorded] of credentialTargets) {
       cases.push(['https://workspace.test', target, recorded, `https://workspace.test${target}`]);
     }
+    // The URL parser strips a tab inside a name, so the browser sends `token`.
+    cases.push([
+      'https://workspace.test',
+      '/login?to\tken=sekret',
+      '/login?to\tken=REDACTED',
+      'https://workspace.test/login?token=sekret',
+    ]);
     // A placeholder value carries no secret, so it is recorded as authored; the browser
     // still gets the expansion.
     cases.push([

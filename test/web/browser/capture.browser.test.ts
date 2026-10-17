@@ -550,6 +550,10 @@ describe('scripted capture in a real browser', () => {
     ['control on a later page', 'navigate', 'input[name=token]'],
     ['control in a shadow root attached later', 'shadow', 'input[name=token]'],
     ['control that gains the selector later', 'attribute', 'input[name=token]'],
+    // A structural selector starts matching through a change on another element, and a
+    // pseudo-class through a state change that no mutation reports.
+    ['control matched once a sibling gains a class', 'sibling', '.reveal ~ input'],
+    ['control matched once a sibling is checked', 'checked', ':checked ~ input'],
   ])('keeps the mask on a %s for the rest of the capture', async (_label, mode, selector) => {
     const control =
       '<input name="token" style="width:600px;height:70px;font:40px monospace;color:rgb(0,160,0);background:white">';
@@ -562,8 +566,9 @@ describe('scripted capture in a real browser', () => {
         return;
       }
       response.end(`<!doctype html><body style="margin:0">
-      <div id="slot">${control}</div><div id="host"></div>
-      <input id="plain" style="width:600px;height:70px;font:40px monospace;color:rgb(0,160,0);background:white">
+      <div id="slot"><input type="checkbox" checked style="display:none"><label class="reveal"></label>${control}</div><div id="host"></div>
+      <div><input id="box" type="checkbox" style="display:none"><label id="mark"></label>
+      <input id="plain" style="width:600px;height:70px;font:40px monospace;color:rgb(0,160,0);background:white"></div>
       <button id="replace">Replace control</button><a id="next" href="/second">Next page</a>
       <p id="done" hidden>Replaced</p>
       <script>
@@ -577,6 +582,10 @@ describe('scripted capture in a real browser', () => {
             const root = document.getElementById('host').attachShadow({ mode: 'open' });
             root.innerHTML = '<input name="token" style="' + style + '">';
             root.querySelector('input').value = old.value;
+          } else if (mode === 'sibling' || mode === 'checked') {
+            document.getElementById('plain').value = old.value;
+            if (mode === 'sibling') document.getElementById('mark').className = 'reveal';
+            else document.getElementById('box').checked = true;
           } else if (mode === 'attribute') {
             const plain = document.getElementById('plain');
             plain.value = old.value;

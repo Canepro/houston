@@ -514,10 +514,11 @@ function navigationTarget(root: string, target: string, context: Context): strin
  * of the same kind. Matching is on the whole name so `error_code` and `barcode` stay readable.
  */
 const CREDENTIAL_PARAM =
-  /^(?:code|(?:auth|authorization|oauth|verification|reset|login|magic|invite)[_-]?code|auth|otp|jwt|assertion|saml[_-]?(?:response|request)|sig|signature|sid|session[_-]?id)$/iu;
+  /^(?:code|(?:auth|authorization|oauth|verification|reset|login|magic|invite|otp)[_-]?code|auth|otp|totp|pwd|jwt|assertion|saml[_-]?(?:response|request)|sig|signature|sid|session[_-]?id)$/iu;
 
 function credentialParam(name: string): boolean {
-  let key = name;
+  // The URL parser strips tab and newlines, so `to\tken` is sent as `token`.
+  let key = name.replace(/[\t\n\r]/gu, '');
   // The key can be percent-encoded as deeply as the target: `%74oken`, `%2574oken`.
   for (let depth = 0; depth < 4; depth += 1) {
     if (CREDENTIAL_PARAM.test(key) || credentialKey(key)) return true;
@@ -529,7 +530,7 @@ function credentialParam(name: string): boolean {
 }
 
 /** A parameter name after a `?`, `&`, `#` or `;`, up to its `=`. */
-const PARAMETER_NAME = /[?&#;]([^=&#;?\s/]*)=/gu;
+const PARAMETER_NAME = /[?&#;]([^=&#;?\s/]*(?:[\t\n\r]+[^=&#;?\s/]*)*)=/gu;
 
 /**
  * `text` with the value of every credential-shaped parameter replaced, running to the next
@@ -1660,12 +1661,16 @@ function installSecretMask(target: MaskTarget | null, options: MaskOptions): str
     }).observe(entry.target, { attributes: true, attributeFilter: ['style'] });
     position();
   };
+  // A structural selector (`.reveal + input`, `:has()`) can start matching a node outside the
+  // changed subtree, so it is resolved in every known root: one query per selector, never a
+  // walk of every element.
   const protectMatches = (scope: MaskRoot, deep: boolean, node: MaskTarget | null): void => {
     for (const selector of state.selectors) {
       try {
         if (node !== null && node.matches(selector)) protect(cover(node));
-        if (deep || structural(selector))
-          for (const match of Array.from(scope.querySelectorAll(selector))) protect(cover(match));
+        const scopes = deep ? [scope] : structural(selector) ? state.roots : [];
+        for (const root of scopes)
+          for (const match of Array.from(root.querySelectorAll(selector))) protect(cover(match));
       } catch {
         // The selector was valid when it was accepted; never let a page break the observer.
       }
@@ -1789,7 +1794,18 @@ function installSecretMask(target: MaskTarget | null, options: MaskOptions): str
   for (const root of state.roots) protectMatches(root, true, null);
   if (!state.running) {
     state.running = true;
+    // A pseudo-class such as `:checked` changes with no mutation to hear, so those selectors,
+    // and only those, are resolved again each frame.
     const tick = (): void => {
+      for (const selector of state.selectors) {
+        if (!selector.includes(':')) continue;
+        try {
+          for (const root of state.roots)
+            for (const match of Array.from(root.querySelectorAll(selector))) protect(cover(match));
+        } catch {
+          // The selector was valid when it was accepted; never let a page break the frame loop.
+        }
+      }
       position();
       browser.requestAnimationFrame(tick);
     };
