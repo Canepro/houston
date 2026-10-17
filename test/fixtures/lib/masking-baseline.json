@@ -1,0 +1,90 @@
+{
+  "base": "cd43ec601791a7cdf510bfaa9c0a6d4e935e7f03",
+  "scope": [
+    "A finite snapshot of bytes that the merged workbench-v2 head withheld from an attachable evidence bundle.",
+    "The public rows cover the distinct assignment, whole-userinfo, environment and argv redactors.",
+    "The matrix combines 15 wrapper forms, 8 shell forms and 10 heredoc layouts through record and writeBundle. Every generated row had its marker withheld by the pinned base."
+  ],
+  "limits": [
+    "This is a regression corpus, not a proof that every credential spelling is recognized.",
+    "A public row names the bytes that were withheld at the pinned base; stronger masking or different safe formatting is acceptable.",
+    "The expected matrix markers are pinned by count and digest. Add a reviewed row when a masking rule changes or a newly discovered authored shape needs preservation."
+  ],
+  "public": [
+    [
+      "assigned",
+      "URL=https://mask-guard-user-a:MASK_GUARD_VALUE_A@example.test/path",
+      ["mask-guard-user-a", "MASK_GUARD_VALUE_A"]
+    ],
+    [
+      "assigned",
+      "{\"url\":\"https://mask-guard-user-b:MASK_GUARD_VALUE_B@example.test/path\"}",
+      ["mask-guard-user-b", "MASK_GUARD_VALUE_B"]
+    ],
+    [
+      "userinfo",
+      "https://mask-guard-user-c:MASK_GUARD_VALUE_C@example.test/path",
+      ["mask-guard-user-c", "MASK_GUARD_VALUE_C"]
+    ],
+    [
+      "env",
+      "URL\u0000https://mask-guard-user-d:MASK_GUARD_VALUE_D@example.test/path",
+      ["MASK_GUARD_VALUE_D"]
+    ],
+    [
+      "argv",
+      "houston\u0000--env\u0000URL=https://mask-guard-user-e:MASK_GUARD_VALUE_E@example.test/path",
+      ["MASK_GUARD_VALUE_E"]
+    ],
+    ["argv", "houston\u0000--reg-token\u0000MASK_GUARD_VALUE_F", ["MASK_GUARD_VALUE_F"]],
+    [
+      "argv",
+      "houston\u0000--root-url=https://mask-guard-user-g:MASK_GUARD_VALUE_G@example.test/path",
+      ["MASK_GUARD_VALUE_G"]
+    ]
+  ],
+  "matrix": {
+    "wrappers": [
+      ["direct", ""],
+      ["env", "env"],
+      ["env-split", "env -S"],
+      ["sudo-user", "sudo -uroot"],
+      ["sudo-cluster", "sudo -nu worker"],
+      ["doas", "doas -n"],
+      ["exec", "exec -a capture"],
+      ["nice", "nice -n 0"],
+      ["timeout", "timeout 1"],
+      ["time", "time"],
+      ["command", "command --"],
+      ["nohup", "nohup"],
+      ["setsid", "setsid"],
+      ["stdbuf", "stdbuf -o0"],
+      ["unknown", "local-wrapper --tag"]
+    ],
+    "shells": [
+      ["sh", "sh"],
+      ["bash", "bash"],
+      ["dash", "dash"],
+      ["ash", "ash"],
+      ["ksh", "ksh"],
+      ["zsh", "zsh"],
+      ["path-sh", "/bin/sh -e"],
+      ["bash-profile", "bash --noprofile"]
+    ],
+    "layouts": [
+      "plain",
+      "single-delimiter",
+      "double-delimiter",
+      "tab-strip",
+      "space-before-delimiter",
+      "line-continuation",
+      "single-value",
+      "ansi-value",
+      "assignment-prefix",
+      "output-redirection"
+    ],
+    "marker_prefix": "MASK_GUARD_VALUE_",
+    "marker_count": 1200,
+    "marker_sha256": "bb56fcdf4b204bc49c744dfa5a9a665f9074fa77ca7ff090166a735efaae8c42"
+  }
+}

@@ -117,6 +117,11 @@ Go through this list for every change:
 8. **Nothing may break a 1.x install.** houston 1.x must keep working on a home 2.x has
    touched: leave the `IMPLEMENTATION` marker handling, the locks and every state file
    format alone unless that is the change.
+9. **Masking leans toward masking.** Treat an ambiguous byte as private; hiding too much is
+   safer than making a previously masked value readable. A proposed narrowing needs a
+   pinned prior-head corpus: every previously masked marker stays non-readable unless an
+   approved intentional contract change names it. A regex over authored text needs a killable
+   child-process deadline.
 
 ---
 

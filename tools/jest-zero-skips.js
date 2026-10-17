@@ -162,7 +162,9 @@ const ROOT = path.resolve(__dirname, '..');
 // in two modes, workspace HTTP credentials and the browser context options): 4867.
 // Round 8 adds one case (timing modifiers and fill values taken as authored or refused): 4868.
 // Merged with PRs 62 and 64 (base 4914): capture adds 4868 - 4831 = 37 cases, so 4914 + 37 = 4951.
-const FLOOR = 4951;
+// The pinned masking corpus adds fixture-integrity, public, artifact and authored-text timeout guards:
+// total 4955.
+const FLOOR = 4955;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

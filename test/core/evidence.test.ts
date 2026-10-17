@@ -59,6 +59,7 @@ import * as engine from '../../src/core/runner/engine';
 import * as lifecyclePayload from '../../src/core/lifecycle/payload';
 import * as kubeNamespace from '../../src/core/kube/namespace';
 import * as config from '../../src/lib/config';
+import { credentialKey } from '../../src/lib/redact';
 import { ValidationError } from '../../src/lib/errors';
 import * as dockerCli from '../../src/seams/docker-cli';
 import { Interrupted } from '../../src/seams/exec';
@@ -107,6 +108,99 @@ const COMPOSE = [
   '    image: mongo:7.0',
   '',
 ].join('\n');
+
+/** The evidence half of the finite cd43ec6 masking baseline. See the fixture for its limits. */
+const MASKING_BASELINE = JSON.parse(
+  fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'lib', 'masking-baseline.json'), 'utf8'),
+) as {
+  base: string;
+  scope: string[];
+  limits: string[];
+  public: [string, string, string[]][];
+  matrix: {
+    wrappers: [string, string][];
+    shells: [string, string][];
+    layouts: string[];
+    marker_prefix: string;
+    marker_count: number;
+    marker_sha256: string;
+  };
+};
+
+interface MaskingMatrixRow {
+  readonly copyKey: string;
+  readonly marker: string;
+  readonly service: string;
+  readonly script: string;
+}
+
+function heredocScript(command: string, layout: string, marker: string, delimiter: string): string {
+  const body = `client --password ${marker}`;
+  switch (layout) {
+    case 'plain':
+      return `${command} <<${delimiter}\n${body}\n${delimiter}`;
+    case 'single-delimiter':
+      return `${command} <<'${delimiter}'\n${body}\n${delimiter}`;
+    case 'double-delimiter':
+      return `${command} <<"${delimiter}"\n${body}\n${delimiter}`;
+    case 'tab-strip':
+      return `${command} <<-${delimiter}\n\t${body}\n\t${delimiter}`;
+    case 'space-before-delimiter':
+      return `${command} << ${delimiter}\n${body}\n${delimiter}`;
+    case 'line-continuation':
+      return `${command} <<${delimiter}\n${['client \\', `  --password ${marker}`].join('\n')}\n${delimiter}`;
+    case 'single-value':
+      return `${command} <<${delimiter}\nclient --password '${marker}'\n${delimiter}`;
+    case 'ansi-value':
+      return `${command} <<${delimiter}\nclient --password $'${marker}'\n${delimiter}`;
+    case 'assignment-prefix':
+      return `RUN=1 ${command} <<${delimiter}\n${body}\n${delimiter}`;
+    case 'output-redirection':
+      return `${command} <<${delimiter} >/dev/null\n${body}\n${delimiter}`;
+    default:
+      throw new Error(`unknown masking baseline layout '${layout}'`);
+  }
+}
+
+function maskingMatrixRows(): MaskingMatrixRow[] {
+  const { matrix } = MASKING_BASELINE;
+  const rows: MaskingMatrixRow[] = [];
+  for (const [wrapperId, wrapper] of matrix.wrappers) {
+    for (const [shellId, shell] of matrix.shells) {
+      for (const layout of matrix.layouts) {
+        const index = rows.length;
+        const rowId = String(index).padStart(4, '0');
+        const marker = `${matrix.marker_prefix}${rowId}`;
+        const command = [wrapper, shell].filter((part) => part !== '').join(' ');
+        rows.push({
+          copyKey: `x-row-${rowId}`,
+          marker,
+          service: `m${rowId}`,
+          script: heredocScript(command, layout, marker, `MASK_GUARD_END_${rowId}`),
+        });
+        expect(`${wrapperId}-${shellId}-${layout}`).toMatch(/^[a-z0-9-]+$/u);
+      }
+    }
+  }
+  return rows;
+}
+
+function maskingMatrixDocument(rows: readonly MaskingMatrixRow[]): string {
+  return [
+    ...rows.map((row) => `${row.copyKey}: ${row.marker}`),
+    'services:',
+    ...rows.flatMap((row) => [
+      `  ${row.service}:`,
+      '    image: busybox:1.37',
+      '    command:',
+      '      - /bin/sh',
+      '      - -c',
+      '      - |',
+      ...row.script.split('\n').map((line) => `        ${line}`),
+    ]),
+    '',
+  ].join('\n');
+}
 
 function captureInstructionArgs(readme: string): string[] {
   const match = readme.match(/```bash\nhouston capture([\s\S]*?)\n```/u);
@@ -1132,6 +1226,30 @@ describe('the bundle', () => {
     expect(rendered.services.rocketchat.command).toEqual(['/bin/sh', '-c', 'echo ********']);
     expect(rendered.services.rocketchat.labels['com.example.evidence-note']).toBe('********');
     expect(out.files).not.toContain('logs/compose.log');
+  });
+
+  it('keeps every finite cd43ec6 evidence-matrix marker non-readable', async () => {
+    // This invokes the actual record/writeBundle path. Its companion public-entrypoint test
+    // covers redactors whose output is intentionally not the same as an attachable artifact.
+    expect(MASKING_BASELINE.base).toBe('cd43ec601791a7cdf510bfaa9c0a6d4e935e7f03');
+    const rows = maskingMatrixRows();
+    const markers = rows.map((row) => row.marker);
+    expect(rows).toHaveLength(MASKING_BASELINE.matrix.marker_count);
+    expect(new Set(markers).size).toBe(markers.length);
+    expect(createHash('sha256').update(markers.join('\n')).digest('hex')).toBe(
+      MASKING_BASELINE.matrix.marker_sha256,
+    );
+    for (const row of rows) expect(credentialKey(row.copyKey)).toBe(false);
+
+    const name = 'e7-masking-baseline';
+    await workspaceNamed(name, {}, {}, maskingMatrixDocument(rows));
+    const dest = path.join(workspace(name), 'out', 'bundle');
+
+    await writeBundle(name, dest, await record(name));
+
+    const artifact = fs.readFileSync(path.join(dest, 'docker-compose.yml'), 'utf8');
+    for (const marker of markers) expect(artifact).not.toContain(marker);
+    expect(artifact).toContain('********');
   });
 
   it('collects artifact credentials before masking aliases and earlier copies', async () => {

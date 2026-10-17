@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -37,6 +38,81 @@ import {
 } from '../../src/lib/errors';
 
 const ADMIN_PASSWORD = 'capture-admin-password-123';
+const ROOT = path.resolve(__dirname, '..', '..');
+
+/**
+ * Navigation, selectors, values and the public redactors scan authored text before or alongside
+ * browser interaction. Keep that synchronous work in a child: a Jest timeout cannot interrupt a
+ * blocked JavaScript event loop, while this process deadline can kill a catastrophic regex
+ * regression.
+ */
+const AUTHORED_TEXT_TIMING_CHILD = String.raw`
+const fs = require('node:fs/promises');
+const path = require('node:path');
+require(path.join(process.cwd(), 'tools', 'ts-require')).install();
+const { parseWorkload, REDACTED, run } = require(path.join(process.cwd(), 'src', 'core', 'capture.ts'));
+const { redactAllUserinfo, redactArgv, redactAssignedText } = require(path.join(process.cwd(), 'src', 'lib', 'redact.ts'));
+const dest = process.argv[1];
+const navigationStress = '/x?a' + '\t'.repeat(5000) + 'x';
+const selector = '[data-authored-token="' + 'x'.repeat(5000) + '"]';
+const value = '{{' + 'x'.repeat(5000);
+const secret = 'MASK_GUARD_AUTHORED_' + 'x'.repeat(10000);
+let navigated = '';
+let clicked = '';
+let filled = '';
+const driver = {
+  goto: async (target) => { navigated = target; },
+  click: async (target) => { clicked = target; },
+  fill: async (_target, text) => { filled = text; },
+  press: async () => {},
+  waitFor: async () => {},
+  screenshot: async (file) => {
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, Buffer.alloc(4096));
+  },
+  finish: async () => {
+    await fs.writeFile(path.join(dest, 'video.webm'), Buffer.alloc(16384));
+    return { video: 'video.webm', secrets: [], maskedSelectors: [] };
+  },
+};
+(async () => {
+  const workload = parseWorkload(
+    [
+      'steps:',
+      '  - goto: ' + JSON.stringify(navigationStress),
+      '  - click: ' + JSON.stringify(selector),
+      '  - fill: ' + JSON.stringify(selector),
+      '    value: ' + JSON.stringify(value),
+      '',
+    ].join('\n'),
+    'authored-text-timing',
+  );
+  const manifest = await run(workload, driver, dest, { root_url: 'https://workspace.test' });
+  if (
+    manifest.steps[0].target !== navigationStress ||
+    manifest.steps[1].target !== selector ||
+    manifest.steps[2].value !== REDACTED ||
+    navigated === '' ||
+    clicked !== selector ||
+    filled !== value
+  ) throw new Error('authored capture text changed');
+  const publicOutputs = [
+    redactAssignedText('URL=https://mask-guard-user:' + secret + '@example.test/path'),
+    redactAllUserinfo('https://mask-guard-user:' + secret + '@example.test/path'),
+    redactArgv([
+      'houston',
+      '--root-url=https://mask-guard-user:' + secret + '@example.test/path',
+    ]).join('\0'),
+  ];
+  if (publicOutputs.some((output) => output.includes(secret))) {
+    throw new Error('public redactor exposed authored secret');
+  }
+  process.stdout.write('ok');
+})().catch((error) => {
+  process.stderr.write(String(error.stack || error));
+  process.exitCode = 1;
+});
+`;
 
 class FakeDriver implements Driver {
   readonly calls: string[] = [];
@@ -129,6 +205,23 @@ beforeEach(() => {
 });
 
 describe('scripted browser capture', () => {
+  test('bounds capture and public-redaction regex work over authored text in a killable child process', () => {
+    const dest = path.join(config.home(), 'authored-text-timing');
+    const result = spawnSync(process.execPath, ['-e', AUTHORED_TEXT_TIMING_CHILD, dest], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      timeout: 2500,
+      killSignal: 'SIGKILL',
+      maxBuffer: 1024 * 1024,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).toBe('ok');
+  });
+
   test('refuses an unreadable user override instead of running the built-in smoke workload', async () => {
     fs.mkdirSync(path.join(config.workloadDir(), 'smoke.yaml'), { recursive: true });
     await expect(loadWorkload('smoke')).rejects.toThrow(/cannot read workload.*EISDIR/u);
