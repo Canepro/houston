@@ -50,6 +50,7 @@ interface Tool {
   renderFixture(fixture: Fixture): string;
   measureCounts(root: string): Omit<Counts, 'floor'>;
   collectionCount(root: string, status: number | null, report: object, stderr: string): number;
+  gitMergeFile(ours: string, ancestor: string, theirs: string): string;
   run(options: {
     root: string;
     write?: boolean;
@@ -80,6 +81,10 @@ describe('the pins the tool owns, on this tree', () => {
   it('reproduces the usage-error fixture byte for byte, so a merge moves no line nobody changed', () => {
     const raw = fs.readFileSync(path.join(ROOT, 'test/fixtures/cli/usage-error.json'), 'utf8');
     expect(tool.renderFixture(JSON.parse(raw) as Fixture)).toBe(raw);
+  });
+
+  it('refuses a merge-file run git itself could not do, rather than take empty output', () => {
+    expect(() => tool.gitMergeFile('a\u0000b\n', 'a\n', 'c\n')).toThrow(/merge-file/u);
   });
 
   it('spells a count the way a test title does, and reads it back', () => {
@@ -524,6 +529,14 @@ describe('a base merge, end to end', () => {
       const report = tool.run({ root: clean, measure: () => ANCESTOR });
       expect(report.ok).toBe(false);
       expect(report.lines.join('\n')).toMatch(/textual merge of usage-error\.json/u);
+      // Corrected in the tree by hand, but not in HEAD: still not done.
+      const byHand = tool.mergeFixture(base, ours, theirs).text;
+      fs.writeFileSync(fixturePath, byHand);
+      const pending = tool.run({ root: clean, measure: () => ANCESTOR });
+      expect(pending.ok).toBe(false);
+      expect(pending.lines.join('\n')).toMatch(/git commit --amend/u);
+      expect(fs.readFileSync(fixturePath, 'utf8')).toBe(byHand);
+      git(clean, 'checkout', '--', 'test/fixtures/cli/usage-error.json');
       const written = tool.run({ root: clean, write: true, measure: () => ANCESTOR });
       expect(meaning(fs.readFileSync(fixturePath, 'utf8'))['g2 > extra']).toEqual(V('a'));
       // Staged, so the amend it asks for records it.
@@ -703,6 +716,33 @@ describe('a base merge, end to end', () => {
     expect(text).toMatch(/collects 104 tests, below the larger side's floor of 105/u);
     expect(text).toMatch(/floor pin .*cannot be read/u);
     expect(read('tools/jest-zero-skips.js')).toMatch(/^const FLOOR = 115;$/mu);
+  });
+
+  it('leaves the owned files alone when the history has more than one merge base', () => {
+    git(root, 'merge', '--abort');
+    // Criss-cross: each branch merges the other's first commit before both move on.
+    git(root, 'checkout', '-q', '-b', 'side', 'branch~1');
+    fs.writeFileSync(path.join(root, 'o1.txt'), 'o1\n');
+    git(root, 'add', 'o1.txt');
+    git(root, 'commit', '-q', '-m', 'o1');
+    git(root, 'checkout', '-q', '-b', 'side2', 'base~1');
+    fs.writeFileSync(path.join(root, 't1.txt'), 't1\n');
+    git(root, 'add', 't1.txt');
+    git(root, 'commit', '-q', '-m', 't1');
+    git(root, 'checkout', '-q', 'branch');
+    git(root, 'merge', '-q', '--no-edit', 'side', 'side2');
+    git(root, 'checkout', '-q', 'base');
+    git(root, 'merge', '-q', '--no-edit', 'side', 'side2');
+    git(root, 'checkout', '-q', 'branch');
+    git(root, 'merge', '-q', 'base');
+    expect(git(root, 'merge-base', '--all', 'HEAD', 'MERGE_HEAD').trim().split('\n')).toHaveLength(
+      2,
+    );
+    const before = read('tools/jest-zero-skips.js');
+    const result = tool.run({ root, measure: never });
+    expect(result.ok).toBe(false);
+    expect(result.lines.join('\n')).toMatch(/2 merge bases/u);
+    expect(read('tools/jest-zero-skips.js')).toBe(before);
   });
 
   it('outside a merge, reports a stale pin and moves it only with --write', () => {

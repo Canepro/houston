@@ -239,7 +239,8 @@ function gitMergeFile(ours, ancestor, theirs, style = '--diff3') {
       { cwd: dir, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 },
     );
     if (result.error) throw result.error;
-    if (result.status === null || result.status < 0) {
+    // 0 is clean and 1..127 counts conflicts; anything else is git failing to merge at all.
+    if (result.status === null || result.status < 0 || result.status > 127) {
       throw new Error(`git merge-file failed: ${result.stderr.trim()}`);
     }
     return result.stdout;
@@ -657,11 +658,16 @@ function run(options) {
     say(
       `merging ${merge.theirs.slice(0, 12)} into HEAD (merge base ${merge.ancestor.slice(0, 12)})`,
     );
-    if (merge.bases > 1) {
-      say(`  warning: ${String(merge.bases)} merge bases; the first stands in for all of them`);
-    }
     const unmerged = unmergedPaths(root);
-    const owned = [FIXTURE, ...new Set(SITES.map((site) => site.file))];
+    // A criss-cross history has no one ancestor to merge against; git builds a virtual one
+    // this tool does not. Every owned file is left to the person merging.
+    const owned = merge.bases > 1 ? [] : [FIXTURE, ...new Set(SITES.map((site) => site.file))];
+    if (merge.bases > 1) {
+      problems.push(
+        `${String(merge.bases)} merge bases (a criss-cross history): the owned files are not ` +
+          'merged here; resolve them by hand, then rerun to measure',
+      );
+    }
     for (const file of owned) {
       try {
         const conflicted = unmerged.includes(file);
@@ -761,15 +767,19 @@ function run(options) {
   if (merge === null) {
     const committed = committedFixtureMerge(root);
     if (committed !== null) {
-      if (write && !dryRun) {
-        fs.writeFileSync(path.join(root, FIXTURE), committed);
+      const current = fs.readFileSync(path.join(root, FIXTURE), 'utf8');
+      if (write && !dryRun && current === committed.committed) {
+        fs.writeFileSync(path.join(root, FIXTURE), committed.merged);
         git(root, ['add', '--', FIXTURE]);
-        say(`  ${FIXTURE}: merged by verdict; \`git commit --amend\` records it in the merge`);
+        say(`  ${FIXTURE}: merged by verdict and staged; \`git commit --amend\` records it`);
       } else {
+        // Until the amend, HEAD still holds the textual merge, whatever the tree holds.
         problems.push(
-          `HEAD is a merge git committed by itself with a textual merge of usage-error.json, ` +
-            'which can point cases at the wrong verdicts; rerun with --write, then ' +
-            '`git commit --amend`',
+          'HEAD is a merge git committed by itself with a textual merge of usage-error.json, ' +
+            'which can point cases at the wrong verdicts; ' +
+            (current === committed.committed
+              ? 'rerun with --write, then `git commit --amend`'
+              : 'the tree holds another fixture: stage it, then `git commit --amend`'),
         );
       }
     }
@@ -865,12 +875,14 @@ function committedFixtureMerge(root) {
   // Only one side changed it: git's merge is that side's file, which is right.
   if (ours === null || theirs === null || ancestor === null) return null;
   if (ours === ancestor || theirs === ancestor || ours === theirs) return null;
-  const current = fs.readFileSync(path.join(root, FIXTURE), 'utf8');
-  if (current !== gitMergeFile(ours, ancestor, theirs)) return null;
+  // What HEAD records, not what the tree holds: a correction not yet amended in is not one.
+  const committed = show(root, 'HEAD', FIXTURE);
+  if (committed === null || committed !== gitMergeFile(ours, ancestor, theirs)) return null;
   try {
     const merged = mergeFixture(ancestor, ours, theirs).text;
     // Different bytes are not a wrong merge; a case pointing at a different verdict is.
-    return fixtureMeaning(merged) === fixtureMeaning(current) ? null : merged;
+    if (fixtureMeaning(merged) === fixtureMeaning(committed)) return null;
+    return { merged, committed };
   } catch (error) {
     if (error instanceof Refusal) return null;
     throw error;
@@ -1007,5 +1019,6 @@ module.exports = {
   renderFixture,
   measureCounts,
   collectionCount,
+  gitMergeFile,
   run,
 };

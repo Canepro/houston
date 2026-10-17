@@ -177,7 +177,9 @@ const ROOT = path.resolve(__dirname, '..');
 // readable merge base, a staged fixture beats a side the merge refuses, and an unreadable
 // floor outside a merge is reported while the other pins move: 4984.
 // One more keeps the readable side's floor bound when the other side's pin is odd: 4985.
-const FLOOR = 4985;
+// Three more: a fatal merge-file exit refused, a criss-cross merge left to hand, and a hand
+// correction of a committed merge still asks for the amend: 4987.
+const FLOOR = 4987;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [
