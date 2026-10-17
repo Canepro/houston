@@ -164,7 +164,22 @@ const ROOT = path.resolve(__dirname, '..');
 // Merged with PRs 62 and 64 (base 4914): capture adds 4868 - 4831 = 37 cases, so 4914 + 37 = 4951.
 // The pinned masking corpus adds fixture-integrity, public, artifact and authored-text timeout guards:
 // total 4955.
-const FLOOR = 4955;
+// tools/integrate-base.js adds fourteen: its pins on this tree, the fixture's verdict merge,
+// the note join and a scratch-repository merge. `yarn integrate-base` measured 4969.
+// Five review fixes: a staged fixture kept, an interim floor clamped to both sides, a dry run
+// that measures nothing unwritten, a failed collection refused, and a title past 100: 4974.
+// Three more: a lost command refused, an unreadable pin reported past, and a merge git
+// committed by itself caught: 4977.
+// Two more: a one-sided fixture change in a committed merge is left alone, and a pinned
+// file the base deleted is reported while the rest is staged: 4979.
+// One more keeps a half-resolved pinned file: total 4980.
+// Four more: a dry run with stale pins is not done, a lost command is refused without a
+// readable merge base, a staged fixture beats a side the merge refuses, and an unreadable
+// floor outside a merge is reported while the other pins move: 4984.
+// One more keeps the readable side's floor bound when the other side's pin is odd: 4985.
+// Three more: a fatal merge-file exit refused, a criss-cross merge left to hand, and a hand
+// correction of a committed merge still asks for the amend: 4987.
+const FLOOR = 4987;
 
 /** Every authored construct that removes a test from a run or inverts what it asserts. */
 const SKIP_CONSTRUCTS = [

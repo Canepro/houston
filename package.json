@@ -50,7 +50,8 @@
     "depcruise:selftest": "node tools/depcruise-selftest.js",
     "test:zero-skips:selftest": "node tools/zero-skips-selftest.js",
     "skill:generate": "node tools/skill-generate.js",
-    "skill:check": "node tools/skill-generate.js --check"
+    "skill:check": "node tools/skill-generate.js --check",
+    "integrate-base": "node tools/integrate-base.js"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

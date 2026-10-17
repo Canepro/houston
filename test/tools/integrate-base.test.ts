@@ -1,0 +1,779 @@
+/**
+ * `tools/integrate-base.js`: the base-merge repairs, held to what a hand merge produced.
+ *
+ * The first block holds the pin table to THIS tree: every site matches once and reads what
+ * the source measures, so a renamed test or a reworded title fails here rather than in the
+ * next merge. The rest drives the merge itself -- the fixture's three-way verdict merge,
+ * the joined note above `FLOOR`, and a whole `git merge` in a scratch repository with the
+ * measurement stubbed, because the real one runs this suite.
+ */
+import { spawnSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+
+import { describeCommands } from '../../src/cli/capabilities';
+import { COMMAND_SPECS } from '../../src/cli/spec-data';
+
+interface Site {
+  readonly file: string;
+  readonly metric: string;
+}
+interface Counts {
+  paths: number;
+  options: number;
+  flags: number;
+  json: number;
+  floor: number;
+}
+interface Fixture {
+  verdicts: unknown[];
+  cases: Record<string, unknown>;
+}
+interface Tool {
+  SITES: readonly Site[];
+  toWords(n: number): string;
+  fromWords(text: string): number;
+  readSites(file: string, text: string): number[];
+  resolveCommentHunks(text: string): { text: string; resolved: number };
+  mergeSiteFile(
+    file: string,
+    ancestor: string,
+    ours: string,
+    theirs: string,
+  ): { text: string; conflicted: boolean; values: { merged: number[] } };
+  mergeFixture(
+    ancestor: string | null,
+    ours: string,
+    theirs: string,
+  ): { text: string; baseWins: string[][]; appended: number };
+  renderFixture(fixture: Fixture): string;
+  measureCounts(root: string): Omit<Counts, 'floor'>;
+  collectionCount(root: string, status: number | null, report: object, stderr: string): number;
+  gitMergeFile(ours: string, ancestor: string, theirs: string): string;
+  run(options: {
+    root: string;
+    write?: boolean;
+    dryRun?: boolean;
+    force?: boolean;
+    measure: (root: string) => Counts;
+  }): { ok: boolean; lines: string[] };
+}
+
+const ROOT = path.resolve(__dirname, '..', '..');
+const tool = require('../../tools/integrate-base.js') as Tool;
+const { FLOOR } = require('../../tools/jest-zero-skips.js') as { FLOOR: number };
+
+describe('the pins the tool owns, on this tree', () => {
+  it('finds every site exactly once, reading what the source measures', () => {
+    const measured = { ...tool.measureCounts(ROOT), floor: FLOOR };
+    expect(measured.paths).toBe(COMMAND_SPECS.length);
+    expect(measured.flags).toBe(
+      describeCommands().reduce((total, command) => total + command.flags.length, 0),
+    );
+    for (const file of new Set(tool.SITES.map((site) => site.file))) {
+      const values = tool.readSites(file, fs.readFileSync(path.join(ROOT, file), 'utf8'));
+      const metrics = tool.SITES.filter((site) => site.file === file).map((site) => site.metric);
+      expect(values).toEqual(metrics.map((metric) => measured[metric as keyof Counts]));
+    }
+  });
+
+  it('reproduces the usage-error fixture byte for byte, so a merge moves no line nobody changed', () => {
+    const raw = fs.readFileSync(path.join(ROOT, 'test/fixtures/cli/usage-error.json'), 'utf8');
+    expect(tool.renderFixture(JSON.parse(raw) as Fixture)).toBe(raw);
+  });
+
+  it('refuses a merge-file run git itself could not do, rather than take empty output', () => {
+    expect(() => tool.gitMergeFile('a\u0000b\n', 'a\n', 'c\n')).toThrow(/merge-file/u);
+  });
+
+  it('spells a count the way a test title does, and reads it back', () => {
+    expect(tool.toWords(45)).toBe('forty-five');
+    expect(tool.toWords(40)).toBe('forty');
+    expect(tool.toWords(102)).toBe('one hundred and two');
+    for (let n = 0; n <= 999; n += 1) expect(tool.fromWords(tool.toWords(n))).toBe(n);
+  });
+
+  it('reads a title count past one hundred, which has spaces in it', () => {
+    const text = [
+      "it('registers exactly the one hundred and two commands the table declares', () => {",
+      '  expect(declared).toHaveLength(102);',
+      '  expect(advertised.size).toBe(16);',
+      '  expect(described).toHaveLength(102);',
+      '  expect(flags).toBe(202);',
+    ].join('\n');
+    expect(tool.readSites('test/cli/invariants/command-surface.test.ts', text)).toEqual([
+      102, 102, 16, 102, 202,
+    ]);
+  });
+
+  it('refuses a collection run Jest itself failed, though its report looks whole', () => {
+    // The zero-skips reporter fails an authored `.skip` through Jest's exit code alone.
+    const report = {
+      numTotalTests: 10,
+      numPassedTests: 0,
+      numFailedTests: 0,
+      numRuntimeErrorTestSuites: 0,
+      testResults: [],
+    };
+    expect(tool.collectionCount('/root', 0, report, '')).toBe(10);
+    expect(() =>
+      tool.collectionCount('/root', 1, report, 'zero-skips gate FAILED: an authored skip'),
+    ).toThrow(/exited 1[^]*zero-skips gate FAILED/u);
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+
+const V = (text: string) => ({ code: 2, stdout: '', stderr: text });
+
+function fixture(verdicts: unknown[], cases: Record<string, unknown>): string {
+  return tool.renderFixture({ verdicts, cases });
+}
+
+/** Each case path, with the verdict it points at. */
+function meaning(raw: string): Record<string, unknown> {
+  const doc = JSON.parse(raw) as Fixture;
+  const out: Record<string, unknown> = {};
+  const walk = (node: Record<string, unknown>, at: string) => {
+    for (const [key, value] of Object.entries(node)) {
+      if (typeof value === 'number') out[`${at}${key}`] = doc.verdicts[value];
+      else walk(value as Record<string, unknown>, `${at}${key} > `);
+    }
+  };
+  walk(doc.cases, '');
+  return out;
+}
+
+describe('merging the usage-error fixture', () => {
+  const ancestor = fixture([V('a'), V('b')], {
+    group: { keep: 0, oursEdits: 1, theirsEdits: 0, theirsDrops: 0, bothEdit: 0, oursDrops: 1 },
+  });
+  // Ours: its verdicts in a different order, so its indices mean something else.
+  const ours = fixture([V('b'), V('a'), V('ours')], {
+    group: { keep: 1, oursEdits: 1, theirsEdits: 1, theirsDrops: 1, bothEdit: 2, oursAdds: 2 },
+  });
+  const theirs = fixture([V('a'), V('b'), V('theirs')], {
+    group: { keep: 0, oursEdits: 1, theirsEdits: 2, bothEdit: 1, oursDrops: 2, theirsAdds: 2 },
+  });
+
+  it('takes each side its own changes, by verdict rather than by index', () => {
+    const merged = tool.mergeFixture(ancestor, ours, theirs);
+    expect(meaning(merged.text)).toEqual({
+      'group > keep': V('a'),
+      'group > oursEdits': V('a'),
+      'group > theirsEdits': V('theirs'),
+      'group > bothEdit': V('b'),
+      'group > oursDrops': V('theirs'),
+      'group > theirsAdds': V('theirs'),
+      'group > oursAdds': V('ours'),
+    });
+    // The base's list keeps its order; the one verdict only ours uses is appended.
+    expect((JSON.parse(merged.text) as Fixture).verdicts).toEqual([
+      V('a'),
+      V('b'),
+      V('theirs'),
+      V('ours'),
+    ]);
+    expect(merged.appended).toBe(1);
+  });
+
+  it('lets the base win where both sides changed a case, and names every one', () => {
+    const merged = tool.mergeFixture(ancestor, ours, theirs);
+    expect(merged.baseWins).toEqual([
+      ['group', 'bothEdit'],
+      ['group', 'oursDrops'],
+    ]);
+  });
+
+  it('refuses a side not in the recorder layout rather than rewrite lines nobody changed', () => {
+    const reflowed = JSON.stringify(JSON.parse(ours), null, 2);
+    expect(() => tool.mergeFixture(ancestor, reflowed, theirs)).toThrow(/layout/u);
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+
+describe('the note above FLOOR', () => {
+  it('never writes an interim floor below either side, even when ours removed tests', () => {
+    const file = (floor: number) =>
+      `'use strict';\n// The suite.\nconst FLOOR = ${String(floor)};\n`;
+    const merged = tool.mergeSiteFile('tools/jest-zero-skips.js', file(100), file(90), file(110));
+    expect(merged.values.merged).toEqual([110]);
+    expect(merged.text).toContain('const FLOOR = 110;');
+  });
+
+  const conflict = (ours: string[], base: string[], theirs: string[], after: string) =>
+    [
+      'module.exports = {};',
+      '<<<<<<< ours',
+      ...ours,
+      '||||||| base',
+      ...base,
+      '=======',
+      ...theirs,
+      '>>>>>>> theirs',
+      after,
+    ].join('\n');
+
+  it('joins two notes: theirs, then the lines only ours wrote', () => {
+    const text = conflict(
+      ['// shared.', '// ours: total 105.'],
+      ['// shared.', '// total 100.'],
+      ['// theirs: total 110.'],
+      'const FLOOR = 115;',
+    );
+    const joined = tool.resolveCommentHunks(text);
+    expect(joined.resolved).toBe(1);
+    // `// shared.` stays gone: ours left it alone and theirs removed it.
+    expect(joined.text.split('\n')).toEqual([
+      'module.exports = {};',
+      '// theirs: total 110.',
+      '// ours: total 105.',
+      'const FLOOR = 115;',
+    ]);
+  });
+
+  it('leaves a comment conflict anywhere else, and any code conflict, to the person merging', () => {
+    const elsewhere = conflict(['// a'], [], ['// b'], 'function other() {}');
+    expect(tool.resolveCommentHunks(elsewhere).resolved).toBe(0);
+    const code = conflict(['const a = 1;'], [], ['// b'], 'const FLOOR = 1;');
+    expect(tool.resolveCommentHunks(code).resolved).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// A real `git merge`, in a scratch repository that holds every pinned file.
+
+const GIT_ENV = {
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_AUTHOR_NAME: 'integrate-base test',
+  GIT_AUTHOR_EMAIL: 'integrate-base@example.invalid',
+  GIT_COMMITTER_NAME: 'integrate-base test',
+  GIT_COMMITTER_EMAIL: 'integrate-base@example.invalid',
+};
+
+function git(root: string, ...args: string[]): string {
+  const result = spawnSync('git', args, { cwd: root, encoding: 'utf8', env: process.env });
+  return `${result.stdout}${result.stderr}`;
+}
+
+interface Tree extends Counts {
+  notes: string[];
+  other: string;
+  cases: Record<string, number>;
+  /** The whole fixture, when a test needs more than one `corpus` group. */
+  fixture?: string;
+}
+
+/** The pinned files as this tree spells them, cut down to the lines the pins live on. */
+function tree(state: Tree): Record<string, string> {
+  return {
+    'tools/jest-zero-skips.js': [
+      "'use strict';",
+      ...state.notes,
+      `const FLOOR = ${String(state.floor)};`,
+      'module.exports = { FLOOR };',
+      '',
+    ].join('\n'),
+    'test/cli/foundation.test.ts': [
+      `test('registers all ${String(state.paths)} unique paths and all ${String(state.flags)} logical flags', () => {`,
+      `  expect(paths).toHaveLength(${String(state.paths)});`,
+      `  expect(new Set(paths).size).toBe(${String(state.paths)});`,
+      `  expect(specs.reduce((total, spec) => total + spec.options.length, 0)).toBe(${String(state.options)});`,
+      `  expect(described.reduce((total, command) => total + command.flags.length, 0)).toBe(${String(state.flags)});`,
+      `  expect(described.filter((command) => command.json)).toHaveLength(${String(state.json)});`,
+      '});',
+      '',
+    ].join('\n'),
+    'test/cli/invariants/command-surface.test.ts': [
+      `it('registers exactly the ${tool.toWords(state.paths)} commands the table declares', () => {`,
+      `  expect(declared).toHaveLength(${String(state.paths)});`,
+      `  expect(advertised.size).toBe(${String(state.json)});`,
+      `  expect(described).toHaveLength(${String(state.paths)});`,
+      `  expect(flags).toBe(${String(state.flags)});`,
+      '});',
+      '',
+    ].join('\n'),
+    'test/cli/render-human.test.ts': [
+      `test('all ${String(state.paths)} routable paths have a renderer', () => {`,
+      `  expect(COMMAND_SPECS).toHaveLength(${String(state.paths)});`,
+      '});',
+      '',
+    ].join('\n'),
+    'test/cli/invariants/printed-commands.test.ts': `expect(COMMAND_SPECS).toHaveLength(${String(state.paths)});\n`,
+    'test/cli/invariants/source-rules.test.ts': `expect(speakers.length).toBe(${String(state.json)});\n`,
+    'test/fixtures/cli/usage-error.json':
+      state.fixture ?? fixture([V('a'), V('b'), V('c')], { corpus: state.cases }),
+    'other.txt': `${state.other}\n`,
+  };
+}
+
+function commit(root: string, state: Tree, message: string): void {
+  for (const [file, text] of Object.entries(tree(state))) {
+    fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+    fs.writeFileSync(path.join(root, file), text);
+  }
+  git(root, 'add', '-A');
+  git(root, 'commit', '-q', '-m', message);
+}
+
+const ANCESTOR: Tree = {
+  paths: 45,
+  options: 187,
+  flags: 202,
+  json: 16,
+  floor: 100,
+  notes: ['// The suite.', '// Total 100.'],
+  other: 'ancestor',
+  cases: { one: 0, two: 1 },
+};
+// The base added a JSON command (two flags, two options) and ten tests.
+const THEIRS: Tree = {
+  ...ANCESTOR,
+  paths: 46,
+  options: 189,
+  flags: 204,
+  json: 17,
+  floor: 110,
+  notes: ['// The suite.', '// The base adds ten: total 110.'],
+  other: 'theirs',
+  cases: { one: 0, two: 2, three: 1 },
+};
+// The branch added a plain command (one flag, one option) and five tests.
+const OURS: Tree = {
+  ...ANCESTOR,
+  paths: 46,
+  options: 188,
+  flags: 203,
+  floor: 105,
+  notes: ['// The suite.', '// The branch adds five: total 105.'],
+  other: 'ours',
+  cases: { zero: 1, one: 0, two: 1 },
+};
+const MERGED = { paths: 47, options: 190, flags: 205, json: 17, floor: 115 };
+
+describe('a base merge, end to end', () => {
+  let root: string;
+  const saved: Record<string, string | undefined> = {};
+
+  beforeAll(() => {
+    for (const [key, value] of Object.entries(GIT_ENV)) {
+      saved[key] = process.env[key];
+      process.env[key] = value;
+    }
+  });
+  afterAll(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-integrate-base-'));
+    git(root, 'init', '-q', '-b', 'base');
+    commit(root, ANCESTOR, 'ancestor');
+    git(root, 'checkout', '-q', '-b', 'branch');
+    commit(root, OURS, 'branch');
+    git(root, 'checkout', '-q', 'base');
+    commit(root, THEIRS, 'base');
+    git(root, 'checkout', '-q', 'branch');
+    git(root, 'merge', '-q', 'base');
+  });
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const read = (file: string) => fs.readFileSync(path.join(root, file), 'utf8');
+  const unmerged = () => git(root, 'diff', '--name-only', '--diff-filter=U').trim();
+  const never = (): Counts => {
+    throw new Error('measured while paths were still unmerged');
+  };
+
+  it('merges every pinned file, stages it, and stops at the conflict it does not own', () => {
+    const result = tool.run({ root, measure: never });
+    expect(result.ok).toBe(false);
+    expect(result.lines.join('\n')).toMatch(/1 path\(s\) still unmerged[^]*other\.txt/u);
+    expect(unmerged()).toBe('other.txt');
+    // The files git could not merge carry base + ours - merge base already.
+    const expected = tree({ ...THEIRS, ...MERGED, notes: [], cases: {} });
+    for (const file of [
+      'test/cli/foundation.test.ts',
+      'test/cli/invariants/command-surface.test.ts',
+      'test/cli/invariants/source-rules.test.ts',
+    ]) {
+      expect(read(file)).toBe(expected[file]);
+    }
+    // Both sides wrote 46 here, so git merged it without a word. 47 waits for the measurement.
+    expect(read('test/cli/render-human.test.ts')).toContain('all 46 routable paths');
+    expect(read('tools/jest-zero-skips.js')).toBe(
+      tree({
+        ...THEIRS,
+        floor: 115,
+        notes: [
+          '// The suite.',
+          '// The base adds ten: total 110.',
+          '// The branch adds five: total 105.',
+        ],
+      })['tools/jest-zero-skips.js'],
+    );
+    expect(meaning(read('test/fixtures/cli/usage-error.json'))).toEqual({
+      'corpus > zero': V('b'),
+      'corpus > one': V('a'),
+      'corpus > two': V('c'),
+      'corpus > three': V('b'),
+    });
+  });
+
+  it('then measures: the counts and the floor move to what the merged tree holds', () => {
+    tool.run({ root, measure: never });
+    fs.writeFileSync(path.join(root, 'other.txt'), 'resolved\n');
+    git(root, 'add', 'other.txt');
+    // A test both sides carried was counted twice: 113, not 115, and still above both sides.
+    const result = tool.run({ root, measure: () => ({ ...MERGED, floor: 113 }) });
+    expect(result.lines.join('\n')).toMatch(/floor 115 -> 113/u);
+    expect(result.ok).toBe(true);
+    expect(read('tools/jest-zero-skips.js')).toMatch(/^const FLOOR = 113;$/mu);
+    const expected = tree({ ...THEIRS, ...MERGED, notes: [], cases: {} });
+    for (const file of Object.keys(expected).filter((name) => name.startsWith('test/cli/'))) {
+      expect(read(file)).toBe(expected[file]);
+    }
+    // Everything it wrote is staged.
+    expect(git(root, 'diff', '--name-only')).toBe('');
+  });
+
+  it('never lowers the floor below either side: a smaller suite lost tests', () => {
+    tool.run({ root, measure: never });
+    fs.writeFileSync(path.join(root, 'other.txt'), 'resolved\n');
+    git(root, 'add', 'other.txt');
+    const result = tool.run({ root, measure: () => ({ ...MERGED, floor: 108 }) });
+    expect(result.ok).toBe(false);
+    expect(result.lines.join('\n')).toMatch(
+      /collects 108 tests, below the larger side's floor of 110/u,
+    );
+    expect(read('tools/jest-zero-skips.js')).toMatch(/^const FLOOR = 115;$/mu);
+  });
+
+  it('leaves a pinned file someone already resolved by hand', () => {
+    const file = 'test/cli/foundation.test.ts';
+    fs.writeFileSync(path.join(root, file), 'resolved by hand\n');
+    const result = tool.run({ root, measure: never });
+    expect(result.lines.join('\n')).toContain(`${file}: already edited by hand`);
+    expect(read(file)).toBe('resolved by hand\n');
+  });
+
+  it('reports a conflict marker left behind and a tool that no longer parses', () => {
+    tool.run({ root, measure: never });
+    fs.writeFileSync(
+      path.join(root, 'other.txt'),
+      '<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n',
+    );
+    fs.writeFileSync(
+      path.join(root, 'tools', 'dup.js'),
+      "'use strict';\nconst os = require('node:os');\nconst os = require('node:os');\n",
+    );
+    git(root, 'add', 'other.txt', 'tools/dup.js');
+    const result = tool.run({ root, measure: () => MERGED });
+    const text = result.lines.join('\n');
+    expect(result.ok).toBe(false);
+    expect(text).toMatch(/tools\/dup\.js does not parse/u);
+    expect(text).toMatch(/leftover other\.txt:1: leftover conflict marker/u);
+  });
+
+  it('refuses a merge that lost a command one side added, rather than shrink the pins', () => {
+    fs.writeFileSync(path.join(root, 'other.txt'), 'resolved\n');
+    git(root, 'add', 'other.txt');
+    // Both sides have 46 commands; a merged registry of 45 dropped one of them.
+    const result = tool.run({ root, measure: () => ({ ...MERGED, paths: 45 }) });
+    expect(result.ok).toBe(false);
+    expect(result.lines.join('\n')).toMatch(/45 paths, fewer than the larger side's 46/u);
+    expect(read('test/cli/render-human.test.ts')).toContain('all 46 routable paths');
+  });
+
+  it('keeps going past a pin it cannot read, and stages the files it did merge', () => {
+    git(root, 'merge', '--abort');
+    git(root, 'checkout', '-q', 'branch');
+    fs.writeFileSync(path.join(root, 'test/cli/invariants/source-rules.test.ts'), 'renamed\n');
+    git(root, 'commit', '-q', '-am', 'rename the pin');
+    git(root, 'merge', '-q', 'base');
+    const result = tool.run({ root, measure: never });
+    const text = result.lines.join('\n');
+    expect(result.ok).toBe(false);
+    expect(text).toMatch(/source-rules\.test\.ts: the json pin/u);
+    expect(git(root, 'diff', '--name-only', '--cached')).toContain('tools/jest-zero-skips.js');
+    expect(unmerged()).not.toContain('tools/jest-zero-skips.js');
+  });
+
+  it('catches a merge git committed by itself with a textual fixture merge', () => {
+    // Ours inserts a verdict at index 0 and retargets its case; the base adds a group whose
+    // case means `a`. The lines never touch, so git commits -- and points the base's case
+    // at `z`.
+    const pad = { pad: {} };
+    const base = fixture([V('a'), V('b')], { g1: { keep: 0 }, ...pad });
+    const ours = fixture([V('z'), V('a'), V('b')], { g1: { keep: 1 }, ...pad });
+    const theirs = fixture([V('a'), V('b')], { g1: { keep: 0 }, ...pad, g2: { extra: 0 } });
+    const clean = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-integrate-base-clean-'));
+    try {
+      git(clean, 'init', '-q', '-b', 'base');
+      commit(clean, { ...ANCESTOR, fixture: base }, 'ancestor');
+      git(clean, 'checkout', '-q', '-b', 'branch');
+      commit(clean, { ...ANCESTOR, fixture: ours }, 'branch');
+      git(clean, 'checkout', '-q', 'base');
+      commit(clean, { ...ANCESTOR, fixture: theirs }, 'base');
+      git(clean, 'checkout', '-q', 'branch');
+      git(clean, 'merge', '-q', '--no-edit', 'base');
+      const fixturePath = path.join(clean, 'test/fixtures/cli/usage-error.json');
+      expect(meaning(fs.readFileSync(fixturePath, 'utf8'))['g2 > extra']).toEqual(V('z'));
+      const report = tool.run({ root: clean, measure: () => ANCESTOR });
+      expect(report.ok).toBe(false);
+      expect(report.lines.join('\n')).toMatch(/textual merge of usage-error\.json/u);
+      // Corrected in the tree by hand, but not in HEAD: still not done.
+      const byHand = tool.mergeFixture(base, ours, theirs).text;
+      fs.writeFileSync(fixturePath, byHand);
+      const pending = tool.run({ root: clean, measure: () => ANCESTOR });
+      expect(pending.ok).toBe(false);
+      expect(pending.lines.join('\n')).toMatch(/git commit --amend/u);
+      expect(fs.readFileSync(fixturePath, 'utf8')).toBe(byHand);
+      git(clean, 'checkout', '--', 'test/fixtures/cli/usage-error.json');
+      const written = tool.run({ root: clean, write: true, measure: () => ANCESTOR });
+      expect(meaning(fs.readFileSync(fixturePath, 'utf8'))['g2 > extra']).toEqual(V('a'));
+      // Staged, so the amend it asks for records it.
+      expect(git(clean, 'diff', '--name-only')).toBe('');
+      expect(git(clean, 'diff', '--name-only', '--cached')).toContain('usage-error.json');
+      // Staged is not committed: not done until the amend, and done after it.
+      expect(written.ok).toBe(false);
+      git(clean, 'commit', '-q', '--amend', '--no-edit');
+      expect(tool.run({ root: clean, measure: () => ANCESTOR }).ok).toBe(true);
+      expect(written.lines.join('\n')).toMatch(/git commit --amend/u);
+    } finally {
+      fs.rmSync(clean, { recursive: true, force: true });
+    }
+  });
+
+  it('lets a merge git committed alone stand when only one side changed the fixture', () => {
+    const base = fixture([V('a'), V('b')], { g1: { keep: 0, other: 1 } });
+    // Ours reorders the verdicts and moves every index with them: same meaning, new bytes.
+    const ours = fixture([V('b'), V('a')], { g1: { keep: 1, other: 0 } });
+    const clean = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-integrate-base-one-side-'));
+    try {
+      git(clean, 'init', '-q', '-b', 'base');
+      commit(clean, { ...ANCESTOR, fixture: base }, 'ancestor');
+      git(clean, 'checkout', '-q', '-b', 'branch');
+      commit(clean, { ...ANCESTOR, fixture: ours }, 'branch');
+      git(clean, 'checkout', '-q', 'base');
+      commit(clean, { ...ANCESTOR, fixture: base, other: 'theirs' }, 'base');
+      git(clean, 'checkout', '-q', 'branch');
+      git(clean, 'merge', '-q', '--no-edit', 'base');
+      const report = tool.run({ root: clean, measure: () => ANCESTOR });
+      expect(report.lines.join('\n')).not.toMatch(/textual merge/u);
+      expect(report.ok).toBe(true);
+    } finally {
+      fs.rmSync(clean, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a pinned file the base deleted, and still stages what it merged', () => {
+    git(root, 'merge', '--abort');
+    git(root, 'checkout', '-q', 'base');
+    git(root, 'rm', '-q', 'test/cli/invariants/source-rules.test.ts');
+    git(root, 'commit', '-q', '-m', 'delete a pinned file');
+    git(root, 'checkout', '-q', 'branch');
+    git(root, 'merge', '-q', 'base');
+    const result = tool.run({ root, measure: never });
+    expect(result.ok).toBe(false);
+    expect(result.lines.join('\n')).toMatch(/source-rules\.test\.ts[^\n]*(missing|deleted)/u);
+    expect(unmerged()).not.toContain('tools/jest-zero-skips.js');
+  });
+
+  it('leaves a pinned file someone half resolved, markers and all', () => {
+    const file = 'tools/jest-zero-skips.js';
+    const partial = `${read(file)}// resolved by hand while a conflict remains\n`;
+    expect(partial).toMatch(/^<{7}/mu);
+    fs.writeFileSync(path.join(root, file), partial);
+    const result = tool.run({ root, measure: never });
+    expect(result.lines.join('\n')).toContain(`${file}: already edited by hand`);
+    expect(read(file)).toBe(partial);
+  });
+
+  it('keeps a fixture resolution someone staged by hand, on every rerun', () => {
+    const fixturePath = 'test/fixtures/cli/usage-error.json';
+    const hand = fixture([V('a'), V('b'), V('c')], { corpus: { one: 0, hand: 1 } });
+    fs.writeFileSync(path.join(root, fixturePath), hand);
+    git(root, 'add', fixturePath);
+    const result = tool.run({ root, measure: never });
+    expect(result.lines.join('\n')).toContain(`${fixturePath}: already edited by hand`);
+    expect(read(fixturePath)).toBe(hand);
+  });
+
+  it('in a dry run, measures nothing it has not written', () => {
+    fs.writeFileSync(path.join(root, 'other.txt'), 'resolved\n');
+    git(root, 'add', 'other.txt');
+    const before = read('tools/jest-zero-skips.js');
+    const result = tool.run({ root, dryRun: true, measure: never });
+    expect(result.ok).toBe(false);
+    expect(result.lines.join('\n')).toMatch(/dry run[^]*rerun without --dry-run/u);
+    expect(read('tools/jest-zero-skips.js')).toBe(before);
+  });
+
+  it('in a dry run with nothing left to merge, reports pins it would move as not done', () => {
+    fs.writeFileSync(path.join(root, 'other.txt'), 'resolved\n');
+    git(root, 'add', 'other.txt');
+    tool.run({ root, measure: () => MERGED });
+    const result = tool.run({ root, dryRun: true, measure: () => ({ ...MERGED, paths: 48 }) });
+    expect(result.ok).toBe(false);
+    expect(result.lines.join('\n')).toMatch(/would move paths 47 -> 48/u);
+    expect(read('test/cli/render-human.test.ts')).toContain('all 47 routable paths');
+  });
+
+  it('still refuses a lost command when the merge base has no readable pins', () => {
+    const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-integrate-base-nopin-'));
+    try {
+      git(scratch, 'init', '-q', '-b', 'base');
+      commit(scratch, ANCESTOR, 'ancestor');
+      fs.writeFileSync(path.join(scratch, 'test/cli/foundation.test.ts'), 'no pins here\n');
+      git(scratch, 'commit', '-q', '-am', 'ancestor without pins');
+      git(scratch, 'checkout', '-q', '-b', 'branch');
+      commit(scratch, OURS, 'branch');
+      git(scratch, 'checkout', '-q', 'base');
+      commit(scratch, THEIRS, 'base');
+      git(scratch, 'checkout', '-q', 'branch');
+      git(scratch, 'merge', '-q', 'base');
+      const resolved = tree({ ...THEIRS, ...MERGED, notes: [], cases: {} });
+      fs.writeFileSync(
+        path.join(scratch, 'test/cli/foundation.test.ts'),
+        resolved['test/cli/foundation.test.ts'] ?? '',
+      );
+      fs.writeFileSync(path.join(scratch, 'other.txt'), 'resolved\n');
+      git(scratch, 'add', 'test/cli/foundation.test.ts', 'other.txt');
+      const result = tool.run({ root: scratch, measure: () => ({ ...MERGED, paths: 45 }) });
+      expect(result.ok).toBe(false);
+      expect(result.lines.join('\n')).toMatch(/45 paths, fewer than the larger side's 46/u);
+    } finally {
+      fs.rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts a staged fixture resolution even when a side is not in the recorder layout', () => {
+    const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-integrate-base-layout-'));
+    try {
+      const pretty = (cases: Record<string, number>) =>
+        `${JSON.stringify({ verdicts: [V('a'), V('b'), V('c')], cases: { corpus: cases } }, null, 2)}\n`;
+      git(scratch, 'init', '-q', '-b', 'base');
+      commit(scratch, ANCESTOR, 'ancestor');
+      git(scratch, 'checkout', '-q', '-b', 'branch');
+      commit(scratch, { ...OURS, fixture: pretty(OURS.cases) }, 'branch');
+      git(scratch, 'checkout', '-q', 'base');
+      commit(scratch, THEIRS, 'base');
+      git(scratch, 'checkout', '-q', 'branch');
+      git(scratch, 'merge', '-q', 'base');
+      const hand = fixture([V('a'), V('b'), V('c')], { corpus: { zero: 1, one: 0, two: 2 } });
+      fs.writeFileSync(path.join(scratch, 'test/fixtures/cli/usage-error.json'), hand);
+      fs.writeFileSync(path.join(scratch, 'other.txt'), 'resolved\n');
+      git(scratch, 'add', 'test/fixtures/cli/usage-error.json', 'other.txt');
+      const result = tool.run({ root: scratch, measure: () => MERGED });
+      expect(result.lines.join('\n')).not.toMatch(/layout/u);
+      expect(result.ok).toBe(true);
+    } finally {
+      fs.rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('outside a merge, reports an unreadable floor and still moves the other pins', () => {
+    fs.writeFileSync(path.join(root, 'other.txt'), 'resolved\n');
+    git(root, 'add', 'other.txt');
+    tool.run({ root, measure: () => MERGED });
+    git(root, 'commit', '-q', '-m', 'merge');
+    const floorFile = path.join(root, 'tools/jest-zero-skips.js');
+    fs.writeFileSync(
+      floorFile,
+      read('tools/jest-zero-skips.js').replace('const FLOOR', 'const FLOR'),
+    );
+    const result = tool.run({ root, write: true, measure: () => ({ ...MERGED, paths: 48 }) });
+    expect(result.ok).toBe(false);
+    expect(result.lines.join('\n')).toMatch(/the floor pin/u);
+    expect(read('test/cli/render-human.test.ts')).toContain('all 48 routable paths');
+  });
+
+  it("moves no floor while one side's floor pin cannot be read", () => {
+    git(root, 'merge', '--abort');
+    git(root, 'checkout', '-q', 'base');
+    const floorFile = path.join(root, 'tools/jest-zero-skips.js');
+    fs.writeFileSync(
+      floorFile,
+      read('tools/jest-zero-skips.js').replace('FLOOR = 110', 'FLOOR=110'),
+    );
+    git(root, 'commit', '-q', '-am', 'the base spells its floor differently');
+    git(root, 'checkout', '-q', 'branch');
+    git(root, 'merge', '-q', 'base');
+    fs.writeFileSync(
+      floorFile,
+      tree({ ...THEIRS, floor: 115, notes: [] })['tools/jest-zero-skips.js'] ?? '',
+    );
+    fs.writeFileSync(path.join(root, 'other.txt'), 'resolved\n');
+    git(root, 'add', 'tools/jest-zero-skips.js', 'other.txt');
+    // 104 tests: below ours' readable 105, and the base's 110 cannot be read at all.
+    const result = tool.run({ root, measure: () => ({ ...MERGED, floor: 104 }) });
+    const text = result.lines.join('\n');
+    expect(result.ok).toBe(false);
+    expect(text).toMatch(/floor pin .*cannot be read/u);
+    expect(read('tools/jest-zero-skips.js')).toMatch(/^const FLOOR = 115;$/mu);
+    // Above ours' 105 but perhaps below the unread base: still not moved.
+    const above = tool.run({ root, measure: () => ({ ...MERGED, floor: 108 }) });
+    expect(above.ok).toBe(false);
+    expect(read('tools/jest-zero-skips.js')).toMatch(/^const FLOOR = 115;$/mu);
+  });
+
+  it('leaves the owned files alone when the history has more than one merge base', () => {
+    git(root, 'merge', '--abort');
+    // Criss-cross: each branch merges the other's first commit before both move on.
+    git(root, 'checkout', '-q', '-b', 'side', 'branch~1');
+    fs.writeFileSync(path.join(root, 'o1.txt'), 'o1\n');
+    git(root, 'add', 'o1.txt');
+    git(root, 'commit', '-q', '-m', 'o1');
+    git(root, 'checkout', '-q', '-b', 'side2', 'base~1');
+    fs.writeFileSync(path.join(root, 't1.txt'), 't1\n');
+    git(root, 'add', 't1.txt');
+    git(root, 'commit', '-q', '-m', 't1');
+    git(root, 'checkout', '-q', 'branch');
+    git(root, 'merge', '-q', '--no-edit', 'side', 'side2');
+    git(root, 'checkout', '-q', 'base');
+    git(root, 'merge', '-q', '--no-edit', 'side', 'side2');
+    git(root, 'checkout', '-q', 'branch');
+    git(root, 'merge', '-q', 'base');
+    expect(git(root, 'merge-base', '--all', 'HEAD', 'MERGE_HEAD').trim().split('\n')).toHaveLength(
+      2,
+    );
+    const before = read('tools/jest-zero-skips.js');
+    const result = tool.run({ root, measure: never });
+    expect(result.ok).toBe(false);
+    expect(result.lines.join('\n')).toMatch(/2 merge bases/u);
+    expect(read('tools/jest-zero-skips.js')).toBe(before);
+    // Resolved by hand, it still moves no pin: there is no one base to bound it against.
+    git(root, 'checkout', '--ours', '--', '.');
+    git(root, 'add', '-A');
+    const pinned = read('test/cli/render-human.test.ts');
+    const resolved = tool.run({ root, measure: () => ({ ...MERGED, paths: 50 }) });
+    expect(resolved.ok).toBe(false);
+    expect(read('test/cli/render-human.test.ts')).toBe(pinned);
+  });
+
+  it('outside a merge, reports a stale pin and moves it only with --write', () => {
+    fs.writeFileSync(path.join(root, 'other.txt'), 'resolved\n');
+    git(root, 'add', 'other.txt');
+    tool.run({ root, measure: () => MERGED });
+    git(root, 'commit', '-q', '-m', 'merge');
+    const grown = { ...MERGED, paths: 48 };
+    const report = tool.run({ root, measure: () => grown });
+    expect(report.ok).toBe(false);
+    expect(report.lines.join('\n')).toMatch(/paths 47 -> 48 \(rerun with --write/u);
+    expect(read('test/cli/render-human.test.ts')).toContain('all 47 routable paths');
+    const written = tool.run({ root, write: true, measure: () => grown });
+    expect(written.ok).toBe(true);
+    expect(read('test/cli/render-human.test.ts')).toContain('all 48 routable paths');
+    expect(read('test/cli/invariants/command-surface.test.ts')).toContain(
+      'the forty-eight commands',
+    );
+  });
+});
